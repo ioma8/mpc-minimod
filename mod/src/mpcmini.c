@@ -1257,6 +1257,71 @@ static void repaint_hook(void *comp, uint64_t a, uint64_t b)
 }
 
 /* --------------------------------------------------------------- overlay */
+/* Overdraw, the way am-mod does it: take the screen's vtable slot 27 (paint),
+ * keep the stock function, and paint on top of it with the app's own Graphics
+ * calls (setColour / fillRect / Font + drawText). */
+#define A_SCREEN_VT 0x6e212a0
+
+static void *g_screen;
+static void (*orig_screen_paint)(void *, void *);
+
+static void draw_colour(void *g, uint32_t v)
+{
+    FN(0x102d5e0, void (*)(void *, uint32_t))(g, v);
+}
+static void draw_rect(void *g, int x, int y, int w, int h)
+{
+    FN(0x102e000, void (*)(void *, int, int, int, int))(g, x, y, w, h);
+}
+static void draw_text(void *g, const char *s, int x, int y, int w, int h,
+                      float size)
+{
+    uint64_t str = 0, font = 0;
+    FN(0xf535c0, void (*)(uint64_t *, const char *))(&str, s);
+    FN(0x1082810, void (*)(uint64_t *, int, float))(&font, 0, size);
+    FN(0x102dca0, void (*)(void *, const uint64_t *))(g, &font);
+    FN(0x10817b0, void (*)(void *, const uint64_t *, int, int, int, int, int, int,
+                           float))(g, &str, x, y, w, h, 0x24, 1, 0.7f);
+    FN(0x1070d60, void (*)(uint64_t *))(&font);
+    FN(0xf0a290, void (*)(uint64_t *))(&str);
+}
+
+static void screen_paint(void *p, void *g)
+{
+    if (orig_screen_paint)
+        orig_screen_paint(p, g);
+    if (FIELD(p, 0, uintptr_t) != base + A_SCREEN_VT)
+        return;
+    g_screen = p;
+    if (!g_shift)
+        return;
+    /* third soft-key cell of the Sample page */
+    draw_colour(g, 0xff000000);
+    draw_rect(g, 213, 0, 107, 29);
+    draw_colour(g, 0xffffffff);
+    draw_text(g, "AutoTrim", 215, 1, 103, 22, 14.0f);
+}
+
+static int install_screen_paint(void)
+{
+    uintptr_t vtaddr = base + A_SCREEN_VT;
+    if (!mapped((void *)vtaddr))
+        return 0;
+    uintptr_t *vt = (uintptr_t *)vtaddr;
+    orig_screen_paint = (void (*)(void *, void *))vt[27];
+    if (!orig_screen_paint)
+        return 0;
+    uintptr_t page = vtaddr & ~(uintptr_t)0xfff;
+    if (mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE) != 0) {
+        mlog("mpcmini: screen vtable mprotect failed: %s\n", strerror(errno));
+        return 0;
+    }
+    vt[27] = (uintptr_t)screen_paint;
+    mprotect((void *)page, 0x1000, PROT_READ);
+    mlog("mpcmini: screen paint hooked (stock %p)\n", (void *)orig_screen_paint);
+    return 1;
+}
+
 /* The soft-key row is rebuilt on SHIFT, and every rebuild assigns the label
  * strings through 0xf535c0(dest, text). While SHIFT is held we swap the B3
  * label ("Filter") for "AutoTrim" and remember its destination so the release
@@ -1337,8 +1402,10 @@ static void find_filter_strings(void)
  * strings afterwards. */
 static void set_filter_text(const char *t)
 {
-    if (debug_mode)
-        mlog("mpcmini: overlay '%s'\n", t);
+    (void)t;
+    if (g_screen)
+        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(g_screen, 0,
+                                                          FIELD(g_screen, 0x28, uint64_t));
 }
 
 static void str_assign_hook(void *dest, const char *text)
@@ -1769,6 +1836,7 @@ __attribute__((constructor)) static void load(void)
         orig_label_text = (void *(*)(void *))t_lt;
     if (t_dt)
         orig_draw_text = (void (*)(void *, const uint64_t *, int, int, int, int, int, int, float))t_dt;
+    install_screen_paint();
     if (!relay_used) {
         mlog("mpcmini: no hook installed\n");
         return;
