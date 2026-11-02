@@ -1038,6 +1038,44 @@ static void rotary(void *a, float v)
 static volatile int g_own_call;
 static struct { uintptr_t param, listener; } g_lis[8];
 static volatile int g_nlis;
+static struct { uintptr_t param, slider; } g_ps[8];
+static volatile int g_nps;
+
+static uintptr_t slider_for_value(float pct)
+{
+    if (!g_screen)
+        return 0;
+    const size_t len = 0x20000;
+    unsigned char *buf = malloc(len);
+    if (!buf)
+        return 0;
+    if (!rd((uintptr_t)g_screen, buf, len)) {
+        free(buf);
+        return 0;
+    }
+    uintptr_t want = base + 0x706e5d0, found = 0;
+    for (size_t o = 0; o + 8 <= len; o += 8) {
+        uintptr_t q;
+        memcpy(&q, buf + o, 8);
+        if (q != want)
+            continue;
+        size_t vo = o + 0x1b4;
+        if (vo + 4 > len)
+            continue;
+        float v;
+        memcpy(&v, buf + vo, 4);
+        float d = v - pct;
+        if (d < 0)
+            d = -d;
+        if (d <= 1.0f) {
+            found = (uintptr_t)g_screen + o;
+            break;
+        }
+    }
+    free(buf);
+    return found;
+}
+
 static void *g_obs[8];
 static int g_nobs;
 
@@ -1069,6 +1107,40 @@ static void trim_probe(void *self, float v)
     uintptr_t prop = 0;
     __asm__ volatile("mov %0, x20" : "=r"(prop));
     g_core_hit = 1;
+    /* am-mod's listeners keep their property at +0x40; x20 may be that
+     * listener rather than the property itself. Prefer the inner object when
+     * it looks like one. */
+    if (prop && mapped((void *)prop)) {
+        uintptr_t inner = 0;
+        if (rd(prop + 0x40, &inner, 8) && inner && mapped((void *)inner)) {
+            float f50 = 0, f1c = 0;
+            int ok50 = rd(inner + 0x50, &f50, 4) && f50 >= -0.001f && f50 <= 1.001f;
+            int ok1c = rd(inner + 0x1c, &f1c, 4) && f1c >= -0.001f && f1c <= 1.001f;
+            if (ok50 || ok1c) {
+                mlog("mpcmini: listener @%p -> property @%p\n", (void *)prop,
+                     (void *)inner);
+                prop = inner;
+            }
+        }
+    }
+    {
+        uintptr_t sl = slider_for_value(v * 100.0f);
+        if (sl) {
+            int i;
+            for (i = 0; i < g_nps; ++i)
+                if (g_ps[i].param == (uintptr_t)self) {
+                    g_ps[i].slider = sl;
+                    break;
+                }
+            if (i == g_nps && g_nps < 8) {
+                g_ps[g_nps].param = (uintptr_t)self;
+                g_ps[g_nps].slider = sl;
+                g_nps++;
+            }
+            mlog("mpcmini: knob param=%p slider=%p (%.2f%%)\n", self, (void *)sl,
+                 (double)(v * 100.0f));
+        }
+    }
     if (prop && mapped((void *)prop)) {
         int slot = -1;
         for (int i = 0; i < g_nlis; ++i)
@@ -1349,6 +1421,37 @@ static uintptr_t find_controls_prop(uintptr_t param)
     return 0;
 }
 
+/* The page draws its locators from the trim **slider widget**: a ui::Slider
+ * embedded in the screen holds its position as a percentage at +0x1b4
+ * (measured: +0x6758 = 49.0 right after K1 was set to 50). Writing that value
+ * and repainting is what a knob move does to the widget. */
+static int set_slider_percent(float from, float to)
+{
+    if (!g_screen)
+        return 0;
+    uintptr_t want = base + 0x706e5d0;
+    for (long o = 0; o < 0x20000; o += 8) {
+        uintptr_t q = 0;
+        if (!rd((uintptr_t)g_screen + o, &q, 8))
+            break;
+        if (q != want)
+            continue;
+        uintptr_t s = (uintptr_t)g_screen + (uintptr_t)o;
+        float v = 0;
+        if (!rd(s + 0x1b4, &v, 4))
+            continue;
+        float d = v - from;
+        if (d < 0)
+            d = -d;
+        if (d <= 0.75f) {
+            wr(s + 0x1b4, &to, 4);
+            mlog("mpcmini: slider +0x%lx %.2f -> %.2f\n", o, (double)v, (double)to);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void commit_trim(void)
 {
     void *p0 = g_trim_param0, *p1 = g_trim_param1;
@@ -1366,6 +1469,33 @@ static void commit_trim(void)
             if (g_screen)
                 FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
                     g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
+            return;
+        }
+        uintptr_t s0 = 0, s1 = 0;
+        for (int i = 0; i < g_nps; ++i) {
+            if (g_ps[i].param == (uintptr_t)p0)
+                s0 = g_ps[i].slider;
+            if (g_ps[i].param == (uintptr_t)p1)
+                s1 = g_ps[i].slider;
+        }
+        mlog("mpcmini: sliders for params %p/%p\n", (void *)s0, (void *)s1);
+        int w0 = 0, w1 = 0;
+        if (s0) {
+            float p = v0 * 100.0f;
+            w0 = wr(s0 + 0x1b4, &p, 4);
+        }
+        if (s1) {
+            float p = v1 * 100.0f;
+            w1 = wr(s1 + 0x1b4, &p, 4);
+        }
+        if (!w0 && !w1) {
+            w0 = set_slider_percent(g_trim_cur0 * 100.0f, v0 * 100.0f);
+            w1 = set_slider_percent(g_trim_cur1 * 100.0f, v1 * 100.0f);
+        }
+        mlog("mpcmini: sliders written %d/%d\n", w0, w1);
+        if ((w0 || w1) && g_screen) {
+            FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
+                g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
             return;
         }
         /* x20 at a trim-core call is the property object itself (value at
@@ -1519,6 +1649,30 @@ static void draw_text(void *g, const char *s, int x, int y, int w, int h,
     FN(0xf0a290, void (*)(uint64_t *))(&str);
 }
 
+static void dump_sliders(void *p)
+{
+    uintptr_t want = base + 0x706e5d0;
+    unsigned n = 0;
+    for (long o = 0; o < 0x20000; o += 8) {
+        uintptr_t q = 0;
+        if (!rd((uintptr_t)p + o, &q, 8))
+            break;
+        if (q != want)
+            continue;
+        uintptr_t s = (uintptr_t)p + (uintptr_t)o;
+        n++;
+        mlog("mpcmini: slider +0x%lx\n", o);
+        for (long k = 0x160; k < 0x230; k += 4) {
+            float f = 0;
+            if (!rd(s + k, &f, 4))
+                break;
+            if (f > -0.01f && f < 100.5f && f != 0.0f)
+                mlog("mpcmini:   +0x%lx = %.4f\n", k, (double)f);
+        }
+    }
+    mlog("mpcmini: dump done, %u sliders\n", n);
+}
+
 static void screen_paint(void *p, void *g)
 {
     if (orig_screen_paint)
@@ -1528,6 +1682,13 @@ static void screen_paint(void *p, void *g)
     if (g_screen != p) {
         g_screen = p;
         mlog("mpcmini: screen=%p\n", p);
+    }
+    {
+        static int dumped;
+        if (!dumped && getenv("MPCMINI_DUMP")) {
+            dumped = 1;
+            dump_sliders(p);
+        }
     }
     if (!g_shift)
         return;
