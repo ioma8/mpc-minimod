@@ -403,20 +403,37 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
     }
     unsigned stop = f > frames ? frames : f;
     unsigned lastf = *first;
-    for (unsigned i = frames; i-- > 0;) {
-        ssize_t n = pread(fd, buf, sizeof buf, (off_t)dataoff + (off_t)i * bps * ch);
-        if (n < (ssize_t)(bps * ch))
-            continue;
-        int loud = 0;
-        for (unsigned c = 0; c < ch; ++c) {
-            short v = pcm_at(buf + c * bps, bps);
-            if (v > thr || v < -thr)
-                loud = 1;
-        }
-        if (loud) {
-            lastf = i;
+    /* Walk backwards in blocks: one pread per frame froze the UI thread on a
+     * 15k-frame sample, and the stock library has 500k-frame ones. */
+    unsigned block = (unsigned)(sizeof buf / (bps * ch));
+    if (!block)
+        block = 1;
+    unsigned end = frames;
+    while (end > 0) {
+        unsigned start = end > block ? end - block : 0;
+        unsigned cnt = end - start;
+        ssize_t n = pread(fd, buf, (size_t)cnt * bps * ch,
+                          (off_t)dataoff + (off_t)start * bps * ch);
+        if (n <= 0)
             break;
+        unsigned got = (unsigned)(n / (bps * ch));
+        int found = 0;
+        for (unsigned i = got; i-- > 0;) {
+            int loud = 0;
+            for (unsigned c = 0; c < ch; ++c) {
+                short v = pcm_at(buf + (i * ch + c) * bps, bps);
+                if (v > thr || v < -thr)
+                    loud = 1;
+            }
+            if (loud) {
+                lastf = start + i;
+                found = 1;
+                break;
+            }
         }
+        if (found)
+            break;
+        end = start;
     }
     (void)stop;
     close(fd);
@@ -886,6 +903,8 @@ static void buttons(void *event)
     }
     if (down && g_shift && code == 0x0e) { /* SHIFT + B3 */
         mlog("mpcmini: combo SHIFT+B3 -> autotrim\n");
+        /* Analysis is cheap now (block reads); it must stay on this thread so
+         * the commit is queued for the very next repaint. */
         do_autotrim();
         return;
     }

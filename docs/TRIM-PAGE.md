@@ -680,3 +680,16 @@ The one UX detail: the property broadcast needs one knob touch of Start/End
 first, because that is the only trustworthy way to learn `param → property`.
 Without it the mod still trims (layer + core), it just cannot refresh the
 page's cached markers.
+
+## J. The freeze after autotrim (fixed)
+
+`wav_edges()` walked the tail of the file **one `pread` per frame** to find the
+last audible frame. On a 15 129-frame kick that is 15 129 syscalls on the UI
+thread (the button hook runs there), and on one of the stock 500 k-frame
+samples it is effectively a hang: the screen stops repainting right after the
+trim, which is exactly what it looked like.
+
+It now reads the tail in 16 KB blocks and scans each block backwards, and the
+commit still happens on the next repaint. Measured after the fix: autotrim
+returns in ~3 s on the kick and the panel stays responsive (a B1 press after
+the trim still changes the screen).
