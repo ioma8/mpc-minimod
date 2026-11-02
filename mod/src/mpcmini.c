@@ -1494,6 +1494,100 @@ static int apply_to_instance(uintptr_t S, float p0, float p1)
     return 1;
 }
 
+/* The page paints from the *model*. Find the TrimParameter instances whose
+ * value matches the page's own cached percentages (screen+0x1f4c / +0x1f50):
+ * those are the parameters the page is actually showing. */
+static uintptr_t param_by_value(float frac)
+{
+    ranges_load();
+    unsigned char *buf = malloc(65536);
+    if (!buf)
+        return 0;
+    uintptr_t want = base + A_TRIM_PARAM_VT, best = 0;
+    float bestd = 0.02f;
+    for (int r = 0; r < g_nrng; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi; a += 65536) {
+            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+            n &= ~(size_t)7;
+            if (!rd(a, buf, n))
+                break;
+            for (size_t o = 0; o + 8 <= n; o += 8) {
+                uintptr_t q;
+                memcpy(&q, buf + o, 8);
+                if (q != want)
+                    continue;
+                uintptr_t p = a + o;
+                float v = 0;
+                if (!rd(p + T_VALUE, &v, 4))
+                    continue;
+                float d = v - frac;
+                if (d < 0)
+                    d = -d;
+                if (d < bestd) {
+                    bestd = d;
+                    best = p;
+                }
+            }
+        }
+    }
+    free(buf);
+    return best;
+}
+
+/* Find the page object by its own cached percentage: a float equal to the
+ * End percent whose address-0x1f50 starts with a vtable pointer. Works for any
+ * screen subclass, which is what the enumeration by one vptr misses. */
+static uintptr_t find_page_by_cache(float pct)
+{
+    ranges_load();
+    unsigned char *buf = malloc(65536);
+    if (!buf)
+        return 0;
+    uintptr_t hit = 0;
+    for (int r = 0; r < g_nrng && !hit; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && !hit; a += 65536) {
+            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+            n &= ~(size_t)7;
+            if (!rd(a, buf, n))
+                break;
+            for (size_t o = 0; o + 4 <= n && !hit; o += 4) {
+                float v;
+                memcpy(&v, buf + o, 4);
+                if (v < 0.5f || v > 100.5f)
+                    continue;
+                float d = v - pct;
+                if (d < 0) d = -d;
+                if (d > 0.75f)
+                    continue;
+                uintptr_t addr = a + o;
+                uintptr_t b = addr - 0x1f50;
+                /* the page is a heap object, not a static in the image */
+                if (b >= base && b < base + 0x9000000)
+                    continue;
+                uintptr_t vt = 0;
+                if (b < 0x10000 || !rd(b, &vt, 8))
+                    continue;
+                if (vt < base + 0x6ddf910 || vt > base + 0x7162018)
+                    continue;
+                float chk = 0;
+                if (!rd(b + 0x1f4c, &chk, 4))
+                    continue;
+                if (chk < -0.5f || chk > 100.5f)
+                    continue;
+                hit = b;
+                mlog("mpcmini: page base %p vptr=%p (vt+0x%lx)\n", (void *)b,
+                     (void *)vt, (unsigned long)(vt - base));
+            }
+        }
+    }
+    free(buf);
+    return hit;
+}
+
 static void commit_trim(void)
 {
     void *p0 = g_trim_param0, *p1 = g_trim_param1;
@@ -1512,6 +1606,52 @@ static void commit_trim(void)
                 FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
                     g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
             return;
+        }
+        {
+            uintptr_t sc[8];
+            int ns = find_screens(sc, 8);
+            uintptr_t page = 0;
+            float c0 = 0, c1 = 0;
+            for (int i = 0; i < ns; ++i) {
+                float a = 0, b = 0;
+                if (!rd(sc[i] + 0x1f4c, &a, 4) || !rd(sc[i] + 0x1f50, &b, 4))
+                    continue;
+                if (!(a >= -0.5f && a <= 100.5f && b >= -0.5f && b <= 100.5f))
+                    continue;
+                if (a < 0.5f && b < 0.5f)
+                    continue; /* not the trimmed page */
+                page = sc[i];
+                c0 = a;
+                c1 = b;
+                break;
+            }
+            if (!page) {
+                uintptr_t guess = find_page_by_cache(g_trim_cur1 * 100.0f);
+                if (guess) {
+                    page = guess;
+                    rd(page + 0x1f4c, &c0, 4);
+                    rd(page + 0x1f50, &c1, 4);
+                }
+            }
+            mlog("mpcmini: trim page %p caches %.2f/%.2f\n", (void *)page,
+                 (double)c0, (double)c1);
+            if (page) {
+                uintptr_t q0 = param_by_value(c0 / 100.0f);
+                uintptr_t q1 = param_by_value(c1 / 100.0f);
+                mlog("mpcmini: page %.2f/%.2f -> params %p/%p\n", (double)c0,
+                     (double)c1, (void *)q0, (void *)q1);
+                if (q0 && q1 && q0 != q1) {
+                    float a0 = v0, a1 = v1;
+                    g_own_call = 1;
+                    FN(A_TRIM_CORE, void (*)(float, void *))(a0, (void *)q0);
+                    FN(A_TRIM_CORE, void (*)(float, void *))(a1, (void *)q1);
+                    g_own_call = 0;
+                    FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
+                        (void *)page, 0, FIELD(page, 0x28, uint64_t));
+                    mlog("mpcmini: wrote page params\n");
+                    return;
+                }
+            }
         }
         {
             uintptr_t sc[8];
@@ -2179,6 +2319,59 @@ static int find_screens(uintptr_t *out, int max)
     return n;
 }
 
+/* Probe: /run/mpcmini.slider holds "N,V" - write percent V into the N-th
+ * ui::Slider of the painting screen and repaint. Used to identify which slider
+ * drives which locator. */
+static void *slider_probe_thread(void *arg)
+{
+    (void)arg;
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 300 * 1000 * 1000};
+    int last_n = -1;
+    float last_v = -1;
+    for (;;) {
+        nanosleep(&ts, 0);
+        int fd = open("/run/mpcmini.slider", O_RDONLY);
+        if (fd < 0)
+            continue;
+        char buf[64];
+        ssize_t n = read(fd, buf, sizeof buf - 1);
+        close(fd);
+        if (n <= 0)
+            continue;
+        buf[n] = 0;
+        int idx = -1;
+        float val = 0;
+        if (sscanf(buf, "%d,%f", &idx, &val) != 2 || idx < 0)
+            continue;
+        if (idx == last_n && val == last_v)
+            continue;
+        last_n = idx;
+        last_v = val;
+        if (!g_screen)
+            continue;
+        uintptr_t want = base + 0x706e5d0, hit = 0;
+        int k = 0;
+        for (long o = 0; o < 0x20000; o += 8) {
+            uintptr_t q = 0;
+            if (!rd((uintptr_t)g_screen + o, &q, 8))
+                break;
+            if (q != want)
+                continue;
+            if (k++ == idx) {
+                hit = (uintptr_t)g_screen + (uintptr_t)o;
+                break;
+            }
+        }
+        if (!hit)
+            continue;
+        wr(hit + 0x1b4, (void *)&val, 4);
+        mlog("mpcmini: probe slider %d @%p = %.2f\n", idx, (void *)hit, (double)val);
+        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
+            g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
+    }
+    return 0;
+}
+
 /* Re-arms the software watchpoint from /run/mpcmini.watch (hex address), so the
  * address can be set after the app has started and picked a new heap. */
 static void *watch_thread(void *arg)
@@ -2362,6 +2555,8 @@ __attribute__((constructor)) static void load(void)
     {
         pthread_t wth;
         pthread_create(&wth, 0, watch_thread, 0);
+        pthread_t sth;
+        pthread_create(&sth, 0, slider_probe_thread, 0);
     }
     if (!relay_used) {
         mlog("mpcmini: no hook installed\n");
