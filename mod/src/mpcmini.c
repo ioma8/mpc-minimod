@@ -292,73 +292,92 @@ static int bump_octave(int d)
 
 /* ------------------------------------------------------------- WAV helpers */
 static int wav_info(const char *path, unsigned *frames, unsigned *rate,
-                    unsigned *ch, unsigned *dataoff)
+                    unsigned *ch, unsigned *dataoff, unsigned *bps)
 {
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return 0;
-    unsigned char h[64];
-    if (read(fd, h, sizeof h) != (ssize_t)sizeof h) {
+    unsigned char h[4096];
+    ssize_t n = pread(fd, h, sizeof h, 0);
+    if (n < 44 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4)) {
         close(fd);
         return 0;
     }
-    if (memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4)) {
+    unsigned chn = (unsigned)h[22] | ((unsigned)h[23] << 8);
+    unsigned bits = (unsigned)h[34] | ((unsigned)h[35] << 8);
+    unsigned rt = (unsigned)h[24] | ((unsigned)h[25] << 8) |
+                  ((unsigned)h[26] << 16) | ((unsigned)h[27] << 24);
+    if (!chn || !rt || (bits != 16 && bits != 24 && bits != 32)) {
         close(fd);
         return 0;
     }
-    unsigned off = 12;
-    unsigned chn = 0, rt = 0, bits = 0, dof = 0, len = 0;
-    while (off + 8 < 4096) {
+    /* Walk the chunk list properly: Akai files carry a large metadata chunk
+     * before "data", so a fixed-size prefix scan is not enough. */
+    unsigned dof = 0, len = 0;
+    off_t off = 12;
+    for (int guard = 0; guard < 64; ++guard) {
         unsigned char ck[8];
-        if (pread(fd, ck, 8, (off_t)off) != 8)
+        if (pread(fd, ck, 8, off) != 8)
             break;
-        unsigned sz = ck[4] | (ck[5] << 8) | (ck[6] << 16) | ((unsigned)ck[7] << 24);
-        if (!memcmp(ck, "fmt ", 4)) {
-            unsigned char f[16];
-            if (pread(fd, f, 16, (off_t)off + 8) != 16)
-                break;
-            chn = f[2] | (f[3] << 8);
-            rt = f[4] | (f[5] << 8) | (f[6] << 16) | ((unsigned)f[7] << 24);
-            bits = f[14] | (f[15] << 8);
-        } else if (!memcmp(ck, "data", 4)) {
-            dof = off + 8;
+        unsigned sz = (unsigned)ck[4] | ((unsigned)ck[5] << 8) |
+                      ((unsigned)ck[6] << 16) | ((unsigned)ck[7] << 24);
+        if (!memcmp(ck, "data", 4)) {
+            dof = (unsigned)off + 8;
             len = sz;
             break;
         }
-        off += 8 + sz + (sz & 1);
+        off += 8 + (off_t)sz + (off_t)(sz & 1);
     }
     close(fd);
-    if (!chn || !rt || !dof || bits != 16)
+    if (!dof || !len)
         return 0;
-    *frames = len / (2u * chn);
+    *frames = len / ((bits / 8u) * chn);
     *rate = rt;
     *ch = chn;
     *dataoff = dof;
+    *bps = bits / 8u;
     return 1;
 }
 
+static short pcm_at(const unsigned char *p, unsigned bps)
+{
+    if (bps == 2) {
+        short v;
+        memcpy(&v, p, 2);
+        return v;
+    }
+    if (bps == 3) {
+        int v = (int)p[0] | ((int)p[1] << 8) | ((int)(signed char)p[2] << 16);
+        return (short)(v >> 8);
+    }
+    int v;
+    memcpy(&v, p, 4);
+    return (short)(v >> 16);
+}
+
 static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
-                     unsigned ch, unsigned *first, unsigned *last)
+                     unsigned ch, unsigned bps, unsigned *first, unsigned *last)
 {
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return 0;
     if (!ch)
         ch = 1;
+    if (bps < 2 || bps > 4)
+        bps = 2;
     const short thr = 328; /* ~ -40 dBFS */
     unsigned char buf[16384];
     unsigned f = 0;
     int found_first = 0;
     while (f < frames && !found_first) {
-        ssize_t n = pread(fd, buf, sizeof buf, (off_t)dataoff + (off_t)f * 2 * ch);
+        ssize_t n = pread(fd, buf, sizeof buf, (off_t)dataoff + (off_t)f * bps * ch);
         if (n <= 0)
             break;
-        unsigned got = (unsigned)(n / (2 * ch));
+        unsigned got = (unsigned)(n / (bps * ch));
         for (unsigned i = 0; i < got; ++i) {
             int loud = 0;
             for (unsigned c = 0; c < ch; ++c) {
-                short v;
-                memcpy(&v, buf + (i * ch + c) * 2, 2);
+                short v = pcm_at(buf + (i * ch + c) * bps, bps);
                 if (v > thr || v < -thr)
                     loud = 1;
             }
@@ -369,7 +388,7 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
             }
         }
         f += got;
-        if (got < sizeof buf / (2 * ch))
+        if (got < sizeof buf / (bps * ch))
             break;
     }
     if (!found_first) {
@@ -379,13 +398,12 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
     unsigned stop = f > frames ? frames : f;
     unsigned lastf = *first;
     for (unsigned i = frames; i-- > 0;) {
-        ssize_t n = pread(fd, buf, sizeof buf, (off_t)dataoff + (off_t)i * 2 * ch);
-        if (n < (ssize_t)(2 * ch))
+        ssize_t n = pread(fd, buf, sizeof buf, (off_t)dataoff + (off_t)i * bps * ch);
+        if (n < (ssize_t)(bps * ch))
             continue;
         int loud = 0;
         for (unsigned c = 0; c < ch; ++c) {
-            short v;
-            memcpy(&v, buf + c * 2, 2);
+            short v = pcm_at(buf + c * bps, bps);
             if (v > thr || v < -thr)
                 loud = 1;
         }
@@ -499,8 +517,8 @@ static int path_from_buffer(const char *buf, unsigned want, char *out, size_t n)
             continue;
         char tmp[512];
         snprintf(tmp, sizeof tmp, "%.*s", (int)(end - hit), hit);
-        unsigned fr = 0, rt = 0, ch = 0, doff = 0;
-        if (!wav_info(tmp, &fr, &rt, &ch, &doff) || fr != want)
+        unsigned fr = 0, rt = 0, ch = 0, doff = 0, bps = 2;
+        if (!wav_info(tmp, &fr, &rt, &ch, &doff, &bps) || fr != want)
             continue;
         snprintf(out, n, "%s", tmp);
         return 1;
@@ -581,8 +599,15 @@ static int wav_by_frames(unsigned want, char *out, size_t n)
             if (len < 5 || strcasecmp(f->d_name + len - 4, ".wav"))
                 continue;
             snprintf(path, sizeof path, "%s/%s", sub, f->d_name);
-            unsigned fr = 0, rt = 0, ch = 0, doff = 0;
-            if (!wav_info(path, &fr, &rt, &ch, &doff) || fr != want)
+            unsigned fr = 0, rt = 0, ch = 0, doff = 0, bps = 2;
+            int ok = wav_info(path, &fr, &rt, &ch, &doff, &bps);
+            static int logged;
+            if (logged < 10) {
+                logged++;
+                mlog("mpcmini: wav '%s' ok=%d frames=%u ch=%u\n", f->d_name, ok,
+                     fr, ch);
+            }
+            if (!ok || fr != want)
                 continue;
             if (found) {
                 closedir(d2);
@@ -673,20 +698,28 @@ static uintptr_t learned_prop(uintptr_t param)
     return 0;
 }
 
+/* A property seen in a real broadcast whose cached value is exactly the
+ * parameter's current value is the one that owns it. Exact equality keeps the
+ * false positives (and the abort they caused) away. */
 static uintptr_t broadcast_prop(uintptr_t param, float cur)
 {
-    (void)cur;
+    (void)param;
     uintptr_t best = 0;
+    int hits = 0;
     for (int i = 0; i < (g_nbc < 256 ? g_nbc : 256); ++i) {
         uintptr_t p = g_bc[i].p;
         if ((p & 7) || p < 0x10000 || !mapped((void *)p))
             continue;
-        float v50 = 0;
-        if (!rd(p + 0x50, &v50, 4) || !(v50 >= -0.001f && v50 <= 1.001f))
+        if (g_bc[i].v != cur)
             continue;
+        float v50 = 0;
+        if (!rd(p + 0x50, &v50, 4) || v50 != cur)
+            continue;
+        if (best && p != best)
+            hits++;
         best = p;
     }
-    return best;
+    return hits ? 0 : best; /* ambiguous -> refuse */
 }
 
 /* ------------------------------------------------------------ app screens */
@@ -996,16 +1029,17 @@ static void repaint_hook(void *comp, uint64_t a, uint64_t b)
         g_trim_pending = 0;
         void *p0 = g_trim_param0, *p1 = g_trim_param1;
         float v0 = g_trim_v0, v1 = g_trim_v1;
+        /* Only a property learned from a real knob move is trusted: the
+         * heuristics found false positives and broadcasting a wrong object
+         * makes the app abort. */
         uintptr_t pr0 = learned_prop((uintptr_t)p0);
         uintptr_t pr1 = learned_prop((uintptr_t)p1);
-        if (!pr0)
-            pr0 = find_prop_by_binding(g_trim_cur0);
-        if (!pr1)
-            pr1 = find_prop_by_binding(g_trim_cur1);
         if (!pr0)
             pr0 = broadcast_prop((uintptr_t)p0, g_trim_cur0);
         if (!pr1)
             pr1 = broadcast_prop((uintptr_t)p1, g_trim_cur1);
+        if (pr0 == pr1 || (pr0 && pr1 && !pr0 && !pr1))
+            pr0 = pr1 = 0;
         mlog("mpcmini: commit %.4f/%.4f prop=%p/%p\n", (double)v0, (double)v1,
              (void *)pr0, (void *)pr1);
         uintptr_t b0 = 0, b1 = 0;
@@ -1031,12 +1065,18 @@ static void repaint_hook(void *comp, uint64_t a, uint64_t b)
         wr((uintptr_t)p0 + 0x1a0, &v0, 4);
         wr((uintptr_t)p1 + 0x1a0, &v1, 4);
         if (pr0) {
-            wr(pr0 + 0x50, &v0, 4);
-            FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
+            float cur0 = 0;
+            if (rd(pr0 + 0x50, &cur0, 4) && cur0 >= -0.001f && cur0 <= 1.001f) {
+                wr(pr0 + 0x50, &v0, 4);
+                FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
+            }
         }
         if (pr1) {
-            wr(pr1 + 0x50, &v1, 4);
-            FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
+            float cur1 = 0;
+            if (rd(pr1 + 0x50, &cur1, 4) && cur1 >= -0.001f && cur1 <= 1.001f) {
+                wr(pr1 + 0x50, &v1, 4);
+                FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
+            }
         }
         unsigned l0 = 0, l1 = 0;
         if (g_trim_layer) {
@@ -1287,12 +1327,12 @@ static void do_autotrim(void)
              (double)x1, (double)g_trim_cur0, (double)g_trim_cur1);
         return;
     }
-    unsigned fr = 0, rt = 0, ch = 0, doff = 0;
-    if (!path[0] || !wav_info(path, &fr, &rt, &ch, &doff) || fr != N) {
+    unsigned fr = 0, rt = 0, ch = 0, doff = 0, bps = 2;
+    if (!path[0] || !wav_info(path, &fr, &rt, &ch, &doff, &bps) || fr != N) {
         mlog("mpcmini: autotrim: no verified wav for %u frames\n", N);
         return;
     }
-    if (!wav_edges(path, fr, doff, ch, &a, &b) || (a == 0 && b + 1 >= N)) {
+    if (!wav_edges(path, fr, doff, ch, bps, &a, &b) || (a == 0 && b + 1 >= N)) {
         mlog("mpcmini: autotrim: nothing to trim\n");
         return;
     }
@@ -1440,16 +1480,13 @@ __attribute__((constructor)) static void load(void)
     void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)note_on) : 0;
     void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)cs_event) : 0;
     void *t_off = (hook_mask & 128) ? install_hook(base + A_NOTE_OFF, (void *)note_off) : 0;
-    void *t_trim = (probe_mode && (probe_bits & 8)) ? install_hook(base + A_TRIM_CORE, (void *)trim_probe) : 0;
-    void *t_bc = 0, *t_rp = 0;
-    if (probe_mode) {
-        t_bc = install_hook(base + A_BROADCAST, (void *)bcast_hook);
-        if (t_bc)
-            orig_bcast = (void (*)(void *, float))t_bc;
-        t_rp = install_hook(base + A_REPAINT, (void *)repaint_hook);
-        if (t_rp)
-            orig_repaint = (void (*)(void *, uint64_t, uint64_t))t_rp;
-    }
+    void *t_trim = install_hook(base + A_TRIM_CORE, (void *)trim_probe); /* also learns param->property */
+    void *t_bc = install_hook(base + A_BROADCAST, (void *)bcast_hook);
+    if (t_bc)
+        orig_bcast = (void (*)(void *, float))t_bc;
+    void *t_rp = install_hook(base + A_REPAINT, (void *)repaint_hook);
+    if (t_rp)
+        orig_repaint = (void (*)(void *, uint64_t, uint64_t))t_rp;
     void *t_sa = 0;   /* string-assign hook removed: not needed, unstable in the browser */
     void *t_lt = 0;   /* Label::getText hook removed: wrong ABI, crashed the sample browser */
     void *t_dt = 0;   /* drawText overlay removed: the third slot is never drawn through it */
