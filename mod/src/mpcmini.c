@@ -1312,11 +1312,62 @@ static int inject_cc(unsigned code, unsigned value)
     return 1;
 }
 
+/* am-mod sets native properties through the command at 0x1671650 with a pointer
+ * to the value; the property lives inside SamplePadControls (root+0x178) and
+ * has guards at +0x38/+0x78/+0x80/+0x88. Find the one that references our trim
+ * parameter, then set it the same way. */
+static uintptr_t find_controls_prop(uintptr_t param)
+{
+    if (!g_screen)
+        return 0;
+    /* am-mod's SamplePadControls offset belongs to its firmware; ours differs.
+     * Scan the screen object itself for the same property shape. */
+    uintptr_t controls = (uintptr_t)g_screen;
+    for (long o = 0; o < 0x12000; o += 8) {
+        uintptr_t p = controls + (uintptr_t)o;
+        uintptr_t f38 = 0, f78 = 0, f80 = 0, f88 = 0;
+        if (!rd(p + 0x38, &f38, 8) || !rd(p + 0x78, &f78, 8) ||
+            !rd(p + 0x80, &f80, 8) || !rd(p + 0x88, &f88, 8))
+            break;
+        if (!f38 || !f78 || !f80 || !f88)
+            continue;
+        if (!mapped((void *)f38) || !mapped((void *)f78))
+            continue;
+        unsigned char buf[0x100];
+        if (!rd(p, buf, sizeof buf))
+            continue;
+        for (size_t k = 0; k + 8 <= sizeof buf; k += 8) {
+            uintptr_t q;
+            memcpy(&q, buf + k, 8);
+            if (q == param) {
+                mlog("mpcmini: controls prop +0x%lx references %p\n", (unsigned long)o,
+                     (void *)param);
+                return p;
+            }
+        }
+    }
+    return 0;
+}
+
 static void commit_trim(void)
 {
     void *p0 = g_trim_param0, *p1 = g_trim_param1;
     float v0 = g_trim_v0, v1 = g_trim_v1;
     if (!getenv("MPCMINI_LEGACY")) {
+        uintptr_t c0 = find_controls_prop((uintptr_t)p0);
+        uintptr_t c1 = find_controls_prop((uintptr_t)p1);
+        mlog("mpcmini: controls props %p/%p\n", (void *)c0, (void *)c1);
+        if (c0 && c1 && c0 != c1) {
+            float b0 = v0, b1 = v1;
+            FN(0x1671650, void (*)(void *, const void *))((void *)c0, &b0);
+            FN(0x1671650, void (*)(void *, const void *))((void *)c1, &b1);
+            mlog("mpcmini: set via native property (%.4f/%.4f)\n", (double)v0,
+                 (double)v1);
+            if (g_screen)
+                FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
+                    g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
+            return;
+        }
         /* x20 at a trim-core call is the property object itself (value at
          * +0x50). Broadcast through it when it is known; the layer write above
          * already carries the audio side. The knob path reaches the same core,
@@ -1325,9 +1376,7 @@ static void commit_trim(void)
         uintptr_t pr1 = learned_prop((uintptr_t)p1);
         mlog("mpcmini: props %p/%p\n", (void *)pr0, (void *)pr1);
         if (pr0 && pr1 && pr0 != pr1) {
-            wr(pr0 + 0x50, &v0, 4);
             FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
-            wr(pr1 + 0x50, &v1, 4);
             FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
         }
         /* The page paints its locators from three mirrored fields per edge
@@ -1413,19 +1462,19 @@ static void commit_trim(void)
     g_own_call = 0;
     wr((uintptr_t)p0 + 0x1a0, &v0, 4);
     wr((uintptr_t)p1 + 0x1a0, &v1, 4);
+    /* The broadcaster stores the new value itself and returns early if the
+     * cached value already matches, so it must be called *without* pre-writing
+     * 0x50 - otherwise the listener loop (which is what updates the page)
+     * never runs. */
     if (pr0) {
         float cur0 = 0;
-        if (rd(pr0 + 0x50, &cur0, 4) && cur0 >= -0.001f && cur0 <= 1.001f) {
-            wr(pr0 + 0x50, &v0, 4);
+        if (rd(pr0 + 0x50, &cur0, 4) && cur0 >= -0.001f && cur0 <= 1.001f)
             FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
-        }
     }
     if (pr1) {
         float cur1 = 0;
-        if (rd(pr1 + 0x50, &cur1, 4) && cur1 >= -0.001f && cur1 <= 1.001f) {
-            wr(pr1 + 0x50, &v1, 4);
+        if (rd(pr1 + 0x50, &cur1, 4) && cur1 >= -0.001f && cur1 <= 1.001f)
             FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
-        }
     }
     unsigned l0 = 0, l1 = 0;
     if (g_trim_layer) {
