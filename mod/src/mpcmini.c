@@ -1291,9 +1291,35 @@ static void commit_trim(void)
             wr(pr1 + 0x50, &v1, 4);
             FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
         }
-        if (g_screen)
+        /* The page paints its locators from three mirrored fields per edge
+         * (percent at +0x1f4c/+0x288c, fraction at +0x72c8, End is the next
+         * slot). Only overwrite values that already look like a trim edge. */
+        if (g_screen) {
+            float p0p = v0 * 100.0f, p1p = v1 * 100.0f, old = 0;
+            static const long pct[2] = {0x1f4c, 0x288c};
+            static const long frc[2] = {0x72c8, 0x72cc};
+            int done = 0;
+            for (int k = 0; k < 2; ++k) {
+                long o = pct[k];
+                if (rd((uintptr_t)g_screen + o, &old, 4) && old >= -1 && old <= 101) {
+                    wr((uintptr_t)g_screen + o, &p0p, 4);
+                    wr((uintptr_t)g_screen + o + 4, &p1p, 4);
+                    done++;
+                }
+            }
+            for (int k = 0; k < 2; ++k) {
+                long o = frc[k];
+                if (rd((uintptr_t)g_screen + o, &old, 4) && old >= -0.01f && old <= 1.01f) {
+                    wr((uintptr_t)g_screen + o, &v0, 4);
+                    wr((uintptr_t)g_screen + o + 4, &v1, 4);
+                    done++;
+                }
+            }
+            mlog("mpcmini: page fields written=%d (%.2f%%/%.2f%%)\n", done,
+                 (double)p0p, (double)p1p);
             FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
                 g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
+        }
         return;
     }
     /* Only a property learned from a real knob move is trusted: the
@@ -1411,7 +1437,10 @@ static void screen_paint(void *p, void *g)
         orig_screen_paint(p, g);
     if (FIELD(p, 0, uintptr_t) != base + A_SCREEN_VT)
         return;
-    g_screen = p;
+    if (g_screen != p) {
+        g_screen = p;
+        mlog("mpcmini: screen=%p\n", p);
+    }
     if (!g_shift)
         return;
     /* third soft-key cell of the Sample page */
