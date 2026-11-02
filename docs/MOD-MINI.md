@@ -9,8 +9,8 @@ touching the firmware on disk. It is delivered as an SD `autorun` package (see
 
 | # | feature | control | state |
 | --- | --- | --- | --- |
-| 1 | octave shift in 16 Levels → Tune | `PLUS` / `MINUS` while 16 LEVELS is lit | working, verified |
-| 2 | sample autotrim to silent edges | `SHIFT` + `B3` | **working, verified** on the stock project |
+| 1 | pitch shift in 16 Levels, ±8 semitones (half the pad grid) | `PLUS` / `MINUS` while 16 LEVELS is lit | working, **verified on device 2026-11-03** |
+| 2 | sample autotrim to silent edges | `SHIFT` + `B3` | analysis + layer write verified; **markers do not refresh** (see §"What is still open") |
 | 3 | chromatic MIDI from an external controller | automatic while 16 LEVELS is lit | note path verified with simulated MIDI |
 | 4 | shift overlay label | `SHIFT` held on the Sample page | **working** — third soft key overdrawn with `AutoTrim` |
 
@@ -60,7 +60,8 @@ Runtime switches: `MPCMINI_HOOKS` (bitmask), `MPCMINI_DEBUG=1`,
 | address | meaning |
 | --- | --- |
 | `0x1545a50` | 16-Levels constructor |
-| `0x21472f0` | 16-Levels processing |
+| `0x21472f0` | 16-Levels render `(self, pad, ctx)` |
+| `0x27e4400` | 16-Levels pitch offset setter `(ctx, ?, ?, semitones)` |
 | `0x159f2f0` | physical button dispatch `(event)`; `event+8` = code, `event+9` = value |
 | `0x1e27360` | note on `(input, src, pad, props, vel)` |
 | `0x1e270d0` | note off `(input, src, pad)` |
@@ -124,14 +125,49 @@ Panel button codes measured on the wire: `SHIFT 0x31`, `16 LEVELS 0x28`,
 `PLUS 0x36`, `MINUS 0x37`, `DATA push 0x6F`, soft keys B1/B2/B3
 (`SCREEN 1/2/3`) `0x0C / 0x0D / 0x0E`.
 
-## Feature 1 — octave shift
+## Feature 1 — pitch shift in 16 Levels
 
-With 16 LEVELS active the pad row becomes a chromatic keyboard, and `PLUS` /
-`MINUS` move it by an octave. The mod intercepts those codes in the button
-dispatch (swallowing them so the stock action does not also run) and calls the
-note path with `pitch = ±12`.
+With 16 LEVELS active the pad row becomes a chromatic keyboard of 16 notes, and
+`PLUS` / `MINUS` move the whole row by **8 semitones** — half the grid.
 
-Verified: `PLUS` → `pitch +12`, `MINUS` → `pitch -12`, app stable.
+Two details matter, both learned the hard way on hardware:
+
+1. **The keys must be swallowed.** `0x159f2f0` is the button dispatch; both keys
+   arrive there as codes `0x36` / `0x37`. If the hook falls through to
+   `orig_buttons(event)` the stock action still runs and the *selected knob*
+   increments by one — which is exactly what the first hardware build did. The
+   handler now returns immediately for those two codes:
+
+   ```c
+   if (code == 0x36 || code == 0x37) {
+       if (down) bump_octave(code == 0x36 ? +1 : -1);
+       return;
+   }
+   ```
+
+2. **The shift belongs in `0x27e4400`, not in the render entry.** The 16-Levels
+   renderer `0x21472f0(self, pad, ctx)` computes the semitone offset as
+   `(pad & 0xf) - *(int *)(self + 0x228)` and hands it to
+   `0x27e4400(ctx, ?, ?, offset)` — a *context object*, not a float. Writing
+   through the renderer's third argument corrupts that object and moves no
+   pitch. The hook is on the setter instead:
+
+   ```c
+   static void pitch_off(void *a0, uint64_t a1, uint64_t a2, int a3)
+   {
+       int off = a3 + 8 * g_octave;      /* half of the 16-note grid */
+       orig_pitch_off(a0, a1, a2, off);
+   }
+   ```
+
+   `0x21472f0` remains hooked but is a pure pass-through.
+
+Note `0x21472f0` branches on `*(int *)(self + 0x88)` (modes 2/3/4/6/7); the
+`0x27e4510` branch used by one of them is **not** hooked yet, so a mode that
+takes it would shift nothing.
+
+Verified on device 2026-11-03: `PLUS` / `MINUS` move the row by 8 semitones and
+no longer change the selected knob.
 
 ## Feature 2 — autotrim
 
@@ -187,6 +223,31 @@ after layer=1/12434
 * Broadcasting a property that was guessed by "looks like a property" **aborts
   the app** (SIGABRT inside the broadcaster). Only a verified property may be
   broadcast; ambiguity means skip.
+
+### What is still open in autotrim
+
+The analysis and the layer write are correct and verified; what does not happen
+is the **page repainting its Start/End locators**. Everything that was ruled out,
+with the measurement that ruled it out:
+
+| candidate | result |
+| --- | --- |
+| trim core + boundary + layer write | state lands, paint unchanged |
+| property broadcast `0x13bb930` (after fixing the pre-write that suppressed it) | no visual change |
+| observable setter `0x14a7580` | never called by the knobs |
+| control-surface handler `0x23aff60` | never fires for panel knobs |
+| native property command `0x1671650` on scanned `SamplePadControls` properties | no property in this firmware references the trim parameters |
+| synthetic CC sweep through the button dispatch | reaches nothing |
+| page cache fields `+0x1f4c/+0x288c/+0x72c8` | written, re-derived on the next paint |
+| all 34 `ui::Slider` widgets (`+0x1b4`) | every write repaints to the *same* frame, i.e. the paint re-derives the widget from the model |
+| hardware watchpoint (perf `HW_BREAKPOINT_W`) | never fires: QEMU does not virtualize the debug registers |
+| QEMU gdbstub `Z2` watchpoint | rejected with `E22` under HVF |
+| software watchpoint (page `PROT_READ` + fault handler) | armed, never faults on a knob turn |
+
+Conclusion: the page paints from a model object that is not any of the
+parameters, properties, caches or widgets tested above. The instrument that can
+settle it is a `Z2` watchpoint under TCG (accepted by the stub, too slow to use
+interactively on this host) or `gdbserver` on real hardware.
 
 ## Feature 3 — chromatic MIDI
 

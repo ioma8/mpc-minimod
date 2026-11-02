@@ -67,6 +67,7 @@
 
 #define A_TRIM_PARAM_VT 0x6e1b240 /* TrimParameter vtable */
 #define A_TRIM_PAGE_VT 0x6e31ee8  /* the Trim page class */
+#define A_PITCH_OFF 0x27e4400      /* 16 Levels: set pitch offset (a3 = semitones) */
 
 #define FIELD(p, off, type) (*(type *)((char *)(p) + (off)))
 #define FN(off, type) ((type)(base + (off)))
@@ -329,6 +330,7 @@ static int sixteen_tune_active(void)
 
 static int bump_octave(int d)
 {
+    mlog("mpcmini: PLUS/MINUS -> %+d x 8 semitones\n", d);
     int next = g_octave + d;
     if (next < -4)
         next = -4;
@@ -337,7 +339,7 @@ static int bump_octave(int d)
     if (next == g_octave)
         return 0;
     g_octave = next;
-    mlog("mpcmini: octave=%d\n", next);
+    mlog("mpcmini: pitch shift=%d (%+d semitones)\n", next, next * 8);
     return 1;
 }
 
@@ -882,6 +884,7 @@ static int find_displayed_sample(unsigned *frames, char *path, size_t pathsz)
 /* ------------------------------------------------------------- app hooks */
 static void *(*orig_sixteen_ctor)(void *, void *, void *, void *);
 static void (*orig_sixteen_proc)(void *, int, void *);
+static void (*orig_pitch_off)(void *, uint64_t, uint64_t, int);
 static void (*orig_plus)(void *);
 static void (*orig_minus)(void *);
 static void (*orig_buttons)(void *);
@@ -927,12 +930,19 @@ static void *sixteen_ctor(void *a, void *b, void *c, void *d)
 /* The stock code computes the 16 Levels pitch here; shift the whole row. */
 static void sixteen_proc(void *self, int idx, void *out)
 {
+    /* pure pass-through: the pitch is set by A_PITCH_OFF, not by writing
+     * through the third argument (it is a context object, not a float). */
     if (orig_sixteen_proc)
         orig_sixteen_proc(self, idx, out);
-    if (g_octave && out) {
-        float *f = (float *)out;
-        *f += 12.0f * (float)g_octave;
-    }
+}
+
+static void pitch_off(void *a0, uint64_t a1, uint64_t a2, int a3)
+{
+    int off = a3 + 8 * g_octave; /* half of the 16-note grid per press */
+    if (g_octave && debug_mode)
+        mlog("mpcmini: pitch offset %d -> %d\n", a3, off);
+    if (orig_pitch_off)
+        orig_pitch_off(a0, a1, a2, off);
 }
 
 static void buttons(void *event)
@@ -954,12 +964,13 @@ static void buttons(void *event)
         do_autotrim();
         return;
     }
-    if (down && code == 0x36) { /* PLUS */
-        if (sixteen_tune_active() || g_octave)
-            bump_octave(+1);
-    } else if (down && code == 0x37) { /* MINUS */
-        if (sixteen_tune_active() || g_octave)
-            bump_octave(-1);
+    /* PLUS / MINUS move the 16 Levels row by an octave. The pitch hook only
+     * runs for that screen, so bumping unconditionally is safe - and the old
+     * guard (g_octave != 0) made the first press a no-op. */
+    if (code == 0x36 || code == 0x37) {
+        if (down)
+            bump_octave(code == 0x36 ? +1 : -1);
+        return; /* swallow: the stock action would nudge the selected knob */
     }
     if (debug_mode && g_dbg < 80) {
         g_dbg++;
@@ -2568,6 +2579,9 @@ __attribute__((constructor)) static void load(void)
         probe_bits = atoi(bits_env);
     void *t_ctor = (hook_mask & 1) ? install_hook(base + A_SIXTEEN_CTOR, (void *)sixteen_ctor) : 0;
     void *t_proc = (hook_mask & 2) ? install_hook(base + A_SIXTEEN_PROC, (void *)sixteen_proc) : 0;
+    void *t_poff = install_hook(base + A_PITCH_OFF, (void *)pitch_off);
+    if (t_poff)
+        orig_pitch_off = (void (*)(void *, uint64_t, uint64_t, int))t_poff;
     void *t_btn = (hook_mask & 16) ? install_hook(base + A_BUTTONS, (void *)buttons) : 0;
     void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)note_on) : 0;
     void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)cs_event) : 0;
