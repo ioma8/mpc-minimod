@@ -66,6 +66,7 @@
 #define T_MAX 0x1e8   /* u32, frames */
 
 #define A_TRIM_PARAM_VT 0x6e1b240 /* TrimParameter vtable */
+#define A_TRIM_PAGE_VT 0x6e31ee8  /* the Trim page class */
 
 #define FIELD(p, off, type) (*(type *)((char *)(p) + (off)))
 #define FN(off, type) ((type)(base + (off)))
@@ -87,6 +88,7 @@ static int probe_bits = 0x7f;
 
 static void mlog(const char *fmt, ...);
 static void *g_screen;
+static void *g_trim_page;
 static int prop_references(uintptr_t P, uintptr_t param);
 static int find_screens(uintptr_t *out, int max);
 
@@ -1588,6 +1590,52 @@ static uintptr_t find_page_by_cache(float pct)
     return hit;
 }
 
+/* Enumerate objects of the Trim page class and pick the one whose cached
+ * percentages match what the layer currently holds. */
+static uintptr_t find_trim_page(float c0, float c1)
+{
+    ranges_load();
+    unsigned char *buf = malloc(65536);
+    if (!buf)
+        return 0;
+    uintptr_t want = base + A_TRIM_PAGE_VT, best = 0;
+    float bestscore = 3.0f;
+    for (int r = 0; r < g_nrng; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi; a += 65536) {
+            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+            n &= ~(size_t)7;
+            if (!rd(a, buf, n))
+                break;
+            for (size_t o = 0; o + 8 <= n; o += 8) {
+                uintptr_t q;
+                memcpy(&q, buf + o, 8);
+                if (q != want)
+                    continue;
+                uintptr_t p = a + o;
+                float x = 0, y = 0;
+                if (!rd(p + 0x1f4c, &x, 4) || !rd(p + 0x1f50, &y, 4))
+                    continue;
+                if (!(x >= -0.5f && x <= 100.5f && y >= -0.5f && y <= 100.5f))
+                    continue;
+                float d0 = x - c0, d1 = y - c1;
+                if (d0 < 0) d0 = -d0;
+                if (d1 < 0) d1 = -d1;
+                float score = d0 + d1;
+                if (score < bestscore) {
+                    bestscore = score;
+                    best = p;
+                }
+            }
+        }
+    }
+    free(buf);
+    if (best)
+        mlog("mpcmini: trim page %p (score %.2f)\n", (void *)best, (double)bestscore);
+    return best;
+}
+
 static void commit_trim(void)
 {
     void *p0 = g_trim_param0, *p1 = g_trim_param1;
@@ -1625,6 +1673,10 @@ static void commit_trim(void)
                 c1 = b;
                 break;
             }
+            if (!page && g_trim_page)
+                page = (uintptr_t)g_trim_page;
+            if (!page)
+                page = find_trim_page(g_trim_cur0 * 100.0f, g_trim_cur1 * 100.0f);
             if (!page) {
                 uintptr_t guess = find_page_by_cache(g_trim_cur1 * 100.0f);
                 if (guess) {
@@ -1814,6 +1866,9 @@ static void repaint_hook(void *comp, uint64_t a, uint64_t b)
  * keep the stock function, and paint on top of it with the app's own Graphics
  * calls (setColour / fillRect / Font + drawText). */
 #define A_SCREEN_VT 0x6e212a0
+/* The Trim page is its own class (found by matching its cached percentages);
+ * it is not the plain SampleModeScreen. */
+#define A_TRIM_PAGE_VT 0x6e31ee8
 
 static void (*orig_screen_paint)(void *, void *);
 
