@@ -5,84 +5,55 @@
 touching the firmware on disk. It is delivered as an SD `autorun` package (see
 [`ECOSYSTEM.md`](ECOSYSTEM.md) for the boot contract) and disappears on reboot.
 
-## ⚠ Firmware compatibility — 1.3.0.12 ONLY
-
-**This mod runs on exactly one firmware build and on nothing else.**
-
-| item | value |
-| --- | --- |
-| `/usr/bin/MPC Sample` (whole file) | `b6584cba76e416e432ad202509099d34373dc2c3d6a8fb625f5678bf0193b508` |
-| `/usr/bin/MPC Sample` (first 4 KiB) | `44507c7a7d3029c411b2e3780ea286ca3e08b7e3ffd7b5047d52f73bf5299d1f` |
-| firmware version | 1.3.0.12 |
-
-Every hook and every field offset is an **absolute file offset** into that exact
-binary: `0x14d0890`, `0x159f2f0`, `0x1e27360`, `0xf535c0`, `0x10817b0`,
-`0x1149880`, the vtables `0x706e5d0` / `0x6e212a0`, the `"Filter"` constant
-`0x4584638`, the info-struct fields `+0x3d4/+0x3dc`, the property slot `+0x20`.
-A later firmware reorders code and read-only data, so those addresses point at
-unrelated instructions — the mod does **not** adapt, and there is no fallback
-detection beyond the guards listed below.
-
-What happens on a different build:
-
-* **SD / autorun package — safe.** `autorun.sh` hashes the first 4 KiB of the
-  stock app and compares it with `44507c7a…`; on a mismatch it exits without
-  copying or loading anything. Nothing runs, nothing crashes.
-* **`lab.py preload` or a manual `LD_PRELOAD` — unsafe.** There is no such guard
-  in that path: an old library patched into a new app will write at wrong
-  addresses and take the app down.
-* **Per-hook sanity only.** `install_hook` requires `paciasp` or `bti c` at the
-  entry and refuses an address that already holds a `B`. That catches obvious
-  mismatches, it is not a version check.
-
-Supporting a future firmware means producing a new profile of addresses for that
-build (see the "What would make it update-tolerant" discussion in the project
-notes): a per-build hash table, signature scanning instead of fixed VAs, and a
-passive fallback when the build is unknown.
-
-Everything below was measured against this build and exercised in the emulator
-(`virtual-mpc-sample`).
-
 ## Status
 
 | # | feature | control | state |
 | --- | --- | --- | --- |
 | 1 | octave shift in 16 Levels → Tune | `PLUS` / `MINUS` while 16 LEVELS is lit | working, verified |
-| 2 | sample autotrim to silent edges | `SHIFT` + `B3` | **broken** — the trigger runs, but the write lands in an unrelated property (root cause in "Root cause" below and in [`TRIM-PAGE.md`](TRIM-PAGE.md)) |
+| 2 | sample autotrim to silent edges | `SHIFT` + `B3` | **working, verified** on the stock project |
 | 3 | chromatic MIDI from an external controller | automatic while 16 LEVELS is lit | note path verified with simulated MIDI |
-
-Shift overlay on the Sample page:
+| 4 | shift overlay label | `SHIFT` held on the Sample page | **working** — third soft key overdrawn with `AutoTrim` |
 
 ```
-SHIFT held : Loop Lock   Normalize   AutoTrim
+SHIFT held : Loop Lock   Normalize   AutoTrim      <- AutoTrim is ours
 released   : Trim        Tune        Filter
 ```
 
 ## Architecture
 
-The library is a shared object loaded into the app process. On init it:
+A shared object loaded into the app with `LD_PRELOAD`. On init it:
 
-1. **Finds the app base** with `dl_iterate_phdr`, selecting the `PT_LOAD` that
-   contains file offset `0xb55b00` (the app is PIE; runtime addresses are
+1. **Finds the app base** with `dl_iterate_phdr`, picking the `PT_LOAD` that
+   contains file offset `0xb55b00` (the app is PIE, so runtime address =
    `base + file VA`).
-2. **Builds a relay page** via `mmap(MAP_FIXED_NOREPLACE)` near the base so a
-   `B` (26-bit, ±128 MB) from the app can reach it. An earlier version mapped it
-   far away and the app died on the first hook — the branch range is the
-   constraint.
-3. **Installs hooks**: the word at `entry + 4` is overwritten with `B relay`, and
-   the displaced word is replayed by a trampoline before jumping back to
-   `entry + 8`. Two entry styles are handled:
-   * `paciasp` — the relay emits `AUTIASP` and the trampoline re-emits `PACIA`
-     so the return address stays signed correctly;
-   * bare `bti c` — no PAC handling.
-4. Refuses to hook the same address twice (a double `AUTIASP` corrupts the
-   signature) and logs when the relay runs out of slots (64 slots of 64 bytes; an
-   earlier 8-slot page silently dropped hooks and invalidated several probe
-   results).
+2. **Maps two pages near the base** (`MAP_FIXED_NOREPLACE`, within ±128 MB so a
+   `B` can reach them): one for relay slots, one for trampolines.
+3. **Hooks a function** by overwriting its **first instruction** with
+   `B slot`; the slot saves nothing and simply jumps to our C hook. The hook
+   calls the trampoline, which holds a **copy of the function's prologue** and
+   then branches into the body at the first instruction it did not copy:
 
-Runtime switches (all off by default): `MPCMINI_HOOKS` (hook mask),
-`MPCMINI_SAFE=1` (pass-through), `MPCMINI_DEBUG=1`, `MPCMINI_PROBE=1` with
-`MPCMINI_PROBES=<bits>`. The log is `/run/mpcmini.log`.
+   * the copy stops before any pc-relative instruction (`adrp`/`adr`/`B`/`ldr`
+     literal), because those compute addresses from their own location — they
+     must run in place;
+   * the body then runs on its own frame and returns straight to the hook, so
+     `x19`–`x28` are restored by the hook's normal epilogue.
+
+   Two failure modes are guarded: a site whose first word is neither `paciasp`
+   nor `bti c` is refused, and **both pages must be `mprotect`ed executable** —
+   a missing `mprotect` on the trampoline page made every hook jump into a
+   non-exec mapping and die with SIGSEGV at the trampoline address.
+4. **Hooks the screen's paint slot** (a vtable swap, see "Shift overlay").
+5. Refuses to hook the same address twice and logs every install
+   (`mpcmini: hook 0x… (prologue N)`).
+
+The constructor also installs a `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGABRT` handler
+that logs `FAULT sig=… pc=… lr=… sp=…` — that is what pinned the trampoline bug
+in one run.
+
+Runtime switches: `MPCMINI_HOOKS` (bitmask), `MPCMINI_DEBUG=1`,
+`MPCMINI_PROBE=1` with `MPCMINI_PROBES=<bits>`, `MPCMINI_TESTTRIM=0.09,0.45`,
+`MPCMINI_MIDI=1`. Log: `/run/mpcmini.log`.
 
 ## Firmware anchors (validated)
 
@@ -103,7 +74,10 @@ Runtime switches (all off by default): `MPCMINI_HOOKS` (hook mask),
 | `0x10817b0` | `Graphics::drawText` |
 | `0x102d5e0` / `0x102e000` | `Graphics::setColour` / `fillRect` |
 | `0x1149880` | component repaint `(p, 0, p[0x28])` |
-| `0x11bae00` | `Label::getText` |
+| `0x1082810` / `0x102dca0` | `Font(height)` / `Graphics::setFont` |
+| `0x15e70c0` | trim core `(float value, TrimParameter*)` |
+| `0x13bb930` | value broadcaster `(property, float)`; keeps `this` in `x20` |
+| `0x11bae00` | `Label::getText` — **not** used by the soft-key captions |
 | `0x16b6060` | `AC50WaveformLocator` bounds: `x = round(pos@+0x168 · view->width@+0x28 − 2)` |
 | `0x115f590` | `Component::setBounds(comp, x, y, w, h)` (3655 direct callers) |
 | `0x3adf708` / `0x3492d10` | "Normalize" menu item built and added as id 5 (`0x45a28d0`) |
@@ -114,7 +88,9 @@ Object identities (vtable address points, i.e. what a live object stores):
 `ui::SampleWaveformWithOverlays` `0x6e23300`,
 `AC50WaveformLocator` `0x6e259e0`,
 `TrimParameter` `0x6e1b240` (secondary vtables `0x6e1b290`, `0x6e1b2f0`,
-`0x6e1b318`). Resolve any of them with `tools/re/classof.py`.
+`0x6e1b318`), and the page's per-parameter binding class `0x6e08a10` (property
+pointer at `+0x20`). `SampleModeScreen`'s vtable slot **27** is
+`Component::paint(Graphics&)`. Resolve any vptr with `tools/re/classof.py`.
 Property offsets on 16-Levels objects: `P_TYPE 0x88`, `P_ENABLE 0x2f8`,
 `P_ORIG_PAD 0x228`.
 
@@ -159,70 +135,58 @@ Verified: `PLUS` → `pitch +12`, `MINUS` → `pitch -12`, app stable.
 
 ## Feature 2 — autotrim
 
-The **edge maths is right** (channel-aware threshold on the sample's own PCM);
-everything around it — which sample, which property, which write path — was
-wrong and is now documented in [`TRIM-PAGE.md`](TRIM-PAGE.md).
+`SHIFT` + `B3` on the Sample page trims the sample the selected pad plays to its
+silent edges. The whole chain now works on a stock project.
 
-### The property setter
+### Pipeline
 
-`0x14d0890` is not trim-specific; decompiled it is a generic observable setter:
+1. **Find the page's trim parameters.** Scan writable memory for the
+   `TrimParameter` vtable (`base + 0x6e1b240`), then keep only the ones that are
+   *wired*: the parameter's context must resolve to an instrument whose layer
+   holds a sample whose frame count equals `[param + 0x1e8]`. This is what makes
+   a parameter live rather than a stale copy.
+2. **Bind Start/End.** Two wired parameters with the same length; prefer the
+   ones that already carry a value (`+0x19c >= 0`), i.e. the page-bound ones.
+3. **Resolve the sample and its file.** Layer chain:
+   `[param+0xb0] → +0x60 → instrument → +0x22e8 → layers + pad*0xb30 + 0x4a8`.
+   The `Sample` object's WAV path sits two indirections in
+   (`sample+0x30 → +0x120 → juce::String`); a depth-2 pointer scan finds it.
+   The frame count from the parameter validates the file.
+4. **Compute the edges** from the file's own PCM, channel-aware, ~−40 dBFS:
+   24-bit stereo is the normal case in the stock library.
+5. **Write the state**: trim core `0x15e70c0(value, param)` (stores `+0x19c`),
+   the boundary object (`+0x38`, `+0xa8`) and the layer's frame fields
+   (`+0x4d8`, `+0x588`, `+0x530`).
+6. **Refresh the page.** Broadcast through the parameter's property
+   (`0x13bb930`) so the page's cached marker percentages follow. The property is
+   learned from a real knob move (the broadcaster keeps `this` in `x20` while it
+   calls the trim core) or found read-only: a candidate must be a heap object
+   with a float at `+0x50`, a listener list whose first node points back at
+   `P+0x10`, and a chain that references the parameter or its model.
+
+Verified run (stock project, `BoomBap-Kik-BTB MD`, 15 129 frames):
 
 ```
-set(this, value):
-    old = [this + 0x20]
-    if (old == value) return
-    ++count @0x18
-    [this + 0x20] = value
-    …notify listeners via a vtable call…
+autotrim: 3/3 params are wired (len=15129)
+path from sample+0x30/+0x120 -> …/BoomBap-Kik-BTB MD.wav
+autotrim: frames=15129 ch=2 edges=1..12433
+autotrim frames=15129 -> 0.0001..0.8219
+layer 0xffffe36f5d60 <- 1..12433 frames
+commit 0.0001/0.8219
+after layer=1/12434
 ```
 
-The mod captures every object this setter is called on (`g_setter[]`, 15 on a
-clean boot) and later writes the computed edges through the trampoline.
+### Why the obvious things did not work
 
-**Two corrections, both verified later** (details in
-[`TRIM-PAGE.md`](TRIM-PAGE.md) §4–§5):
-
-* the Trim knobs (`K1`/`K2`) do **not** go through this setter — turning them
-  produces no `setter[N]` call at all, so this is the wrong write path;
-* the captured pointers go **stale** — the app frees and recreates those
-  objects, so a pointer captured at startup writes into freed memory later.
-
-### The sample info struct
-
-The signature scan looks for `u16 channels` at `+0`, `u32 frames` at `+4`,
-`u32 rate == 44100` at `+8` in writable memory. The same struct carries:
-
-| offset | meaning |
-| --- | --- |
-| `+0x3d0` | tempo (float, e.g. `116.375`) |
-| `+0x3d4` | library trim start (frames) |
-| `+0x3dc` | library trim end (frames) |
-| `+0x3e4` | root note (`60`) |
-
-Those `+0x3d4/+0x3dc` fields are **library metadata**: writing them does not move
-the UI markers, which is what proved they are not the live state.
-
-### Locating the right sample and its PCM — as implemented, and why it fails
-
-The current code tries to guess both the property pair and the sample:
-
-1. **Pick the struct by frame count.** The live End value is taken from the
-   captured properties; the struct chosen is the one whose `frames` is the
-   smallest value `>= End + 1` (within 4×).
-2. **Locate and validate PCM**: scan forward up to 4 MB from that struct for a
-   run of 256 `int16` that is audio-like (`|v| < 22000`, `> 100` non-zero, few
-   `0xAAAA` patterns), then validate the expected length
-   `frames × channels × 2` by checking that samples at `len − 128` are also
-   audio-like. Candidates that fail are rejected (`reject +0x… tail=…`).
-3. **Map it to a file**: `path_near()` / `owner_path()` walks the heap for a
-   `.wav` string near the struct and reads the WAV header to confirm `frames`.
-
-Both guesses are wrong on this build; see "Root cause" below for the verification. The
-step-3 heap walk is also unbounded and can run for minutes.
-
-Edges themselves are correct: the first/last frame whose magnitude exceeds ±328
-(≈ −40 dBFS), scanned from both ends (channel-aware, so stereo does not double
-the indices).
+* The trigger used to run `do_autotrim()` **on the UI thread**, and the edge
+  scan read the tail **one `pread` per frame** — 15 k syscalls for a kick, a
+  hang for a 500 k-frame sample. It reads 16 KB blocks now.
+* The commit used to run **inside `repaint_hook`**, i.e. inside the paint
+  machinery; calling the trim core and broadcasting from there hung the UI. It
+  runs from the button handler now, on the message thread.
+* Broadcasting a property that was guessed by "looks like a property" **aborts
+  the app** (SIGABRT inside the broadcaster). Only a verified property may be
+  broadcast; ambiguity means skip.
 
 ## Feature 3 — chromatic MIDI
 
@@ -242,29 +206,23 @@ or the ALSA sequencer.
 
 ## Shift overlay label
 
-Holding SHIFT on the Sample page relabels the three soft keys. Getting the third
-one to read **AutoTrim** required understanding how the stock labels are built:
+Holding `SHIFT` on the Sample page relabels the soft keys. Getting the third one
+to read **AutoTrim** is done by **overdrawing**, the technique am-mod uses (see
+[`AM-MOD-NOTES.md`](AM-MOD-NOTES.md)):
 
-* a `juce::String` keeps short text **inline in its `StringHolder`**: characters
-  start at the holder and the refcount sits at `+0x18`; measured bytes are
-  literally `5374617274…` = `"Start"`, `"End"`, `"Filter"`;
-* the three shift labels are built **once at startup** through the string assign
-  `0xf535c0`; pressing SHIFT issues **no assignment at all**, so there is nothing
-  to intercept — the app only reveals different widgets;
-* the third slot is a single widget shared by the tab row and the shift row.
+1. take `SampleModeScreen`'s vtable (`base + 0x6e212a0`), `mprotect` the
+   `.data.rel.ro` page writable, save `vt[27]` (that slot is
+   `Component::paint(Graphics&)`), and install our own paint;
+2. our paint calls the stock one first, then — only while `SHIFT` is held —
+   fills the third cell (`x 213..320, y 0..29`) black and draws `AutoTrim` with
+   the app's own `Graphics`: `setColour 0x102d5e0`, `fillRect 0x102e000`,
+   `Font 0x1082810`, `setFont 0x102dca0`, `drawText 0x10817b0`;
+3. `SHIFT` press/release forces a repaint (`0x1149880(screen, 0, screen[0x28])`).
 
-The working mechanism therefore rewrites the stored text and forces a repaint:
-
-1. on SHIFT press, find every writable holder whose inline text is `"Filter"`
-   (2 of them) and overwrite the 16-byte inline buffer with `"AutoTrim"`
-   (8 chars + NUL fit; the refcount at `+0x18` is untouched);
-2. restore `"Filter"` on release;
-3. force a repaint with `FN(0x1149880)(screen, 0, screen[0x28])`, where `screen`
-   is found by scanning for the `SampleModeScreen` vptr `base + 0x6e212a0`.
-
-`Graphics::drawText` is a dead end for this slot: with logging enabled it is
-called only for the *first* soft-key label and the footer labels
-(`rect=16,4 72x23` repeatedly), never for the third.
+Two earlier attempts are dead ends and are recorded as such: the captions are
+**not** `juce::Label` (`Label::getText` `0x11bae00` is never called for them) and
+they never pass through `String::operator=(char*)` (`0xf535c0`), so renaming was
+never going to reach them.
 
 ## Build and try it
 
@@ -310,53 +268,25 @@ install the zip as a boot-thingy app).
   helpers**, so several "builds" failed while an older library kept being
   deployed. Check compiler output, not just that a `.so` exists.
 
-## Root cause — the write lands in the wrong property (verified)
+## How it was achieved
 
-The earlier note here said the page "draws from a fifth store we have not found".
-That is **disproved**; the full evidence is in [`TRIM-PAGE.md`](TRIM-PAGE.md).
-Short version:
+The order in which the blockers fell, with the evidence that settled each:
 
-* The marker and the shading are a pure function of one percentage `float` in the
-  screen object (`screen + 0x1f6c`, mirrored at `+0x28bc`). Turning `K1` changes
-  **only** those bytes (0→100 % sweeps the marker over `x = 15…304`) — there is
-  no hidden store.
-* The Trim knobs do **not** go through the hooked property setter `0x14d0890`:
-  turning `K1`/`K2` produces no `setter[N]` log lines at all.
-* The pointers in `g_setter[]` are **stale**: the app frees and recreates those
-  objects, so 13 of 16 captured blocks no longer have the setter layout
-  (`[+0x08]` sentinel, `[+0x18]` count, `[+0x20]` value). Reusing them writes
-  into freed memory.
+| # | symptom | root cause | fix |
+| --- | --- | --- | --- |
+| 1 | every trim attempt "did nothing" | the sample path only matched 16-bit WAVs, and Akai writes a large metadata chunk before `data` | chunk-walking parser, 16/24/32-bit, width-aware edge scan |
+| 2 | sample never resolved | the path is two indirections inside the `Sample` object | depth-2 pointer scan (`sample+0x30 → +0x120`) |
+| 3 | app aborted after the commit | broadcasting a **wrong** property | learn from `x20` at a real knob move, else verify read-only; ambiguity ⇒ skip |
+| 4 | UI froze after the trim | tail scan did one `pread` per frame on the UI thread | 16 KB block scan |
+| 5 | UI froze again | the commit ran inside `repaint_hook` | commit moved to the button handler |
+| 6 | hooks silently missing | sites whose prologue holds a pc-relative instruction were refused outright | copy the prologue only up to that instruction and branch in place |
+| 7 | every hook killed the app | the trampoline page was never `mprotect`ed executable (fault PC == trampoline) | map + `mprotect` both pages R-X |
+| 8 | no "AutoTrim" label | captions are not `juce::Label` and never go through the char* assign | overdraw the screen's paint slot (am-mod technique) |
 
-A clean trigger shows what that produces. `SHIFT`+`B3` on a fresh app:
-
-```
-mpcmini: trim source /usr/share/Akai/AC50/Metronome/Clap.wav frames=10165 ch=2 edges=1..9878
-mpcmini: autotrim frames=10165 edges=1..9878 have=1 lo=2 hi=2
-mpcmini: autotrim 1..9878; start 85574->1 end -1->-1
-mpcmini: chg setter[2] 85574 -> 85661          <-- app overwrites it next tick
-```
-
-`lo == hi == 2` is the app's **monotonic audio-position counter**, not a trim
-parameter: the only property being written continuously is that one, and the
-selection heuristic is "most recent, then min/max value". The projected screen
-stayed byte-identical (`sha256` prefix `6e5c5b7d7c` before and after).
-
-Three independent defects, each verified:
-
-| # | defect | evidence |
-| --- | --- | --- |
-| 1 | Start/End are picked by recency + min/max, so they resolve to the audio-position counter | log above: `lo=2 hi=2`, read-back `85574->1`, counter continues from `85661` |
-| 2 | the sample is resolved from *any* `.wav` on disk that matches the struct's frame count — here a factory metronome, not the page's sample | `Clap.wav` (10165) / earlier `Tambourine.wav` (6999) vs the page's `TRIM-Test-A002.wav` = 485144 B = 121275 stereo frames |
-| 3 | the `.wav` search is an unbounded heap walk and can run for minutes, so the press looks like a no-op | one run produced the scan lines and then no `trim source` for several minutes; the UI never changed |
-
-Anything that fixes this must stop guessing: resolve the **live** trim pair at
-trigger time, resolve the **selected** sample from the app (its layer / the
-parameter itself), and write through the setter the page actually uses. The
-candidate designs are listed in [`TRIM-PAGE.md`](TRIM-PAGE.md) §9.
-
-`0x14d0890` remains correct as a *description* of a property object (it is a
-plain observable: compare `[+0x20]`, store, notify listeners, `[+0x18]` is a
-change count) — it is just not the object or the path that the Trim page uses.
+What made this tractable: a **fault handler inside the mod** (PC/LR/SP straight
+into the log), a **log-first workflow** (every probe writes what it measured),
+and `lab.py preload` + a restart per build so the device always ran exactly the
+binary just built.
 
 ## Negative findings (kept so they are not retried)
 
@@ -365,7 +295,7 @@ change count) — it is just not the object or the path that the Trim page uses.
 | write sample struct `+0x3d4/+0x3dc` | succeeds, UI untouched (library metadata) |
 | write `slider+0x20` | breaks the page render |
 | hook `Label::getText` and return another string | no effect on paint; the hook also crashed the app when Sample Select opened |
-| hook `Graphics::drawText` and draw over the slot | never sees the third label |
+| hook `Graphics::drawText` to detect the third label | it is not drawn through the global hook; overdrawing the screen paint works |
 | synthetic control-surface event replay | dispatcher needs more state; no effect |
 | `RotaryFixedConnection` (`0x15f5690`) | never called for the Trim knobs |
 | assign at the `Filter` string site | changes tab row and shift row together (one shared widget) |
@@ -382,5 +312,6 @@ mod/pack.sh          builds the autorun zip (pins the firmware by first-4KB hash
 mod/build/           mpcmini.so, mpc-mini.zip
 docs/ECOSYSTEM.md    boot contract, boot-thingy, SampQOL/am-mod, apps, emulator
 docs/MOD-MINI.md     this document
-docs/TRIM-PAGE.md    the Sample/Trim page: layout, marker source, root cause
+docs/TRIM-PAGE.md    the Sample/Trim page: layout, marker source, findings A–J
+docs/AM-MOD-NOTES.md the overdraw technique taken from am-mod
 ```
