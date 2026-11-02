@@ -56,6 +56,7 @@
 #define A_BROADCAST 0x13bb930      /* value broadcaster (property, float) */
 #define A_TRIM_REG 0x16b6060       /* waveform locator bounds (probe)     */
 #define A_STR_ASSIGN 0xf535c0      /* juce::String assign (dest, text)    */
+#define A_OBS_SET 0x14a7580        /* observable setter (float, property) */
 #define A_LABEL_TEXT 0x11bae00     /* Label::getText (returns String&)    */
 
 #define T_LAYER 0xb0 /* -> context; [ctx+0x60] = instrument */
@@ -85,6 +86,7 @@ static int probe_mode;
 static int probe_bits = 0x7f;
 
 static void mlog(const char *fmt, ...);
+static void *g_screen;
 static int prop_references(uintptr_t P, uintptr_t param);
 
 static void fault_handler(int sig, siginfo_t *si, void *ucv)
@@ -852,6 +854,7 @@ static void (*orig_reg)(void *, void *);
 static void *(*orig_prog_inst)(void *, int);
 static void (*orig_rotary)(void *, float);
 static void (*orig_bcast)(void *, float);
+static void (*orig_obs_set)(void *, float);
 static void (*orig_str_assign)(void *, const char *);
 static void *(*orig_label_text)(void *);
 static void (*orig_draw_text)(void *, const uint64_t *, int, int, int, int, int, int, float);
@@ -942,8 +945,12 @@ static void note_off(void *input, int src, int pad)
         orig_note_off(input, src, pad);
 }
 
+static void *g_cs_self;
+
 static void cs_event(void *self, int code, void *payload)
 {
+    if (self)
+        g_cs_self = self;
     if (debug_mode && g_dbg < 160) {
         g_dbg++;
         mlog("mpcmini: cs code=0x%02x\n", code & 0xff);
@@ -990,6 +997,27 @@ static void rotary(void *a, float v)
 /* The trim core is called by the broadcaster's listener loop, which keeps the
  * property in x20: learning that pair is what lets autotrim drive the page. */
 static volatile int g_own_call;
+static struct { uintptr_t param, listener; } g_lis[8];
+static volatile int g_nlis;
+static void *g_obs[8];
+static int g_nobs;
+
+static void obs_set(void *self, float v)
+{
+    /* records the property objects the control surface writes */
+    if (!g_own_call) {
+        int seen = 0;
+        for (int i = 0; i < g_nobs; ++i)
+            if (g_obs[i] == self)
+                seen = 1;
+        if (!seen && g_nobs < 8) {
+            g_obs[g_nobs++] = self;
+            mlog("mpcmini: obs property=%p v=%.4f\n", self, (double)v);
+        }
+    }
+    if (orig_obs_set)
+        orig_obs_set(self, v);
+}
 
 static void trim_probe(void *self, float v)
 {
@@ -1002,6 +1030,13 @@ static void trim_probe(void *self, float v)
     uintptr_t prop = 0;
     __asm__ volatile("mov %0, x20" : "=r"(prop));
     g_core_hit = 1;
+    if (prop && mapped((void *)prop)) {
+        int slot = -1;
+        for (int i = 0; i < g_nlis; ++i)
+            if (g_lis[i].param == (uintptr_t)self) { slot = i; break; }
+        if (slot < 0 && g_nlis < 8) { slot = g_nlis++; g_lis[slot].param = (uintptr_t)self; }
+        if (slot >= 0) g_lis[slot].listener = prop;
+    }
     if (prop && mapped((void *)prop) && prop_references(prop, (uintptr_t)self)) {
         float v50 = 0;
         if (rd(prop + 0x50, &v50, 4) && v50 >= -0.001f && v50 <= 1.001f) {
@@ -1165,6 +1200,42 @@ static int prop_references(uintptr_t P, uintptr_t param)
     return 0;
 }
 
+/* The object in x20 at a trim-core call is the *listener*, not the property.
+ * The property that owns it is the one whose list contains a node whose target
+ * is exactly that object. */
+static uintptr_t owner_of_listener(uintptr_t lis)
+{
+    if (!lis)
+        return 0;
+    for (int i = 0; i < g_ncand; ++i) {
+        uintptr_t P = g_cand[i];
+        uintptr_t node = 0;
+        if (!rd(P + 0x10, &node, 8) || !node || !mapped((void *)node))
+            continue;
+        for (int n = 0; n < 16; ++n) {
+            uintptr_t tgt = 0;
+            if (!rd(node + 0x18, &tgt, 8))
+                break;
+            tgt &= ~(uintptr_t)3;
+            if (tgt == lis)
+                return P;
+            uintptr_t next = 0;
+            if (!rd(node + 8, &next, 8) || next == P + 8 || !next)
+                break;
+            node = next;
+        }
+    }
+    return 0;
+}
+
+static uintptr_t listener_of_param(uintptr_t param)
+{
+    for (int i = 0; i < g_nlis; ++i)
+        if (g_lis[i].param == param)
+            return g_lis[i].listener;
+    return 0;
+}
+
 static int probe_property(uintptr_t param)
 {
     collect_binding_props();
@@ -1183,15 +1254,64 @@ static int probe_property(uintptr_t param)
     return 0;
 }
 
+/* am-mod's lesson: don't write the model, drive the app's own input path.
+ * The Trim knobs are control-surface events 0x10 (Start) / 0x11 (End) with an
+ * absolute 7-bit position, so the app updates parameter, page and audio. */
+static int inject_cc(unsigned code, unsigned value)
+{
+    if (!orig_buttons)
+        return 0;
+    unsigned char ev[16] = {0};
+    ev[8] = (unsigned char)code;
+    /* sweep like the physical encoder: the app treats these as movements */
+    for (unsigned v = 0; v <= 127; v += 1) {
+        ev[9] = (unsigned char)v;
+        orig_buttons(ev);
+    }
+    ev[9] = (unsigned char)(value > 127 ? 127 : value);
+    orig_buttons(ev);
+    return 1;
+}
+
 static void commit_trim(void)
 {
     void *p0 = g_trim_param0, *p1 = g_trim_param1;
     float v0 = g_trim_v0, v1 = g_trim_v1;
+    if (!getenv("MPCMINI_LEGACY")) {
+        /* x20 at a trim-core call is the property object itself (value at
+         * +0x50). Broadcast through it when it is known; the layer write above
+         * already carries the audio side. The knob path reaches the same core,
+         * so setting these frames is the app's own representation. */
+        uintptr_t pr0 = learned_prop((uintptr_t)p0);
+        uintptr_t pr1 = learned_prop((uintptr_t)p1);
+        mlog("mpcmini: props %p/%p\n", (void *)pr0, (void *)pr1);
+        if (pr0 && pr1 && pr0 != pr1) {
+            wr(pr0 + 0x50, &v0, 4);
+            FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
+            wr(pr1 + 0x50, &v1, 4);
+            FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
+        }
+        if (g_screen)
+            FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
+                g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
+        return;
+    }
     /* Only a property learned from a real knob move is trusted: the
      * heuristics found false positives and broadcasting a wrong object
      * makes the app abort. */
-    if (!learned_prop((uintptr_t)p0))
-        probe_property((uintptr_t)p0);
+    collect_binding_props();
+    if (!learned_prop((uintptr_t)p0)) {
+        uintptr_t own = owner_of_listener(listener_of_param((uintptr_t)p0));
+        if (own) {
+            int slot = g_npm < 8 ? g_npm : 7;
+            g_pm[slot].param = (uintptr_t)p0;
+            g_pm[slot].prop = own;
+            if (g_npm < 8) g_npm++;
+            mlog("mpcmini: owner(listener) param=%p prop=%p\n", p0, (void *)own);
+        } else {
+            probe_property((uintptr_t)p0);
+        }
+    }
     if (!learned_prop((uintptr_t)p1))
         probe_property((uintptr_t)p1);
     uintptr_t pr0 = learned_prop((uintptr_t)p0);
@@ -1262,7 +1382,6 @@ static void repaint_hook(void *comp, uint64_t a, uint64_t b)
  * calls (setColour / fillRect / Font + drawText). */
 #define A_SCREEN_VT 0x6e212a0
 
-static void *g_screen;
 static void (*orig_screen_paint)(void *, void *);
 
 static void draw_colour(void *g, uint32_t v)
@@ -1812,6 +1931,9 @@ __attribute__((constructor)) static void load(void)
     void *t_rp = install_hook(base + A_REPAINT, (void *)repaint_hook);
     if (t_rp)
         orig_repaint = (void (*)(void *, uint64_t, uint64_t))t_rp;
+    void *t_obs = install_hook(base + A_OBS_SET, (void *)obs_set);
+    if (t_obs)
+        orig_obs_set = (void (*)(void *, float))t_obs;
     void *t_sa = install_hook(base + A_STR_ASSIGN, (void *)str_assign_hook);
 
     void *t_lt = 0;   /* Label::getText hook removed: wrong ABI, crashed the sample browser */
