@@ -55,6 +55,8 @@
 #define A_TRIM_CORE 0x15e70c0      /* trim core (float value, param)      */
 #define A_BROADCAST 0x13bb930      /* value broadcaster (property, float) */
 #define A_TRIM_REG 0x16b6060       /* waveform locator bounds (probe)     */
+#define A_STR_ASSIGN 0xf535c0      /* juce::String assign (dest, text)    */
+#define A_LABEL_TEXT 0x11bae00     /* Label::getText (returns String&)    */
 
 #define T_LAYER 0xb0 /* -> context; [ctx+0x60] = instrument */
 #define T_MODEL 0x70
@@ -221,18 +223,22 @@ static void *install_hook(uintptr_t site, void *hook)
         mlog("mpcmini: site %p has no paciasp/bti (%08x)\n", (void *)site, first);
         return 0;
     }
-    /* prologue copy: paciasp, sub sp, stp x29/x30, mov x29, sp (4 insns) */
+    /* Copy as much of the prologue as is safe: everything up to the first
+     * pc-relative instruction (those compute their address from their own
+     * location, so they must run in place) but never fewer than the erased
+     * first instruction. */
     uint32_t pro[4];
     if (!rd(site, pro, sizeof pro))
         return 0;
-    for (int i = 0; i < 4; ++i)
-        if (pc_relative(pro[i]) && i > 0) {
-            mlog("mpcmini: site %p prologue[%d] is pc-relative\n", (void *)site, i);
-            return 0;
+    unsigned n = 4;
+    for (unsigned i = 1; i < 4; ++i)
+        if (pc_relative(pro[i])) {
+            n = i;
+            break;
         }
     unsigned char *slot = relay_page + (size_t)nslots * 32;
     unsigned char *tr = tramp_page + (size_t)ntramp * 32;
-    uint32_t b_body = enc_b((uintptr_t)tr + 16, site + 16);
+    uint32_t b_body = enc_b((uintptr_t)tr + n * 4, site + n * 4);
     uint32_t b_slot = enc_b(site, (uintptr_t)slot);
     if (!b_body || !b_slot) {
         mlog("mpcmini: hook %p out of B range\n", (void *)site);
@@ -243,9 +249,10 @@ static void *install_hook(uintptr_t site, void *hook)
     memcpy(slot, &ldr, 4);
     memcpy(slot + 4, &br, 4);
     memcpy(slot + 8, &hook, 8);
-    memcpy(tr, pro, 16);
-    memcpy(tr + 16, &b_body, 4);
-    *(uint32_t *)(tr + 20) = 0xD503201Fu; /* nop padding */
+    memcpy(tr, pro, n * 4);
+    memcpy(tr + n * 4, &b_body, 4);
+    nslots++;
+    ntramp++;
 
     uintptr_t page = site & ~(uintptr_t)0xfff;
     if (mprotect((void *)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
@@ -259,11 +266,10 @@ static void *install_hook(uintptr_t site, void *hook)
         mlog("mpcmini: patch of %p failed\n", (void *)site);
         return 0;
     }
-    __builtin___clear_cache((char *)tr, (char *)tr + 24);
+    __builtin___clear_cache((char *)tr, (char *)tr + n * 4 + 4);
     __builtin___clear_cache((char *)slot, (char *)slot + 16);
-    nslots++;
-    ntramp++;
     relay_used = 1;
+    mlog("mpcmini: hook %p (prologue %u)\n", (void *)site, n);
     return tr;
 }
 
@@ -829,7 +835,7 @@ static void *(*orig_prog_inst)(void *, int);
 static void (*orig_rotary)(void *, float);
 static void (*orig_bcast)(void *, float);
 static void (*orig_str_assign)(void *, const char *);
-static const char *(*orig_label_text)(void *);
+static void *(*orig_label_text)(void *);
 static void (*orig_draw_text)(void *, const uint64_t *, int, int, int, int, int, int, float);
 static void (*orig_repaint)(void *, uint64_t, uint64_t);
 
@@ -1090,15 +1096,106 @@ static void repaint_hook(void *comp, uint64_t a, uint64_t b)
 }
 
 /* --------------------------------------------------------------- overlay */
-/* The soft-key strip is redrawn from the label objects; writing the text of
- * the second label (the one the stock firmware uses for "Normalize") is enough
- * to show what the shifted key will do. */
+/* The soft-key row is rebuilt on SHIFT, and every rebuild assigns the label
+ * strings through 0xf535c0(dest, text). While SHIFT is held we swap the B3
+ * label ("Filter") for "AutoTrim" and remember its destination so the release
+ * can put it back. */
+static void *g_filter_dest;
+
+/* The soft-key labels are juce::Label objects whose text is only ever copied,
+ * so the char* assign hook never sees "Filter". Label::getText (0x11bae00)
+ * returns the live juce::String by reference; mutating that string in place
+ * renames the key without touching the layout of anything else. */
+static void *g_label_str;
+
+static const char *string_text(void *str, char *buf, size_t n)
+{
+    uintptr_t h = 0;
+    if (!str || !rd((uintptr_t)str, &h, 8) || !h)
+        return 0;
+    int len = 0;
+    if (rd(h + 4, &len, 4) && len > 0 && len < 200) { /* {ref, len, chars[]} */
+        if (rd(h + 8, buf, (size_t)len < n - 1 ? (size_t)len : n - 1)) {
+            buf[len < (int)n ? len : (int)n - 1] = 0;
+            int ok = 1;
+            for (int i = 0; i < len; ++i)
+                if ((unsigned char)buf[i] < 32) { ok = 0; break; }
+            if (ok)
+                return buf;
+        }
+    }
+    uintptr_t data = 0;
+    size_t l = 0;
+    if (rd(h, &data, 8) && rd(h + 8, &l, 8) && data && l > 0 && l < 200) {
+        if (rd(data, buf, l < n - 1 ? l : n - 1)) {
+            buf[l < n ? l : n - 1] = 0;
+            return buf;
+        }
+    }
+    return 0;
+}
+
+/* The soft-key captions are not juce::Label (Label::getText is never called),
+ * so find the live juce::String that holds "Filter" once, and rename it in
+ * place with the app's own String::operator=(const char*). */
+static void *g_filter_strs[6];
+static int g_nfilter_strs;
+
+static void find_filter_strings(void)
+{
+    if (g_nfilter_strs)
+        return;
+    ranges_load();
+    unsigned char *buf = malloc(65536);
+    if (!buf)
+        return;
+    char txt[64];
+    for (int r = 0; r < g_nrng && g_nfilter_strs < 6; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi; a += 65536) {
+            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+            n &= ~(size_t)7;
+            if (!rd(a, buf, n))
+                break;
+            for (size_t o = 0; o + 8 <= n && g_nfilter_strs < 6; o += 8) {
+                uintptr_t str = a + o;
+                const char *t = string_text((void *)str, txt, sizeof txt);
+                if (t && !strcmp(t, "Filter")) {
+                    g_filter_strs[g_nfilter_strs++] = (void *)str;
+                    mlog("mpcmini: filter string at %p\n", (void *)str);
+                }
+            }
+        }
+    }
+    free(buf);
+}
+
+/* Scanning the heap on the UI thread froze the app (one /proc/self/mem open
+ * per read), so the rename is done by a worker that only touches the cached
+ * strings afterwards. */
 static void set_filter_text(const char *t)
 {
-    (void)t;
     if (debug_mode)
         mlog("mpcmini: overlay '%s'\n", t);
 }
+
+static void str_assign_hook(void *dest, const char *text)
+{
+    static int seen;
+    if (debug_mode && text && seen < 25) {
+        seen++;
+        mlog("mpcmini: label '%s' dest=%p\n", text, dest);
+    }
+    if (text && !strcmp(text, "Filter"))
+        g_filter_dest = dest;
+    if (g_shift && text && !strcmp(text, "Filter"))
+        text = "AutoTrim";
+    if (orig_str_assign)
+        orig_str_assign(dest, text);
+}
+
+
 
 /* ------------------------------------------------------------ MIDI (feature 2) */
 /* Chromatic play from an external controller: the app already receives MIDI on
@@ -1487,7 +1584,8 @@ __attribute__((constructor)) static void load(void)
     void *t_rp = install_hook(base + A_REPAINT, (void *)repaint_hook);
     if (t_rp)
         orig_repaint = (void (*)(void *, uint64_t, uint64_t))t_rp;
-    void *t_sa = 0;   /* string-assign hook removed: not needed, unstable in the browser */
+    void *t_sa = install_hook(base + A_STR_ASSIGN, (void *)str_assign_hook);
+
     void *t_lt = 0;   /* Label::getText hook removed: wrong ABI, crashed the sample browser */
     void *t_dt = 0;   /* drawText overlay removed: the third slot is never drawn through it */
     if (t_ctor)
@@ -1507,7 +1605,7 @@ __attribute__((constructor)) static void load(void)
     if (t_sa)
         orig_str_assign = (void (*)(void *, const char *))t_sa;
     if (t_lt)
-        orig_label_text = (const char *(*)(void *))t_lt;
+        orig_label_text = (void *(*)(void *))t_lt;
     if (t_dt)
         orig_draw_text = (void (*)(void *, const uint64_t *, int, int, int, int, int, int, float))t_dt;
     if (!relay_used) {
