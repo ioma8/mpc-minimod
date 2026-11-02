@@ -89,6 +89,8 @@ static void mlog(const char *fmt, ...);
 static void *g_screen;
 static int prop_references(uintptr_t P, uintptr_t param);
 
+static uintptr_t g_watch_page;
+
 static void fault_handler(int sig, siginfo_t *si, void *ucv)
 {
     ucontext_t *u = (ucontext_t *)ucv;
@@ -97,6 +99,14 @@ static void fault_handler(int sig, siginfo_t *si, void *ucv)
         pc = (unsigned long)u->uc_mcontext.pc;
         lr = (unsigned long)u->uc_mcontext.regs[30];
         sp = (unsigned long)u->uc_mcontext.sp;
+    }
+    if (g_watch_page && si && ((uintptr_t)si->si_addr & ~(uintptr_t)0xfff) == g_watch_page) {
+        /* software watchpoint: report, let the store through, re-arm later */
+        mlog("mpcmini: WATCH addr=%p pc=%p lr=%p\n", si->si_addr, (void *)pc,
+             (void *)lr);
+        mprotect((void *)g_watch_page, 0x1000, PROT_READ | PROT_WRITE);
+        g_watch_page = 0;
+        return;
     }
     mlog("mpcmini: FAULT sig=%d addr=%p pc=%p lr=%p sp=%p\n", sig,
          si ? si->si_addr : 0, (void *)pc, (void *)lr, (void *)sp);
@@ -1851,6 +1861,38 @@ static void do_autotrim(void)
 }
 
 
+/* Re-arms the software watchpoint from /run/mpcmini.watch (hex address), so the
+ * address can be set after the app has started and picked a new heap. */
+static void *watch_thread(void *arg)
+{
+    (void)arg;
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 200 * 1000 * 1000};
+    for (;;) {
+        nanosleep(&ts, 0);
+        if (g_watch_page)
+            continue;
+        int fd = open("/run/mpcmini.watch", O_RDONLY);
+        if (fd < 0)
+            continue;
+        char buf[64];
+        ssize_t n = read(fd, buf, sizeof buf - 1);
+        close(fd);
+        if (n <= 0)
+            continue;
+        buf[n] = 0;
+        uintptr_t a = (uintptr_t)strtoull(buf, 0, 16);
+        if (!a)
+            continue;
+        g_watch_page = a & ~(uintptr_t)0xfff;
+        if (mprotect((void *)g_watch_page, 0x1000, PROT_READ) == 0)
+            mlog("mpcmini: watch armed at %p (page %p)\n", (void *)a,
+                 (void *)g_watch_page);
+        else
+            g_watch_page = 0;
+    }
+    return 0;
+}
+
 static void *trim_worker(void *arg)
 {
     (void)arg;
@@ -1988,6 +2030,10 @@ __attribute__((constructor)) static void load(void)
     if (t_dt)
         orig_draw_text = (void (*)(void *, const uint64_t *, int, int, int, int, int, int, float))t_dt;
     install_screen_paint();
+    {
+        pthread_t wth;
+        pthread_create(&wth, 0, watch_thread, 0);
+    }
     if (!relay_used) {
         mlog("mpcmini: no hook installed\n");
         return;
