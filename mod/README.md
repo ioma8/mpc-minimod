@@ -34,8 +34,9 @@ released   : Trim        Tune        Filter
 
 * **Pitch shift** — `PLUS` / `MINUS` while 16 LEVELS is lit move the whole pad
   row by **8 semitones** per press (half of the 16-note grid), clamped to ±4
-  presses. The keys are *swallowed* so the stock "nudge the selected knob"
-  action does not also run. The shift is applied in
+  presses. **Holding both keys at once resets the row to its original pitch.**
+  The keys are *swallowed* so the stock "nudge the selected knob" action does
+  not also run. The shift is applied in
   `0x27e4400(ctx, ?, ?, semitoneOffset)` — the function the 16-Levels renderer
   calls with `(pad & 0xf) - originalPad`.
 * **Autotrim** — `SHIFT` + **B3**. Computes the first/last non-silent frame of

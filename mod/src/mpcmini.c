@@ -320,7 +320,8 @@ static void *install_hook(uintptr_t site, void *hook)
 }
 
 /* -------------------------------------------------------- 16 Levels state */
-static int g_octave;   /* octave shift applied while 16 LEVELS is active */
+static int g_octave;
+static int g_plus_held, g_minus_held;   /* octave shift applied while 16 LEVELS is active */
 static void *g_sixteen; /* the live 16 Levels screen, if seen             */
 
 static int sixteen_tune_active(void)
@@ -968,8 +969,25 @@ static void buttons(void *event)
      * runs for that screen, so bumping unconditionally is safe - and the old
      * guard (g_octave != 0) made the first press a no-op. */
     if (code == 0x36 || code == 0x37) {
-        if (down)
-            bump_octave(code == 0x36 ? +1 : -1);
+        int plus = (code == 0x36);
+        if (down) {
+            /* both keys at once = reset the row to its original pitch */
+            if (plus ? g_minus_held : g_plus_held) {
+                g_octave = 0;
+                mlog("mpcmini: PLUS+MINUS -> pitch reset to original\n");
+            } else {
+                bump_octave(plus ? +1 : -1);
+            }
+            if (plus)
+                g_plus_held = 1;
+            else
+                g_minus_held = 1;
+        } else {
+            if (plus)
+                g_plus_held = 0;
+            else
+                g_minus_held = 0;
+        }
         return; /* swallow: the stock action would nudge the selected knob */
     }
     if (debug_mode && g_dbg < 80) {

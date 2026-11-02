@@ -166,8 +166,23 @@ Note `0x21472f0` branches on `*(int *)(self + 0x88)` (modes 2/3/4/6/7); the
 `0x27e4510` branch used by one of them is **not** hooked yet, so a mode that
 takes it would shift nothing.
 
-Verified on device 2026-11-03: `PLUS` / `MINUS` move the row by 8 semitones and
-no longer change the selected knob.
+3. **Both keys at once reset the row.** Each key keeps a held flag; a press that
+   arrives while the *other* key is already down clears the shift instead of
+   stepping it:
+
+   ```c
+   if (plus ? g_minus_held : g_plus_held) {
+       g_octave = 0;                      /* back to the original pitch */
+   } else {
+       bump_octave(plus ? +1 : -1);
+   }
+   ```
+
+   Pressing them "together" therefore ends at zero even though the first key of
+   the pair steps once before the second one clears it.
+
+Verified on device 2026-11-03: `PLUS` / `MINUS` move the row by 8 semitones,
+both together reset it, and neither changes the selected knob.
 
 ## Feature 2 — autotrim
 
