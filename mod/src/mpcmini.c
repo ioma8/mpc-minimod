@@ -88,6 +88,7 @@ static int probe_bits = 0x7f;
 static void mlog(const char *fmt, ...);
 static void *g_screen;
 static int prop_references(uintptr_t P, uintptr_t param);
+static int find_screens(uintptr_t *out, int max);
 
 static uintptr_t g_watch_page;
 #define MAXW 12
@@ -1452,6 +1453,47 @@ static int set_slider_percent(float from, float to)
     return 0;
 }
 
+/* Apply the trim to one screen instance: find the two trim sliders by the
+ * instance's own cached percentages, write ours into their +0x1b4 and repaint.
+ * Returns 1 when both were found. */
+static int apply_to_instance(uintptr_t S, float p0, float p1)
+{
+    float c0 = 0, c1 = 0;
+    if (!rd(S + 0x1f4c, &c0, 4) || !rd(S + 0x1f50, &c1, 4))
+        return 0;
+    if (!(c0 >= -0.5f && c0 <= 100.5f && c1 >= -0.5f && c1 <= 100.5f))
+        return 0;
+    uintptr_t want = base + 0x706e5d0, s0 = 0, s1 = 0;
+    for (long o = 0; o < 0x20000; o += 8) {
+        uintptr_t q = 0;
+        if (!rd(S + o, &q, 8))
+            break;
+        if (q != want)
+            continue;
+        uintptr_t sl = S + (uintptr_t)o;
+        float v = 0;
+        if (!rd(sl + 0x1b4, &v, 4))
+            continue;
+        float d0 = v - c0, d1 = v - c1;
+        if (d0 < 0) d0 = -d0;
+        if (d1 < 0) d1 = -d1;
+        if (!s0 && d0 <= 0.6f)
+            s0 = sl;
+        else if (!s1 && d1 <= 0.6f)
+            s1 = sl;
+    }
+    if (!s0 || !s1 || s0 == s1)
+        return 0;
+    wr(s0 + 0x1b4, (void *)&p0, 4);
+    wr(s1 + 0x1b4, (void *)&p1, 4);
+    mlog("mpcmini: instance %p sliders %p/%p -> %.2f/%.2f (was %.2f/%.2f)\n",
+         (void *)S, (void *)s0, (void *)s1, (double)p0, (double)p1, (double)c0,
+         (double)c1);
+    FN(0x1149880, void (*)(void *, uint64_t, uint64_t))((void *)S, 0,
+                                                        FIELD(S, 0x28, uint64_t));
+    return 1;
+}
+
 static void commit_trim(void)
 {
     void *p0 = g_trim_param0, *p1 = g_trim_param1;
@@ -1470,6 +1512,13 @@ static void commit_trim(void)
                 FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
                     g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
             return;
+        }
+        {
+            uintptr_t sc[8];
+            int ns = find_screens(sc, 8);
+            for (int i = 0; i < ns; ++i)
+                if (apply_to_instance(sc[i], v0 * 100.0f, v1 * 100.0f))
+                    return;
         }
         uintptr_t s0 = 0, s1 = 0;
         for (int i = 0; i < g_nps; ++i) {
