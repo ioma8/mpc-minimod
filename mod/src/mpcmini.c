@@ -90,6 +90,33 @@ static void *g_screen;
 static int prop_references(uintptr_t P, uintptr_t param);
 
 static uintptr_t g_watch_page;
+#define MAXW 12
+static uintptr_t g_wpages[MAXW];
+static int g_nwpage;
+
+static int watch_has(uintptr_t page)
+{
+    for (int i = 0; i < g_nwpage; ++i)
+        if (g_wpages[i] == page)
+            return 1;
+    return 0;
+}
+
+static void watch_arm(uintptr_t addr, const char *why)
+{
+    uintptr_t page = addr & ~(uintptr_t)0xfff;
+    if (watch_has(page) || g_nwpage >= MAXW)
+        return;
+    int rc = mprotect((void *)page, 0x1000, PROT_READ);
+    if (rc == 0) {
+        g_wpages[g_nwpage++] = page;
+        mlog("mpcmini: watch(%s) %p page=%p\n", why, (void *)addr, (void *)page);
+    } else {
+        mlog("mpcmini: watch(%s) %p page=%p failed: %s\n", why, (void *)addr,
+             (void *)page, strerror(errno));
+    }
+}
+
 
 static void fault_handler(int sig, siginfo_t *si, void *ucv)
 {
@@ -100,12 +127,14 @@ static void fault_handler(int sig, siginfo_t *si, void *ucv)
         lr = (unsigned long)u->uc_mcontext.regs[30];
         sp = (unsigned long)u->uc_mcontext.sp;
     }
-    if (g_watch_page && si && ((uintptr_t)si->si_addr & ~(uintptr_t)0xfff) == g_watch_page) {
-        /* software watchpoint: report, let the store through, re-arm later */
-        mlog("mpcmini: WATCH addr=%p pc=%p lr=%p\n", si->si_addr, (void *)pc,
-             (void *)lr);
-        mprotect((void *)g_watch_page, 0x1000, PROT_READ | PROT_WRITE);
-        g_watch_page = 0;
+    if (si && watch_has((uintptr_t)si->si_addr & ~(uintptr_t)0xfff)) {
+        mlog("mpcmini: WATCH addr=%p pc=%p lr=%p sp=%p\n", si->si_addr, (void *)pc,
+             (void *)lr, (void *)sp);
+        mprotect((void *)((uintptr_t)si->si_addr & ~(uintptr_t)0xfff), 0x1000,
+                 PROT_READ | PROT_WRITE);
+        for (int i = 0; i < g_nwpage; ++i)
+            if (g_wpages[i] == ((uintptr_t)si->si_addr & ~(uintptr_t)0xfff))
+                g_wpages[i] = 0;
         return;
     }
     mlog("mpcmini: FAULT sig=%d addr=%p pc=%p lr=%p sp=%p\n", sig,
@@ -1861,6 +1890,36 @@ static void do_autotrim(void)
 }
 
 
+/* every SampleModeScreen instance in the heap (the page paints from one of
+ * them, the Trim knobs may drive another) */
+static int find_screens(uintptr_t *out, int max)
+{
+    ranges_load();
+    unsigned char *buf = malloc(65536);
+    if (!buf)
+        return 0;
+    uintptr_t want = base + A_SCREEN_VT;
+    int n = 0;
+    for (int r = 0; r < g_nrng && n < max; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && n < max; a += 65536) {
+            size_t sz = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+            sz &= ~(size_t)7;
+            if (!rd(a, buf, sz))
+                break;
+            for (size_t o = 0; o + 8 <= sz && n < max; o += 8) {
+                uintptr_t q;
+                memcpy(&q, buf + o, 8);
+                if (q == want)
+                    out[n++] = a + o;
+            }
+        }
+    }
+    free(buf);
+    return n;
+}
+
 /* Re-arms the software watchpoint from /run/mpcmini.watch (hex address), so the
  * address can be set after the app has started and picked a new heap. */
 static void *watch_thread(void *arg)
@@ -1869,8 +1928,13 @@ static void *watch_thread(void *arg)
     struct timespec ts = {.tv_sec = 0, .tv_nsec = 200 * 1000 * 1000};
     for (;;) {
         nanosleep(&ts, 0);
-        if (g_watch_page)
-            continue;
+        /* the app installs its own crash handler after us; keep ours on top */
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = fault_handler;
+        sa.sa_flags = SA_SIGINFO;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGSEGV, &sa, 0);
         int fd = open("/run/mpcmini.watch", O_RDONLY);
         if (fd < 0)
             continue;
@@ -1880,15 +1944,21 @@ static void *watch_thread(void *arg)
         if (n <= 0)
             continue;
         buf[n] = 0;
-        uintptr_t a = (uintptr_t)strtoull(buf, 0, 16);
-        if (!a)
+        if (!strncmp(buf, "scan", 4)) {
+            uintptr_t sc[8];
+            int ns = find_screens(sc, 8);
+            mlog("mpcmini: %d screen instance(s)\n", ns);
+            for (int i = 0; i < ns; ++i) {
+                mlog("mpcmini:   screen[%d]=%p\n", i, (void *)sc[i]);
+                watch_arm(sc[i] + 0x1f4c, "screen");
+                watch_arm(sc[i] + 0x72c8, "screenfrac");
+            }
+            unlink("/run/mpcmini.watch");
             continue;
-        g_watch_page = a & ~(uintptr_t)0xfff;
-        if (mprotect((void *)g_watch_page, 0x1000, PROT_READ) == 0)
-            mlog("mpcmini: watch armed at %p (page %p)\n", (void *)a,
-                 (void *)g_watch_page);
-        else
-            g_watch_page = 0;
+        }
+        uintptr_t a = (uintptr_t)strtoull(buf, 0, 16);
+        if (a)
+            watch_arm(a, "addr");
     }
     return 0;
 }
