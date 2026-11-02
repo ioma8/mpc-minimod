@@ -85,6 +85,7 @@ static int probe_mode;
 static int probe_bits = 0x7f;
 
 static void mlog(const char *fmt, ...);
+static int prop_references(uintptr_t P, uintptr_t param);
 
 static void fault_handler(int sig, siginfo_t *si, void *ucv)
 {
@@ -988,13 +989,20 @@ static void rotary(void *a, float v)
 
 /* The trim core is called by the broadcaster's listener loop, which keeps the
  * property in x20: learning that pair is what lets autotrim drive the page. */
+static volatile int g_own_call;
+
 static void trim_probe(void *self, float v)
 {
     static int logs;
+    if (g_own_call) {
+        if (orig_trim)
+            orig_trim(self, v);
+        return;
+    }
     uintptr_t prop = 0;
     __asm__ volatile("mov %0, x20" : "=r"(prop));
     g_core_hit = 1;
-    if (prop && mapped((void *)prop)) {
+    if (prop && mapped((void *)prop) && prop_references(prop, (uintptr_t)self)) {
         float v50 = 0;
         if (rd(prop + 0x50, &v50, 4) && v50 >= -0.001f && v50 <= 1.001f) {
             float d = v50 - v;
@@ -1048,68 +1056,202 @@ static float g_trim_cur0, g_trim_cur1;
 static unsigned g_trim_frames;
 static uintptr_t g_trim_layer, g_trim_screen;
 
+/* Broadcast a unique value to one candidate property: if the app's own
+ * listener chain reaches the trim core for *our* parameter, that property owns
+ * it. The original value is restored right after. */
+static uintptr_t g_cand[24];
+static int g_ncand;
+
+/* The page keeps a small binding object per parameter (vtable app+0x6e08a10)
+ * that holds the property at +0x20. Collect those as probe candidates. */
+static void collect_binding_props(void)
+{
+    if (g_ncand)
+        return;
+    ranges_load();
+    unsigned char *buf = malloc(65536);
+    if (!buf)
+        return;
+    uintptr_t want = base + A_BINDING_VT;
+    for (int r = 0; r < g_nrng && g_ncand < 24; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ncand < 24;
+             a += 65536) {
+            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+            n &= ~(size_t)7;
+            if (!rd(a, buf, n))
+                break;
+            for (size_t o = 0; o + 8 <= n && g_ncand < 24; o += 8) {
+                uintptr_t q;
+                memcpy(&q, buf + o, 8);
+                if (q != want)
+                    continue;
+                uintptr_t p20 = 0;
+                if (!rd(a + o + 0x20, &p20, 8) || !p20)
+                    continue;
+                uintptr_t cs[2] = {p20 & ~(uintptr_t)0xf, (p20 & ~(uintptr_t)0xf) - 0x10};
+                for (int k = 0; k < 2; ++k) {
+                    uintptr_t c = cs[k];
+                    float f = 0;
+                    if (!c || (c & 7) || !mapped((void *)c))
+                        continue;
+                    if (!rd(c + 0x50, &f, 4) || !(f >= -0.001f && f <= 1.001f))
+                        continue;
+                    /* statics in the app image pass the float test but are not
+                     * properties; a property lives on the heap */
+                    if (c >= base && c < base + 0x9000000)
+                        continue;
+                    int dup = 0;
+                    for (int i = 0; i < g_ncand; ++i)
+                        if (g_cand[i] == c) { dup = 1; break; }
+                    if (!dup)
+                        g_cand[g_ncand++] = c;
+                }
+            }
+        }
+    }
+    free(buf);
+    mlog("mpcmini: %d property candidates from bindings\n", g_ncand);
+}
+
+/* Read-only ownership test: the property's listener chain must reference the
+ * parameter (or its model) somewhere within two hops. No broadcasting, so a
+ * wrong candidate can never disturb the app. */
+static int prop_references(uintptr_t P, uintptr_t param)
+{
+    uintptr_t model = 0;
+    rd(param + T_MODEL, &model, 8);
+    uintptr_t node = 0;
+    if (!rd(P + 0x10, &node, 8) || !node)
+        return 0;
+    uintptr_t back = 0;
+    if (!rd(node, &back, 8) || back != P + 0x10)
+        return 0;
+    unsigned char buf[0x200];
+    unsigned char buf2[0x100];
+    for (int n = 0; n < 16; ++n) {
+        if (node == P + 8 || !node || !mapped((void *)node))
+            break;
+        uintptr_t tgt = 0;
+        if (!rd(node + 0x18, &tgt, 8))
+            break;
+        tgt &= ~(uintptr_t)3;
+        if (tgt && mapped((void *)tgt) && rd(tgt, buf, sizeof buf)) {
+            for (size_t o = 0; o + 8 <= sizeof buf; o += 8) {
+                uintptr_t q;
+                memcpy(&q, buf + o, 8);
+                if (!q)
+                    continue;
+                if (q == param || (model && q == model))
+                    return 1;
+                if (q < 0x10000 || !mapped((void *)q))
+                    continue;
+                if (!rd(q, buf2, sizeof buf2))
+                    continue;
+                for (size_t k = 0; k + 8 <= sizeof buf2; k += 8) {
+                    uintptr_t q2;
+                    memcpy(&q2, buf2 + k, 8);
+                    if (q2 == param || (model && q2 == model))
+                        return 1;
+                }
+            }
+        }
+        uintptr_t next = 0;
+        if (!rd(node + 8, &next, 8))
+            break;
+        node = next;
+    }
+    return 0;
+}
+
+static int probe_property(uintptr_t param)
+{
+    collect_binding_props();
+    for (int i = 0; i < g_ncand; ++i)
+        if (prop_references(g_cand[i], param)) {
+            int slot = g_npm;
+            if (slot < 8) {
+                g_pm[slot].param = param;
+                g_pm[slot].prop = g_cand[i];
+                g_npm = slot + 1;
+            }
+            mlog("mpcmini: owner of param=%p is prop=%p\\n", (void *)param,
+                 (void *)g_cand[i]);
+            return 1;
+        }
+    return 0;
+}
+
+static void commit_trim(void)
+{
+    void *p0 = g_trim_param0, *p1 = g_trim_param1;
+    float v0 = g_trim_v0, v1 = g_trim_v1;
+    /* Only a property learned from a real knob move is trusted: the
+     * heuristics found false positives and broadcasting a wrong object
+     * makes the app abort. */
+    if (!learned_prop((uintptr_t)p0))
+        probe_property((uintptr_t)p0);
+    if (!learned_prop((uintptr_t)p1))
+        probe_property((uintptr_t)p1);
+    uintptr_t pr0 = learned_prop((uintptr_t)p0);
+    uintptr_t pr1 = learned_prop((uintptr_t)p1);
+    if (!pr0)
+        pr0 = broadcast_prop((uintptr_t)p0, g_trim_cur0);
+    if (!pr1)
+        pr1 = broadcast_prop((uintptr_t)p1, g_trim_cur1);
+    if (pr0 == pr1 || (pr0 && pr1 && !pr0 && !pr1))
+        pr0 = pr1 = 0;
+    mlog("mpcmini: commit %.4f/%.4f prop=%p/%p\n", (double)v0, (double)v1,
+         (void *)pr0, (void *)pr1);
+    uintptr_t b0 = 0, b1 = 0;
+    rd((uintptr_t)p0 + 0x80, &b0, 8);
+    rd((uintptr_t)p1 + 0x80, &b1, 8);
+    unsigned fa = (unsigned)(v0 * (float)g_trim_frames + 0.5f);
+    unsigned fb = (unsigned)(v1 * (float)g_trim_frames + 0.5f);
+    if (b0) {
+        wr(b0 + 0x38, &fa, 4);
+        wr(b0 + 0xa8, &fa, 4);
+    }
+    if (b1) {
+        wr(b1 + 0x38, &fb, 4);
+        wr(b1 + 0xa8, &fb, 4);
+    }
+    if (g_trim_layer) {
+        wr(g_trim_layer + 0x4d8, &fa, 4);
+        wr(g_trim_layer + 0x588, &fa, 4);
+        wr(g_trim_layer + 0x530, &fb, 4);
+    }
+    g_own_call = 1;
+    FN(A_TRIM_CORE, void (*)(float, void *))(v0, p0);
+    FN(A_TRIM_CORE, void (*)(float, void *))(v1, p1);
+    g_own_call = 0;
+    wr((uintptr_t)p0 + 0x1a0, &v0, 4);
+    wr((uintptr_t)p1 + 0x1a0, &v1, 4);
+    if (pr0) {
+        float cur0 = 0;
+        if (rd(pr0 + 0x50, &cur0, 4) && cur0 >= -0.001f && cur0 <= 1.001f) {
+            wr(pr0 + 0x50, &v0, 4);
+            FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
+        }
+    }
+    if (pr1) {
+        float cur1 = 0;
+        if (rd(pr1 + 0x50, &cur1, 4) && cur1 >= -0.001f && cur1 <= 1.001f) {
+            wr(pr1 + 0x50, &v1, 4);
+            FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
+        }
+    }
+    unsigned l0 = 0, l1 = 0;
+    if (g_trim_layer) {
+        rd(g_trim_layer + 0x4d8, &l0, 4);
+        rd(g_trim_layer + 0x530, &l1, 4);
+    }
+    mlog("mpcmini: after layer=%u/%u\n", l0, l1);
+}
+
 static void repaint_hook(void *comp, uint64_t a, uint64_t b)
 {
-    if (g_trim_pending) {
-        g_trim_pending = 0;
-        void *p0 = g_trim_param0, *p1 = g_trim_param1;
-        float v0 = g_trim_v0, v1 = g_trim_v1;
-        /* Only a property learned from a real knob move is trusted: the
-         * heuristics found false positives and broadcasting a wrong object
-         * makes the app abort. */
-        uintptr_t pr0 = learned_prop((uintptr_t)p0);
-        uintptr_t pr1 = learned_prop((uintptr_t)p1);
-        if (!pr0)
-            pr0 = broadcast_prop((uintptr_t)p0, g_trim_cur0);
-        if (!pr1)
-            pr1 = broadcast_prop((uintptr_t)p1, g_trim_cur1);
-        if (pr0 == pr1 || (pr0 && pr1 && !pr0 && !pr1))
-            pr0 = pr1 = 0;
-        mlog("mpcmini: commit %.4f/%.4f prop=%p/%p\n", (double)v0, (double)v1,
-             (void *)pr0, (void *)pr1);
-        uintptr_t b0 = 0, b1 = 0;
-        rd((uintptr_t)p0 + 0x80, &b0, 8);
-        rd((uintptr_t)p1 + 0x80, &b1, 8);
-        unsigned fa = (unsigned)(v0 * (float)g_trim_frames + 0.5f);
-        unsigned fb = (unsigned)(v1 * (float)g_trim_frames + 0.5f);
-        if (b0) {
-            wr(b0 + 0x38, &fa, 4);
-            wr(b0 + 0xa8, &fa, 4);
-        }
-        if (b1) {
-            wr(b1 + 0x38, &fb, 4);
-            wr(b1 + 0xa8, &fb, 4);
-        }
-        if (g_trim_layer) {
-            wr(g_trim_layer + 0x4d8, &fa, 4);
-            wr(g_trim_layer + 0x588, &fa, 4);
-            wr(g_trim_layer + 0x530, &fb, 4);
-        }
-        FN(A_TRIM_CORE, void (*)(float, void *))(v0, p0);
-        FN(A_TRIM_CORE, void (*)(float, void *))(v1, p1);
-        wr((uintptr_t)p0 + 0x1a0, &v0, 4);
-        wr((uintptr_t)p1 + 0x1a0, &v1, 4);
-        if (pr0) {
-            float cur0 = 0;
-            if (rd(pr0 + 0x50, &cur0, 4) && cur0 >= -0.001f && cur0 <= 1.001f) {
-                wr(pr0 + 0x50, &v0, 4);
-                FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
-            }
-        }
-        if (pr1) {
-            float cur1 = 0;
-            if (rd(pr1 + 0x50, &cur1, 4) && cur1 >= -0.001f && cur1 <= 1.001f) {
-                wr(pr1 + 0x50, &v1, 4);
-                FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
-            }
-        }
-        unsigned l0 = 0, l1 = 0;
-        if (g_trim_layer) {
-            rd(g_trim_layer + 0x4d8, &l0, 4);
-            rd(g_trim_layer + 0x530, &l1, 4);
-        }
-        mlog("mpcmini: after layer=%u/%u\n", l0, l1);
-    }
     if (orig_repaint)
         orig_repaint(comp, a, b);
 }
@@ -1489,8 +1631,8 @@ static void do_autotrim(void)
     g_trim_frames = N;
     g_trim_layer = layers;
     g_trim_screen = (uintptr_t)find_sample_screen();
-    g_trim_pending = 1;
-    mlog("mpcmini: autotrim queued for the ui thread\n");
+    mlog("mpcmini: autotrim commit (message thread)\n");
+    commit_trim();
 }
 
 
