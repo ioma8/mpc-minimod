@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Large reverse-engineering artefacts: the extracted firmware and app binary live
+# outside the tree (see docs/MODDING.md §5); only small scripts are kept here.
+analysis/
+*.img
+
+# Generated output (stems, reports, experiment renders)
+out/
+out-*/
+
+# macOS
+.DS_Store

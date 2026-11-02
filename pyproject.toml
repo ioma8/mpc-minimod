@@ -1,0 +1,33 @@
+[project]
+name = "mpc2stems"
+version = "0.1.0"
+description = "Convert Akai MPC sample projects (.xpj) into per-pad DAW stems that sum back to the device mixdown"
+readme = "README.md"
+authors = [
+    { name = "Jakub Kolcar", email = "j.kolcar@raynet.cz" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "librosa>=1.0.0",
+    "matplotlib>=3.11.2",
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "soundfile>=0.12.1",
+]
+
+[project.scripts]
+mpc2stems = "mpc2stems.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+# Only this project's tests.  analysis/ holds third-party checkouts (and their
+# own suites) for the firmware work; collecting them would misreport our result.
+testpaths = ["tests"]
