@@ -266,7 +266,7 @@ To enable the dev tab, the mod would have to reproduce its factory:
 Cautions if this is ever implemented:
 
 * the tab contains a **`Crash application`** button and a `Set User ID` action —
-  it must live behind `MPCMINI_DEBUG` and never ship;
+  it must live behind `MINIMOD_DEBUG` and never ship;
 * `Custom tags` / `Refresh tags` touch the app's tags database, so constructing
   it on a user's unit risks mutating real data;
 * it is a developer diagnostics tool, unrelated to Bluetooth despite sitting in

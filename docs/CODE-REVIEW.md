@@ -1,4 +1,4 @@
-# Code review — `mod/src/mpcmini.c`
+# Code review — `mod/src/minimod.c`
 
 Scope: the whole shipped module (~3 900 lines), reviewed against the binary it
 targets (firmware 1.3.0.12, sha256 `b6584cba…3b508`).
@@ -16,7 +16,7 @@ Severity order below; each item gives location, impact and the fix.
 ## Critical
 
 ### C1. `mlog` over-reads its buffer — memory disclosure / crash
-`mod/src/mpcmini.c:181-192`
+`mod/src/minimod.c:181-192`
 
 ```c
 char buf[512];
@@ -41,7 +41,7 @@ if (n > 0) {
 ```
 
 ### C2. Debug command channel ships enabled — arbitrary memory write
-`mod/src/mpcmini.c:3885-3990` (`heap_probe_thread`), commands include:
+`mod/src/minimod.c:3885-3990` (`heap_probe_thread`), commands include:
 
 | command | effect |
 |---|---|
@@ -50,16 +50,16 @@ if (n > 0) {
 | `findval <f>` | scans the whole heap |
 | `snap` / `diff` / `snapb` / `diffb` / `find` / `who` | heap probing |
 
-Triggered by writing `/run/mpcmini.heap`. In a shipped mod this is an
+Triggered by writing `/run/minimod.heap`. In a shipped mod this is an
 unauthenticated arbitrary-write primitive reachable by any process that can write
 that path, and a malformed line can crash the app (the thread runs with the app's
 privileges and no validation beyond `strtoull`).
 
-Fix: wrap the whole thread and file path in `#ifdef MPCMINI_DEBUG` and compile it
+Fix: wrap the whole thread and file path in `#ifdef MINIMOD_DEBUG` and compile it
 out of release builds. Do not ship a `set` command.
 
 ### C3. `watch_arm` removes write permission from live app pages
-`mod/src/mpcmini.c:115-132`, triggered from `/run/mpcmini.watch` at `:4219-4228`
+`mod/src/minimod.c:115-132`, triggered from `/run/minimod.watch` at `:4219-4228`
 
 ```c
 int rc = mprotect((void *)page, 0x1000, PROT_READ);
@@ -75,7 +75,7 @@ Fix: delete for release. Page-protection tampering plus a returning fault handle
 is not something to leave in a binary that runs on hardware.
 
 ### C4. Process-wide handlers for fatal signals, which return
-`mod/src/mpcmini.c:131` (handler) installed at `:4280-4295` for **SIGSEGV,
+`mod/src/minimod.c:131` (handler) installed at `:4280-4295` for **SIGSEGV,
 SIGBUS, SIGILL and SIGABRT**
 
 Catching `SIGILL`/`SIGABRT` and returning is never correct, and swallowing
@@ -86,7 +86,7 @@ Fix: install only `SIGSEGV`/`SIGBUS`, only in debug builds, and only to log the
 fault then `sigaction` back to default and re-raise (never resume).
 
 ### C5. The mod can kill the app on its own failure
-`mod/src/mpcmini.c:4418` and `:4420`
+`mod/src/minimod.c:4418` and `:4420`
 
 ```c
 if (mprotect(relay_page, 4096, PROT_READ | PROT_EXEC) != 0) _exit(121);
@@ -102,7 +102,7 @@ installed but the pages writable, or unhook and continue).
 ## High
 
 ### H1. Five experimental hooks are still installed in release
-`mod/src/mpcmini.c:4353-4365` — `pagector_probe`, `setctl_probe`,
+`mod/src/minimod.c:4353-4365` — `pagector_probe`, `setctl_probe`,
 `ctlhandler_probe`, `gettrim_probe`, `copypad_probe`.
 
 They exist only for the investigation documented in `docs/TRIM-PAGE.md`. Each one
@@ -122,22 +122,22 @@ Fix: delete all five (and `setctl_probe`'s `orig_setctl`, which is unused after
 the experiments were reverted).
 
 ### H2. Four always-on polling threads
-`mod/src/mpcmini.c:4401-4412` — `watch_thread` (200 ms), `slider_probe_thread`
+`mod/src/minimod.c:4401-4412` — `watch_thread` (200 ms), `slider_probe_thread`
 (300 ms), `bcast_probe_thread` (300 ms), `heap_probe_thread` (400 ms).
 
 On an embedded sampler these run forever, waking the CPU and reading memory
 (hundreds of `rd()` calls per second through a freshly opened `/proc/self/mem`).
-The heap thread also `open`/`read`/`close`s `/run/mpcmini.heap` four times a
+The heap thread also `open`/`read`/`close`s `/run/minimod.heap` four times a
 second forever.
 
-Fix: remove in release (`#ifdef MPCMINI_DEBUG`), or at minimum gate on an env var
+Fix: remove in release (`#ifdef MINIMOD_DEBUG`), or at minimum gate on an env var
 checked once at load.
 
 ### H3. Log file grows without bound on tmpfs
-`mod/src/mpcmini.c:4280`
+`mod/src/minimod.c:4280`
 
 ```c
-log_fd = open("/run/mpcmini.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+log_fd = open("/run/minimod.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
 ```
 
 `/run` is a tmpfs (RAM). Nothing rotates or caps the file; a long session with
@@ -146,10 +146,10 @@ system. The log already accumulated thousands of lines in this session.
 
 Fix: cap the file (e.g. stop logging once `st_size > 256 KB`, or reopen with
 `O_TRUNC` on load), and make `mlog` a no-op in release unless
-`MPCMINI_LOG` is set.
+`MINIMOD_LOG` is set.
 
 ### H4. `rd`/`wr` open `/proc/self/mem` per call
-`mod/src/mpcmini.c:205-222`
+`mod/src/minimod.c:205-222`
 
 ```c
 int fd = open("/proc/self/mem", O_RDONLY);
@@ -169,7 +169,7 @@ if the cached fd fails.
 ## Medium
 
 ### M1. `pc_relative` misses branch forms
-`mod/src/mpcmini.c:272-281` recognises `B/BL`, `ADRP`, `ADR`, `LDR literal`.
+`mod/src/minimod.c:272-281` recognises `B/BL`, `ADRP`, `ADR`, `LDR literal`.
 It does **not** recognise `CBZ/CBNZ`, `TBZ/TBNZ` (all PC-relative) or `RET`.
 `install_hook` copies up to four prologue instructions into the trampoline and
 stops only at a `pc_relative` match (`:310-317`); a conditional branch in the
@@ -179,13 +179,13 @@ Fix: add `(i & 0x7E000000) == 0x34000000` (CBZ/CBNZ), `(i & 0x7E000000) ==
 0x36000000` (TBZ/TBNZ), and treat `RET`/`BR`/`BLR` as "stop here".
 
 ### M2. `install_hook` consumes slots before it succeeds
-`mod/src/mpcmini.c:326-328` increments `nslots`/`ntramp` **before** the patch is
+`mod/src/minimod.c:326-328` increments `nslots`/`ntramp` **before** the patch is
 confirmed; a failed `wr` or `mprotect` leaves two slots burned and returns 0.
 
 Fix: allocate, patch, and only then bump the counters (or roll back).
 
 ### M3. `mapped()` silently disables validation
-`mod/src/mpcmini.c:225-235`
+`mod/src/minimod.c:225-235`
 
 ```c
 if (!g_rng_loaded) return 1;   /* "assume mapped" */
@@ -209,7 +209,7 @@ The off-thread path exists but is dead: `trim_worker` (`:4239`) waits on
 paint hook) or delete the worker.
 
 ### M5. Division by zero when the sample has no frames
-`mod/src/mpcmini.c:3748-3749` (main path), also `:3725-3726`, `:3768-3769`
+`mod/src/minimod.c:3748-3749` (main path), also `:3725-3726`, `:3768-3769`
 
 ```c
 float v0 = (float)a / (float)N;
@@ -223,13 +223,13 @@ so it propagates into the model).
 
 Fix: `if (!N) return;` as soon as the length is resolved, before any normalisation.
 
-### M6. `MPCMINI_TESTTRIM` is a shipping backdoor
-`mod/src/mpcmini.c:3716-3734` — an environment variable forces arbitrary trim
+### M6. `MINIMOD_TESTTRIM` is a shipping backdoor
+`mod/src/minimod.c:3716-3734` — an environment variable forces arbitrary trim
 bounds and drives the write path. It is a test hook; it should be compiled out of
 release, or at least require a second opt-in.
 
 ### M7. 24-bit PCM is accepted but analysed as 16-bit
-`mod/src/mpcmini.c:452-454`
+`mod/src/minimod.c:452-454`
 
 ```c
 if (bps < 2 || bps > 4) bps = 2;
@@ -291,7 +291,7 @@ the dispatch table still say "generic observable property setter" for
 * `rd`/`wr` are fault-safe by construction (via `/proc/self/mem`) — the right
   choice for poking an app you do not control.
 * The AutoTrim threshold is peak-relative with an absolute floor and is
-  documented and overridable (`MPCMINI_TRIM_DB`), which is exactly what the
+  documented and overridable (`MINIMOD_TRIM_DB`), which is exactly what the
   requirement asked for.
 * The property write goes through the app's own `Property_Broadcast`, so the
   app's model is updated *and* listeners are notified — the hard-won fix.
@@ -311,8 +311,8 @@ the dispatch table still say "generic observable property setter" for
 5. **M1/M2** (hook installer hardening) and **M5** (division guard).
 6. Everything else as cleanup.
 
-Concretely, one `#ifdef MPCMINI_DEBUG` around the probe hooks, the four threads,
-`watch_arm`/`fault_handler`, and the `/run/mpcmini.*` channels would remove
+Concretely, one `#ifdef MINIMOD_DEBUG` around the probe hooks, the four threads,
+`watch_arm`/`fault_handler`, and the `/run/minimod.*` channels would remove
 findings C2, C3, C4, H1, H2 and M6 in a single change and leave a mod that is
 roughly 60 % smaller.
 
@@ -320,18 +320,18 @@ roughly 60 % smaller.
 
 ## Fix status (release-hardening pass applied)
 
-`MPCMINI_DEBUG` (default `0`) now guards every investigation facility; a debug
-build is `zig cc … -DMPCMINI_DEBUG=1`.
+`MINIMOD_DEBUG` (default `0`) now guards every investigation facility; a debug
+build is `zig cc … -DMINIMOD_DEBUG=1`.
 
 | id | status | what changed |
 |---|---|---|
 | C1 | **fixed** | `mlog` clamps the `vsnprintf` result before `write` |
-| C2 | **fixed** | `/run/mpcmini.heap` thread compiled out of release |
+| C2 | **fixed** | `/run/minimod.heap` thread compiled out of release |
 | C3 | **fixed** | `watch_arm` / `watch_thread` compiled out of release |
 | C4 | **fixed** | handlers debug-only, and now restore `SIG_DFL` and `raise(sig)` instead of resuming |
 | C5 | **fixed** | `_exit(121/122)` replaced by a log line and `return` (mod degrades, app survives) |
-| H1 | **fixed** | the five probe hooks are `#if MPCMINI_DEBUG` |
-| H2 | **fixed** | the four polling threads are `#if MPCMINI_DEBUG` (thread count 24 -> 20) |
+| H1 | **fixed** | the five probe hooks are `#if MINIMOD_DEBUG` |
+| H2 | **fixed** | the four polling threads are `#if MINIMOD_DEBUG` (thread count 24 -> 20) |
 | H3 | **fixed** | `mlog` caps at 256 KB and writes one "log cap reached" line |
 | H4 | **fixed** | one cached `/proc/self/mem` descriptor, reopened only if it goes stale |
 | M1 | **fixed** | `pc_relative` now also covers `CBZ/CBNZ`, `TBZ/TBNZ`, `BR`, `BLR`, `RET` |
@@ -339,7 +339,7 @@ build is `zig cc … -DMPCMINI_DEBUG=1`.
 | M3 | **mitigated** | reverted on purpose: failing closed breaks the mod because the map ranges are loaded lazily and go stale. The only writer that trusted `mapped()` blindly was the debug `set` channel, which is now compiled out |
 | M4 | **fixed** | dead `trim_worker` and its `pthread_create` removed (`g_trim_req` was never set) |
 | M5 | **fixed** | `if (!N) return;` before any normalisation |
-| M6 | **fixed** | `MPCMINI_TESTTRIM` is `#if MPCMINI_DEBUG` |
+| M6 | **fixed** | `MINIMOD_TESTTRIM` is `#if MINIMOD_DEBUG` |
 | M7 | **retracted** | `pcm_at()` handles 16-, 24- and 32-bit correctly (24-bit sign-extends and shifts by 8); the review's claim was wrong |
 | M8 | **accepted** | 32-bit aligned flag stores are atomic on aarch64; the compound `g_pm[]` pair is written once at learn time and read afterwards. Documented rather than rewritten, to avoid touching the working path |
 | L1-L5 | open | overlay-slot verification, naming, log lock (now also mutexed), `snprintf` truncation checks, comment drift |
@@ -351,7 +351,7 @@ commit core done p0=0.0000 p1=0.8268 (want 0.0001/0.8254)
 notified props 0xffffe576c718/0xffffe576c770
 overlay: 5196 px change, pid unchanged
 threads: 20 (was 24)
-debug channels inert: writing /run/mpcmini.heap and /run/mpcmini.watch does nothing
+debug channels inert: writing /run/minimod.heap and /run/minimod.watch does nothing
 ```
 
 Binary size: 61 392 -> 46 384 bytes (-24 %). Package: 34 350 -> 25 832 bytes.

@@ -51,7 +51,7 @@ FN(0xf0a290, void (*)(uint64_t *))(&str);
 
 ## What we used it for
 
-`mpcmini` swaps `vt[27]` of `SampleModeScreen` (`base + 0x6e212a0`), calls the
+`minimod` swaps `vt[27]` of `SampleModeScreen` (`base + 0x6e212a0`), calls the
 stock paint, and — while SHIFT is held — fills the third soft-key cell
 (`x 213..320, y 0..29`, black) and draws **"AutoTrim"** in it. That is the whole
 overlay: no widget lookup, no label rename, no layout knowledge beyond the cell.

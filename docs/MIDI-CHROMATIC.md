@@ -36,8 +36,8 @@ wire. This kills the "echo the note onto the Surface card" idea (§4).
 A panel pad press fires exactly two of the mod's hooks:
 
 ```
-mpcmini: cs code=0x04
-mpcmini: note_on pad=4 vel=0.79        ← PAD 5
+minimod: cs code=0x04
+minimod: note_on pad=4 vel=0.79        ← PAD 5
 ```
 
 So pads call `note_on` (`A_NOTE_ON`, file `0x1e27360`; Ghidra `0x1f27360`):
@@ -110,7 +110,7 @@ chromatic MIDI cannot be built on the 16-Levels path.
 * The root filesystem is **read-only** (dm-verity): `mkdir /usr/local` fails with
   "Read-only file system", so the mod cannot be installed persistently.
 * `lab.py preload` **rewrites the drop-in**, dropping any `Environment=` lines
-  you added. Re-add `MPCMINI_MIDI` / `MPCMINI_DEBUG` afterwards.
+  you added. Re-add `MINIMOD_MIDI` / `MINIMOD_DEBUG` afterwards.
 * Restarting the app (`systemctl restart ac50`) does **not** break the panel:
   measured 0.07 s redraw afterwards. What broke it was the mod flooding the
   control-surface wire (§4).

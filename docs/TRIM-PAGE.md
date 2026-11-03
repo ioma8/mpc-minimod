@@ -7,7 +7,7 @@
 > moves). A different build invalidates every number here.
 
 This document exists because autotrim "did nothing on screen" and the previous
-explanation in [`MOD-MINI.md`](MOD-MINI.md) ("the page draws from a fifth store
+explanation in [`MINIMOD.md`](MINIMOD.md) ("the page draws from a fifth store
 we have not found") was **wrong**. It records what the page actually does, how it
 was verified, and what the real failure is.
 
@@ -180,16 +180,16 @@ objects, so a pointer captured at startup cannot be written later.
 A clean run, fresh app, `SHIFT`+`B3`:
 
 ```
-mpcmini: combo SHIFT+B3 -> autotrim
-mpcmini: cand @0xffffd1a85d20 ch=2 frames=121275 start=0 end=0 root=60
+minimod: combo SHIFT+B3 -> autotrim
+minimod: cand @0xffffd1a85d20 ch=2 frames=121275 start=0 end=0 root=60
 ...
-mpcmini: struct sample @0xfffff31e21a0 frames=10165 path='/usr/share/Akai/AC50/Metronome/Clap.wav'
-mpcmini: trim source /usr/share/Akai/AC50/Metronome/Clap.wav frames=10165 ch=2 edges=1..9878
-mpcmini: autotrim frames=10165 edges=1..9878 have=1 lo=2 hi=2
-mpcmini: autotrim 1..9878; start 85574->1 end -1->-1
-mpcmini: chg setter[2] 85574 -> 85661          <-- the app overwrites it on the next tick
-mpcmini: layer 0/0 -> 1/9878
-mpcmini: repaint forced (screen=0xffffe50bc910)
+minimod: struct sample @0xfffff31e21a0 frames=10165 path='/usr/share/Akai/AC50/Metronome/Clap.wav'
+minimod: trim source /usr/share/Akai/AC50/Metronome/Clap.wav frames=10165 ch=2 edges=1..9878
+minimod: autotrim frames=10165 edges=1..9878 have=1 lo=2 hi=2
+minimod: autotrim 1..9878; start 85574->1 end -1->-1
+minimod: chg setter[2] 85574 -> 85661          <-- the app overwrites it on the next tick
+minimod: layer 0/0 -> 1/9878
+minimod: repaint forced (screen=0xffffe50bc910)
 ```
 
 …and the screenshot is **byte-identical** to the one taken before the press
@@ -321,7 +321,7 @@ testing before any further heap scanning.
 cd ~/projects/customs/virtual-mpc-sample
 MPCLAB_PORT_OFFSET=100 python3 lab.py run            # panel :8865
 MPCLAB_PORT_OFFSET=100 python3 lab.py preload \
-  /Users/jakubkolcar/projects/customs/sample-converter/mod/build/mpcmini.so
+  /Users/jakubkolcar/projects/customs/sample-converter/mod/build/minimod.so
 
 # knob sweep (moves the marker 0..100 %)
 for v in 0 32 64 96 127; do
@@ -336,7 +336,7 @@ curl -s -X POST -H 'Content-Type: application/json' -d '{"name":"SHIFT","action"
 curl -s -X POST -H 'Content-Type: application/json' -d '{"name":"SCREEN 3","action":"press"}' http://127.0.0.1:8865/control
 curl -s -X POST -H 'Content-Type: application/json' -d '{"name":"SCREEN 3","action":"release"}' http://127.0.0.1:8865/control
 curl -s -X POST -H 'Content-Type: application/json' -d '{"name":"SHIFT","action":"release"}'  http://127.0.0.1:8865/control
-MPCLAB_PORT_OFFSET=100 python3 lab.py ssh 'tail -n 40 /run/mpcmini.log'
+MPCLAB_PORT_OFFSET=100 python3 lab.py ssh 'tail -n 40 /run/minimod.log'
 
 # static
 kuna decompile /tmp/mpcsample.bin 0x1660370 --addr   # screen resized
@@ -446,7 +446,7 @@ finds, populated on the one a knob drives).
 
 ### What a mod can do today
 
-`do_autotrim()` (in `mod/src/mpcmini.c`) resolves everything correctly:
+`do_autotrim()` (in `mod/src/minimod.c`) resolves everything correctly:
 
 ```
 autotrim: layers=... candidates=N
@@ -465,9 +465,9 @@ value cached at `this+0x50`, listener list around `this+8`) and turning K1 shows
 the real path:
 
 ```
-mpcmini: bcast 0xffffe5556330 v=0.5039     <- property the knob writes
-mpcmini: bcast 0xffffe5559520 v=0.5039     <- forwards to the page binding
-mpcmini: trim self=0xffffe50fe680 v=0.504 lr=0xaaaaabe5ba5c   <- core, as a listener
+minimod: bcast 0xffffe5556330 v=0.5039     <- property the knob writes
+minimod: bcast 0xffffe5559520 v=0.5039     <- forwards to the page binding
+minimod: trim self=0xffffe50fe680 v=0.504 lr=0xaaaaabe5ba5c   <- core, as a listener
 ```
 
 `lr=0x…e5ba5c` is inside `0x13bb930` (file VA `0x13bba5c`): the broadcaster walks
@@ -499,7 +499,7 @@ called it on a mis-identified object actually ran the stock **Normalize** comman
 (the page switched to `…-Normalized`), so the mechanism is right — only the
 identification of the property that owns a given `TrimParameter` is still open.
 A list walk from the parameter side was implemented (`list_sentinel`/`list_has`)
-but produced false positives, so it stays behind `MPCMINI_PROP` and is not used
+but produced false positives, so it stays behind `MINIMOD_PROP` and is not used
 by the default build.
 
 The reliable alternative, if this is picked up again: hook `0x15e70c0` and read
@@ -591,7 +591,7 @@ Verified read-back: `+0x19c` takes `0.0945 / 0.4567`, the boundary takes
 The page does not repaint, because the repaint is a *listener* of property `P`
 and `P` is not reachable from the parameter with the walks tried so far
 (`list_sentinel`/`list_has` produced false positives and stay behind
-`MPCMINI_PROP`).
+`MINIMOD_PROP`).
 
 Fastest deterministic fix: **hook `0x15e70c0` and read `x20`** — the broadcaster
 sets `x20 = P` in its prologue and calls the listener from inside that loop, so
@@ -859,7 +859,7 @@ to a different input (external MIDI), which is why it never fires and why
 injecting into it stores a value the page later discards.
 
 A whole-heap fingerprint tool (`heap_snapshot`/`heap_diff`, driven by
-`/run/mpcmini.heap`) is in place and already shows that a knob move touches only
+`/run/minimod.heap`) is in place and already shows that a knob move touches only
 a handful of pages, but it needs a byte copy of the pages (not just hashes) to
 name the fields.
 
@@ -881,7 +881,7 @@ The knob replay through the app's CC dispatcher works:
   differ from the untrimmed view by 26136 pixels.
 
 But the app **aborts shortly afterwards** (the pid changes), so the injection is
-now behind `MPCMINI_CCINJECT` and the default path is the direct core write,
+now behind `MINIMOD_CCINJECT` and the default path is the direct core write,
 which is stable (`pid 69688 -> 69688`) and writes both parameters
 (`commit core done p0=0.0000 p1=0.8268`).
 
@@ -942,7 +942,7 @@ as code. That is the one thing left to explain.
 ## 19. Round 8: what the trim really is, and the edges drawn
 
 **The threshold is right.** The sample's level envelope, measured in 32 windows
-(`MPCMINI_ENV=1`):
+(`MINIMOD_ENV=1`):
 
 ```
  3/32 peak 29205   9/32 7942   16/32 1821   20/32 1156   24/32 418   28/32 95
@@ -950,7 +950,7 @@ as code. That is the one thing left to explain.
 
 The tail decays smoothly to ~70 counts, so a -40 dB threshold (292) cutting at
 82.5 % is correct for this material - the "content ends at 45 %" impression was
-the display compressing 15129 frames into 295 pixels. `MPCMINI_TRIM_DB` remains
+the display compressing 15129 frames into 295 pixels. `MINIMOD_TRIM_DB` remains
 the knob for more or less aggressive trimming.
 
 **The edges are now visible.** The page's own trim display only refreshes when
@@ -1201,7 +1201,7 @@ What is *not* claimed:
 The knob replay through the app's own CC dispatcher *does* update that model and
 was measured to be pixel-identical to a hand trim, but its outcome varies between
 runs (once pixel-perfect, once inert, once followed by a fatal fault at
-`0xffffe60544d8`), so it stays behind `MPCMINI_CCINJECT`/`MPCMINI_ONESHOT` and
+`0xffffe60544d8`), so it stays behind `MINIMOD_CCINJECT`/`MINIMOD_ONESHOT` and
 is not the default.
 
 ## 22. Ghidra decompilation of the pad-state path (round 14)
@@ -1773,7 +1773,7 @@ yet the display still does not change (0 px). So the control path needs more tha
 the decompiler suggests (the 4th is probably not the value - `FUN_01a679e0`'s
 first two parameters are floats, i.e. passed in `s0`/`s1`).
 
-The call is kept behind `MPCMINI_CTL` and off by default; the shipped build is
+The call is kept behind `MINIMOD_CTL` and off by default; the shipped build is
 unchanged and verified.
 
 ### 30.9 The paint does not read the property (round 4)
@@ -2210,13 +2210,13 @@ App state: pid 1219, healthy, overlay drawing the trim.
 
 ## 32. Final state (delivered)
 
-Package: `mod/build/mpc-mini.zip` (34 KB) - an SD autorun package containing
-`autorun/mpcmini.so`, `autorun.sh`, `autorun.check`, `autorun.json`.
+Package: `mod/build/minimod.zip` (34 KB) - an SD autorun package containing
+`autorun/minimod.so`, `autorun.sh`, `autorun.check`, `autorun.json`.
 
 Verified in the emulator on firmware 1.3.0.12:
 
 * **AutoTrim** (SHIFT+B3): analyses the selected pad's sample with a
-  peak-relative threshold (default -40 dB, `MPCMINI_TRIM_DB`), computes the
+  peak-relative threshold (default -40 dB, `MINIMOD_TRIM_DB`), computes the
   silent/noisy edges, writes the Start/End trim parameters through the app's own
   `Property_Broadcast` (so listeners are notified and the model holds the
   result), and draws the trim on the Sample/Trim page.

@@ -4,7 +4,7 @@ import struct
 import subprocess
 import tempfile
 
-source = (Path(__file__).resolve().parents[1] / 'src/mpcmini.c').read_text()
+source = (Path(__file__).resolve().parents[1] / 'src/minimod.c').read_text()
 helpers = source[source.index('static int wav_info('):source.index('/* --------------------------------------------------------- trim parameter */')]
 with tempfile.TemporaryDirectory() as temp:
     root = Path(temp)

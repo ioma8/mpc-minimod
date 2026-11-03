@@ -55,7 +55,7 @@ for pad, sample in [(1, 'BoomBap-Kik-BTB MD.wav'), (3, 'HipHop-Clp-Hrt OS.wav')]
     time.sleep(2)
     after = screenshot(str(pad) + '-after')
     assert before != after, 'Native trim did not redraw'
-    log = ssh('tail -20 /run/mpcmini.log')
+    log = ssh('tail -20 /run/minimod.log')
     assert 'native trim pad=' + str(pad - 1) in log and sample in log, log
     assert ssh('pidof "MPC Sample"').strip() == pid, 'App restarted'
     press('SCREEN 2')

@@ -1,4 +1,4 @@
-/* mpcmini — a minimal LD_PRELOAD mod for the Akai MPC Sample (firmware 1.3.0.12).
+/* minimod — a minimal LD_PRELOAD mod for the Akai MPC Sample (firmware 1.3.0.12).
  *
  * It never touches the firmware on disk: the SD autorun script preloads this
  * library into the stock app, we find the app's load base and install a few
@@ -42,20 +42,20 @@
 /* ---------------------------------------------------------------- anchors */
 /* application file offsets (== virtual addresses in the PIE of 1.3.0.12) */
 /* Release switches. */
-#ifndef MPCMINI_LOG
-#define MPCMINI_LOG 0      /* 0: no log file, no output at all */
+#ifndef MINIMOD_LOG
+#define MINIMOD_LOG 0      /* 0: no log file, no output at all */
 #endif
 /* Chromatic play from an external controller is not shipped: the control
  * surface carries a proprietary frame format, not MIDI, so the feature needs the
  * decoder first. See docs/MIDI-CHROMATIC.md. */
-#ifndef MPCMINI_CHROMATIC
-#define MPCMINI_CHROMATIC 0
+#ifndef MINIMOD_CHROMATIC
+#define MINIMOD_CHROMATIC 0
 #endif
 
 /* Release builds carry no probes: the /run channels, the experimental hooks
- * and the polling threads are all compiled out unless MPCMINI_DEBUG is set. */
-#ifndef MPCMINI_DEBUG
-#define MPCMINI_DEBUG 0
+ * and the polling threads are all compiled out unless MINIMOD_DEBUG is set. */
+#ifndef MINIMOD_DEBUG
+#define MINIMOD_DEBUG 0
 #endif
 
 #define A_SIXTEEN_CTOR 0x1545a50   /* 16 Levels screen constructor        */
@@ -138,9 +138,9 @@ static void watch_arm(uintptr_t addr, const char *why)
     int rc = mprotect((void *)page, 0x1000, PROT_READ);
     if (rc == 0) {
         g_wpages[g_nwpage++] = page;
-        mlog("mpcmini: watch(%s) %p page=%p\n", why, (void *)addr, (void *)page);
+        mlog("minimod: watch(%s) %p page=%p\n", why, (void *)addr, (void *)page);
     } else {
-        mlog("mpcmini: watch(%s) %p page=%p failed: %s\n", why, (void *)addr,
+        mlog("minimod: watch(%s) %p page=%p failed: %s\n", why, (void *)addr,
              (void *)page, strerror(errno));
     }
 }
@@ -156,7 +156,7 @@ static void fault_handler(int sig, siginfo_t *si, void *ucv)
         sp = (unsigned long)u->uc_mcontext.sp;
     }
     if (si && watch_has((uintptr_t)si->si_addr & ~(uintptr_t)0xfff)) {
-        mlog("mpcmini: WATCH addr=%p pc=%p lr=%p sp=%p\n", si->si_addr, (void *)pc,
+        mlog("minimod: WATCH addr=%p pc=%p lr=%p sp=%p\n", si->si_addr, (void *)pc,
              (void *)lr, (void *)sp);
         mprotect((void *)((uintptr_t)si->si_addr & ~(uintptr_t)0xfff), 0x1000,
                  PROT_READ | PROT_WRITE);
@@ -165,7 +165,7 @@ static void fault_handler(int sig, siginfo_t *si, void *ucv)
                 g_wpages[i] = 0;
         return;
     }
-    mlog("mpcmini: FAULT sig=%d addr=%p pc=%p lr=%p sp=%p\n", sig,
+    mlog("minimod: FAULT sig=%d addr=%p pc=%p lr=%p sp=%p\n", sig,
          si ? si->si_addr : 0, (void *)pc, (void *)lr, (void *)sp);
     /* The knob replay can end in a call through a bad pointer inside the app's
      * follow-up work. That jump faults before touching the stack, so jumping
@@ -174,7 +174,7 @@ static void fault_handler(int sig, siginfo_t *si, void *ucv)
         /* registers at the fault identify what the app was working on */
         ucontext_t *uc = (ucontext_t *)ucv;
         if (uc)
-            mlog("mpcmini: fault regs x0=%llx x1=%llx x2=%llx x3=%llx x19=%llx x20=%llx "
+            mlog("minimod: fault regs x0=%llx x1=%llx x2=%llx x3=%llx x19=%llx x20=%llx "
                  "x21=%llx x22=%llx x23=%llx\n",
                  (unsigned long long)uc->uc_mcontext.regs[0],
                  (unsigned long long)uc->uc_mcontext.regs[1],
@@ -213,7 +213,7 @@ static int g_log_full;
 
 static void mlog(const char *fmt, ...)
 {
-#if !MPCMINI_LOG
+#if !MINIMOD_LOG
     (void)fmt;
 #else
     if (log_fd < 0 || g_log_full)
@@ -232,7 +232,7 @@ static void mlog(const char *fmt, ...)
 
     pthread_mutex_lock(&g_log_mtx);
     if (g_log_bytes + (unsigned long)n > LOG_CAP) {
-        static const char tail[] = "mpcmini: log cap reached, going quiet\n";
+        static const char tail[] = "minimod: log cap reached, going quiet\n";
         (void)!write(log_fd, tail, sizeof tail - 1);
         g_log_full = 1;
     } else {
@@ -372,7 +372,7 @@ static void *install_hook(uintptr_t site, void *hook)
     if (!rd(site, &first, 4))
         return 0;
     if (first != 0xD503233Fu && first != 0xD503245Fu) {
-        mlog("mpcmini: site %p has no paciasp/bti (%08x)\n", (void *)site, first);
+        mlog("minimod: site %p has no paciasp/bti (%08x)\n", (void *)site, first);
         return 0;
     }
     /* Copy as much of the prologue as is safe: everything up to the first
@@ -393,7 +393,7 @@ static void *install_hook(uintptr_t site, void *hook)
     uint32_t b_body = enc_b((uintptr_t)tr + n * 4, site + n * 4);
     uint32_t b_slot = enc_b(site, (uintptr_t)slot);
     if (!b_body || !b_slot) {
-        mlog("mpcmini: hook %p out of B range\n", (void *)site);
+        mlog("minimod: hook %p out of B range\n", (void *)site);
         return 0;
     }
     uint32_t ldr = 0x58000050u; /* ldr x16, [pc, #8] */
@@ -406,14 +406,14 @@ static void *install_hook(uintptr_t site, void *hook)
 
     uintptr_t page = site & ~(uintptr_t)0xfff;
     if (mprotect((void *)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        mlog("mpcmini: mprotect(%p) failed: %s\n", (void *)page, strerror(errno));
+        mlog("minimod: mprotect(%p) failed: %s\n", (void *)page, strerror(errno));
         return 0;
     }
     int ok = wr(site, &b_slot, 4);
     __builtin___clear_cache((char *)site, (char *)(site + 4));
     mprotect((void *)page, 0x2000, PROT_READ | PROT_EXEC);
     if (!ok) {
-        mlog("mpcmini: patch of %p failed\n", (void *)site);
+        mlog("minimod: patch of %p failed\n", (void *)site);
         return 0;
     }
     nslots++;
@@ -421,7 +421,7 @@ static void *install_hook(uintptr_t site, void *hook)
     __builtin___clear_cache((char *)tr, (char *)tr + n * 4 + 4);
     __builtin___clear_cache((char *)slot, (char *)slot + 16);
     relay_used = 1;
-    mlog("mpcmini: hook %p (prologue %u)\n", (void *)site, n);
+    mlog("minimod: hook %p (prologue %u)\n", (void *)site, n);
     return tr;
 }
 
@@ -437,7 +437,7 @@ static int sixteen_tune_active(void)
 
 static int bump_octave(int d)
 {
-    mlog("mpcmini: PLUS/MINUS -> %+d x 8 semitones\n", d);
+    mlog("minimod: PLUS/MINUS -> %+d x 8 semitones\n", d);
     int next = g_octave + d;
     if (next < -4)
         next = -4;
@@ -446,7 +446,7 @@ static int bump_octave(int d)
     if (next == g_octave)
         return 0;
     g_octave = next;
-    mlog("mpcmini: pitch shift=%d (%+d semitones)\n", next, next * 8);
+    mlog("minimod: pitch shift=%d (%+d semitones)\n", next, next * 8);
     {
         char buf[48];
         snprintf(buf, sizeof buf, "Pitch %+d semitones", next * 8);
@@ -553,7 +553,7 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
     /* Threshold: relative to the file's peak so quiet material is trimmed as
      * well, with an absolute floor so a nearly silent file is not trimmed to
      * nothing. g_trim_ratio is set per SHIFT+B3 press (3 %, then 6 %);
-     * MPCMINI_TRIM_DB overrides the relative part for the default case. */
+     * MINIMOD_TRIM_DB overrides the relative part for the default case. */
     unsigned char buf[16384];
     short thr = 328; /* -40 dBFS fallback */
     {
@@ -562,7 +562,7 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
         if (g_trim_ratio > 0.0) {
             ratio = g_trim_ratio;
         } else {
-            const char *e = getenv("MPCMINI_TRIM_DB");
+            const char *e = getenv("MINIMOD_TRIM_DB");
             if (e && *e)
                 db = atof(e);
             if (db < -90.0) db = -90.0;
@@ -591,9 +591,9 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
             if (t < 90.0) t = 90.0;      /* absolute floor ~ -51 dBFS */
             if (t > 30000.0) t = 30000.0;
             thr = (short)t;
-            mlog("mpcmini: trim threshold ratio %.4f peak %d -> %d\n", ratio,
+            mlog("minimod: trim threshold ratio %.4f peak %d -> %d\n", ratio,
                  (int)peak, (int)thr);
-            if (getenv("MPCMINI_ENV")) {
+            if (getenv("MINIMOD_ENV")) {
                 /* level envelope in 32 windows, same scale as the threshold */
                 unsigned step = frames / 32 ? frames / 32 : 1;
                 for (unsigned w = 0; w < 32; ++w) {
@@ -614,7 +614,7 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
                             if (v > wp) wp = v;
                         }
                     }
-                    mlog("mpcmini: env %2u/%02u peak %5d\n", w, 32, (int)wp);
+                    mlog("minimod: env %2u/%02u peak %5d\n", w, 32, (int)wp);
                 }
             }
         }
@@ -735,7 +735,7 @@ static void scan_trim_params(void)
         }
     }
     free(buf);
-    mlog("mpcmini: trimparams found=%d\n", g_ntp);
+    mlog("minimod: trimparams found=%d\n", g_ntp);
 }
 
 static unsigned frames_of_sample(uintptr_t sample)
@@ -807,7 +807,7 @@ static int wav_path_of(uintptr_t obj, unsigned want, char *out, size_t n)
             continue;
         buf[sizeof buf - 1] = 0;
         if (path_from_buffer(buf, want, out, n)) {
-            mlog("mpcmini: path from sample+0x%lx -> %s\n", (unsigned long)o, out);
+            mlog("minimod: path from sample+0x%lx -> %s\n", (unsigned long)o, out);
             return 1;
         }
         /* one level deeper: the path often lives in a small holder object */
@@ -819,7 +819,7 @@ static int wav_path_of(uintptr_t obj, unsigned want, char *out, size_t n)
                 continue;
             buf[sizeof buf - 1] = 0;
             if (path_from_buffer(buf, want, out, n)) {
-                mlog("mpcmini: path from sample+0x%lx/+0x%lx -> %s\n",
+                mlog("minimod: path from sample+0x%lx/+0x%lx -> %s\n",
                      (unsigned long)o, (unsigned long)k, out);
                 return 1;
             }
@@ -873,7 +873,7 @@ static int wav_by_frames(unsigned want, char *out, size_t n)
             static int logged;
             if (logged < 10) {
                 logged++;
-                mlog("mpcmini: wav '%s' ok=%d frames=%u ch=%u\n", f->d_name, ok,
+                mlog("minimod: wav '%s' ok=%d frames=%u ch=%u\n", f->d_name, ok,
                      fr, ch);
             }
             if (!ok || fr != want)
@@ -881,7 +881,7 @@ static int wav_by_frames(unsigned want, char *out, size_t n)
             if (found) {
                 closedir(d2);
                 closedir(d);
-                mlog("mpcmini: autotrim: %u frames matches more than one wav\n", want);
+                mlog("minimod: autotrim: %u frames matches more than one wav\n", want);
                 return 0;
             }
             snprintf(out, n, "%s", path);
@@ -891,7 +891,7 @@ static int wav_by_frames(unsigned want, char *out, size_t n)
     }
     closedir(d);
     if (found)
-        mlog("mpcmini: autotrim: wav by frames -> %s\n", out);
+        mlog("minimod: autotrim: wav by frames -> %s\n", out);
     return found;
 }
 
@@ -1047,7 +1047,7 @@ static int find_displayed_sample(unsigned *frames, char *path, size_t pathsz)
 {
     void *screen = find_sample_screen();
     if (!screen) {
-        mlog("mpcmini: no Sample screen found\n");
+        mlog("minimod: no Sample screen found\n");
         return 0;
     }
     for (int off = 0; off < 0x800; off += 8) {
@@ -1072,11 +1072,11 @@ static int find_displayed_sample(unsigned *frames, char *path, size_t pathsz)
         rd(info + 8, &rate, 4);
         *frames = fr;
         snprintf(path, pathsz, "%s", p2);
-        mlog("mpcmini: sample obj=%p info=%p frames=%u path='%s'\n", (void *)child,
+        mlog("minimod: sample obj=%p info=%p frames=%u path='%s'\n", (void *)child,
              (void *)info, fr, p2[0] ? p2 : "?");
         return p2[0] ? 1 : 0;
     }
-    mlog("mpcmini: displayed sample struct not found (screen=%p)\n", screen);
+    mlog("minimod: displayed sample struct not found (screen=%p)\n", screen);
     return 0;
 }
 
@@ -1165,7 +1165,7 @@ static void *gettrim_probe(void *blk)
             int64_t f0 = -1, f1 = -1;
             rd((uintptr_t)r + 0x78, &f0, sizeof f0);
             rd((uintptr_t)r + 0xd0, &f1, sizeof f1);
-            mlog("mpcmini: trimobj=%p (blk=%p) start=%lld end=%lld\n",
+            mlog("minimod: trimobj=%p (blk=%p) start=%lld end=%lld\n",
                  r, blk, (long long)f0, (long long)f1);
             n++;
         }
@@ -1186,7 +1186,7 @@ static void copypad_probe(void *page, void *pad)
         float f0 = -1, f1 = -1;
         rd((uintptr_t)pad + 0x1588, &f0, 4);
         rd((uintptr_t)pad + 0x15e0, &f1, 4);
-        mlog("mpcmini: pad=%p start=%.4f end=%.4f\n", pad, (double)f0, (double)f1);
+        mlog("minimod: pad=%p start=%.4f end=%.4f\n", pad, (double)f0, (double)f1);
         g_padstate = pad;
     }
     if (orig_copypad)
@@ -1211,7 +1211,7 @@ static void sync_probe(void *a0, void *a1, void *a2, void *a3)
             rd((uintptr_t)a1 + 0x1ac0, &g0, 4);
             rd((uintptr_t)a1 + 0x1b18, &g1, 4);
         }
-        mlog("mpcmini: sync a0=%p(a0k1=%.4f a0k2=%.4f) a1=%p(a1k1=%.4f a1k2=%.4f)\n",
+        mlog("minimod: sync a0=%p(a0k1=%.4f a0k2=%.4f) a1=%p(a1k1=%.4f a1k2=%.4f)\n",
              a0, (double)f0, (double)f1, a1, (double)g0, (double)g1);
     }
     if (orig_sync)
@@ -1242,7 +1242,7 @@ static void loc_bounds(void *self)
             float pos = 0;
             rd(s + 0x168, &pos, 4);
             g_loc[g_nloc++] = s;
-            mlog("mpcmini: locator %p pos=%.4f\n", (void *)s, (double)pos);
+            mlog("minimod: locator %p pos=%.4f\n", (void *)s, (double)pos);
         }
     }
     if (orig_loc_bounds)
@@ -1256,7 +1256,7 @@ static void (*orig_repaint)(void *, uint64_t, uint64_t);
 
 static void set_filter_text(const char *t);
 static void do_autotrim(void);
-#if MPCMINI_CHROMATIC
+#if MINIMOD_CHROMATIC
 static void play_note(int pitch, int on, float velocity);
 #endif
 
@@ -1273,7 +1273,7 @@ static void *sixteen_ctor(void *a, void *b, void *c, void *d)
     g_sixteen = self ? self : a;
     if (debug_mode && g_dbg < 40) {
         g_dbg++;
-        mlog("mpcmini: 16 levels ctor %p\n", g_sixteen);
+        mlog("minimod: 16 levels ctor %p\n", g_sixteen);
     }
     return self;
 }
@@ -1291,7 +1291,7 @@ static void pitch_off(void *a0, uint64_t a1, uint64_t a2, int a3)
 {
     int off = a3 + 8 * g_octave; /* half of the 16-note grid per press */
     if (g_octave && debug_mode)
-        mlog("mpcmini: pitch offset %d -> %d\n", a3, off);
+        mlog("minimod: pitch offset %d -> %d\n", a3, off);
     if (orig_pitch_off)
         orig_pitch_off(a0, a1, a2, off);
 }
@@ -1325,14 +1325,14 @@ static void find_value(float v)
                 break;
             for (size_t o = 0; o + 4 <= n && shown < 60; o += 4) {
                 if (memcmp(buf + o, pat, 4) == 0) {
-                    mlog("mpcmini: fv %#llx %.6f\n",
+                    mlog("minimod: fv %#llx %.6f\n",
                          (unsigned long long)(a + o), (double)v);
                     shown++;
                 }
             }
         }
     }
-    mlog("mpcmini: fv done %d\n", shown);
+    mlog("minimod: fv done %d\n", shown);
     free(buf);
 }
 
@@ -1366,7 +1366,7 @@ static void apply_pending_props(void)
         v = g_pend_pv1;
         wr((uintptr_t)g_pend_prop1 + 0x50, &v, 4);
     }
-    mlog("mpcmini: props written in paint %.4f/%.4f\n",
+    mlog("minimod: props written in paint %.4f/%.4f\n",
          (double)g_pend_pv0, (double)g_pend_pv1);
 }
 
@@ -1384,7 +1384,7 @@ static void apply_pending_ctl(void)
         return;
     orig_setctl2(g_control_context, g_surface2, 0, 0x466, g_pending_v1);
     orig_setctl2(g_control_context, g_surface2, 0, 0x462, g_pending_v0);
-    mlog("mpcmini: paint-time setctl %d/%d\n", g_pending_r0, g_pending_r1);
+    mlog("minimod: paint-time setctl %d/%d\n", g_pending_r0, g_pending_r1);
 }
 static void *g_paint_comp;
 static void *g_paint_gfx;
@@ -1435,13 +1435,13 @@ static void buttons(void *event)
     /* PLUS / MINUS move the 16 Levels row by an octave. The pitch hook only
      * runs for that screen, so bumping unconditionally is safe - and the old
      * guard (g_octave != 0) made the first press a no-op. */
-    if (getenv("MPCMINI_BTNLOG")) {
+    if (getenv("MINIMOD_BTNLOG")) {
         static int n;
         if (n < 24) {
             n++;
             unsigned char raw[16];
             if (rd((uintptr_t)event, raw, sizeof raw)) {
-                mlog("mpcmini: btn ev="
+                mlog("minimod: btn ev="
                      "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
                      raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
                      raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14],
@@ -1472,7 +1472,7 @@ static void buttons(void *event)
             k06++;
             unsigned char raw[16];
             if (rd((uintptr_t)event, raw, sizeof raw))
-                mlog("mpcmini: ev06 %02x %02x %02x %02x %02x %02x %02x %02x | "
+                mlog("minimod: ev06 %02x %02x %02x %02x %02x %02x %02x %02x | "
                      "%02x %02x %02x %02x %02x %02x %02x %02x\n",
                      raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
                      raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14],
@@ -1485,7 +1485,7 @@ static void buttons(void *event)
             /* both keys at once = reset the row to its original pitch */
             if (plus ? g_minus_held : g_plus_held) {
                 g_octave = 0;
-                mlog("mpcmini: PLUS+MINUS -> pitch reset to original\n");
+                mlog("minimod: PLUS+MINUS -> pitch reset to original\n");
                 toast("Pitch reset");
             } else {
                 bump_octave(plus ? +1 : -1);
@@ -1504,7 +1504,7 @@ static void buttons(void *event)
     }
     if (debug_mode && g_dbg < 80) {
         g_dbg++;
-        mlog("mpcmini: button code=0x%02x down=%u\n", code, down);
+        mlog("minimod: button code=0x%02x down=%u\n", code, down);
     }
     if (orig_buttons)
         orig_buttons(event);
@@ -1535,7 +1535,7 @@ static void note_on(void *input, int src, int pad, void *props, float vel)
     }
     if (debug_mode && g_dbg < 120) {
         g_dbg++;
-        mlog("mpcmini: note_on pad=%d vel=%.2f\n", pad, (double)vel);
+        mlog("minimod: note_on pad=%d vel=%.2f\n", pad, (double)vel);
     }
     if (orig_note_on)
         orig_note_on(input, src, pad, props, vel);
@@ -1555,7 +1555,7 @@ static void cs_event(void *self, int code, void *payload)
         g_cs_self = self;
     if (debug_mode && g_dbg < 160) {
         g_dbg++;
-        mlog("mpcmini: cs code=0x%02x\n", code & 0xff);
+        mlog("minimod: cs code=0x%02x\n", code & 0xff);
     }
     if (orig_cs)
         orig_cs(self, code, payload);
@@ -1652,7 +1652,7 @@ static void obs_set(void *self, float v)
                 seen = 1;
         if (!seen && g_nobs < 8) {
             g_obs[g_nobs++] = self;
-            mlog("mpcmini: obs property=%p v=%.4f\n", self, (double)v);
+            mlog("minimod: obs property=%p v=%.4f\n", self, (double)v);
         }
     }
     if (orig_obs_set)
@@ -1687,7 +1687,7 @@ static void trim_probe(void *self, float v)
                 float c50 = 0;
                 int ok = r > 0x10000 && mapped((void *)r) && rd(r + 0x50, &c50, 4) &&
                          c50 >= -0.001f && c50 <= 1.001f;
-                mlog("mpcmini: reg x%2d=%p propish=%d c50=%.4f\n", 19 + i, (void *)r,
+                mlog("minimod: reg x%2d=%p propish=%d c50=%.4f\n", 19 + i, (void *)r,
                      ok, ok ? (double)c50 : 0.0);
             }
         }
@@ -1707,7 +1707,7 @@ static void trim_probe(void *self, float v)
                 g_ps[g_nps].slider = sl;
                 g_nps++;
             }
-            mlog("mpcmini: knob param=%p slider=%p (%.2f%%)\n", self, (void *)sl,
+            mlog("minimod: knob param=%p slider=%p (%.2f%%)\n", self, (void *)sl,
                  (double)(v * 100.0f));
         }
     }
@@ -1725,7 +1725,7 @@ static void trim_probe(void *self, float v)
         static int diag;
         if (diag < 6) {
             diag++;
-            mlog("mpcmini: diag prop=%p v50=%s%.4f refs=%d v=%.4f\n", (void *)prop,
+            mlog("minimod: diag prop=%p v50=%s%.4f refs=%d v=%.4f\n", (void *)prop,
                  has ? "" : "?", (double)v50, refs, (double)v);
         }
     }
@@ -1744,13 +1744,13 @@ static void trim_probe(void *self, float v)
                     uintptr_t head = 0, node = 0;
                     rd(prop + 0x10, &head, 8);
                     node = head;
-                    mlog("mpcmini: prop %p head=%p sentinel=%p\n", (void *)prop,
+                    mlog("minimod: prop %p head=%p sentinel=%p\n", (void *)prop,
                          (void *)head, (void *)(prop + 8));
                     for (int i = 0; i < 8 && node && node != prop + 8; ++i) {
                         uintptr_t tgt = 0, next = 0;
                         if (!rd(node + 0x18, &tgt, 8) || !rd(node + 8, &next, 8))
                             break;
-                        mlog("mpcmini:   node %p target=%p next=%p\n", (void *)node,
+                        mlog("minimod:   node %p target=%p next=%p\n", (void *)node,
                              (void *)(tgt & ~(uintptr_t)3), (void *)next);
                         node = next;
                     }
@@ -1761,7 +1761,7 @@ static void trim_probe(void *self, float v)
         if (learn_diag < 12) {
             learn_diag++;
             int has = rd(prop + 0x50, &v50, 4);
-            mlog("mpcmini: learn? prop=%p c50=%s%.4f v=%.4f\n", (void *)prop,
+            mlog("minimod: learn? prop=%p c50=%s%.4f v=%.4f\n", (void *)prop,
                  has ? "" : "?", (double)v50, (double)v);
         }
         if (rd(prop + 0x50, &v50, 4) && v50 >= -0.001f && v50 <= 1.001f) {
@@ -1781,7 +1781,7 @@ static void trim_probe(void *self, float v)
                 }
                 if (probe_mode && logs < 6) {
                     logs++;
-                    mlog("mpcmini: learnt self=%p prop=%p v=%.4f\n", self,
+                    mlog("minimod: learnt self=%p prop=%p v=%.4f\n", self,
                          (void *)prop, (double)v);
                 }
             }
@@ -1799,14 +1799,14 @@ static void trim_probe(void *self, float v)
             rd(lay + 0x4d8, &a, 4);
             rd(lay + 0x530, &b, 4);
             rd(lay + 0x588, &c, 4);
-            mlog("mpcmini: layer@knob %p 4d8=%u 530=%u 588=%u\n", (void *)lay, a, b, c);
+            mlog("minimod: layer@knob %p 4d8=%u 530=%u 588=%u\n", (void *)lay, a, b, c);
         }
         uintptr_t vt = 0, val = 0, ap = 0;
         rd((uintptr_t)self, &vt, 8);
         rd((uintptr_t)self + T_VALUE, &val, 4);
         rd((uintptr_t)self + T_APPLIED, &ap, 4);
         logs++;
-        mlog("mpcmini: trim self=%p vptr=%p(base+0x%lx) v=%.4f val=%.4f ap=%.4f lr=%p\n",
+        mlog("minimod: trim self=%p vptr=%p(base+0x%lx) v=%.4f val=%.4f ap=%.4f lr=%p\n",
              self, (void *)vt, vt >= base ? (unsigned long)(vt - base) : 0UL,
              (double)v, (double)val, (double)ap, __builtin_return_address(0));
     }
@@ -1821,7 +1821,7 @@ static void bcast_hook(void *self, float v)
     g_bc[i & 255].v = v;
     g_nbc = i + 1;
     if (probe_mode && i < 64)
-        mlog("mpcmini: bcast %p v=%.4f\n", self, (double)v);
+        mlog("minimod: bcast %p v=%.4f\n", self, (double)v);
     /* Record the property a *native* broadcast uses: that is the object the
      * page listens to. Our own broadcasts are flagged. */
     if (!g_own_call) {
@@ -1829,7 +1829,7 @@ static void bcast_hook(void *self, float v)
         int nice = (v > 0.001f && v < 0.999f) && v != 0.5f;
         if (nice && lrc < 24) {
             lrc++;
-            mlog("mpcmini: bcast lr=%p prop=%p v=%.4f\n",
+            mlog("minimod: bcast lr=%p prop=%p v=%.4f\n",
                  __builtin_return_address(0), self, (double)v);
         }
         uintptr_t P = (uintptr_t)self;
@@ -1841,7 +1841,7 @@ static void bcast_hook(void *self, float v)
             }
         if (!known && g_nbp < 8) {
             g_bp[g_nbp++] = P;
-            mlog("mpcmini: native bcast property=%p v=%.4f\n", self, (double)v);
+            mlog("minimod: native bcast property=%p v=%.4f\n", self, (double)v);
         }
     }
     if (orig_bcast)
@@ -1912,7 +1912,7 @@ static void collect_binding_props(void)
         }
     }
     free(buf);
-    mlog("mpcmini: %d property candidates from bindings\n", g_ncand);
+    mlog("minimod: %d property candidates from bindings\n", g_ncand);
 }
 
 /* Read-only ownership test: the property's listener chain must reference the
@@ -2012,7 +2012,7 @@ static int probe_property(uintptr_t param)
                 g_pm[slot].prop = g_cand[i];
                 g_npm = slot + 1;
             }
-            mlog("mpcmini: owner of param=%p is prop=%p\\n", (void *)param,
+            mlog("minimod: owner of param=%p is prop=%p\\n", (void *)param,
                  (void *)g_cand[i]);
             return 1;
         }
@@ -2066,7 +2066,7 @@ static uintptr_t find_controls_prop(uintptr_t param)
             uintptr_t q;
             memcpy(&q, buf + k, 8);
             if (q == param) {
-                mlog("mpcmini: controls prop +0x%lx references %p\n", (unsigned long)o,
+                mlog("minimod: controls prop +0x%lx references %p\n", (unsigned long)o,
                      (void *)param);
                 return p;
             }
@@ -2099,7 +2099,7 @@ static int set_slider_percent(float from, float to)
             d = -d;
         if (d <= 0.75f) {
             wr(s + 0x1b4, &to, 4);
-            mlog("mpcmini: slider +0x%lx %.2f -> %.2f\n", o, (double)v, (double)to);
+            mlog("minimod: slider +0x%lx %.2f -> %.2f\n", o, (double)v, (double)to);
             return 1;
         }
     }
@@ -2139,7 +2139,7 @@ static int apply_to_instance(uintptr_t S, float p0, float p1)
         return 0;
     wr(s0 + 0x1b4, (void *)&p0, 4);
     wr(s1 + 0x1b4, (void *)&p1, 4);
-    mlog("mpcmini: instance %p sliders %p/%p -> %.2f/%.2f (was %.2f/%.2f)\n",
+    mlog("minimod: instance %p sliders %p/%p -> %.2f/%.2f (was %.2f/%.2f)\n",
          (void *)S, (void *)s0, (void *)s1, (double)p0, (double)p1, (double)c0,
          (double)c1);
     FN(0x1149880, void (*)(void *, uint64_t, uint64_t))((void *)S, 0,
@@ -2232,7 +2232,7 @@ static uintptr_t find_page_by_cache(float pct)
                 if (chk < -0.5f || chk > 100.5f)
                     continue;
                 hit = b;
-                mlog("mpcmini: page base %p vptr=%p (vt+0x%lx)\n", (void *)b,
+                mlog("minimod: page base %p vptr=%p (vt+0x%lx)\n", (void *)b,
                      (void *)vt, (unsigned long)(vt - base));
             }
         }
@@ -2283,7 +2283,7 @@ static uintptr_t find_trim_page(float c0, float c1)
     }
     free(buf);
     if (best)
-        mlog("mpcmini: trim page %p (score %.2f)\n", (void *)best, (double)bestscore);
+        mlog("minimod: trim page %p (score %.2f)\n", (void *)best, (double)bestscore);
     return best;
 }
 
@@ -2315,14 +2315,14 @@ static void probe_node(uintptr_t param)
                 rd(node, &owner, 8);
                 rd(node + 8, &next, 8);
                 rd(node + 0x10, &back, 8);
-                mlog("mpcmini: node %p owner=%p next=%p back=%p\n", (void *)node,
+                mlog("minimod: node %p owner=%p next=%p back=%p\n", (void *)node,
                      (void *)owner, (void *)next, (void *)back);
                 if (owner && mapped((void *)owner)) {
                     uintptr_t head = 0;
                     rd(owner + 0x10, &head, 8);
                     float c50 = 0;
                     int ok50 = rd(owner + 0x50, &c50, 4) && c50 >= -1.0f && c50 <= 1.0f;
-                    mlog("mpcmini:   owner+0x10=%p c50=%.4f (%d)\n", (void *)head,
+                    mlog("minimod:   owner+0x10=%p c50=%.4f (%d)\n", (void *)head,
                          (double)c50, ok50);
                 }
                 hits++;
@@ -2448,7 +2448,7 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
         static int allc;
         if (allc < 16) {
             allc++;
-            mlog("mpcmini: cc_in cc=0x%x raw=%u range=%.1f ev0=%p\n", cc, raw,
+            mlog("minimod: cc_in cc=0x%x raw=%u range=%.1f ev0=%p\n", cc, raw,
                  (double)range, *(void **)ev);
         }
         int idx = -1;
@@ -2460,7 +2460,7 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
             if (!g_cc_ev_valid) {
                 memcpy(g_cc_ev, ev, sizeof g_cc_ev);
                 g_cc_ev_valid = 1;
-                mlog("mpcmini: captured CC event (cc=0x%x raw=%u range=%.1f)\n", cc,
+                mlog("minimod: captured CC event (cc=0x%x raw=%u range=%.1f)\n", cc,
                      raw, (double)range);
             }
             g_cc_raw[idx] = raw;
@@ -2503,7 +2503,7 @@ static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
         FN(0x159f230, void (*)(void *, unsigned, float, float))(ev, raw, 0.0f, 127.0f);
         g_cc_recover = 0;
     } else {
-        mlog("mpcmini: replay faulted - recovered\n");
+        mlog("minimod: replay faulted - recovered\n");
     }
 }
 
@@ -2549,7 +2549,7 @@ static void heap_snapshot(const char *tag)
         }
     }
     free(buf);
-    mlog("mpcmini: heap snapshot '%s': %d pages\n", tag, g_nhp);
+    mlog("minimod: heap snapshot '%s': %d pages\n", tag, g_nhp);
 }
 
 static void heap_diff(const char *tag)
@@ -2568,7 +2568,7 @@ static void heap_diff(const char *tag)
             h *= 1099511628211ULL;
         }
         if (h != g_hp[i].hash) {
-            mlog("mpcmini: changed page %p (%s)\n", (void *)g_hp[i].addr, tag);
+            mlog("minimod: changed page %p (%s)\n", (void *)g_hp[i].addr, tag);
             shown++;
         }
     }
@@ -2646,7 +2646,7 @@ static uintptr_t find_knob_props(void)
     }
     free(buf);
     if (best)
-        mlog("mpcmini: knob triple %p score=%d\n", (void *)best, bestscore);
+        mlog("minimod: knob triple %p score=%d\n", (void *)best, bestscore);
     return best;
 }
 
@@ -2704,7 +2704,7 @@ static void do_poke(void)
     if (g_poke_which >= 0) {
         int which = g_poke_which;
         g_poke_which = -1;
-        mlog("mpcmini: poke fire %d v=%.3f\n", which, (double)g_poke_value);
+        mlog("minimod: poke fire %d v=%.3f\n", which, (double)g_poke_value);
         uintptr_t pp = prop_of_param((uintptr_t)g_trim_param0);
         if (!pp)
             pp = prop_of_param((uintptr_t)g_trim_param1);
@@ -2713,7 +2713,7 @@ static void do_poke(void)
             if (kp)
                 pp = kp;
         }
-        mlog("mpcmini: poke prop=%p\n", (void *)pp);
+        mlog("minimod: poke prop=%p\n", (void *)pp);
         if (pp) {
             uintptr_t node = 0;
             if (rd(pp + 0x10, &node, 8) && node) {
@@ -2727,10 +2727,10 @@ static void do_poke(void)
                 if (rd(node + 0x18, &tgt, 8) && rd(tgt & ~(uintptr_t)3, &vt, 8) &&
                     rd(vt + 0x28, &slot, 8)) {
                     uintptr_t t = tgt & ~(uintptr_t)3;
-                    mlog("mpcmini: poke %d target=%p slot=%p v=%.4f\n", which, (void *)t,
+                    mlog("minimod: poke %d target=%p slot=%p v=%.4f\n", which, (void *)t,
                          (void *)slot, (double)g_poke_value);
                     ((void (*)(float, void *))slot)(g_poke_value, (void *)t);
-                    mlog("mpcmini: poke done\n");
+                    mlog("minimod: poke done\n");
                 }
             }
         }
@@ -2752,7 +2752,7 @@ static void commit_trim(void)
     /* A learned property broadcasts exactly like a knob; the others are
      * written through the trim core. Broadcasting even one of them is what
      * makes the page repaint. */
-    if (getenv("MPCMINI_NODEPROBE"))
+    if (getenv("MINIMOD_NODEPROBE"))
         probe_node((uintptr_t)p0);
 
     /* A property seen broadcasting the parameter's *current* value is the one
@@ -2772,7 +2772,7 @@ static void commit_trim(void)
         pr0 = prop_of_param((uintptr_t)p0);
     if (!pr1)
         pr1 = prop_of_param((uintptr_t)p1);
-    mlog("mpcmini: props %p/%p (cur %.4f/%.4f, seen %d)\n", (void *)pr0,
+    mlog("minimod: props %p/%p (cur %.4f/%.4f, seen %d)\n", (void *)pr0,
          (void *)pr1, (double)cur0, (double)cur1, g_nbc);
 
     /* Exact pair from the knob properties, when we can find them. */
@@ -2780,7 +2780,7 @@ static void commit_trim(void)
         uintptr_t kp = find_knob_props();
         if (kp) {
             uintptr_t sp = param_from_prop(kp), ep = param_from_prop(kp + 0x58);
-            mlog("mpcmini: params from props %p/%p (had %p/%p)\n", (void *)sp, (void *)ep,
+            mlog("minimod: params from props %p/%p (had %p/%p)\n", (void *)sp, (void *)ep,
                  g_trim_param0, g_trim_param1);
             if (sp && ep) {
                 g_trim_param0 = (void *)sp;
@@ -2795,7 +2795,7 @@ static void commit_trim(void)
      * result of a manual trim (verified pixel-identical), but it crashes the
      * app when called from inside the button dispatch, so it is deferred to the
      * paint hook (opt-in). */
-    if (getenv("MPCMINI_CCINJECT") && !g_in_inject) {
+    if (getenv("MINIMOD_CCINJECT") && !g_in_inject) {
         g_cc_step = 0;
         g_pending_cc = 1;
     }
@@ -2809,7 +2809,7 @@ static void commit_trim(void)
             uintptr_t kp = find_knob_props();
             if (kp) {
                 base = kp - 0x1ac0;
-                mlog("mpcmini: knob property triple at %p\n", (void *)kp);
+                mlog("minimod: knob property triple at %p\n", (void *)kp);
             }
         }
         if (base) {
@@ -2837,13 +2837,13 @@ static void commit_trim(void)
             if (ok && !prop_listeners_sane(base + 0x1b18))
                 ok = 0;
             if (!ok) {
-                mlog("mpcmini: control base %p rejected\n", (void *)base);
+                mlog("minimod: control base %p rejected\n", (void *)base);
                 base = 0;
             } else {
                 obj = ctl_obj_for(base);
             }
         }
-        mlog("mpcmini: cc base=%p obj=%p\n", (void *)base, (void *)obj);
+        mlog("minimod: cc base=%p obj=%p\n", (void *)base, (void *)obj);
         /* What exactly will be called? Log every listener and its call slot so
          * a bad pointer can be matched against the fault address. */
         if (obj) {
@@ -2858,7 +2858,7 @@ static void commit_trim(void)
                         break;
                     tgt &= ~(uintptr_t)3;
                     if (rd(tgt, &vt, 8) && rd(vt + 0x28, &slot, 8))
-                        mlog("mpcmini: P%p listener %p vt=%p slot28=%p\n", (void *)P,
+                        mlog("minimod: P%p listener %p vt=%p slot28=%p\n", (void *)P,
                              (void *)tgt, (void *)vt, (void *)slot);
                     if (!next || !mapped((void *)next))
                         break;
@@ -2870,9 +2870,9 @@ static void commit_trim(void)
             unsigned r0 = (unsigned)(v0 * 127.0f + 0.5f);
             unsigned r1 = (unsigned)(v1 * 127.0f + 0.5f);
             /* Default: one control per paint (safe, but the page does not
-             * update). MPCMINI_ONESHOT delivers both in one turn, which does
+             * update). MINIMOD_ONESHOT delivers both in one turn, which does
              * update the model - and leaves the app faulting afterwards. */
-            if (getenv("MPCMINI_ONESHOT")) {
+            if (getenv("MINIMOD_ONESHOT")) {
                 if (g_cc_ev_valid) {
                     cc_replay(0x11, r1);
                     cc_replay(0x10, r0);
@@ -2880,7 +2880,7 @@ static void commit_trim(void)
                     cc_inject(obj, 0x11, r1);
                     cc_inject(obj, 0x10, r0);
                 }
-                mlog("mpcmini: one-shot replay done\n");
+                mlog("minimod: one-shot replay done\n");
                 return;
             }
             if (g_cc_step == 0) {
@@ -2893,7 +2893,7 @@ static void commit_trim(void)
                 else
                     cc_inject(obj, 0x11, r1);
                 g_pending_cc = 1; /* come back for the second one */
-                mlog("mpcmini: step 1 done\n");
+                mlog("minimod: step 1 done\n");
                 return;
             }
             if (g_cc_step == 1) {
@@ -2902,17 +2902,17 @@ static void commit_trim(void)
                     cc_replay(0x10, g_cc_r0);
                 else
                     cc_inject(g_cc_obj, 0x10, g_cc_r0);
-                mlog("mpcmini: step 2 done\n");
+                mlog("minimod: step 2 done\n");
                 return;
             }
-            mlog("mpcmini: injected CC 0x10=%u 0x11=%u\n", r0, r1);
+            mlog("minimod: injected CC 0x10=%u 0x11=%u\n", r0, r1);
             {
                 float c0 = -9, c1 = -9;
                 if (pr0)
                     rd(pr0 + 0x50, &c0, 4);
                 if (pr1)
                     rd(pr1 + 0x50, &c1, 4);
-                mlog("mpcmini: app stored %.4f/%.4f (want %.4f/%.4f)\n", (double)c0,
+                mlog("minimod: app stored %.4f/%.4f (want %.4f/%.4f)\n", (double)c0,
                      (double)c1, (double)v0, (double)v1);
             }
             /* The page draws its trim only when it reloads the pad, so repeat
@@ -2925,7 +2925,7 @@ static void commit_trim(void)
                                  g_pad_rec[pd].pad, g_pad_rec[pd].props,
                                  g_pad_rec[pd].vel);
                     g_replaying_pad = 0;
-                    mlog("mpcmini: re-selected pad %d to refresh the page\n", pd);
+                    mlog("minimod: re-selected pad %d to refresh the page\n", pd);
                 }
             }
             /* Repaint the whole window, not just the page: the page is a
@@ -2938,7 +2938,7 @@ static void commit_trim(void)
                         break;
                     root = parent;
                 }
-                mlog("mpcmini: repaint root=%p (page %p)\n", (void *)root, g_screen);
+                mlog("minimod: repaint root=%p (page %p)\n", (void *)root, g_screen);
                 FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
                     (void *)root, 0, FIELD(root, 0x28, uint64_t));
                 FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
@@ -2966,7 +2966,7 @@ static void commit_trim(void)
         int ok1 = rd((uintptr_t)p1 + T_VALUE, &c1, 4) && c1 > -0.5f;
         if (ok0 && ok1)
             break;
-        mlog("mpcmini: retry %d (p0=%.3f p1=%.3f)\n", attempt, (double)c0, (double)c1);
+        mlog("minimod: retry %d (p0=%.3f p1=%.3f)\n", attempt, (double)c0, (double)c1);
         if (!ok1)
             FN(A_TRIM_CORE, void (*)(float, void *))(v1, p1);
         if (!ok0)
@@ -2982,7 +2982,7 @@ static void commit_trim(void)
         wr(g_trim_layer + 0x4d8, &fa, 4);
         wr(g_trim_layer + 0x588, &fa, 4);
         wr(g_trim_layer + 0x530, &fb, 4);
-        mlog("mpcmini: layer %p <- %u..%u frames\n", (void *)g_trim_layer, fa, fb);
+        mlog("minimod: layer %p <- %u..%u frames\n", (void *)g_trim_layer, fa, fb);
     }
 
     float a0 = v0, a1 = v1;
@@ -3009,13 +3009,13 @@ static void commit_trim(void)
             pct = v1 * 100.0f;
         if (pct >= 0.0f && g_ps[i].slider) {
             if (wr(g_ps[i].slider + 0x1b4, &pct, 4))
-                mlog("mpcmini: slider %p -> %.2f%%\n", (void *)g_ps[i].slider,
+                mlog("minimod: slider %p -> %.2f%%\n", (void *)g_ps[i].slider,
                      (double)pct);
         }
     }
     g_mark_v0 = v0;
     g_mark_v1 = v1;
-    mlog("mpcmini: commit core done p0=%.4f p1=%.4f (want %.4f/%.4f)\n",
+    mlog("minimod: commit core done p0=%.4f p1=%.4f (want %.4f/%.4f)\n",
          (double)check, (double)check2, (double)v0, (double)v1);
 
 done:
@@ -3033,19 +3033,19 @@ done:
         ev[9] = 0x00;
         orig_buttons(ev);
         g_replaying_pad = 0;
-        mlog("mpcmini: re-pressed %p to refresh the page\n", (void *)g_last_press_obj);
+        mlog("minimod: re-pressed %p to refresh the page\n", (void *)g_last_press_obj);
     }
     /* Repaint the page itself: with the property values written above, this is
      * what makes the app's own Start/End edge follow the trim. */
     if (g_livepage) {
         uintptr_t vt = 0;
         if (rd((uintptr_t)g_livepage, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
-            mlog("mpcmini: page vt=%#lx file=%#lx\n", (unsigned long)vt,
+            mlog("minimod: page vt=%#lx file=%#lx\n", (unsigned long)vt,
                  (unsigned long)(vt - base));
             for (int i = 20; i < 32; ++i) {
                 uintptr_t fn = 0;
                 if (rd(vt + i * 8, &fn, 8) && fn >= base && fn <= base + 0x12000000ULL)
-                    mlog("mpcmini:   slot %d -> %#lx\n", i, (unsigned long)(fn - base));
+                    mlog("minimod:   slot %d -> %#lx\n", i, (unsigned long)(fn - base));
             }
         }
     }
@@ -3055,13 +3055,13 @@ done:
         pvt >= base && pvt <= base + 0x12000000ULL) {
         FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
             g_page, 0, FIELD(g_page, 0x28, uint64_t));
-        mlog("mpcmini: repainted page %p\n", g_page);
+        mlog("minimod: repainted page %p\n", g_page);
     }
     /* Dry run: report the surface we would drive the controls with. */
     if (g_surface) {
         uintptr_t svt = 0;
         int ok = rd((uintptr_t)g_surface, &svt, 8) && svt >= base && svt <= base + 0x12000000ULL;
-        mlog("mpcmini: surface=%p vt=%p valid=%d raw0=%d raw1=%d\n",
+        mlog("minimod: surface=%p vt=%p valid=%d raw0=%d raw1=%d\n",
              g_surface, (void *)svt, ok, (int)(v0 * 127.0f + 0.5f),
              (int)(v1 * 127.0f + 0.5f));
     }
@@ -3070,7 +3070,7 @@ done:
      * the surface (it dispatches through surface->vtable+0x160). */
     /* The control-path call is experimental: it executes cleanly but does not
      * move the app's display, so it stays behind an env flag. */
-    if (getenv("MPCMINI_CTL")) {
+    if (getenv("MINIMOD_CTL")) {
         g_surface2 = g_surface;
         orig_setctl2 = orig_setctl;
         g_pending_r0 = (int)(v0 * 127.0f + 0.5f);
@@ -3078,7 +3078,7 @@ done:
         g_pending_v0 = v0 * g_trim_frames;
         g_pending_v1 = v1 * g_trim_frames;
         g_pending_ctl = 1;
-        mlog("mpcmini: armed paint-time ctl %d/%d\n", g_pending_r0, g_pending_r1);
+        mlog("minimod: armed paint-time ctl %d/%d\n", g_pending_r0, g_pending_r1);
     }
     /* Notify the property's listeners: the page syncs its widget from the
      * property when it is told the value changed. */
@@ -3089,12 +3089,12 @@ done:
         if (pr1)
             orig_bcast((void *)pr1, v1);
         g_own_call = 0;
-        mlog("mpcmini: notified props %p/%p\n", (void *)pr0, (void *)pr1);
+        mlog("minimod: notified props %p/%p\n", (void *)pr0, (void *)pr1);
     }
     /* Also ask the screen to repaint with a clean (0,0) origin. */
     if (g_screen) {
         FN(0x1149880, void (*)(void *, uint64_t, uint64_t))((void *)g_screen, 0, 0);
-        mlog("mpcmini: repainted screen %p\n", (void *)g_screen);
+        mlog("minimod: repainted screen %p\n", (void *)g_screen);
     }
 }
 
@@ -3134,11 +3134,11 @@ static void *toast_expiry(void *arg)
     struct timespec ts = {.tv_sec = 1, .tv_nsec = 120 * 1000 * 1000};
     nanosleep(&ts, 0);
     /* the app only repaints on change, so the last frame would keep the box up */
-    mlog("mpcmini: toast expiry comp=%p repaint=%p\n", g_paint_comp, orig_repaint);
+    mlog("minimod: toast expiry comp=%p repaint=%p\n", g_paint_comp, orig_repaint);
     if (orig_repaint && g_paint_comp) {
         /* the entry takes two packed pairs: (x,y) and (w,h) */
         orig_repaint(g_paint_comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
-        mlog("mpcmini: toast expiry repainted 320x240\n");
+        mlog("minimod: toast expiry repainted 320x240\n");
     }
     return 0;
 }
@@ -3161,7 +3161,7 @@ static void toast(const char *text)
     if (cr == 0)
         pthread_detach(th);
     else
-        mlog("mpcmini: toast thread failed %d\n", cr);
+        mlog("minimod: toast thread failed %d\n", cr);
 }
 
 static void draw_colour(void *g, uint32_t v)
@@ -3197,16 +3197,16 @@ static void dump_sliders(void *p)
             continue;
         uintptr_t s = (uintptr_t)p + (uintptr_t)o;
         n++;
-        mlog("mpcmini: slider +0x%lx\n", o);
+        mlog("minimod: slider +0x%lx\n", o);
         for (long k = 0x160; k < 0x230; k += 4) {
             float f = 0;
             if (!rd(s + k, &f, 4))
                 break;
             if (f > -0.01f && f < 100.5f && f != 0.0f)
-                mlog("mpcmini:   +0x%lx = %.4f\n", k, (double)f);
+                mlog("minimod:   +0x%lx = %.4f\n", k, (double)f);
         }
     }
-    mlog("mpcmini: dump done, %u sliders\n", n);
+    mlog("minimod: dump done, %u sliders\n", n);
 }
 
 static void screen_paint(void *p, void *g)
@@ -3218,12 +3218,12 @@ static void screen_paint(void *p, void *g)
         uintptr_t vt = 0;
         if (rd((uintptr_t)p, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
             logged = 1;
-            mlog("mpcmini: paint comp=%p vt=%#lx file=%#lx\n",
+            mlog("minimod: paint comp=%p vt=%#lx file=%#lx\n",
                  p, (unsigned long)vt, (unsigned long)(vt - base));
             for (int i = 24; i < 32; ++i) {
                 uintptr_t fn = 0;
                 if (rd(vt + i * 8, &fn, 8) && fn >= base && fn <= base + 0x12000000ULL)
-                    mlog("mpcmini:   vt[%d] -> %#lx\n", i, (unsigned long)(fn - base));
+                    mlog("minimod:   vt[%d] -> %#lx\n", i, (unsigned long)(fn - base));
             }
         }
     }
@@ -3245,18 +3245,18 @@ static void screen_paint(void *p, void *g)
         return;
     if (g_screen != p) {
         g_screen = p;
-        mlog("mpcmini: screen=%p\n", p);
+        mlog("minimod: screen=%p\n", p);
     }
     {
         static int dumped;
-        if (!dumped && getenv("MPCMINI_DUMP")) {
+        if (!dumped && getenv("MINIMOD_DUMP")) {
             dumped = 1;
             dump_sliders(p);
         }
     }
     /* Diff the painting screen between paints: whatever changes when a knob
      * turns is exactly what the page stores for its markers. */
-    if (getenv("MPCMINI_SNAPDIFF")) {
+    if (getenv("MINIMOD_SNAPDIFF")) {
         static unsigned char prev[0x8000], cur[0x8000];
         static uintptr_t prev_p;
         static size_t snap_len;
@@ -3272,7 +3272,7 @@ static void screen_paint(void *p, void *g)
                 snap_len = got;
                 prev_p = (uintptr_t)p;
                 have = 1;
-                mlog("mpcmini: snapdiff baseline %p (%zu bytes)\n", p, got);
+                mlog("minimod: snapdiff baseline %p (%zu bytes)\n", p, got);
             }
         } else if (have) {
             size_t got = 0;
@@ -3288,7 +3288,7 @@ static void screen_paint(void *p, void *g)
                 float a, b;
                 memcpy(&a, prev + i, 4);
                 memcpy(&b, cur + i, 4);
-                mlog("mpcmini: diff +0x%zx %.4f -> %.4f\n", i, (double)a, (double)b);
+                mlog("minimod: diff +0x%zx %.4f -> %.4f\n", i, (double)a, (double)b);
                 memcpy(prev + i, cur + i, 4);
                 shown++;
             }
@@ -3302,7 +3302,7 @@ static void screen_paint(void *p, void *g)
          * bottom (the colour the page already uses for the waveform) and white
          * 18 pt text, so it reads at a glance without looking like a dialog. */
         int x = 0, y = 194, w = 320, h = 46;
-        mlog("mpcmini: toast draw '%s' comp=%p vt=%#lx\n", g_toast_text, p,
+        mlog("minimod: toast draw '%s' comp=%p vt=%#lx\n", g_toast_text, p,
              (unsigned long)(FIELD(p, 0, uintptr_t) - base));
         draw_colour(g, 0xff15151a);
         draw_rect(g, x, y, w, h);
@@ -3312,7 +3312,7 @@ static void screen_paint(void *p, void *g)
         draw_colour(g, 0xffffffff);
         draw_text(g, g_toast_text, x + 4, y + 6, w - 8, h - 12, 18.0f);
     }
-    if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f && !getenv("MPCMINI_NOOVERLAY")) {
+    if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f && !getenv("MINIMOD_NOOVERLAY")) {
         int x0 = 10 + (int)(g_mark_v0 * 295.0f + 0.5f);
         int x1 = 10 + (int)(g_mark_v1 * 295.0f + 0.5f);
         /* The page fills the trimmed-out parts with the waveform background
@@ -3344,18 +3344,18 @@ static int install_screen_paint(void)
         return 0;
     uintptr_t *vt = (uintptr_t *)vtaddr;
     orig_screen_paint = (void (*)(void *, void *))vt[27];
-    mlog("mpcmini: paint fn = %p (file %#lx)\n",
+    mlog("minimod: paint fn = %p (file %#lx)\n",
          (void *)orig_screen_paint, (unsigned long)((uintptr_t)orig_screen_paint - base));
     if (!orig_screen_paint)
         return 0;
     uintptr_t page = vtaddr & ~(uintptr_t)0xfff;
     if (mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE) != 0) {
-        mlog("mpcmini: screen vtable mprotect failed: %s\n", strerror(errno));
+        mlog("minimod: screen vtable mprotect failed: %s\n", strerror(errno));
         return 0;
     }
     vt[27] = (uintptr_t)screen_paint;
     mprotect((void *)page, 0x1000, PROT_READ);
-    mlog("mpcmini: screen paint hooked (stock %p)\n", (void *)orig_screen_paint);
+    mlog("minimod: screen paint hooked (stock %p)\n", (void *)orig_screen_paint);
     return 1;
 }
 
@@ -3426,7 +3426,7 @@ static void find_filter_strings(void)
                 const char *t = string_text((void *)str, txt, sizeof txt);
                 if (t && !strcmp(t, "Filter")) {
                     g_filter_strs[g_nfilter_strs++] = (void *)str;
-                    mlog("mpcmini: filter string at %p\n", (void *)str);
+                    mlog("minimod: filter string at %p\n", (void *)str);
                 }
             }
         }
@@ -3450,7 +3450,7 @@ static void str_assign_hook(void *dest, const char *text)
     static int seen;
     if (debug_mode && text && seen < 25) {
         seen++;
-        mlog("mpcmini: label '%s' dest=%p\n", text, dest);
+        mlog("minimod: label '%s' dest=%p\n", text, dest);
     }
     if (text && !strcmp(text, "Filter"))
         g_filter_dest = dest;
@@ -3462,7 +3462,7 @@ static void str_assign_hook(void *dest, const char *text)
 
 
 
-#if MPCMINI_CHROMATIC
+#if MINIMOD_CHROMATIC
 /* ------------------------------------------------------------ MIDI (feature 2) */
 /* Chromatic play from an external controller: the app already receives MIDI on
  * its ALSA rawmidi node; we read the same node and trigger the pads with the
@@ -3481,10 +3481,10 @@ static void *midi_thread(void *arg)
             midi_fd = fd;
     }
     if (midi_fd < 0) {
-        mlog("mpcmini: midi: no rawmidi node\n");
+        mlog("minimod: midi: no rawmidi node\n");
         return 0;
     }
-    mlog("mpcmini: midi: listening on fd %d\n", midi_fd);
+    mlog("minimod: midi: listening on fd %d\n", midi_fd);
     unsigned char b[3];
     int have = 0;
     for (;;) {
@@ -3526,7 +3526,7 @@ static void play_note(int pitch, int on, float velocity)
     if (on)
         orig_note_on(0, 0, pad, 0, velocity);
 }
-#endif /* MPCMINI_CHROMATIC */
+#endif /* MINIMOD_CHROMATIC */
 
 /* -------------------------------------------------------- probe threads */
 static void *needle_thread(void *arg)
@@ -3570,7 +3570,7 @@ static void do_autotrim(void)
         !rd(array + pad*8, &state, 8) || !state ||
         !rd(state + 0x22e8, &layers, 8) || !layers ||
         !rd(layers + 0x4a8, &sample, 8) || !sample) {
-        mlog("mpcmini: native trim: no sample for pad %d\n", pad);
+        mlog("minimod: native trim: no sample for pad %d\n", pad);
         return;
     }
     unsigned frames = frames_of_sample(sample), fr=0, rate=0, ch=0, off=0, bytes=0;
@@ -3607,7 +3607,7 @@ static void do_autotrim(void)
         if (orig_repaint && comp)
             orig_repaint(comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
     }
-    mlog("mpcmini: native trim pad=%d path='%s' frames=%u bounds=%u..%u\n",
+    mlog("minimod: native trim pad=%d path='%s' frames=%u bounds=%u..%u\n",
          pad, path, frames, first, last+1);
 }
 
@@ -3642,7 +3642,7 @@ static int find_screens(uintptr_t *out, int max)
     return n;
 }
 
-/* Probe: /run/mpcmini.slider holds "N,V" - write percent V into the N-th
+/* Probe: /run/minimod.slider holds "N,V" - write percent V into the N-th
  * ui::Slider of the painting screen and repaint. Used to identify which slider
  * drives which locator. */
 static void *slider_probe_thread(void *arg)
@@ -3653,7 +3653,7 @@ static void *slider_probe_thread(void *arg)
     float last_v = -1;
     for (;;) {
         nanosleep(&ts, 0);
-        int fd = open("/run/mpcmini.slider", O_RDONLY);
+        int fd = open("/run/minimod.slider", O_RDONLY);
         if (fd < 0)
             continue;
         char buf[64];
@@ -3688,14 +3688,14 @@ static void *slider_probe_thread(void *arg)
         if (!hit)
             continue;
         wr(hit + 0x1b4, (void *)&val, 4);
-        mlog("mpcmini: probe slider %d @%p = %.2f\n", idx, (void *)hit, (double)val);
+        mlog("minimod: probe slider %d @%p = %.2f\n", idx, (void *)hit, (double)val);
         FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
             g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
     }
     return 0;
 }
 
-/* Probe: /run/mpcmini.heap holds "snap" or "diff" for the heap fingerprint. */
+/* Probe: /run/minimod.heap holds "snap" or "diff" for the heap fingerprint. */
 static void *heap_probe_thread(void *arg)
 {
     (void)arg;
@@ -3703,13 +3703,13 @@ static void *heap_probe_thread(void *arg)
     for (;;) {
         nanosleep(&ts, 0);
         apply_pending_ctl();
-        int fd = open("/run/mpcmini.heap", O_RDONLY);
+        int fd = open("/run/minimod.heap", O_RDONLY);
         if (fd < 0)
             continue;
         char buf[32];
         ssize_t n = read(fd, buf, sizeof buf - 1);
         close(fd);
-        unlink("/run/mpcmini.heap");
+        unlink("/run/minimod.heap");
         if (n <= 0)
             continue;
         buf[n] = 0;
@@ -3729,16 +3729,16 @@ static void *heap_probe_thread(void *arg)
                 float v = (float)atof(sp + 1);
                 if (pr && rd(pr + 0x90, &c, 8) && c) {
                     int ok = wr(c + 0x7ea0, &v, 4);
-                    mlog("mpcmini: model c=%p +0x7ea0 <- %.4f ok=%d\n", (void *)c,
+                    mlog("minimod: model c=%p +0x7ea0 <- %.4f ok=%d\n", (void *)c,
                          (double)v, ok);
                 }
             }
             if (pr && rd(pr + 0x90, &c, 8) && c) {
-                mlog("mpcmini: model param used = %p\n", (void *)pr);
+                mlog("minimod: model param used = %p\n", (void *)pr);
                 for (unsigned off = 0x7000; off <= 0x9000; off += 4) {
                     float f = 0;
                     if (rd(c + off, &f, 4) && f > -0.01f && f < 1.01f)
-                        mlog("mpcmini:   c+%#x = %.4f\n", off, (double)f);
+                        mlog("minimod:   c+%#x = %.4f\n", off, (double)f);
                 }
             }
         } else if (!strncmp(buf, "set ", 4)) {
@@ -3746,7 +3746,7 @@ static void *heap_probe_thread(void *arg)
             const char *sp = strchr(buf + 4, ' ');
             float v = sp ? (float)atof(sp + 1) : 0.0f;
             int ok = wr(a, &v, 4);
-            mlog("mpcmini: set %p = %.4f ok=%d\n", (void *)a, (double)v, ok);
+            mlog("minimod: set %p = %.4f ok=%d\n", (void *)a, (double)v, ok);
         } else if (!strncmp(buf, "snapb", 5))
             byte_snap();
         else if (!strncmp(buf, "diffb", 5))
@@ -3778,7 +3778,7 @@ static void *heap_probe_thread(void *arg)
                         memcpy(&f, chunk + o, 4);
                         float d = f - want;
                         if (d < 0.0001f && d > -0.0001f) {
-                            mlog("mpcmini: fv %#llx %.6f\n",
+                            mlog("minimod: fv %#llx %.6f\n",
                                  (unsigned long long)(a + o), (double)f);
                             hits++;
                         }
@@ -3786,12 +3786,12 @@ static void *heap_probe_thread(void *arg)
                 }
             }
             free(chunk);
-            mlog("mpcmini: fv done %d\n", hits);
+            mlog("minimod: fv done %d\n", hits);
         }
         else if (!strncmp(buf, "reg ", 4)) {
             g_reg_base = (uintptr_t)strtoull(buf + 4, 0, 16);
             g_reg_have = rd(g_reg_base, g_reg_buf, sizeof g_reg_buf) ? 1 : 0;
-            mlog("mpcmini: region mark %p ok=%d\n", (void *)g_reg_base, g_reg_have);
+            mlog("minimod: region mark %p ok=%d\n", (void *)g_reg_base, g_reg_have);
         } else if (!strncmp(buf, "regdiff", 7)) {
             if (g_reg_have) {
                 unsigned char *cur = malloc(sizeof g_reg_buf);
@@ -3803,11 +3803,11 @@ static void *heap_probe_thread(void *arg)
                         float a, b;
                         memcpy(&a, g_reg_buf + i, 4);
                         memcpy(&b, cur + i, 4);
-                        mlog("mpcmini: reg %p+%#zx %.4f -> %.4f\n",
+                        mlog("minimod: reg %p+%#zx %.4f -> %.4f\n",
                              (void *)g_reg_base, i, (double)a, (double)b);
                         shown++;
                     }
-                    mlog("mpcmini: regdiff done\n");
+                    mlog("minimod: regdiff done\n");
                 }
                 free(cur);
             }
@@ -3851,13 +3851,13 @@ static void find_float_pair(float v)
                 memcpy(&prev, buf + o - 4, 4);
                 if (prev > -1e-4f && prev < 1e-4f && shown < 24) {
                     shown++;
-                    mlog("mpcmini: pair at %p (prev %.4f next %.4f)\n",
+                    mlog("minimod: pair at %p (prev %.4f next %.4f)\n",
                          (void *)(a + o - 4), (double)prev, (double)v);
                 }
             }
         }
     }
-    mlog("mpcmini: pair search done, %d hits\n", shown);
+    mlog("minimod: pair search done, %d hits\n", shown);
     free(buf);
 }
 
@@ -3899,7 +3899,7 @@ static void byte_snap(void)
     }
     g_bs = buf;
     g_bs_len = used;
-    mlog("mpcmini: byte snapshot %zu bytes\n", used);
+    mlog("minimod: byte snapshot %zu bytes\n", used);
 }
 
 static void byte_diff(void)
@@ -3926,7 +3926,7 @@ static void byte_diff(void)
                 memcpy(&b, cur + i, 4);
                 if (!(a > -2.0f && a < 2.0f) && !(b > -2.0f && b < 2.0f))
                     continue;
-                mlog("mpcmini: bdiff %#llx %.4f -> %.4f\n",
+                mlog("minimod: bdiff %#llx %.4f -> %.4f\n",
                      (unsigned long long)(addr + i), (double)a, (double)b);
                 shown++;
             }
@@ -3934,7 +3934,7 @@ static void byte_diff(void)
         o += 16 + len;
     }
     free(cur);
-    mlog("mpcmini: byte diff done\n");
+    mlog("minimod: byte diff done\n");
 }
 
 /* Probe: "who <addr>" - every object that holds a pointer to <addr>, with the
@@ -3963,17 +3963,17 @@ static void who_points_at(uintptr_t target)
                 uintptr_t vt = 0;
                 rd(a, &vt, 8); /* object base in this chunk */
                 int base_off = (int)(holder & 0xffff);
-                mlog("mpcmini: who %p holder %p chunkvt=%p off_in_chunk=%#x\n",
+                mlog("minimod: who %p holder %p chunkvt=%p off_in_chunk=%#x\n",
                      (void *)target, (void *)holder, (void *)vt, base_off);
                 shown++;
             }
         }
     }
-    mlog("mpcmini: who done, %d holders\n", shown);
+    mlog("minimod: who done, %d holders\n", shown);
     free(buf);
 }
 
-/* Probe: /run/mpcmini.bcast holds "i,v" - broadcast g_bp[i] with value v, so we
+/* Probe: /run/minimod.bcast holds "i,v" - broadcast g_bp[i] with value v, so we
  * can find which recorded property drives the page. */
 static void *bcast_probe_thread(void *arg)
 {
@@ -3983,7 +3983,7 @@ static void *bcast_probe_thread(void *arg)
     float last_v = -1;
     for (;;) {
         nanosleep(&ts, 0);
-        int fd = open("/run/mpcmini.bcast", O_RDONLY);
+        int fd = open("/run/minimod.bcast", O_RDONLY);
         if (fd < 0)
             continue;
         char buf[64];
@@ -4000,14 +4000,14 @@ static void *bcast_probe_thread(void *arg)
             continue;
         last_i = idx;
         last_v = val;
-        mlog("mpcmini: bcast probe %d (%p) = %.4f\n", idx, (void *)g_bp[idx],
+        mlog("minimod: bcast probe %d (%p) = %.4f\n", idx, (void *)g_bp[idx],
              (double)val);
         FN(A_BROADCAST, void (*)(void *, float))((void *)g_bp[idx], val);
     }
     return 0;
 }
 
-/* Re-arms the software watchpoint from /run/mpcmini.watch (hex address), so the
+/* Re-arms the software watchpoint from /run/minimod.watch (hex address), so the
  * address can be set after the app has started and picked a new heap. */
 static void *watch_thread(void *arg)
 {
@@ -4022,7 +4022,7 @@ static void *watch_thread(void *arg)
         sa.sa_flags = SA_SIGINFO;
         sigemptyset(&sa.sa_mask);
         sigaction(SIGSEGV, &sa, 0);
-        int fd = open("/run/mpcmini.watch", O_RDONLY);
+        int fd = open("/run/minimod.watch", O_RDONLY);
         if (fd < 0)
             continue;
         char buf[64];
@@ -4034,13 +4034,13 @@ static void *watch_thread(void *arg)
         if (!strncmp(buf, "scan", 4)) {
             uintptr_t sc[8];
             int ns = find_screens(sc, 8);
-            mlog("mpcmini: %d screen instance(s)\n", ns);
+            mlog("minimod: %d screen instance(s)\n", ns);
             for (int i = 0; i < ns; ++i) {
-                mlog("mpcmini:   screen[%d]=%p\n", i, (void *)sc[i]);
+                mlog("minimod:   screen[%d]=%p\n", i, (void *)sc[i]);
                 watch_arm(sc[i] + 0x1f4c, "screen");
                 watch_arm(sc[i] + 0x72c8, "screenfrac");
             }
-            unlink("/run/mpcmini.watch");
+            unlink("/run/minimod.watch");
             continue;
         }
         uintptr_t a = (uintptr_t)strtoull(buf, 0, 16);
@@ -4053,12 +4053,12 @@ static void *watch_thread(void *arg)
 static int find_main(struct dl_phdr_info *info, size_t size, void *out)
 {
     (void)size;
-    mlog("mpcmini: entry '%s' addr=%p phnum=%u\n", info->dlpi_name ? info->dlpi_name : "",
+    mlog("minimod: entry '%s' addr=%p phnum=%u\n", info->dlpi_name ? info->dlpi_name : "",
          (void *)info->dlpi_addr, (unsigned)info->dlpi_phnum);
     for (unsigned i = 0; i < info->dlpi_phnum; ++i) {
         const ElfW(Phdr) *p = &info->dlpi_phdr[i];
         if (p->p_type == PT_LOAD)
-            mlog("mpcmini:   PT_LOAD vaddr=%p memsz=%p filesz=%p\n",
+            mlog("minimod:   PT_LOAD vaddr=%p memsz=%p filesz=%p\n",
                  (void *)p->p_vaddr, (void *)p->p_memsz, (void *)p->p_filesz);
     }
     if (info->dlpi_name && *info->dlpi_name)
@@ -4077,10 +4077,10 @@ static int find_main(struct dl_phdr_info *info, size_t size, void *out)
 
 __attribute__((constructor)) static void load(void)
 {
-#if MPCMINI_LOG
-    log_fd = open("/run/mpcmini.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+#if MINIMOD_LOG
+    log_fd = open("/run/minimod.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
 #endif
-#if MPCMINI_DEBUG
+#if MINIMOD_DEBUG
     /* Debug builds only: the watch probe needs to see the fault it caused.
      * Never installed in release - swallowing a SIGSEGV/SIGBUS changes the
      * host app's behaviour on every fault. */
@@ -4096,7 +4096,7 @@ __attribute__((constructor)) static void load(void)
 #endif
     uintptr_t found = 0;
     if (!dl_iterate_phdr(find_main, &found)) {
-        mlog("mpcmini: stock app not found; not installing\n");
+        mlog("minimod: stock app not found; not installing\n");
         return;
     }
     base = found;
@@ -4110,7 +4110,7 @@ __attribute__((constructor)) static void load(void)
             break;
     }
     if (relay_page == MAP_FAILED) {
-        mlog("mpcmini: relay mmap near base failed\n");
+        mlog("minimod: relay mmap near base failed\n");
         return;
     }
     /* trampolines: the displaced instruction plus a branch back into the app */
@@ -4121,20 +4121,20 @@ __attribute__((constructor)) static void load(void)
             break;
     }
     if (tramp_page == MAP_FAILED) {
-        mlog("mpcmini: trampoline mmap near base failed\n");
+        mlog("minimod: trampoline mmap near base failed\n");
         return;
     }
-    mlog("mpcmini: relay at %p (site %p)\n", relay_page, (void *)(base + A_SIXTEEN_PROC));
-    const char *env = getenv("MPCMINI_HOOKS");
+    mlog("minimod: relay at %p (site %p)\n", relay_page, (void *)(base + A_SIXTEEN_PROC));
+    const char *env = getenv("MINIMOD_HOOKS");
     if (env && *env)
         hook_mask = atoi(env);
-    const char *safe_env = getenv("MPCMINI_SAFE");
-    const char *dbg_env = getenv("MPCMINI_DEBUG");
+    const char *safe_env = getenv("MINIMOD_SAFE");
+    const char *dbg_env = getenv("MINIMOD_DEBUG");
     safe_mode = safe_env && atoi(safe_env) != 0;
     debug_mode = dbg_env && atoi(dbg_env) != 0;
-    const char *probe_env = getenv("MPCMINI_PROBE");
+    const char *probe_env = getenv("MINIMOD_PROBE");
     probe_mode = probe_env && atoi(probe_env) != 0;
-    const char *bits_env = getenv("MPCMINI_PROBES");
+    const char *bits_env = getenv("MINIMOD_PROBES");
     if (bits_env && *bits_env)
         probe_bits = atoi(bits_env);
     void *t_ctor = (hook_mask & 1) ? install_hook(base + A_SIXTEEN_CTOR, (void *)sixteen_ctor) : 0;
@@ -4158,7 +4158,7 @@ __attribute__((constructor)) static void load(void)
     void *t_sc = install_hook(base + 0x1968020, (void *)setctl_probe);
     if (t_sc)
         orig_setctl = (void (*)(void *, void *, int, int, float))t_sc;
-#if MPCMINI_DEBUG
+#if MINIMOD_DEBUG
     void *t_pg = install_hook(base + 0x28100c0, (void *)pagector_probe);
     if (t_pg)
         orig_pagector = (pagector_fn)t_pg;
@@ -4207,7 +4207,7 @@ __attribute__((constructor)) static void load(void)
     if (t_dt)
         orig_draw_text = (void (*)(void *, const uint64_t *, int, int, int, int, int, int, float))t_dt;
     install_screen_paint();
-#if MPCMINI_DEBUG
+#if MINIMOD_DEBUG
     {
         pthread_t wth, sth, bth, hth;
         pthread_create(&wth, 0, watch_thread, 0);
@@ -4217,31 +4217,31 @@ __attribute__((constructor)) static void load(void)
     }
 #endif
     if (!relay_used) {
-        mlog("mpcmini: no hook installed\n");
+        mlog("minimod: no hook installed\n");
         return;
     }
     /* Hardening failures must never take the host app down: leave the pages
      * writable and keep running unhooked rather than exit. */
     if (mprotect(relay_page, 4096, PROT_READ | PROT_EXEC) != 0) {
-        mlog("mpcmini: relay mprotect failed: %s (continuing)\n", strerror(errno));
+        mlog("minimod: relay mprotect failed: %s (continuing)\n", strerror(errno));
         return;
     }
     if (mprotect(tramp_page, 4096, PROT_READ | PROT_EXEC) != 0) {
-        mlog("mpcmini: tramp mprotect failed: %s (continuing)\n", strerror(errno));
+        mlog("minimod: tramp mprotect failed: %s (continuing)\n", strerror(errno));
         return;
     }
-    mlog("mpcmini: codes relay=%p tramp=%p\n", (void *)relay_page,
+    mlog("minimod: codes relay=%p tramp=%p\n", (void *)relay_page,
          (void *)tramp_page);
     pthread_t th;
-#if MPCMINI_CHROMATIC
+#if MINIMOD_CHROMATIC
     /* The app owns the control-surface rawmidi node; opening it here makes the
      * stock app fail to start, so the feature is opt-in. */
-    const char *midi_env = getenv("MPCMINI_MIDI");
+    const char *midi_env = getenv("MINIMOD_MIDI");
     if (midi_env && atoi(midi_env) != 0)
         pthread_create(&th, 0, midi_thread, 0);
 #else
     (void)th;
 #endif
-    mlog("mpcmini: base=%p mask=%d safe=%d probe=%d (ctor=%d proc=%d plus=%d minus=%d)\n",
+    mlog("minimod: base=%p mask=%d safe=%d probe=%d (ctor=%d proc=%d plus=%d minus=%d)\n",
          (void *)base, hook_mask, safe_mode, probe_mode, t_ctor != 0, t_proc != 0);
 }

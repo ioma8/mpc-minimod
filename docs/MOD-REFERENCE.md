@@ -16,7 +16,7 @@ sections 4–7 describe how it was found and what does *not* work.
 
 ## 1. What the mod is
 
-An `LD_PRELOAD` shared library (`mpcmini.so`) that is loaded into the stock app by
+An `LD_PRELOAD` shared library (`minimod.so`) that is loaded into the stock app by
 an SD-card `autorun` script. It never modifies the firmware on disk — it patches
 a handful of instructions in the app's memory at load time, the same technique
 `am-mod` uses.
@@ -39,7 +39,7 @@ the Trim page by the mod's overlay.
 
 ### 2.1 Loading and hooking
 
-1. The SD autorun script sets `LD_PRELOAD=/path/mpcmini.so` for the app and
+1. The SD autorun script sets `LD_PRELOAD=/path/minimod.so` for the app and
    restarts it.
 2. On load, the library walks `dl_iterate_phdr` to find the app's load base
    (the `PT_LOAD` containing file offset `0xb55b00`). Runtime address of any
@@ -84,7 +84,7 @@ addresses) and as call targets.
    The path is logged as `sample obj=… info=… frames=… path='…'`.
 3. **Analyse the WAV.** `wav_info()` parses the RIFF header; `wav_edges()` scans
    the PCM data for the first and last frame above a threshold.
-   The threshold is **peak-relative** (`MPCMINI_TRIM_DB`, default **−40 dB**,
+   The threshold is **peak-relative** (`MINIMOD_TRIM_DB`, default **−40 dB**,
    clamped to −90…−6) with an absolute fallback of `328` (−40 dBFS) — this is
    what makes low-level noise at the edges get trimmed, not just digital
    silence.
@@ -129,10 +129,10 @@ repaint from a hook" attempt failed (measured: 0 px, and the cached pointer was
 ```sh
 cd mod
 ./build.sh     # zig cc -target aarch64-linux-gnu -O2 -fno-omit-frame-pointer
-./pack.sh      # -> mod/build/mpc-mini.zip
+./pack.sh      # -> mod/build/minimod.zip
 ```
 
-The package contains `autorun/mpcmini.so`, `autorun.sh`, `autorun.check`,
+The package contains `autorun/minimod.so`, `autorun.sh`, `autorun.check`,
 `autorun.json` (~34 KB total). Copy it to the SD card root; the stock app runs
 the autorun script on boot.
 
@@ -149,7 +149,7 @@ MPCLAB_PORT_OFFSET=100 python3 lab.py ssh '...'        # root shell
 environment variables. Always rewrite the drop-in and restart afterwards:
 
 ```sh
-printf "[Service]\nEnvironment=LD_PRELOAD=/run/mpclab-preload/mpcmini.so\n" \
+printf "[Service]\nEnvironment=LD_PRELOAD=/run/mpclab-preload/minimod.so\n" \
   > /run/systemd/system/ac50.service.d/mpclab-preload.conf
 systemctl daemon-reload; systemctl reset-failed ac50; systemctl restart ac50
 ```
@@ -356,9 +356,9 @@ Operational lessons (all learned the hard way):
 
 | path | contents |
 |---|---|
-| `mod/src/mpcmini.c` | the mod (~3 900 lines) |
+| `mod/src/minimod.c` | the mod (~3 900 lines) |
 | `mod/build.sh`, `mod/pack.sh` | build and package |
-| `mod/build/mpc-mini.zip` | **the deliverable** |
+| `mod/build/minimod.zip` | **the deliverable** |
 | `docs/TRIM-PAGE.md` | the long-form investigation log (§1–32) |
 | `docs/RE-GHIDRA.md` | Ghidra/MCP setup and the 12.2 rebuild |
 | `docs/re/*.c` | decompiled reference functions |

@@ -228,7 +228,7 @@ uv run mpc2stems convert project1/bapap1.xpj --out out-dry \
 | [`docs/MODDING.md`](docs/MODDING.md) | the device's SD-card autorun and how the community mod patches the app in RAM |
 | [`docs/EMULATOR.md`](docs/EMULATOR.md) | running the virtual MPC Sample |
 | [`docs/ECOSYSTEM.md`](docs/ECOSYSTEM.md) | how custom firmware boots, and the community tools |
-| [`docs/MOD-MINI.md`](docs/MOD-MINI.md) | `mpc-mini`, the minimal mod |
+| [`docs/MINIMOD.md`](../docs/MINIMOD.md) | `mpc-mini`, the minimal mod |
 | [`CONTEXT.md`](CONTEXT.md) | glossary (song, sequence, pad, mixdown, stem, Color Compressor) |
 | [`README.md`](README.md) | short overview and the modelled / not-modelled lists |
 | [`USER-TASK.md`](USER-TASK.md) | the manual per-pad export procedure for a real device |

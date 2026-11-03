@@ -1,6 +1,6 @@
-# mpc-mini — a minimal MPC Sample mod
+# minimod — a minimal MPC Sample mod
 
-`mpc-mini` is an `LD_PRELOAD` library for the Akai MPC Sample (app
+`minimod` is an `LD_PRELOAD` library for the Akai MPC Sample (app
 `/usr/bin/MPC Sample`, firmware 1.3.0.12) that adds three small features without
 touching the firmware on disk. It is delivered as an SD `autorun` package (see
 [`ECOSYSTEM.md`](ECOSYSTEM.md) for the boot contract) and disappears on reboot.
@@ -45,15 +45,15 @@ A shared object loaded into the app with `LD_PRELOAD`. On init it:
    non-exec mapping and die with SIGSEGV at the trampoline address.
 4. **Hooks the screen's paint slot** (a vtable swap, see "Shift overlay").
 5. Refuses to hook the same address twice and logs every install
-   (`mpcmini: hook 0x… (prologue N)`).
+   (`minimod: hook 0x… (prologue N)`).
 
 The constructor also installs a `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGABRT` handler
 that logs `FAULT sig=… pc=… lr=… sp=…` — that is what pinned the trampoline bug
 in one run.
 
-Runtime switches: `MPCMINI_HOOKS` (bitmask), `MPCMINI_DEBUG=1`,
-`MPCMINI_PROBE=1` with `MPCMINI_PROBES=<bits>`, `MPCMINI_TESTTRIM=0.09,0.45`,
-`MPCMINI_MIDI=1`. Log: `/run/mpcmini.log`.
+Runtime switches: `MINIMOD_HOOKS` (bitmask), `MINIMOD_DEBUG=1`,
+`MINIMOD_PROBE=1` with `MINIMOD_PROBES=<bits>`, `MINIMOD_TESTTRIM=0.09,0.45`,
+`MINIMOD_MIDI=1`. Log: `/run/minimod.log`.
 
 ## Firmware anchors (validated)
 
@@ -304,8 +304,8 @@ never going to reach them.
 
 ```sh
 cd mod
-./build.sh     # build/mpcmini.so  (aarch64 glibc, LD_PRELOAD)
-./pack.sh      # build/mpc-mini.zip (autorun package with a valid autorun.check)
+./build.sh     # build/minimod.so  (aarch64 glibc, LD_PRELOAD)
+./pack.sh      # build/minimod.zip (autorun package with a valid autorun.check)
 ```
 
 Emulator:
@@ -314,14 +314,14 @@ Emulator:
 cd ~/projects/customs/virtual-mpc-sample
 MPCLAB_PORT_OFFSET=100 python3 lab.py run          # panel on :8865
 MPCLAB_PORT_OFFSET=100 python3 lab.py preload \
-  /Users/jakubkolcar/projects/customs/sample-converter/mod/build/mpcmini.so
-MPCLAB_PORT_OFFSET=100 python3 lab.py ssh 'cat /run/mpcmini.log'
+  /Users/jakubkolcar/projects/customs/sample-converter/mod/build/minimod.so
+MPCLAB_PORT_OFFSET=100 python3 lab.py ssh 'cat /run/minimod.log'
 ```
 
 `preload --off` removes it; a reboot also does, because the drop-in lives in
 `/run`.
 
-Device: unzip `build/mpc-mini.zip` and copy `autorun/` to the card root (or
+Device: unzip `build/minimod.zip` and copy `autorun/` to the card root (or
 install the zip as a boot-thingy app).
 
 ## Emulator and workflow hazards (all hit during this work)
@@ -382,10 +382,10 @@ binary just built.
 ## Repository layout
 
 ```
-mod/src/mpcmini.c    the mod
+mod/src/minimod.c    the mod
 mod/build.sh         zig cc -target aarch64-linux-gnu -shared
 mod/pack.sh          builds the autorun zip (pins the firmware by first-4KB hash)
-mod/build/           mpcmini.so, mpc-mini.zip
+mod/build/           minimod.so, minimod.zip
 docs/ECOSYSTEM.md    boot contract, boot-thingy, SampQOL/am-mod, apps, emulator
 docs/MOD-MINI.md     this document
 docs/TRIM-PAGE.md    the Sample/Trim page: layout, marker source, findings A–J

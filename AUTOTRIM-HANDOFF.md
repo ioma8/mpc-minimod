@@ -51,7 +51,7 @@ and the sample really is trimmed).
 
 ## 2. What the mod is
 
-An `LD_PRELOAD` shared library (`mpcmini.so`) loaded into the stock app by an SD
+An `LD_PRELOAD` shared library (`minimod.so`) loaded into the stock app by an SD
 `autorun` script. It never modifies the firmware on disk — it patches a few
 instructions in memory at load time.
 
@@ -72,7 +72,7 @@ firmware means "no mod", not "crash".
 
 ### 3.1 Loading and hooking
 
-1. SD autorun sets `LD_PRELOAD=/path/mpcmini.so` and restarts the app.
+1. SD autorun sets `LD_PRELOAD=/path/minimod.so` and restarts the app.
 2. `dl_iterate_phdr` finds the app base (the `PT_LOAD` covering file offset
    `0xb55b00`). **Runtime address = base + file VA**, base typically
    `0xaaaaaaaa0000`.
@@ -94,7 +94,7 @@ firmware means "no mod", not "crash".
    screen's child pointers for an info struct (`frames` at `+4`, `rate` at `+8`)
    and a holder that yields a `.wav` path.
 3. **Analyse the WAV** — `wav_info()` parses RIFF; `wav_edges()` scans PCM for
-   the first/last frame above a **peak-relative threshold** (`MPCMINI_TRIM_DB`,
+   the first/last frame above a **peak-relative threshold** (`MINIMOD_TRIM_DB`,
    default **−40 dB**, clamped −90…−6) with an absolute −40 dBFS floor. That is
    what trims low-level noise, not just digital silence. `pcm_at()` handles
    16-, 24- and 32-bit PCM.
@@ -151,13 +151,13 @@ Structures:
 cd mod
 ./build.sh     # zig cc -target aarch64-linux-gnu -shared -fPIC -O2 \
                #   -fno-omit-frame-pointer -mbranch-protection=standard -Wall -Wextra -s
-./pack.sh      # -> mod/build/mpc-mini.zip (autorun/…)
+./pack.sh      # -> mod/build/minimod.zip (autorun/…)
 ```
 
-Current artefacts: `mpcmini.so` ≈ 55.7 KB, `mpc-mini.zip` ≈ 29.5 KB.
+Current artefacts: `minimod.so` ≈ 55.7 KB, `minimod.zip` ≈ 29.5 KB.
 
 **Debug build** (probes, watch thread, polling threads, TESTTRIM, signal
-handlers): compile with `-DMPCMINI_DEBUG=1`. Release is the default and must stay
+handlers): compile with `-DMINIMOD_DEBUG=1`. Release is the default and must stay
 that way — see §9.1.
 
 Deploy into the emulator:
@@ -165,7 +165,7 @@ Deploy into the emulator:
 ```sh
 cd ~/projects/customs/virtual-mpc-sample
 MPCLAB_PORT_OFFSET=100 python3 lab.py panel          # web panel :8865 (keep running!)
-MPCLAB_PORT_OFFSET=100 python3 lab.py preload <path>/mpcmini.so
+MPCLAB_PORT_OFFSET=100 python3 lab.py preload <path>/minimod.so
 MPCLAB_PORT_OFFSET=100 python3 lab.py ssh '...'
 ```
 
@@ -173,7 +173,7 @@ MPCLAB_PORT_OFFSET=100 python3 lab.py ssh '...'
 so always rewrite it and restart afterwards:
 
 ```sh
-printf "[Service]\nEnvironment=LD_PRELOAD=/run/mpclab-preload/mpcmini.so\n" \
+printf "[Service]\nEnvironment=LD_PRELOAD=/run/mpclab-preload/minimod.so\n" \
   > /run/systemd/system/ac50.service.d/mpclab-preload.conf
 systemctl daemon-reload; systemctl reset-failed ac50; systemctl restart ac50
 ```
@@ -205,7 +205,7 @@ The canonical trim test:
 4. screenshot **before**.
 5. `SHIFT` press, `SCREEN 3` press, wait ~6 s, release both.
 6. screenshot **after**; count changed pixels in `y ∈ [84,190]`, `x ∈ [4,312]`.
-7. Check `/run/mpcmini.log` for `commit core done`.
+7. Check `/run/minimod.log` for `commit core done`.
 
 Expected (release build, overlay on):
 
@@ -280,13 +280,13 @@ eMMC** (`/data` and `/factory` reset). `lab.py reset` only works after a stop.
 
 | env | effect |
 |---|---|
-| `MPCMINI_DEBUG` (build) | compiles the probes, watch thread, polling threads, signal handlers, `/run` channels, `MPCMINI_TESTTRIM` |
-| `MPCMINI_TRIM_DB` | threshold in dB (default −40) |
-| `MPCMINI_MIDI` | enable the external-MIDI feature (off by default: it steals the rawmidi node) |
-| `MPCMINI_NOOVERLAY` | disable the overlay (used in every "does the app itself render it?" test) |
+| `MINIMOD_DEBUG` (build) | compiles the probes, watch thread, polling threads, signal handlers, `/run` channels, `MINIMOD_TESTTRIM` |
+| `MINIMOD_TRIM_DB` | threshold in dB (default −40) |
+| `MINIMOD_MIDI` | enable the external-MIDI feature (off by default: it steals the rawmidi node) |
+| `MINIMOD_NOOVERLAY` | disable the overlay (used in every "does the app itself render it?" test) |
 
-Debug builds also expose `/run/mpcmini.heap` (`set`, `findval`, dumps) and
-`/run/mpcmini.watch`. **These must never ship.**
+Debug builds also expose `/run/minimod.heap` (`set`, `findval`, dumps) and
+`/run/minimod.watch`. **These must never ship.**
 
 ---
 
@@ -356,10 +356,10 @@ replacing with a structural lookup.
 ## 10. Repo map
 
 ```
-mod/src/mpcmini.c        the mod (~4.4k lines)
+mod/src/minimod.c        the mod (~4.4k lines)
 mod/build.sh             build the .so
 mod/pack.sh              build the SD autorun zip
-mod/build/mpc-mini.zip   the deliverable
+mod/build/minimod.zip   the deliverable
 docs/MOD-REFERENCE.md    architecture + all RE findings
 docs/CODE-REVIEW.md      review, fix status, regression bisect
 docs/TRIM-PAGE.md        investigation log (§1–32)
@@ -367,4 +367,4 @@ docs/RE-GHIDRA.md        Ghidra/MCP setup
 docs/re/                 decompiled reference functions
 ```
 
-Git: tag `v1.3.0.12-mpc-mini.1`; private remote `https://github.com/ioma8/mpc-sample-mod`.
+Git: tag `v1.3.0.12-minimod.1`; private remote `https://github.com/ioma8/mpc-sample-mod`.

@@ -54,7 +54,7 @@ low-level noise, including a negative full-scale sample.
 ## Threshold adjustment requested after listening
 
 The default relative amplitude threshold is now 3% of peak (about -30.46 dB),
-three times the former 1%. `MPCMINI_TRIM_DB` still overrides it. Verified in the
+three times the former 1%. `MINIMOD_TRIM_DB` still overrides it. Verified in the
 emulator: ratio 0.0300, threshold 876 for peak 29204; A07 bounds 84..52786,
 A09 bounds 89..73431. The PCM/float regression checks still pass.
 
@@ -76,7 +76,7 @@ paint hook with the app's own `drawText`, so it disappears without a timer.
 
 `B3` is button code `0x0e`, the same code the control surface repeats while the
 button is held, so the handler acts on the press edge only (`g_b3_down`); without
-that, one physical press fired the cycle up to 16 times. `MPCMINI_TRIM_DB` still
+that, one physical press fired the cycle up to 16 times. `MINIMOD_TRIM_DB` still
 overrides the ratio for the first step only.
 
 ## The toast, and how it is cleared

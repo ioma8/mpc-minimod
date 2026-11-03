@@ -1,7 +1,7 @@
 # The MPC Sample mod ecosystem — how custom firmware actually boots
 
 Study of the community custom-firmware/app ecosystem for the Akai MPC Sample
-(firmware 1.3.0.12, product `AC50`), done to build `mpc-mini`. Everything here
+(firmware 1.3.0.12, product `AC50`), done to build `minimod`. Everything here
 was read from the sources or reproduced in the virtual device; tags are
 **[VALIDATED]** (ran/read it) and **[DOC]** (author's own claim).
 
@@ -196,7 +196,7 @@ Note for MIDI work: the stock app's external MIDI goes through
 simply open the raw device. Interpose that library, or use the ALSA sequencer.
 
 A **mod** (patches the stock app and keeps it) and an **app** (replaces the
-screen) are different products. `mpc-mini` is a mod, because the three wanted
+screen) are different products. `minimod` is a mod, because the three wanted
 features are edits to stock behaviour, not a new UI.
 
 ---
@@ -220,7 +220,7 @@ pads need a `value` (velocity) or nothing sounds. `PLUS`/`MINUS`/`16 LEVELS`
 are plain buttons. Screenshots are 320×240 PNGs from `/screen.png`.
 
 **Autorun runner caveat:** in this checkout the lab's `lab.py autorun` reports
-"the runner did not pick the package up" for *both* `mpc-mini.zip` and the
+"the runner did not pick the package up" for *both* `minimod.zip` and the
 reference `SampQOL-OS-v0.1.5.zip`, cold boot **and** `--no-reboot` (the card is
 mounted, the app even announces the script question, but nothing executes).
 Since the reference package behaves identically, the package format is not the

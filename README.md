@@ -16,7 +16,7 @@ keyboard is in progress — [`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).
 
 ## Install
 
-1. Download **`mpc-mini.zip`** from the
+1. Download **`minimod.zip`** from the
    [latest release](https://github.com/ioma8/mpc-minimod/releases/latest).
 2. Unzip it. You get a folder called `autorun`.
 3. Copy `autorun` onto the **SD card**, next to the folders already there — not
@@ -35,7 +35,7 @@ from the card (or boot without the card).
 cd mod && ./build.sh && ./pack.sh
 ```
 
-That writes `mod/build/mpc-mini.zip` — the same package as the release.
+That writes `mod/build/minimod.zip` — the same package as the release.
 
 </details>
 

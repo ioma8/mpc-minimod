@@ -1,4 +1,4 @@
-# mpc-mini
+# minimod
 
 > **Firmware 1.3.0.12 only.** This mod is built against one exact build of
 > `/usr/bin/MPC Sample` (`b6584cba76e416e432ad202509099d34373dc2c3d6a8fb625f5678bf0193b508`);
@@ -20,7 +20,7 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 | 3 | chromatic control from an external MIDI controller | always while 16 LEVELS is lit | note path verified with simulated MIDI |
 | 4 | shift overlay label | `SHIFT` held on the Sample page | verified on device |
 
-Status history, evidence and open work: [`docs/MOD-MINI.md`](../docs/MOD-MINI.md).
+Status history, evidence and open work: [`docs/MINIMOD.md`](../docs/MINIMOD.md).
 The Sample/Trim page itself: [`docs/TRIM-PAGE.md`](../docs/TRIM-PAGE.md).
 The am-mod study that supplied the overlay technique: [`docs/AM-MOD-NOTES.md`](../docs/AM-MOD-NOTES.md).
 Ecosystem: [`docs/ECOSYSTEM.md`](../docs/ECOSYSTEM.md).
@@ -46,25 +46,25 @@ released   : Trim        Tune        Filter
   the pad's sample from the app's own WAV copy (24-bit aware). The silence
   threshold is **relative to the file's peak** (default −40 dB, so low-level
   noise at the ends is trimmed as well, not only digital silence) with an
-  absolute floor so a near-silent file is not trimmed away; `MPCMINI_TRIM_DB`
+  absolute floor so a near-silent file is not trimmed away; `MINIMOD_TRIM_DB`
   overrides it (e.g. `-30` to trim more aggressively, `-60` to keep more).
   It then writes the trim core, the layer frames and the applied value. The audio state lands; the
   page's cached markers are not refreshed, because the page paints from a model
   object we have not identified yet (full account in `docs/TRIM-PAGE.md`).
 * **Chromatic MIDI** — always on while 16 LEVELS is lit (no toggle). Off with
-  `MPCMINI_MIDI=0`: the rawmidi reader takes the control-surface node from the
+  `MINIMOD_MIDI=0`: the rawmidi reader takes the control-surface node from the
   app, which stops the stock app from starting.
 
 ## Install (device)
 
 ```sh
 cd mod
-./build.sh          # build/mpcmini.so
-./pack.sh           # build/mpc-mini.zip
+./build.sh          # build/minimod.so
+./pack.sh           # build/minimod.zip
 
 # card mounted at /Volumes/MPCSAMPLE
 rm -rf /Volumes/MPCSAMPLE/autorun
-unzip -q build/mpc-mini.zip -d /Volumes/MPCSAMPLE/
+unzip -q build/minimod.zip -d /Volumes/MPCSAMPLE/
 rm -f /Volumes/MPCSAMPLE/autorun/._* /Volumes/MPCSAMPLE/._autorun   # macOS AppleDouble
 sync; diskutil unmount /Volumes/MPCSAMPLE
 ```
@@ -73,8 +73,8 @@ Insert the card and power on. The firmware runs `/autorun/autorun.sh`, which:
 
 1. verifies the first 4 KiB of `/usr/bin/MPC Sample` against `44507c7a…` and
    exits silently on any other firmware;
-2. copies `mpcmini.so` to `/run/mpcmini.so`;
-3. writes `/run/systemd/system/ac50.service.d/mpcmini.conf` with `LD_PRELOAD`
+2. copies `minimod.so` to `/run/minimod.so`;
+3. writes `/run/systemd/system/ac50.service.d/minimod.conf` with `LD_PRELOAD`
    and restarts `ac50`.
 
 To unload: reboot, or delete `autorun` from the card.
@@ -84,13 +84,13 @@ To unload: reboot, or delete `autorun` from the card.
 ```sh
 cd ~/projects/customs/virtual-mpc-sample
 MPCLAB_PORT_OFFSET=100 python3 lab.py run            # HVF, panel on :8865
-MPCLAB_PORT_OFFSET=100 python3 lab.py preload /path/to/mod/build/mpcmini.so
-MPCLAB_PORT_OFFSET=100 python3 lab.py ssh 'tail -f /run/mpcmini.log'
+MPCLAB_PORT_OFFSET=100 python3 lab.py preload /path/to/mod/build/minimod.so
+MPCLAB_PORT_OFFSET=100 python3 lab.py ssh 'tail -f /run/minimod.log'
 ```
 
-Extra switches (off by default): `MPCMINI_HOOKS` (bitmask: 2 proc, 16 buttons,
-32 note_on, 64 cs, 128 note_off), `MPCMINI_DEBUG=1`, `MPCMINI_PROBE=1` with
-`MPCMINI_PROBES=<bits>`, `MPCMINI_MIDI=1`, `MPCMINI_TESTTRIM=0.09,0.45`.
+Extra switches (off by default): `MINIMOD_HOOKS` (bitmask: 2 proc, 16 buttons,
+32 note_on, 64 cs, 128 note_off), `MINIMOD_DEBUG=1`, `MINIMOD_PROBE=1` with
+`MINIMOD_PROBES=<bits>`, `MINIMOD_MIDI=1`, `MINIMOD_TESTTRIM=0.09,0.45`.
 
 ## How it hooks
 
@@ -129,8 +129,8 @@ the app's own `Graphics` calls. See [`docs/AM-MOD-NOTES.md`](../docs/AM-MOD-NOTE
 ## Build
 
 ```sh
-./build.sh     # build/mpcmini.so  (zig cc -target aarch64-linux-gnu, -O2)
-./pack.sh      # build/mpc-mini.zip (autorun package with a valid autorun.check)
+./build.sh     # build/minimod.so  (zig cc -target aarch64-linux-gnu, -O2)
+./pack.sh      # build/minimod.zip (autorun package with a valid autorun.check)
 ```
 
 `pack.sh` regenerates `autorun.check` = `sha256(autorun.json + autorun.sh + salt)`;
