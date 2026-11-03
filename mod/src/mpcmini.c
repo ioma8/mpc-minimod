@@ -3225,9 +3225,9 @@ static void screen_paint(void *p, void *g)
         return;
     /* third soft-key cell of the Sample page */
     draw_colour(g, 0xff000000);
-    draw_rect(g, 213, 0, 107, 29);
+    draw_rect(g, 213, 0, 107, 38);
     draw_colour(g, 0xffffffff);
-    draw_text(g, "AutoTrim", 215, 1, 103, 22, 14.0f);
+    draw_text(g, "AutoTrim", 215, 5, 103, 28, 18.0f);
 }
 
 static int install_screen_paint(void)
