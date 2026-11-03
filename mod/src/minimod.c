@@ -432,13 +432,14 @@ static void *g_sixteen; /* the live 16 Levels screen, if seen             */
 
 /* Chop mode replaces the Trim group with the Chop group on the Sample page.
  * The two groups are mutually exclusive children of the screen object, so the
- * live visibility of the Chop group's first child (+0x15e0) is the mode. */
+ * live visibility of the Chop group (+0x1ee0) is the mode. Cross-checked
+ * against the panel's CHOP LED: LED bright <=> +0x1ee0 visible. */
 static int in_chop_mode(void)
 {
     void *s = g_screen;
     if (!s || FIELD(s, 0, uintptr_t) != base + 0x6e212a0) /* SampleModeScreen */
         return 0;
-    return FN(0x112fd50, int (*)(void *))((char *)s + 0x15e0) != 0;
+    return FN(0x112fd50, int (*)(void *))((char *)s + 0x1ee0) != 0;
 }
 
 static int sixteen_tune_active(void)
@@ -1491,6 +1492,10 @@ static void buttons(void *event)
 
     unsigned code = event ? FIELD(event, 8, uint8_t) : 0;
     unsigned down = event ? FIELD(event, 9, uint8_t) : 0;
+    if (getenv("MINIMOD_VIS") && g_screen)
+        mlog("minimod: vis code=0x%02x chopA=%d chopB=%d\n", code,
+             FN(0x112fd50, int (*)(void *))((char *)g_screen + 0x15e0),
+             FN(0x112fd50, int (*)(void *))((char *)g_screen + 0x1ee0));
     if (code == 0x31) { /* SHIFT */
         g_shift = down ? 1 : 0;
         if (!down) {

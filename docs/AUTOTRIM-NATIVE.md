@@ -88,17 +88,19 @@ in the image):
 
 | offset | vtable | Trim page | Chop page |
 |---|---|---|---|
-| `+0x15e0` (first of four) | `0x706d428` | hidden | **visible** |
-| `+0x1ee0` | `0x6d849e8` | **visible** | hidden |
+| `+0x15e0` (first of four) | `0x706d428` | **visible** | hidden |
+| `+0x1ee0` | `0x6d849e8` | hidden | **visible** |
 
 Toggling the panel `CHOP` key (button code `0x4b`) flips both, and they never
-disagree, so `Component::isVisible` (`0x112fd50`) on the first Chop child is the
-mode:
+disagree. The pair was cross-checked against the control surface's CHOP LED
+(id 75: `1` = off, `2` = on), which removes any guess about which offset is
+which group: LED `1` → `+0x15e0` visible, LED `2` → `+0x1ee0` visible. So
+`Component::isVisible` (`0x112fd50`) on `+0x1ee0` is the mode:
 
 ```c
 static int in_chop_mode(void)   /* only meaningful on SampleModeScreen */
 {
-    return isVisible(screen + 0x15e0);
+    return isVisible(screen + 0x1ee0);
 }
 ```
 
@@ -106,10 +108,10 @@ static int in_chop_mode(void)   /* only meaningful on SampleModeScreen */
 `B3` press is passed to the stock handler untouched (in Chop, `Shift+B3` is the
 stock Split), no trim is computed, and the soft-key cell is not overdrawn.
 
-Verified in the emulator after the change: `SHIFT`+`B3` in Trim logs
-`native trim pad=0 … bounds=0..7204` plus the toast; the same combo in Chop logs
-nothing. Holding `SHIFT` changes 517 pixels of the third soft-key cell in Trim
-and **0** pixels in Chop, i.e. the overlay is gone too.
+Verified in the emulator against the CHOP LED: with the LED off `SHIFT`+`B3`
+dispatches the native trim once and the paint hook evaluates the overlay with
+`chop=0` (10/10 paints); with the LED on the same combo dispatches no trim and
+every paint sees `chop=1` (8/8), so the overlay is skipped as well.
 
 ## The toast, and how it is cleared
 
