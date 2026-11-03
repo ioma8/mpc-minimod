@@ -3130,7 +3130,7 @@ static void *toast_expiry(void *arg)
     mlog("mpcmini: toast expiry comp=%p repaint=%p\n", g_paint_comp, orig_repaint);
     if (orig_repaint && g_paint_comp) {
         /* the entry takes two packed pairs: (x,y) and (w,h) */
-        orig_repaint(g_paint_comp, 0, ((uint64_t)320 << 32) | (uint64_t)240);
+        orig_repaint(g_paint_comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
         mlog("mpcmini: toast expiry repainted 320x240\n");
     }
     return 0;
@@ -3588,7 +3588,7 @@ static void do_autotrim(void)
     {
         void *comp = g_paint_comp ? g_paint_comp : g_screen;
         if (orig_repaint && comp)
-            orig_repaint(comp, 0, ((uint64_t)320 << 32) | (uint64_t)240);
+            orig_repaint(comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
     }
     mlog("mpcmini: native trim pad=%d path='%s' frames=%u bounds=%u..%u\n",
          pad, path, frames, first, last+1);
