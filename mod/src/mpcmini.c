@@ -1044,6 +1044,29 @@ static void ctlhandler_probe(void *a0, uint64_t a1, uint64_t a2)
         orig_ctlhandler(a0, a1, a2);
 }
 
+/* FUN_02912f10(padBlock) returns the object the page reads its trim from
+ * (Start at +0x78, End at +0xd0). Capturing it in-process avoids stale pointers. */
+static void *g_trimobj;
+static void *(*orig_gettrim)(void *);
+
+static void *gettrim_probe(void *blk)
+{
+    void *r = orig_gettrim ? orig_gettrim(blk) : 0;
+    if (r && (uintptr_t)r > 0xffff00000000ULL && (uintptr_t)r < 0xffffff000000ULL) {
+        static int n;
+        if (g_trimobj != r || n < 3) {
+            float f0 = -1, f1 = -1;
+            rd((uintptr_t)r + 0x78, &f0, 4);
+            rd((uintptr_t)r + 0xd0, &f1, 4);
+            mlog("mpcmini: trimobj=%p (blk=%p) start=%.4f end=%.4f\n",
+                 r, blk, (double)f0, (double)f1);
+            n++;
+        }
+        g_trimobj = r;
+    }
+    return r;
+}
+
 static void (*orig_bcast)(void *, float);
 static void (*orig_cc)(void *, unsigned, float, float);
 static void (*orig_sync)(void *, void *, void *, void *);
@@ -4288,6 +4311,9 @@ __attribute__((constructor)) static void load(void)
     void *t_ch = install_hook(base + 0x2804e90, (void *)ctlhandler_probe);
     if (t_ch)
         orig_ctlhandler = (void (*)(void *, uint64_t, uint64_t))t_ch;
+    void *t_gt = install_hook(base + 0x2812f10, (void *)gettrim_probe);
+    if (t_gt)
+        orig_gettrim = (void *(*)(void *))t_gt;
     void *t_trim = install_hook(base + A_TRIM_CORE, (void *)trim_probe); /* also learns param->property */
     void *t_bc = install_hook(base + A_BROADCAST, (void *)bcast_hook);
     if (t_bc)

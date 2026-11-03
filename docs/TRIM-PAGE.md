@@ -1872,3 +1872,36 @@ paint), page-widget writes, a live page capture, the app's own control entry
 tracing of the apply function. The remaining technique is a longer store trace
 over the whole control-event chain with a float filter, which is slow (single
 stepping) but has not yet been tried to completion.
+
+### 30.15 The getter object is not the trim either (round 7)
+
+Hooking `FUN_02912f10` (the getter the control handler calls) captures the object
+it returns, live and in-process:
+
+```
+trimobj=0xffffe2c46db0 (blk=0xffffe2c46670) start=0.0000 end=0.0000
+```
+
+Both `+0x78` (Start) and `+0xd0` (End) read zero while the knobs are at 45/80 and
+30/100, so those offsets do **not** hold the trim as floats. Writing float bits
+there does not set the trim - it **removes the page's markers entirely** (the
+waveform then draws edge to edge), which means the fields hold something else
+(very likely pointers). The write was reverted and the build restored
+(392 marker pixels back, `commit core done` unchanged).
+
+### 30.16 Techniques exhausted
+
+| technique | outcome |
+|---|---|
+| property write (outside paint) | no visual change |
+| property write (inside paint) | no visual change |
+| property write + broadcast | no visual change |
+| page widget write (`page+0x1588/+0x15e0`) | removed the markers (enums) |
+| live page capture + repaint | no visual change |
+| control entry `FUN_01a68020` (correct registers) | faults |
+| four-point value scan | ~200 candidates, no isolation |
+| store trace of the apply function | only pointer stores |
+| getter object write (`+0x78/+0xd0`) | removed the markers |
+
+The renderer's data source has not been identified, and every candidate write
+either does nothing or damages the page's own drawing.
