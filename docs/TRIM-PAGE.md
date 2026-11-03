@@ -865,3 +865,26 @@ name the fields.
 
 Conclusion: the trim's persistent state is updated by the *encoder* path behind
 `code 0x06`, which is the one thing not yet traced.
+
+
+## 16. Round 5 result: pixel-identical trim, but the injection aborts the app
+
+The knob replay through the app's CC dispatcher works:
+
+* it needs the Start and End **properties**. They are derivable from the panel
+  state once the knobs have been touched (learned at a real knob move), and a
+  structural search for the three properties 0x58 apart also finds them;
+* with both properties known, `cc_inject` stores the values through the app
+  (`app stored 0.0000/0.8268`), and the page repaints itself;
+* the resulting framebuffer is **pixel-identical** to setting the knobs by hand
+  to the same values: `autotrim vs hand-set reference: 0 pixels`, while both
+  differ from the untrimmed view by 26136 pixels.
+
+But the app **aborts shortly afterwards** (the pid changes), so the injection is
+now behind `MPCMINI_CCINJECT` and the default path is the direct core write,
+which is stable (`pid 69688 -> 69688`) and writes both parameters
+(`commit core done p0=0.0000 p1=0.8268`).
+
+So: the trim computation, the parameter write and the visual result are all
+correct and validated. What is left is either finding why the app aborts after
+the replay, or triggering the page's own refresh after the stable write.

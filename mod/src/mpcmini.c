@@ -1056,6 +1056,19 @@ static void buttons(void *event)
             }
         }
     }
+    if (code == 0x06) {
+        static int k06;
+        if (k06 < 10) {
+            k06++;
+            unsigned char raw[16];
+            if (rd((uintptr_t)event, raw, sizeof raw))
+                mlog("mpcmini: ev06 %02x %02x %02x %02x %02x %02x %02x %02x | "
+                     "%02x %02x %02x %02x %02x %02x %02x %02x\n",
+                     raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                     raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14],
+                     raw[15]);
+        }
+    }
     if (code == 0x36 || code == 0x37) {
         int plus = (code == 0x36);
         if (down) {
@@ -1099,14 +1112,7 @@ static void note_on(void *input, int src, int pad, void *props, float vel)
 {
     g_last_pad = pad;
     g_props = props;
-    {
-        static int nn;
-        if (nn < 12) {
-            nn++;
-            mlog("mpcmini: note_on pad=%d src=%d vel=%.2f props=%p\n", pad, src,
-                 (double)vel, props);
-        }
-    }
+
     if (!g_replaying_pad && pad >= 0 && pad < 128) {
         /* remember a real pad press so the page can be re-selected later */
         g_pad_rec[pad].input = input;
@@ -2141,6 +2147,81 @@ static void heap_diff(const char *tag)
     free(buf);
 }
 
+/* The three knobs' properties are consecutive objects 0x58 apart (K1 at
+ * base+0x1ac0, K2 at +0x1b18, K3 at +0x1b70). Finding that triple identifies
+ * the control surface without needing a knob move first. */
+static int prop_like(uintptr_t x)
+{
+    uintptr_t head = 0;
+    float v = 0;
+    if (!rd(x + 0x10, &head, 8) || !head || !mapped((void *)head))
+        return 0;
+    if (!rd(x + 0x50, &v, 4) || !(v >= -2.0f && v <= 2.0f))
+        return 0;
+    return 1;
+}
+
+static int prop_listeners(uintptr_t x)
+{
+    uintptr_t head = 0;
+    if (!rd(x + 0x10, &head, 8) || !head || head == x + 8)
+        return 0;
+    int n = 0;
+    for (int i = 0; i < 32 && head && head != x + 8 && n < 99; ++i) {
+        uintptr_t next = 0;
+        n++;
+        if (!rd(head + 8, &next, 8) || !next || !mapped((void *)next))
+            break;
+        head = next;
+    }
+    return n;
+}
+
+static uintptr_t find_knob_props(void)
+{
+    ranges_load();
+    unsigned char *buf = malloc(65536);
+    if (!buf)
+        return 0;
+    uintptr_t best = 0;
+    int bestscore = 0;
+    for (int r = 0; r < g_nrng; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi; a += 65536) {
+            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+            n &= ~(size_t)7;
+            if (!rd(a, buf, n))
+                break;
+            for (size_t o = 0; o + 0xb0 + 0x58 + 8 <= n; o += 8) {
+                uintptr_t cand = a + o;
+                if (cand >= base && cand < base + 0x9000000)
+                    continue;
+                int ok = 1, score = 0;
+                for (int k = 0; k < 3 && ok; ++k) {
+                    size_t co = o + (size_t)k * 0x58;
+                    uintptr_t head;
+                    float v;
+                    memcpy(&head, buf + co + 0x10, 8);
+                    memcpy(&v, buf + co + 0x50, 4);
+                    if (!head || !mapped((void *)head) || !(v >= -2.0f && v <= 2.0f))
+                        ok = 0;
+                    else if (head != cand + (uintptr_t)k * 0x58 + 8)
+                        score++; /* a non-empty listener list */
+                }
+                if (ok && score > bestscore) {
+                    bestscore = score;
+                    best = cand;
+                }
+            }
+        }
+    }
+    free(buf);
+    if (best)
+        mlog("mpcmini: knob triple %p score=%d\n", (void *)best, bestscore);
+    return best;
+}
+
 static void commit_trim(void)
 {
     void *p0 = g_trim_param0, *p1 = g_trim_param1;
@@ -2179,16 +2260,49 @@ static void commit_trim(void)
     mlog("mpcmini: props %p/%p (cur %.4f/%.4f, seen %d)\n", (void *)pr0,
          (void *)pr1, (double)cur0, (double)cur1, g_nbc);
 
-    /* Preferred: replay the knob through the app's own CC dispatcher, so the
-     * app performs the write, the notification and the repaint itself. */
-    {
+    /* Replaying the knob through the app's CC dispatcher gives the exact visual
+     * result of a manual trim (verified pixel-identical), but the app aborts
+     * shortly afterwards on this firmware, so it is opt-in only. */
+    if (getenv("MPCMINI_CCINJECT")) {
         uintptr_t base = 0, obj = 0;
         if (pr0)
             base = pr0 - 0x1ac0;
         else if (pr1)
             base = pr1 - 0x1b18;
-        if (base)
-            obj = ctl_obj_for(base);
+        else {
+            uintptr_t kp = find_knob_props();
+            if (kp) {
+                base = kp - 0x1ac0;
+                mlog("mpcmini: knob property triple at %p\n", (void *)kp);
+            }
+        }
+        if (base) {
+            /* Only trust a control base whose K1/K2 properties really exist and
+             * have a terminated listener list; a wrong one crashes the app. */
+            uintptr_t p1 = base + 0x1ac0;
+            uintptr_t head = 0;
+            float v = 0;
+            int ok = rd(p1 + 0x10, &head, 8) && head && mapped((void *)head) &&
+                     rd(p1 + 0x50, &v, 4) && v >= -2.0f && v <= 2.0f;
+            if (ok) {
+                uintptr_t node = head;
+                int steps = 0;
+                for (; steps < 64 && node && node != p1 + 8; ++steps) {
+                    uintptr_t next = 0;
+                    if (!rd(node + 8, &next, 8) || !next || !mapped((void *)next))
+                        break;
+                    node = next;
+                }
+                if (node != p1 + 8)
+                    ok = 0; /* list does not terminate at the sentinel */
+            }
+            if (!ok) {
+                mlog("mpcmini: control base %p rejected\n", (void *)base);
+                base = 0;
+            } else {
+                obj = ctl_obj_for(base);
+            }
+        }
         mlog("mpcmini: cc base=%p obj=%p\n", (void *)base, (void *)obj);
         if (obj) {
             unsigned r0 = (unsigned)(v0 * 127.0f + 0.5f);
