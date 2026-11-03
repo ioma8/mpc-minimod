@@ -888,3 +888,30 @@ which is stable (`pid 69688 -> 69688`) and writes both parameters
 So: the trim computation, the parameter write and the visual result are all
 correct and validated. What is left is either finding why the app aborts after
 the replay, or triggering the page's own refresh after the stable write.
+
+
+## 17. Round 6: the parameter write is reliable; the page reads a model
+
+New facts:
+
+* **A parameter can silently reject a write while it still holds -1.** The core
+  treats that as "not yet bound". `commit_trim` now retries the pair until both
+  read back, which is why the log finally shows both values
+  (`commit core done p0=0.0000 p1=0.8268`) instead of one of them staying at 0
+  or -1.
+* **The displayed trim is not the parameter.** With both parameters correct and
+  the page re-selected, the framebuffer differs from the untrimmed view by
+  **1 pixel** - i.e. it still shows the full sample, while the hand-set trim
+  differs by 4626. The page draws from a model that the knob's own handler
+  updates.
+* **The knob replay does update that model** (round 5: pixel-identical to a hand
+  trim) but the app then dies with `SIGSEGV` at a fixed heap address
+  (`pc=addr=0xffffe60544d8`), i.e. a call through a bad function pointer inside
+  the app's own processing, not in our code.
+* Re-pressing an arbitrary captured control is not a valid refresh: the object
+  recorded from the last `code 0x06` press is not always the pad and pressing it
+  opened a menu. It is disabled.
+
+So the remaining work is exactly: find the model field the knob's handler writes
+after the broadcast. The heap-fingerprint tool is in place for that but needs a
+byte copy of the changed pages to name the field.

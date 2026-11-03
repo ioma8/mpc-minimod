@@ -1019,6 +1019,7 @@ static void pitch_off(void *a0, uint64_t a1, uint64_t a2, int a3)
 
 static void heap_snapshot(const char *tag);
 static void heap_diff(const char *tag);
+static uintptr_t g_last_press_obj;
 
 static void buttons(void *event)
 {
@@ -1055,6 +1056,13 @@ static void buttons(void *event)
                      raw[15]);
             }
         }
+    }
+    if (code == 0x06 && down == 0x7f) {
+        /* remember the object of the last press so it can be replayed to make
+         * the sample page reload (which is when it redraws its trim) */
+        uintptr_t ob = 0;
+        if (rd((uintptr_t)event, &ob, 8) && ob)
+            g_last_press_obj = ob;
     }
     if (code == 0x06) {
         static int k06;
@@ -2066,7 +2074,9 @@ static void cc_replay(unsigned cc, unsigned raw)
 
 static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
 {
-    unsigned char ev[16];
+    /* Static, not stack: the app may keep the pointer it was handed (the abort
+     * after the replay looked exactly like a dangling event). */
+    static unsigned char ev[64];
     memset(ev, 0, sizeof ev);
     *(uintptr_t *)ev = obj;
     ev[8] = (unsigned char)cc;
@@ -2222,6 +2232,55 @@ static uintptr_t find_knob_props(void)
     return best;
 }
 
+/* Every listener of a real property has a vtable inside the app's
+ * .data.rel.ro. If one does not, the property is not the one the page uses and
+ * broadcasting through it would jump into garbage. */
+static int prop_listeners_sane(uintptr_t P)
+{
+    uintptr_t node = 0;
+    if (!rd(P + 0x10, &node, 8) || !node)
+        return 0;
+    int n = 0;
+    for (; n < 32 && node && node != P + 8; ++n) {
+        uintptr_t tgt = 0, next = 0, vt = 0;
+        if (!rd(node + 0x18, &tgt, 8) || !rd(node + 8, &next, 8))
+            return 0;
+        tgt &= ~(uintptr_t)3;
+        if (!tgt || !mapped((void *)tgt))
+            return 0;
+        if (!rd(tgt, &vt, 8))
+            return 0;
+        if (vt < base + 0x6ddf910 || vt > base + 0x7162018)
+            return 0;
+        if (!next || !mapped((void *)next))
+            return 0;
+        node = next;
+    }
+    return n > 0;
+}
+
+/* The trim parameter is the listener of the knob's property whose vtable is
+ * TrimParameter's. That makes the Start/End pair exact, with no scanning and no
+ * dependence on which knob was touched last. */
+static uintptr_t param_from_prop(uintptr_t P)
+{
+    uintptr_t node = 0;
+    if (!P || !rd(P + 0x10, &node, 8) || !node)
+        return 0;
+    for (int i = 0; i < 32 && node && node != P + 8; ++i) {
+        uintptr_t tgt = 0, next = 0, vt = 0;
+        if (!rd(node + 0x18, &tgt, 8) || !rd(node + 8, &next, 8))
+            return 0;
+        tgt &= ~(uintptr_t)3;
+        if (tgt && mapped((void *)tgt) && rd(tgt, &vt, 8) && vt == base + 0x6e1b240)
+            return tgt;
+        if (!next || !mapped((void *)next))
+            return 0;
+        node = next;
+    }
+    return 0;
+}
+
 static void commit_trim(void)
 {
     void *p0 = g_trim_param0, *p1 = g_trim_param1;
@@ -2260,6 +2319,22 @@ static void commit_trim(void)
     mlog("mpcmini: props %p/%p (cur %.4f/%.4f, seen %d)\n", (void *)pr0,
          (void *)pr1, (double)cur0, (double)cur1, g_nbc);
 
+    /* Exact pair from the knob properties, when we can find them. */
+    {
+        uintptr_t kp = find_knob_props();
+        if (kp) {
+            uintptr_t sp = param_from_prop(kp), ep = param_from_prop(kp + 0x58);
+            mlog("mpcmini: params from props %p/%p (had %p/%p)\n", (void *)sp, (void *)ep,
+                 g_trim_param0, g_trim_param1);
+            if (sp && ep) {
+                g_trim_param0 = (void *)sp;
+                g_trim_param1 = (void *)ep;
+                p0 = (void *)sp;
+                p1 = (void *)ep;
+            }
+        }
+    }
+
     /* Replaying the knob through the app's CC dispatcher gives the exact visual
      * result of a manual trim (verified pixel-identical), but the app aborts
      * shortly afterwards on this firmware, so it is opt-in only. */
@@ -2296,6 +2371,10 @@ static void commit_trim(void)
                 if (node != p1 + 8)
                     ok = 0; /* list does not terminate at the sentinel */
             }
+            if (ok && !prop_listeners_sane(p1))
+                ok = 0;
+            if (ok && !prop_listeners_sane(base + 0x1b18))
+                ok = 0;
             if (!ok) {
                 mlog("mpcmini: control base %p rejected\n", (void *)base);
                 base = 0;
@@ -2367,13 +2446,19 @@ static void commit_trim(void)
         FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
     else
         FN(A_TRIM_CORE, void (*)(float, void *))(v0, p0);
-    {
-        float got = 0;
-        if (rd((uintptr_t)p0 + T_VALUE, &got, 4) && got < -0.5f) {
-            mlog("mpcmini: start rejected (%.3f), retrying after end\n", (double)got);
+    /* Either parameter can reject a write while it still holds -1 (the core
+     * treats that as "not yet bound"), so retry the pair a few times. */
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        float c0 = 0, c1 = 0;
+        int ok0 = rd((uintptr_t)p0 + T_VALUE, &c0, 4) && c0 > -0.5f;
+        int ok1 = rd((uintptr_t)p1 + T_VALUE, &c1, 4) && c1 > -0.5f;
+        if (ok0 && ok1)
+            break;
+        mlog("mpcmini: retry %d (p0=%.3f p1=%.3f)\n", attempt, (double)c0, (double)c1);
+        if (!ok1)
             FN(A_TRIM_CORE, void (*)(float, void *))(v1, p1);
+        if (!ok0)
             FN(A_TRIM_CORE, void (*)(float, void *))(v0, p0);
-        }
     }
     g_own_call = 0;
 
@@ -2399,6 +2484,22 @@ static void commit_trim(void)
          (double)check, (double)check2, (double)v0, (double)v1);
 
 done:
+    /* Re-press the last control so the page reloads: it only redraws its trim
+     * when the pad is (re)selected. Off by default - the object recorded from a
+     * press is not always the pad and pressing it can open a menu. */
+    if (0 && g_last_press_obj && orig_buttons) {
+        static unsigned char ev[32];
+        memset(ev, 0, sizeof ev);
+        *(uintptr_t *)ev = g_last_press_obj;
+        ev[8] = 0x06;
+        ev[9] = 0x7f;
+        g_replaying_pad = 1;
+        orig_buttons(ev);
+        ev[9] = 0x00;
+        orig_buttons(ev);
+        g_replaying_pad = 0;
+        mlog("mpcmini: re-pressed %p to refresh the page\n", (void *)g_last_press_obj);
+    }
     if (g_screen)
         FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
             g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
