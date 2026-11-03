@@ -528,8 +528,8 @@ static int pcm_at(const unsigned char *p, unsigned bps, unsigned format)
     return (short)(v >> 16);
 }
 
-/* SHIFT+B3 cycles 3 % -> 6 % -> untrimmed while SHIFT stays held; releasing
- * SHIFT resets the cycle. */
+/* SHIFT+B3 cycles 3 % -> 6 % -> 9 % -> untrimmed while SHIFT stays held;
+ * releasing SHIFT resets the cycle. */
 static int g_trim_step;
 static double g_trim_ratio;
 static int g_b3_down;      /* edge detection: the button auto-repeats while held */
@@ -1415,13 +1415,13 @@ static void buttons(void *event)
             orig_buttons(event);
         return;
     }
-    if (code == 0x0e && g_shift) { /* SHIFT + B3: 3 %, 6 %, untrimmed */
+    if (code == 0x0e && g_shift) { /* SHIFT + B3: 3 %, 6 %, 9 %, untrimmed */
         /* The button repeats while held, so act on the press edge only. */
         if (down && !g_b3_down) {
             /* Analysis is cheap now (block reads); it must stay on this thread
              * so the commit is queued for the very next repaint. */
             do_autotrim();
-            g_trim_step = (g_trim_step + 1) % 3;
+            g_trim_step = (g_trim_step + 1) % 4;
         }
         g_b3_down = down;
         return;
@@ -3508,12 +3508,13 @@ static void do_autotrim(void)
     char path[512] = {0};
     if (!frames || !wav_path_of(sample, frames, path, sizeof path) ||
         !wav_info(path, &fr, &rate, &ch, &off, &bytes, &format) || fr != frames) return;
-    if (g_trim_step >= 2) {
-        /* third press: remove the trim entirely */
+    if (g_trim_step >= 3) {
+        /* fourth press: remove the trim entirely */
         first = 0;
         last = frames ? frames - 1 : 0;
     } else {
-        g_trim_ratio = g_trim_step == 1 ? 0.06 : 0.03;
+        g_trim_ratio = g_trim_step == 0 ? 0.03
+                     : g_trim_step == 1 ? 0.06 : 0.09;
         int ok = wav_edges(path, fr, off, ch, bytes, format, &first, &last);
         g_trim_ratio = 0.0;
         if (!ok)

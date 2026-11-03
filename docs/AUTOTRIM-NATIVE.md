@@ -58,7 +58,7 @@ three times the former 1%. `MPCMINI_TRIM_DB` still overrides it. Verified in the
 emulator: ratio 0.0300, threshold 876 for peak 29204; A07 bounds 84..52786,
 A09 bounds 89..73431. The PCM/float regression checks still pass.
 
-## Three-step trim cycle (SHIFT held)
+## Four-step trim cycle (SHIFT held)
 
 `SHIFT` + `B3` now cycles while SHIFT stays held, and the counter resets on
 SHIFT release:
@@ -67,7 +67,8 @@ SHIFT release:
 |---|---|---|
 | 1 | 3 % of peak (876) | bounds `23..9794` |
 | 2 | 6 % of peak (1752) | bounds `62..7731` (tighter) |
-| 3 | none | bounds `0..15129` (trim removed) |
+| 3 | 9 % of peak (2628) | bounds `71..5358` (tighter still) |
+| 4 | none | bounds `0..15129` (trim removed) |
 
 `B3` is button code `0x0e`, the same code the control surface repeats while the
 button is held, so the handler acts on the press edge only (`g_b3_down`); without

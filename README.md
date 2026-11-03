@@ -7,7 +7,7 @@ a reboot restores stock.
 
 | what | how |
 | --- | --- |
-| **AutoTrim** — trims the selected sample to its silent edges; press again while SHIFT is held for a tighter trim, a third time to remove it | `SHIFT` + `B3` |
+| **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim | `SHIFT` + `B3` |
 | **Octave shift** in 16 Levels — 8 semitones per press | `PLUS` / `MINUS` (both = reset) |
 
 **Work in progress:** chromatic play from an external MIDI keyboard — see
