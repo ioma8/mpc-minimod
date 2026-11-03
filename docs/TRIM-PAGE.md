@@ -1203,3 +1203,77 @@ was measured to be pixel-identical to a hand trim, but its outcome varies betwee
 runs (once pixel-perfect, once inert, once followed by a fatal fault at
 `0xffffe60544d8`), so it stays behind `MPCMINI_CCINJECT`/`MPCMINI_ONESHOT` and
 is not the default.
+
+## 22. Ghidra decompilation of the pad-state path (round 14)
+
+Ghidra was made usable (see `docs/RE-GHIDRA.md`), which allowed reading the two
+functions that own the per-pad state.
+
+### 22.1 FUN_02902e60 - the pad-block loop
+
+```c
+void FUN_02902e60(long param_1,long param_2,int param_3) {
+  if (param_3 == 0) {
+    lVar3 = 0;
+    do {
+      lVar1 = *(long *)(param_1 + 0x22e8) + lVar3;   /* destination block */
+      lVar2 = *(long *)(param_2 + 0x22e8) + lVar3;   /* source block      */
+      lVar3 = lVar3 + 0xb30;
+      FUN_02918be0(lVar1,lVar2);
+    } while (lVar3 != 0x5980);                        /* 0x5980/0xb30 = 8 pads */
+  }
+  ...
+}
+```
+
+So: an array pointer at `object + 0x22e8`, blocks of `0xb30`, eight of them.
+
+### 22.2 FUN_02918be0 - the applier
+
+Reads the source block and pushes it into the page:
+
+```c
+local_7c = *(undefined4 *)(param_2 + 0x1a8);        /* -> broadcaster at param_1+0x158 */
+local_80 = *(undefined4 *)(param_2 + 0x220);        /* -> FUN_014b16a0(param_1+0x1d0)   */
+local_84 = *(undefined4 *)(param_2 + 0x298);        /* -> FUN_014b16a0(param_1+0x248)   */
+                             *(undefined4 *)(param_2 + 0x310);
+                             *(undefined4 *)(param_2 + 0x368);
+                             *(undefined4 *)(param_2 + 0x3c0);
+```
+
+Six knob floats, stride `0x78`. Only the first goes through the *broadcaster*
+(`FUN_014bb930`) - which is why the broadcaster hook saw knob values but the
+other five knobs produced no observable traffic.
+
+### 22.3 What the runtime says
+
+Hooking `FUN_02918be0` and printing only calls whose source block holds
+plausible floats gives:
+
+```
+apply dst=0xffffe2c5b830 src=0xffffffffcb68 start=0.5000 end=0.0000
+apply dst=0xffffe2c5c360 src=0xffffffffcb68 start=0.5000 end=0.0000   (+0xb30)
+apply dst=0xffffe2c67f50 src=0xffffffffcb68 start=0.5000 end=0.0000
+...
+```
+
+* the destination steps by exactly `0xb30` - these **are** the eight pad blocks,
+  and they live on the heap at `0xffffe2c5b830` for pad 0;
+* the source is `0xffffffffcb68`, which `/proc/<pid>/maps` places inside
+  `[stack]` (`fffffffdf000-1000000000000`) - so the app copies **stack -> block**,
+  i.e. it is *saving* the page's widget values into the pad block;
+* dumping block 0 afterwards shows zeros at `+0x1a8/+0x220/+0x298` and a single
+  `0.5` at `+0x108`, i.e. the block did not receive the knob values from the
+  stack copy in this path.
+
+### 22.4 Conclusion
+
+The pad blocks are real and their layout is confirmed statically, but in the
+observed path the app writes *into* them from a stack temporary that does not
+carry the live knob values. The knobs' own write path is therefore upstream of
+this copy, and it is still not identified. What is now known for certain:
+
+* the state container is `*(object + 0x22e8)`, eight `0xb30` blocks;
+* the per-pad trim fields are `+0x1a8` (Start) and `+0x220` (End), stride `0x78`;
+* writing the parameter, its applied copy, the property cache, the layer frames
+  or the slider does **not** reach it (verified with the overlay disabled: 0 px).
