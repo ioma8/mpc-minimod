@@ -18,5 +18,8 @@ analysis/
 out/
 out-*/
 
+# Scratch area: local probes, backups, the raw app binary
+ztmp/
+
 # macOS
 .DS_Store
