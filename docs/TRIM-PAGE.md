@@ -1526,3 +1526,54 @@ The build was restored to the last known-good source and re-verified:
 ```
 autotrim: 5196 px | pid unchanged
 ```
+
+## 28. The knob handler's own reads (round 17)
+
+`FUN_02904e90(page, control_id, flags)` is a switch over control ids. For the
+trim controls it reads the pad block at `*(page + 0x22e8) + idx*0xb30`:
+
+```c
+case 0xc0a: case 0xc12: case 0xc1a: case 0xc22:      /* Start */
+    uVar21 = *(uint *)(block + 0x1a8);
+case 0xc0b: case 0xc13: case 0xc1b: case 0xc23:      /* End   */
+    uVar21 = (uint)((float)*(int *)(block + 0x220) / 127.0);
+case 0xc0c: case 0xc14: case 0xc1c: case 0xc24:
+    uVar21 = (uint)((float)*(int *)(block + 0x298) / 127.0);
+```
+
+Two things follow:
+
+* the control ids are `0xc0a + 8*pad` (Start) and `0xc0b + 8*pad` (End) - so the
+  pad index is encoded in the id, not looked up separately;
+* the fields are read as **ints** and divided by 127, i.e. the raw knob value.
+
+### 28.1 But the reachable blocks are defaults
+
+Reading those fields on every page captured in a live run gives, for all eight
+pages:
+
+```
+pg0 arr=0xffffe2e465a0 start=1056964608 end=0
+pg1 arr=0xffffe2e56dd0 start=1056964608 end=0
+...
+```
+
+`1056964608 = 0x3F000000` = **0.5f**, and `end = 0`. So the blocks reachable from
+the pages the constructor hook sees hold *defaults*, not the live trim - which is
+also why scanning them for the knob values found nothing.
+
+### 28.2 Status
+
+The wiring is fully mapped (control id -> block -> field -> 0..1 position), but
+the block instance that the *visible* page reads is not one of the blocks
+reachable from the captured pages, and no field on those pages tracks a knob
+move. Resolving this needs either a live debugger breakpoint on
+`FUN_02904e90` with a real knob event (to see which page/block it receives), or
+accepting the overlay as the visible representation.
+
+The shipped build is unchanged and verified:
+
+```
+autotrim: 5197 px | pid unchanged
+commit core done p0=0.0000 p1=0.8268
+```
