@@ -41,6 +41,17 @@
 
 /* ---------------------------------------------------------------- anchors */
 /* application file offsets (== virtual addresses in the PIE of 1.3.0.12) */
+/* Release switches. */
+#ifndef MPCMINI_LOG
+#define MPCMINI_LOG 0      /* 0: no log file, no output at all */
+#endif
+/* Chromatic play from an external controller is not shipped: the control
+ * surface carries a proprietary frame format, not MIDI, so the feature needs the
+ * decoder first. See docs/MIDI-CHROMATIC.md. */
+#ifndef MPCMINI_CHROMATIC
+#define MPCMINI_CHROMATIC 0
+#endif
+
 /* Release builds carry no probes: the /run channels, the experimental hooks
  * and the polling threads are all compiled out unless MPCMINI_DEBUG is set. */
 #ifndef MPCMINI_DEBUG
@@ -201,6 +212,9 @@ static int g_log_full;
 
 static void mlog(const char *fmt, ...)
 {
+#if !MPCMINI_LOG
+    (void)fmt;
+#else
     if (log_fd < 0 || g_log_full)
         return;
     char buf[512];
@@ -225,6 +239,7 @@ static void mlog(const char *fmt, ...)
         g_log_bytes += (unsigned long)n;
     }
     pthread_mutex_unlock(&g_log_mtx);
+#endif
 }
 
 /* ------------------------------------------------------- process memory */
@@ -1223,7 +1238,9 @@ static void (*orig_repaint)(void *, uint64_t, uint64_t);
 
 static void set_filter_text(const char *t);
 static void do_autotrim(void);
+#if MPCMINI_CHROMATIC
 static void play_note(int pitch, int on, float velocity);
+#endif
 
 static volatile int g_shift;
 static volatile int g_trim_req;
@@ -3355,6 +3372,7 @@ static void str_assign_hook(void *dest, const char *text)
 
 
 
+#if MPCMINI_CHROMATIC
 /* ------------------------------------------------------------ MIDI (feature 2) */
 /* Chromatic play from an external controller: the app already receives MIDI on
  * its ALSA rawmidi node; we read the same node and trigger the pads with the
@@ -3418,6 +3436,7 @@ static void play_note(int pitch, int on, float velocity)
     if (on)
         orig_note_on(0, 0, pad, 0, velocity);
 }
+#endif /* MPCMINI_CHROMATIC */
 
 /* -------------------------------------------------------- probe threads */
 static void *needle_thread(void *arg)
@@ -3943,7 +3962,9 @@ static int find_main(struct dl_phdr_info *info, size_t size, void *out)
 
 __attribute__((constructor)) static void load(void)
 {
+#if MPCMINI_LOG
     log_fd = open("/run/mpcmini.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+#endif
 #if MPCMINI_DEBUG
     /* Debug builds only: the watch probe needs to see the fault it caused.
      * Never installed in release - swallowing a SIGSEGV/SIGBUS changes the
@@ -4097,12 +4118,15 @@ __attribute__((constructor)) static void load(void)
     mlog("mpcmini: codes relay=%p tramp=%p\n", (void *)relay_page,
          (void *)tramp_page);
     pthread_t th;
-    /* External MIDI is on unless explicitly disabled. */
+#if MPCMINI_CHROMATIC
     /* The app owns the control-surface rawmidi node; opening it here makes the
-     * stock app fail to start, so the MIDI feature stays opt-in. */
+     * stock app fail to start, so the feature is opt-in. */
     const char *midi_env = getenv("MPCMINI_MIDI");
     if (midi_env && atoi(midi_env) != 0)
         pthread_create(&th, 0, midi_thread, 0);
+#else
+    (void)th;
+#endif
     mlog("mpcmini: base=%p mask=%d safe=%d probe=%d (ctor=%d proc=%d plus=%d minus=%d)\n",
          (void *)base, hook_mask, safe_mode, probe_mode, t_ctor != 0, t_proc != 0);
 }
