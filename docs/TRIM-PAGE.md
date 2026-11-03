@@ -1069,3 +1069,20 @@ one UI turn, and that same turn leaves something behind that faults afterwards.
 
 The shipping default stays the stable path: exact parameter write plus the drawn
 edges (192 px), verified again at the end of this round.
+
+
+### 20.3 Only the one-turn replay updates the model
+
+Two more results:
+
+* **The one-turn replay really does update the model** - re-selecting the pad
+  afterwards leaves the page pixel-identical to a hand trim (`HAND vs AUTO 0 px`),
+  so it is not a transient repaint.
+* **The split replay updates nothing.** One control per paint, then a pad
+  re-selection: `FULL vs AUTO 0 px`. So the two value changes must be delivered
+  in the same turn for the model to be written at all.
+
+That fixes the choice: the correct result is only reachable through the path
+that leaves the app in a state it later faults in (`pc = sp = 0xffffe60544d8`,
+`sp = 0xfffffffff3d0` before the fault). Capturing the fault registers is in
+place for the next run that survives long enough to be inspected.

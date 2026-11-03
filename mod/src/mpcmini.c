@@ -152,6 +152,22 @@ static void fault_handler(int sig, siginfo_t *si, void *ucv)
     /* The knob replay can end in a call through a bad pointer inside the app's
      * follow-up work. That jump faults before touching the stack, so jumping
      * back out of it is safe enough and keeps the app alive. */
+    if (si && si->si_signo == SIGSEGV) {
+        /* registers at the fault identify what the app was working on */
+        ucontext_t *uc = (ucontext_t *)ucv;
+        if (uc)
+            mlog("mpcmini: fault regs x0=%llx x1=%llx x2=%llx x3=%llx x19=%llx x20=%llx "
+                 "x21=%llx x22=%llx x23=%llx\n",
+                 (unsigned long long)uc->uc_mcontext.regs[0],
+                 (unsigned long long)uc->uc_mcontext.regs[1],
+                 (unsigned long long)uc->uc_mcontext.regs[2],
+                 (unsigned long long)uc->uc_mcontext.regs[3],
+                 (unsigned long long)uc->uc_mcontext.regs[19],
+                 (unsigned long long)uc->uc_mcontext.regs[20],
+                 (unsigned long long)uc->uc_mcontext.regs[21],
+                 (unsigned long long)uc->uc_mcontext.regs[22],
+                 (unsigned long long)uc->uc_mcontext.regs[23]);
+    }
     if (g_cc_recover) {
         g_cc_recover = 0;
         siglongjmp(g_cc_jmp, 1);
