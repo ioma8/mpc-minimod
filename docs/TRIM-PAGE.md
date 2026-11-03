@@ -1577,3 +1577,58 @@ The shipped build is unchanged and verified:
 autotrim: 5197 px | pid unchanged
 commit core done p0=0.0000 p1=0.8268
 ```
+
+## 29. Live debugger on the guest (round 18)
+
+The lab VM has no gdb/gdbserver/lldb, but ptrace is unrestricted
+(`ptrace_scope` absent), so a small tracer was cross-compiled for the guest:
+
+```
+zig cc -target aarch64-linux-musl -static -O2 -o knobtrace knobtrace.c
+scp knobtrace root@127.0.0.1:/tmp/       # port 2122
+/tmp/knobtrace <pid> <addr> <seconds> <maxhits>
+```
+
+It attaches, plants `BRK #0`, logs `pc/x0/x1/x2/x3/lr/x29`, single-steps the
+original instruction, re-arms, and detaches. It also walks the frame-pointer
+chain and prints return addresses inside the app image.
+
+### 29.1 FUN_02904e90 hit on a real knob turn
+
+```
+armed 0xaaaaad2a4e90 (base + 0x2804e90)
+HIT pc=0xaaaaad2a4e90 x0=0xffffe2c407a0 x1=0x462 x2=0 x3=0xffffe2c32f00 lr=0xaaaaac408064
+```
+
+* `x0` = the object the handler works on (heap, changes per process);
+* `x1 = 0x462` = the control id for the knob that was turned;
+* `lr = base + 0x1968064` = **the caller** - the knob dispatcher that invokes
+  the handler. That address is the next thing to decompile.
+
+Reading `x0 + 0x22e8` gave `0x800000000`, and `x0`'s first word is a heap
+pointer, so the object the handler receives is **not** the Sample page that owns
+the block array - the page is reached through it somehow.
+
+### 29.2 The trim core is not on the knob path
+
+A breakpoint on `TrimParam_SetValue` (`base + 0x15e70c0`) produced **no hits**
+while turning knobs. The core is only called by the mod's own commit, i.e. the
+knob path reaches the parameter by some other route.
+
+### 29.3 A hazard worth recording
+
+The mod already patches the first instruction of hooked functions with its own
+`B`. A tracer that plants `BRK` at the same address and later "restores" what it
+read will write back the mod's branch (fine) - but in this run the read value did
+not match, the entry ended up corrupted, and the app crashed and restarted.
+**Never breakpoint an address the mod has hooked**; hook-free addresses (the
+caller at `0x1968064`, `FUN_02904e90` itself) are safe.
+
+### 29.4 State
+
+App restarted cleanly and re-verified:
+
+```
+autotrim: 5197 px | pid unchanged
+commit core done p0=0.0000 p1=0.8268
+```
