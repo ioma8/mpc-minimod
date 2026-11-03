@@ -16,12 +16,28 @@ keyboard is in progress — [`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).
 
 ## Install
 
+1. Download **`mpc-mini.zip`** from the
+   [latest release](https://github.com/ioma8/mpc-minimod/releases/latest).
+2. Unzip it. You get a folder called `autorun`.
+3. Copy `autorun` onto the **SD card**, next to the folders already there — not
+   inside one of them. The card should end up with `autorun` at its top level.
+4. Put the card into the MPC Sample and switch it on. When it asks, choose
+   **Start**.
+5. That's it. The two features are active.
+
+Nothing on the device is changed: to go back to stock, delete the `autorun` folder
+from the card (or boot without the card).
+
+<details>
+<summary>Building it yourself</summary>
+
 ```sh
 cd mod && ./build.sh && ./pack.sh
-unzip -q build/mpc-mini.zip -d /Volumes/MPCSAMPLE/     # SD card, fresh autorun/
 ```
 
-Power on and confirm the prompt. To remove it, reboot or delete `autorun/` from the card.
+That writes `mod/build/mpc-mini.zip` — the same package as the release.
+
+</details>
 
 ## Docs
 
