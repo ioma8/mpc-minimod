@@ -1016,3 +1016,32 @@ The next step is therefore concrete: find that function's entry and its `x20`,
 write our two trim values into the model fields, and call it. That is the app's
 own state-loading path, so it should update the page without the synthetic-event
 crash.
+
+
+### 20.1 The sync function's shape, measured
+
+Hooking `0x2822260` (entry: `paciasp; stp x29,x30,[sp,-0x40]!`) shows it is called
+with two large objects `0x3d30` apart, and a count:
+
+```
+sync args 0xfffff3d10bc0 0xfffff3d148f0 (nil) 0x1
+sync args 0xfffff3d220e0 0xfffff3d25e10 (nil) 0x1
+```
+
+Inside, for every one of ~20 controls:
+
+```
+ldr s0, [x20, <property_off - 8>]   ; the model value
+add x0, x19, #<property_off>        ; the live property
+bl  0x13bb930                       ; broadcast
+```
+
+so the model field for a property at `+N` lives at `+N-8` of the second argument.
+Reading the captured objects at that relationship did not yet line up with the
+knob values (`a0+0x1ac0 = 0.5`, `a1+0x1ac0 = 0.0`), so which of the two is the
+source and which the destination is still open - the call captured may be the
+initial fill.
+
+This is the most promising lead: writing the two trim values into the right one
+of those objects and calling `0x2822260` is the app's own
+model -> properties -> UI path, with no synthetic event involved.

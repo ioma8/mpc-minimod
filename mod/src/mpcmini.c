@@ -964,6 +964,25 @@ static void *(*orig_prog_inst)(void *, int);
 static void (*orig_rotary)(void *, float);
 static void (*orig_bcast)(void *, float);
 static void (*orig_cc)(void *, unsigned, float, float);
+static void (*orig_sync)(void *, void *, void *, void *);
+
+static void sync_probe(void *a0, void *a1, void *a2, void *a3)
+{
+    static int n;
+    if (n < 6) {
+        n++;
+        mlog("mpcmini: sync args %p %p %p %p\n", a0, a1, a2, a3);
+        if (n == 1 && a0 && a1) {
+            float f = 0;
+            for (unsigned off = 0x18b8; off <= 0x1ac8; off += 0x58) {
+                if (rd((uintptr_t)a1 + off, &f, 4))
+                    mlog("mpcmini:   model+0x%x = %.4f\n", off, (double)f);
+            }
+        }
+    }
+    if (orig_sync)
+        orig_sync(a0, a1, a2, a3);
+}
 static uintptr_t g_bp[8];
 static volatile int g_nbp;
 
@@ -3743,6 +3762,9 @@ __attribute__((constructor)) static void load(void)
         probe_bits = atoi(bits_env);
     void *t_ctor = (hook_mask & 1) ? install_hook(base + A_SIXTEEN_CTOR, (void *)sixteen_ctor) : 0;
     void *t_proc = (hook_mask & 2) ? install_hook(base + A_SIXTEEN_PROC, (void *)sixteen_proc) : 0;
+    void *t_sync = install_hook(base + 0x2822260, (void *)sync_probe);
+    if (t_sync)
+        orig_sync = (void (*)(void *, void *, void *, void *))t_sync;
     void *t_cc = install_hook(base + 0x159f230, (void *)cc_capture);
     if (t_cc)
         orig_cc = (void (*)(void *, unsigned, float, float))t_cc;
