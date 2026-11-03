@@ -2033,3 +2033,45 @@ start property = 0x388a9e36 = 0.0001     (the trim's Start value)
 
 So the app's own model now really holds the auto-trim result, written through the
 app's own setter rather than by poking memory.
+
+### 31.3 Who reads the property (read watchpoint)
+
+Setting a **read** watchpoint (`Z3`) on the Start property's value slot and
+switching pages produces one and the same reader, over and over:
+
+```
+stop: T05thread:01;rwatch:ffffe4ecc768;
+   pc=0xaaaaac113090  file=0x1673090  ghidra=0x1773090
+   ... (repeats)
+```
+
+That code is a clamped getter:
+
+```
+177308c  ldr  x0, [x19, #0x68]      ; the property object
+1773090  ldr  s0, [x0, #0x50]       ; <-- the value read
+1773094  fcmpe s0, #0.0
+1773098  b.mi 0x1773160             ; negative -> special case
+177309c  fmov s1, 0x3f800000        ; 1.0 for clamping
+```
+
+So the property has exactly one consumer on this path, and it is *not* the edge
+renderer: no paint-side PC ever appears in the read trace. The renderer therefore
+gets its Start/End from somewhere else, which also explains why writing the
+property (now with a real notification) updates the app's model but not its
+drawing.
+
+### 31.4 Where the investigation stands after round 9
+
+New capability: **hardware watchpoints work** through QEMU's gdbstub, on virtual
+addresses, with the writing PC and registers reported. This is the tool the
+earlier rounds lacked.
+
+Established with it:
+
+* `Property_Broadcast(prop, value)` stores at `prop+0x50` and early-outs when the
+  value is unchanged (`0x14bb9f4`);
+* our commit had been pre-writing that slot, suppressing the notification - now
+  fixed, and the property verifiably holds the trim (`0.0001`);
+* the property's only reader is the clamped getter at `0x1773090`, i.e. the
+  renderer of the Start/End edges does **not** read the property.
