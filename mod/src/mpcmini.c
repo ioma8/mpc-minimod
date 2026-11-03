@@ -1067,6 +1067,25 @@ static void *gettrim_probe(void *blk)
     return r;
 }
 
+/* PadState_CopyIntoPage(page, padState): the pad is the source of the page's
+ * Start/End widgets (pad+0x1588 -> widget value, pad+0x15e0 -> End). */
+static void *g_padstate;
+static void (*orig_copypad)(void *, void *);
+
+static void copypad_probe(void *page, void *pad)
+{
+    uintptr_t vt = 0;
+    if (pad && (uintptr_t)pad > 0xffff00000000ULL && (uintptr_t)pad < 0xffffff000000ULL) {
+        float f0 = -1, f1 = -1;
+        rd((uintptr_t)pad + 0x1588, &f0, 4);
+        rd((uintptr_t)pad + 0x15e0, &f1, 4);
+        mlog("mpcmini: pad=%p start=%.4f end=%.4f\n", pad, (double)f0, (double)f1);
+        g_padstate = pad;
+    }
+    if (orig_copypad)
+        orig_copypad(page, pad);
+}
+
 static void (*orig_bcast)(void *, float);
 static void (*orig_cc)(void *, unsigned, float, float);
 static void (*orig_sync)(void *, void *, void *, void *);
@@ -3023,8 +3042,22 @@ static void dump_sliders(void *p)
 
 static void screen_paint(void *p, void *g)
 {
+    static int logged;
     g_paint_comp = p;
     g_paint_gfx = g;
+    if (!logged && p) {
+        uintptr_t vt = 0;
+        if (rd((uintptr_t)p, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
+            logged = 1;
+            mlog("mpcmini: paint comp=%p vt=%#lx file=%#lx\n",
+                 p, (unsigned long)vt, (unsigned long)(vt - base));
+            for (int i = 24; i < 32; ++i) {
+                uintptr_t fn = 0;
+                if (rd(vt + i * 8, &fn, 8) && fn >= base && fn <= base + 0x12000000ULL)
+                    mlog("mpcmini:   vt[%d] -> %#lx\n", i, (unsigned long)(fn - base));
+            }
+        }
+    }
     apply_pending_ctl();
     if (orig_screen_paint)
         orig_screen_paint(p, g);
@@ -4328,6 +4361,9 @@ __attribute__((constructor)) static void load(void)
     void *t_gt = install_hook(base + 0x2812f10, (void *)gettrim_probe);
     if (t_gt)
         orig_gettrim = (void *(*)(void *))t_gt;
+    void *t_cp = install_hook(base + 0x280dca0, (void *)copypad_probe);
+    if (t_cp)
+        orig_copypad = (void (*)(void *, void *))t_cp;
     void *t_trim = install_hook(base + A_TRIM_CORE, (void *)trim_probe); /* also learns param->property */
     void *t_bc = install_hook(base + A_BROADCAST, (void *)bcast_hook);
     if (t_bc)

@@ -1929,3 +1929,37 @@ only ever added a drawing pass on top of the app's own, never replaced it.
 
 So even the paint entry point is not identified, and with it the last chance to
 see what the renderer reads.
+
+### 30.18 Pad-state route (round 8)
+
+The pad object is the last plausible source: `FUN_0290dca0(page, pad)` copies
+`pad+0x1588` into the page's Start widget and `pad+0x15e0` into End, so writing
+*the pad* would survive a page rebuild.
+
+A hook on `FUN_0290dca0` never fires (the log shows no `pad=` line), and the
+installer reports the site has no `paciasp`/`bti` prologue, so the mod cannot
+interpose on it with the current hook scheme (which requires a PAC/BTI prologue
+to patch safely). Reaching the pad object therefore needs either a hook variant
+that can patch a plain-prologue function or a different capture point.
+
+### 30.19 Blocked: what is needed to finish this
+
+Six consecutive rounds have failed on the same concrete point: **the data the
+page renderer reads for the Start/End edges cannot be identified or written**.
+Every route has been tried and measured (30.16-30.18); the pad-state route is now
+also closed by the hook-installer limitation.
+
+To go further, one of these is required:
+
+* a debugger with **hardware watchpoints** on the app's heap, so a page field can
+  be watched across a knob turn (the emulator exposes no `perf`, and aarch64
+  Linux has no `PTRACE_SETHBPREGS`, so `ptrace` cannot do this here);
+* an app build with **symbols or type information**, so the page's paint can be
+  read directly instead of guessed from vtable slots that mean different methods
+  in different vtables;
+* permission to patch the app binary itself (the mod is an `LD_PRELOAD` shim, so
+  it cannot rewrite the renderer's read path).
+
+Until one of those is available, the feature ships as: trim computed and applied
+to the audio parameters exactly, and the trim drawn on screen by the mod's
+overlay during the app's own paint pass.
