@@ -1195,22 +1195,6 @@ static void trim_probe(void *self, float v)
         }
     }
     g_core_hit = 1;
-    /* am-mod's listeners keep their property at +0x40; x20 may be that
-     * listener rather than the property itself. Prefer the inner object when
-     * it looks like one. */
-    if (prop && mapped((void *)prop)) {
-        uintptr_t inner = 0;
-        if (rd(prop + 0x40, &inner, 8) && inner && mapped((void *)inner)) {
-            float f50 = 0, f1c = 0;
-            int ok50 = rd(inner + 0x50, &f50, 4) && f50 >= -0.001f && f50 <= 1.001f;
-            int ok1c = rd(inner + 0x1c, &f1c, 4) && f1c >= -0.001f && f1c <= 1.001f;
-            if (ok50 || ok1c) {
-                mlog("mpcmini: listener @%p -> property @%p\n", (void *)prop,
-                     (void *)inner);
-                prop = inner;
-            }
-        }
-    }
     {
         uintptr_t sl = slider_for_value(v * 100.0f);
         if (sl) {
@@ -1249,6 +1233,13 @@ static void trim_probe(void *self, float v)
     }
     if (prop && mapped((void *)prop)) {
         float v50 = 0;
+        static int learn_diag;
+        if (learn_diag < 12) {
+            learn_diag++;
+            int has = rd(prop + 0x50, &v50, 4);
+            mlog("mpcmini: learn? prop=%p c50=%s%.4f v=%.4f\n", (void *)prop,
+                 has ? "" : "?", (double)v50, (double)v);
+        }
         if (rd(prop + 0x50, &v50, 4) && v50 >= -0.001f && v50 <= 1.001f) {
             float d = v50 - v;
             if (d < 0)
@@ -1752,6 +1743,52 @@ static uintptr_t find_trim_page(float c0, float c1)
     return best;
 }
 
+/* Find the listener node that points at `param` and report what looks like its
+ * owner property. A property P keeps its list head at P+0x10 and its sentinel
+ * at P+8; a node keeps its target (tagged) at +0x18 and its next at +8. */
+static void probe_node(uintptr_t param)
+{
+    ranges_load();
+    unsigned char *buf = malloc(65536);
+    if (!buf)
+        return;
+    int hits = 0;
+    for (int r = 0; r < g_nrng && hits < 4; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && hits < 4; a += 65536) {
+            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+            n &= ~(size_t)7;
+            if (!rd(a, buf, n))
+                break;
+            for (size_t o = 0; o + 8 <= n && hits < 4; o += 8) {
+                uintptr_t q;
+                memcpy(&q, buf + o, 8);
+                if ((q & ~(uintptr_t)3) != param)
+                    continue;
+                uintptr_t node = a + o - 0x18;
+                uintptr_t owner = 0, next = 0, back = 0;
+                rd(node, &owner, 8);
+                rd(node + 8, &next, 8);
+                rd(node + 0x10, &back, 8);
+                mlog("mpcmini: node %p owner=%p next=%p back=%p\n", (void *)node,
+                     (void *)owner, (void *)next, (void *)back);
+                if (owner && mapped((void *)owner)) {
+                    uintptr_t head = 0;
+                    rd(owner + 0x10, &head, 8);
+                    float c50 = 0;
+                    int ok50 = rd(owner + 0x50, &c50, 4) && c50 >= -1.0f && c50 <= 1.0f;
+                    mlog("mpcmini:   owner+0x10=%p c50=%.4f (%d)\n", (void *)head,
+                         (double)c50, ok50);
+                }
+                hits++;
+                break;
+            }
+        }
+    }
+    free(buf);
+}
+
 static void commit_trim(void)
 {
     void *p0 = g_trim_param0, *p1 = g_trim_param1;
@@ -1767,6 +1804,8 @@ static void commit_trim(void)
     /* A learned property broadcasts exactly like a knob; the others are
      * written through the trim core. Broadcasting even one of them is what
      * makes the page repaint. */
+    if (getenv("MPCMINI_NODEPROBE"))
+        probe_node((uintptr_t)p0);
     uintptr_t pr0 = learned_prop((uintptr_t)p0);
     uintptr_t pr1 = learned_prop((uintptr_t)p1);
     mlog("mpcmini: learned %p/%p\n", (void *)pr0, (void *)pr1);
@@ -2208,26 +2247,41 @@ static void do_autotrim(void)
      * the learned one and the instance nearest to it (the stale copies sit at
      * the same address minus/plus a small offset). */
     if (g_npm > 0) {
-        uintptr_t live = g_pm[0].param;
-        uintptr_t near = 0;
-        long bestd = 1 << 30;
-        for (int i = 0; i < g_ntp; ++i) {
-            uintptr_t pp = (uintptr_t)g_tp[i].p;
-            if (pp == live || g_tp[i].mx != N)
-                continue;
-            long d = (long)pp - (long)live;
-            if (d < 0)
-                d = -d;
-            if (d < bestd) {
-                bestd = d;
-                near = pp;
+        uintptr_t live = g_pm[0].param, other = 0;
+        for (int i = 1; i < g_npm; ++i)
+            if (g_pm[i].param != live) {
+                other = g_pm[i].param;
+                break;
+            }
+        if (!other) {
+            long bestd = 1 << 30;
+            for (int i = 0; i < g_ntp; ++i) {
+                uintptr_t pp = (uintptr_t)g_tp[i].p;
+                if (pp == live || g_tp[i].mx != N)
+                    continue;
+                long d = (long)pp - (long)live;
+                if (d < 0)
+                    d = -d;
+                if (d < bestd) {
+                    bestd = d;
+                    other = pp;
+                }
             }
         }
-        if (near) {
+        if (other && other != live) {
+            /* Start is the smaller of the two current values. */
+            float va = 0, vb = 0;
+            rd(live + T_VALUE, &va, 4);
+            rd(other + T_VALUE, &vb, 4);
+            if (vb < va) {
+                uintptr_t t = live;
+                live = other;
+                other = t;
+            }
             p_start = live;
-            p_end = near;
-            mlog("mpcmini: using learned params %p/%p (d=%ld)\n", (void *)p_start,
-                 (void *)p_end, bestd);
+            p_end = other;
+            mlog("mpcmini: using learned params %p/%p\n", (void *)p_start,
+                 (void *)p_end);
         }
     }
 
