@@ -2139,3 +2139,34 @@ So the knob changes the picture through a path that touches none of the objects
 tried so far. The watchpoint tool can answer this, but the next target has to be
 the **paint function itself** - set a software breakpoint on a drawing primitive
 and walk up to the paint, then watch what that paint reads.
+
+### 31.9 Reaching the paint through a drawing primitive: blocked by tooling
+
+The overlay's own drawing calls identify the primitive `fillRect` at file
+`0x102e000`. A software breakpoint there is validated - it catches the mod's
+draws - but the app calls `fillRect` for **every UI rectangle on every frame**:
+a 40 s window produced **64 870 stops**, so a stop-per-hit RSP client cannot
+practically reach the few draws that matter (the trim edges in the y=88..186
+band).
+
+Filtering in the client is too slow (each stop costs several round trips) and
+QEMU's gdbstub has no conditional breakpoints, so `Z0` cannot be predicated on
+the `y` argument.
+
+### 31.10 What is needed for the next step
+
+A debugger with **conditional breakpoints**, so the breakpoint at `fillRect` can
+fire only for `y` inside the waveform band (and `w <= 2`, the edge lines). A real
+`gdb` for aarch64 connected to QEMU's gdbstub (`target remote :1234`) provides
+exactly that: `break *0x... if $w2 >= 88 && $w2 <= 186`.
+
+Everything else is already in place: the gdbstub starts on the running VM via
+QMP, the addresses are known (`fillRect` file `0x102e000`, `Property_Broadcast`
+file `0x14bb930`, the control handler file `0x2804e90`), and the mod's logs
+provide live object addresses.
+
+### 31.11 State after round 12
+
+Unchanged and verified: trim computed, parameters set (`p0=0.0000 p1=0.8268`),
+the app's model holding the trim via its own broadcaster, overlay drawing
+(384 marker pixels), app stable (pid 1219, `TracerPid: 0`).
