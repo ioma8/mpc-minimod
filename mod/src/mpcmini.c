@@ -2563,8 +2563,20 @@ static void commit_trim(void)
         if (obj) {
             unsigned r0 = (unsigned)(v0 * 127.0f + 0.5f);
             unsigned r1 = (unsigned)(v1 * 127.0f + 0.5f);
-            /* One control per paint: two broadcasts inside the same UI turn
-             * left the app in a state it died on afterwards. */
+            /* Default: one control per paint (safe, but the page does not
+             * update). MPCMINI_ONESHOT delivers both in one turn, which does
+             * update the model - and leaves the app faulting afterwards. */
+            if (getenv("MPCMINI_ONESHOT")) {
+                if (g_cc_ev_valid) {
+                    cc_replay(0x11, r1);
+                    cc_replay(0x10, r0);
+                } else {
+                    cc_inject(obj, 0x11, r1);
+                    cc_inject(obj, 0x10, r0);
+                }
+                mlog("mpcmini: one-shot replay done\n");
+                return;
+            }
             if (g_cc_step == 0) {
                 g_cc_step = 1;
                 g_cc_obj = obj;

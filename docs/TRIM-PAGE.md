@@ -1086,3 +1086,32 @@ That fixes the choice: the correct result is only reachable through the path
 that leaves the app in a state it later faults in (`pc = sp = 0xffffe60544d8`,
 `sp = 0xfffffffff3d0` before the fault). Capturing the fault registers is in
 place for the next run that survives long enough to be inspected.
+
+
+### 20.4 The one-turn replay is not reproducible
+
+The pixel-perfect result of section 20.2 could not be repeated. With identical
+code and an identical script, a fresh run gave:
+
+```
+sanity: full vs hand = 4626 px      (the hand reference does change the page)
+FULL vs AUTO: 192 px                (only our drawn edges)
+HAND vs AUTO: 4817 px
+pid 86236 -> 86236                  (no crash)
+learned props: 0xffffe4f0c718(p=0xffffe4aaeb90) 0xffffe4f0c770(p=0xffffe4aaf580)
+props 0xffffe4f0c718/0xffffe4f0c770   cc base=0xffffe4f0ac58   one-shot replay done
+```
+
+so the correct property pair, the correct base, the correct object and a
+successful replay all happened, and the page still did not change.
+
+Two things follow:
+
+* the trim state is being written (the properties read back `0.0000/0.8268`),
+  but whether the *page* picks it up depends on app state we do not control;
+* the one-turn replay is therefore not shippable: it was observed to update the
+  page once, to do nothing other times, and to crash a third time.
+
+The shipping default stays: exact parameter write (`p0=0.0000 p1=0.8268`) plus
+the two drawn edges (193 px, markers at x=253), verified again on a fresh
+process with no crash.
