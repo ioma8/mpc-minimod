@@ -52,6 +52,6 @@ Every hook is an absolute offset into that build, so no other firmware works.
 - [`docs/EMULATOR.md`](docs/EMULATOR.md) · [`docs/MODDING.md`](docs/MODDING.md) · [`docs/ECOSYSTEM.md`](docs/ECOSYSTEM.md) — emulator, autorun mechanism, ecosystem
 
 **The converter — a separate tool that also lives here**
-- [`docs/MPC2STEMS.md`](docs/MPC2STEMS.md) — `mpc2stems`: `.xpj` project → per-pad DAW stems
-  that sum back to the device's Song export, plus [`CONVERTER-HANDOFF.md`](CONVERTER-HANDOFF.md)
-  and the format notes in [`docs/FORMAT.md`](docs/FORMAT.md)
+- [`converter/`](converter/) — `mpc2stems`: `.xpj` project → per-pad DAW stems that sum back
+  to the device's Song export. Start at [`converter/README.md`](converter/README.md), then
+  [`converter/docs/MPC2STEMS.md`](converter/docs/MPC2STEMS.md)

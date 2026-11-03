@@ -98,7 +98,7 @@ script via `sh "<script>"`.
 * `files[]` — extra files the manifest declares (empty in this mod).
 * Paths are relative to the `autorun` folder.
 * Note the `{"value0": ...}` wrapper — the same serialisation convention as the
-  `.xpj` project format (see `docs/FORMAT.md` §2).
+  `.xpj` project format (see `../converter/docs/FORMAT.md` §2).
 
 ### 2.3 `autorun.check`
 
@@ -286,7 +286,7 @@ The extracted binary itself must stay **outside the repository** (it is 114 MiB)
 The `.xpj` insert blobs (`plugin.state`) are also readable now: plain base64 with
 `/` written as `.`, length-prefixed inside the string. The decoded payload is a
 bit-packed parameter stream (`0xff` = unset) that needs the app's bit widths to
-unpack — see FINDINGS §72 and `docs/FORMAT.md` §15.
+unpack — see FINDINGS §72 and `../converter/docs/FORMAT.md` §15.
 
 ### 4.5 Project safety net
 
