@@ -2170,3 +2170,40 @@ provide live object addresses.
 Unchanged and verified: trim computed, parameters set (`p0=0.0000 p1=0.8268`),
 the app's model holding the trim via its own broadcaster, overlay drawing
 (384 marker pixels), app stable (pid 1219, `TracerPid: 0`).
+
+### 31.12 LLDB works with QEMU's gdbstub (round 13)
+
+macOS ships `lldb` (2100.0.17.203) and it speaks the same remote protocol:
+
+```
+lldb --batch -o "gdb-remote 1234" -o "register read pc" -o "detach"
+Process 1 stopped
+      pc = 0xffffcb34fce92570
+Process 1 detached
+```
+
+So **conditional breakpoints are available**: `break set -a <addr> -c "<expr>"`
+with register names `$x1..$x4` gives exactly the filter the raw RSP client
+lacked (`$x2 >= 86 && $x2 <= 188 && $x3 <= 8` for the waveform band).
+
+Two practical findings:
+
+* the gdbstub wedges after a client is killed mid-session
+  (`failed to get reply to handshake packet`); the reliable recovery is QMP
+  `{"execute":"cont"}`, which resumes the VM even when the stub is unresponsive;
+* leave LLDB to detach in its own script rather than killing it, or the stub is
+  left holding the VM.
+
+### 31.13 State after round 13
+
+The conditional-breakpoint run did not reach a hit because the stub was already
+wedged from the previous aborted session. Everything needed for the next attempt
+is now known and documented:
+
+* start the stub: QMP `human-monitor-command` -> `gdbserver tcp::1234`;
+* connect with `lldb --batch -s <cmdfile>` (gdb-remote 1234);
+* conditional breakpoint on `fillRect` (runtime `base + 0x102e000`) filtered to
+  the waveform band, with `bt` to name the paint caller;
+* recover with QMP `cont` if anything goes wrong.
+
+App state: pid 1219, healthy, overlay drawing the trim.
