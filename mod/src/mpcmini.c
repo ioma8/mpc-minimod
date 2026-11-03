@@ -1020,6 +1020,10 @@ static void pitch_off(void *a0, uint64_t a1, uint64_t a2, int a3)
 static void heap_snapshot(const char *tag);
 static void heap_diff(const char *tag);
 static uintptr_t g_last_press_obj;
+static void find_float_pair(float v);
+static volatile int g_pending_cc;
+static volatile int g_in_inject;
+static void commit_trim(void);
 
 static void buttons(void *event)
 {
@@ -2336,9 +2340,12 @@ static void commit_trim(void)
     }
 
     /* Replaying the knob through the app's CC dispatcher gives the exact visual
-     * result of a manual trim (verified pixel-identical), but the app aborts
-     * shortly afterwards on this firmware, so it is opt-in only. */
-    if (getenv("MPCMINI_CCINJECT")) {
+     * result of a manual trim (verified pixel-identical), but it crashes the
+     * app when called from inside the button dispatch, so it is deferred to the
+     * paint hook (opt-in). */
+    if (getenv("MPCMINI_CCINJECT") && !g_in_inject)
+        g_pending_cc = 1;
+    if (g_in_inject) {
         uintptr_t base = 0, obj = 0;
         if (pr0)
             base = pr0 - 0x1ac0;
@@ -2572,6 +2579,14 @@ static void screen_paint(void *p, void *g)
 {
     if (orig_screen_paint)
         orig_screen_paint(p, g);
+    /* The knob replay runs here, on the UI thread at a safe point, instead of
+     * inside the button dispatch where it corrupted the app's state. */
+    if (g_pending_cc) {
+        g_pending_cc = 0;
+        g_in_inject = 1;
+        commit_trim();
+        g_in_inject = 0;
+    }
     if (FIELD(p, 0, uintptr_t) != base + A_SCREEN_VT)
         return;
     if (g_screen != p) {
@@ -3380,8 +3395,50 @@ static void *heap_probe_thread(void *arg)
             heap_snapshot("mark");
         else if (!strncmp(buf, "diff", 4))
             heap_diff("after knob");
+        else if (!strncmp(buf, "find ", 5))
+            find_float_pair((float)atof(buf + 5));
     }
     return 0;
+}
+
+/* Probe: find every place in writable memory where the float pair
+ * (0.0, value) sits adjacent - the trim model would keep Start/End that way. */
+static void find_float_pair(float v)
+{
+    ranges_load();
+    unsigned char *buf = malloc(65536);
+    if (!buf)
+        return;
+    unsigned char pat[4];
+    memcpy(pat, &v, 4);
+    int shown = 0;
+    for (int r = 0; r < g_nrng; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        if (g_rng[r].lo >= base && g_rng[r].hi <= base + 0x9000000)
+            continue;
+        if (g_rng[r].hi - g_rng[r].lo > 0x4000000)
+            continue;
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi; a += 65536) {
+            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+            n &= ~(size_t)3;
+            if (!rd(a, buf, n))
+                break;
+            for (size_t o = 4; o + 4 <= n; ++o) {
+                if (memcmp(buf + o, pat, 4))
+                    continue;
+                float prev;
+                memcpy(&prev, buf + o - 4, 4);
+                if (prev > -1e-4f && prev < 1e-4f && shown < 24) {
+                    shown++;
+                    mlog("mpcmini: pair at %p (prev %.4f next %.4f)\n",
+                         (void *)(a + o - 4), (double)prev, (double)v);
+                }
+            }
+        }
+    }
+    mlog("mpcmini: pair search done, %d hits\n", shown);
+    free(buf);
 }
 
 /* Probe: /run/mpcmini.bcast holds "i,v" - broadcast g_bp[i] with value v, so we

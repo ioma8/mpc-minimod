@@ -915,3 +915,25 @@ New facts:
 So the remaining work is exactly: find the model field the knob's handler writes
 after the broadcast. The heap-fingerprint tool is in place for that but needs a
 byte copy of the changed pages to name the field.
+
+
+## 18. Round 7: where the replay dies
+
+* The whole `CC` replay was moved to the **paint hook** (a safe point on the UI
+  thread) instead of running inside the button dispatch. It still dies, with the
+  same fault, so re-entrancy is not the cause.
+* The fault address is constant across processes and, checked against
+  `/proc/<pid>/maps`, **falls in no mapping at all**: `pc = addr =
+  0xffffe60544d8`, while every real mapping ends below `0xfffff8000000`. The
+  value is in the range the app's own stacks live in, so the app called a
+  function pointer that actually points at stack data.
+* The handler's ABI is confirmed correct by disassembly (only `x0` = event,
+  `w1` = raw, `s1` = range are read; `x2` is overwritten by `and w2,w1,0x7f`),
+  and the event buffer is now `static`, so a retained pointer stays valid.
+* With the default (no replay) the parameter write is stable and exact
+  (`retry 0 (p0=-1.000 p1=-1.000)` then `commit core done p0=0.0000
+  p1=0.8268`), and the pid never changes - but the page still shows the full
+  sample (0 pixels), which is the model problem from section 17.
+
+So the replay performs the correct update and then the app calls a stack address
+as code. That is the one thing left to explain.
