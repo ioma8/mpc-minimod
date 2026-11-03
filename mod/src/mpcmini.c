@@ -3577,10 +3577,10 @@ static void do_autotrim(void)
      * the box has to be set before the dispatch or it only appears on the next
      * unrelated repaint (previously SHIFT release). */
     switch (g_trim_step) {
-    case 0: toast("trimmed by 3% loudness"); break;
-    case 1: toast("trimmed by 6% loudness"); break;
-    case 2: toast("trimmed by 9% loudness"); break;
-    default: toast("trim removed"); break;
+    case 0: toast("Trim 3% of peak"); break;
+    case 1: toast("Trim 6% of peak"); break;
+    case 2: toast("Trim 9% of peak"); break;
+    default: toast("Trim cleared"); break;
     }
     orig_setctl(g_control_context, g_surface, pad, 0x462, 0.0f);
     orig_setctl(g_control_context, g_surface, pad, 0x466, (float)(last+1));

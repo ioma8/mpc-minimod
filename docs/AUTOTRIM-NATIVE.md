@@ -87,10 +87,14 @@ drawn by the existing paint hook with the app's own `drawText`:
 
 | step | text |
 |---|---|
-| 1 | `trimmed by 3% loudness` |
-| 2 | `trimmed by 6% loudness` |
-| 3 | `trimmed by 9% loudness` |
-| 4 | `trim removed` |
+| 1 | `Trim 3% of peak` |
+| 2 | `Trim 6% of peak` |
+| 3 | `Trim 9% of peak` |
+| 4 | `Trim cleared` |
+
+The number is the gate level (samples quieter than N % of the sample's peak are
+cut), which is why the label says "of peak" rather than "trimmed by" — and why
+the last step says "cleared" instead of a level.
 
 Three things had to be right, and each cost a round:
 
