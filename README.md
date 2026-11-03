@@ -21,9 +21,8 @@ keyboard is in progress — [`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).
 2. Unzip it. You get a folder called `autorun`.
 3. Copy `autorun` onto the **SD card**, next to the folders already there — not
    inside one of them. The card should end up with `autorun` at its top level.
-4. Put the card into the MPC Sample and switch it on. When it asks, choose
-   **Start**.
-5. That's it. The two features are active.
+4. Put the card into the MPC Sample and switch it on. That's it — the two
+   features are active.
 
 Nothing on the device is changed: to go back to stock, delete the `autorun` folder
 from the card (or boot without the card).
