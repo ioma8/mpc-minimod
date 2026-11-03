@@ -81,9 +81,10 @@ overrides the ratio for the first step only.
 
 ## The toast, and how it is cleared
 
-Every trim raises a one-second box: `320x42` at `y = 198` (over the
-Start/End/Loop bar), 15 pt text, filled `0xff101014` with `0xffe6e6e6` text,
-drawn by the existing paint hook with the app's own `drawText`:
+Every trim raises a one-second box: `320x46` at `y = 194` (over the
+Start/End/Loop bar), filled `0xff15151a`, an amber `0xffffb43c` rule 2 px along
+the top and bottom (the colour the page already uses for the waveform) and white
+18 pt text, drawn by the existing paint hook with the app's own `drawText`:
 
 | step | text |
 |---|---|

@@ -3286,14 +3286,19 @@ static void screen_paint(void *p, void *g)
      * be: the page itself only re-reads its trim when the pad is re-selected, so
      * without this the result of SHIFT+B3 would be invisible. */
     if (g_toast_until > now_ms() && g_toast_text[0]) {
-        /* cover the Start/End/Loop bar along the bottom of the page */
-        int x = 0, y = 198, w = 320, h = 42;
+        /* Cover the Start/End/Loop bar. Near-black fill, an amber rule top and
+         * bottom (the colour the page already uses for the waveform) and white
+         * 18 pt text, so it reads at a glance without looking like a dialog. */
+        int x = 0, y = 194, w = 320, h = 46;
         mlog("mpcmini: toast draw '%s' comp=%p vt=%#lx\n", g_toast_text, p,
              (unsigned long)(FIELD(p, 0, uintptr_t) - base));
-        draw_colour(g, 0xff101014);
+        draw_colour(g, 0xff15151a);
         draw_rect(g, x, y, w, h);
-        draw_colour(g, 0xffe6e6e6);
-        draw_text(g, g_toast_text, x + 6, y + 4, w - 12, h - 8, 15.0f);
+        draw_colour(g, 0xffffb43c);
+        draw_rect(g, x, y, w, 2);
+        draw_rect(g, x, y + h - 2, w, 2);
+        draw_colour(g, 0xffffffff);
+        draw_text(g, g_toast_text, x + 4, y + 6, w - 8, h - 12, 18.0f);
     }
     if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f && !getenv("MPCMINI_NOOVERLAY")) {
         int x0 = 10 + (int)(g_mark_v0 * 295.0f + 0.5f);
