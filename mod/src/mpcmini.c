@@ -458,6 +458,30 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
             thr = (short)t;
             mlog("mpcmini: trim threshold ratio %.4f peak %d -> %d\n", ratio,
                  (int)peak, (int)thr);
+            if (getenv("MPCMINI_ENV")) {
+                /* level envelope in 32 windows, same scale as the threshold */
+                unsigned step = frames / 32 ? frames / 32 : 1;
+                for (unsigned w = 0; w < 32; ++w) {
+                    unsigned a = w * step, b = a + step;
+                    if (b > frames)
+                        b = frames;
+                    short wp = 0;
+                    for (unsigned f = a; f < b; f += 1) {
+                        unsigned char sb[8];
+                        if (!rd(0, sb, 0))
+                            break;
+                        /* read one frame */
+                        if (pread(fd, sb, (size_t)(bps * ch), (off_t)dataoff + (off_t)f * bps * ch) <= 0)
+                            break;
+                        for (unsigned c = 0; c < ch; ++c) {
+                            short v = pcm_at(sb + c * bps, bps);
+                            if (v < 0) v = (short)-v;
+                            if (v > wp) wp = v;
+                        }
+                    }
+                    mlog("mpcmini: env %2u/%02u peak %5d\n", w, 32, (int)wp);
+                }
+            }
         }
     }
     unsigned f = 0;
@@ -1021,6 +1045,7 @@ static void heap_snapshot(const char *tag);
 static void heap_diff(const char *tag);
 static uintptr_t g_last_press_obj;
 static void find_float_pair(float v);
+static float g_mark_v0 = -1.0f, g_mark_v1 = -1.0f;
 static volatile int g_pending_cc;
 static volatile int g_in_inject;
 static void commit_trim(void);
@@ -1060,6 +1085,15 @@ static void buttons(void *event)
                      raw[15]);
             }
         }
+    }
+    if (down && g_mark_v0 >= 0.0f) {
+        /* any key press may change what the page shows: drop our edges and ask
+         * for a repaint so they actually disappear */
+        g_mark_v0 = -1.0f;
+        g_mark_v1 = -1.0f;
+        if (g_screen)
+            FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
+                g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
     }
     if (code == 0x06 && down == 0x7f) {
         /* remember the object of the last press so it can be replayed to make
@@ -1387,6 +1421,11 @@ static void trim_probe(void *self, float v)
                 }
             }
         }
+    }
+    if (!g_own_call) {
+        /* a real knob move takes over: drop our markers */
+        g_mark_v0 = -1.0f;
+        g_mark_v1 = -1.0f;
     }
     if (probe_mode && logs < 200) {
         uintptr_t lay = 0, ins = 0;
@@ -2390,6 +2429,28 @@ static void commit_trim(void)
             }
         }
         mlog("mpcmini: cc base=%p obj=%p\n", (void *)base, (void *)obj);
+        /* What exactly will be called? Log every listener and its call slot so
+         * a bad pointer can be matched against the fault address. */
+        if (obj) {
+            for (int k = 0; k < 2; ++k) {
+                uintptr_t P = base + 0x1ac0 + (uintptr_t)k * 0x58;
+                uintptr_t node = 0;
+                if (!rd(P + 0x10, &node, 8) || !node)
+                    continue;
+                for (int i = 0; i < 8 && node && node != P + 8; ++i) {
+                    uintptr_t tgt = 0, next = 0, vt = 0, slot = 0;
+                    if (!rd(node + 0x18, &tgt, 8) || !rd(node + 8, &next, 8))
+                        break;
+                    tgt &= ~(uintptr_t)3;
+                    if (rd(tgt, &vt, 8) && rd(vt + 0x28, &slot, 8))
+                        mlog("mpcmini: P%p listener %p vt=%p slot28=%p\n", (void *)P,
+                             (void *)tgt, (void *)vt, (void *)slot);
+                    if (!next || !mapped((void *)next))
+                        break;
+                    node = next;
+                }
+            }
+        }
         if (obj) {
             unsigned r0 = (unsigned)(v0 * 127.0f + 0.5f);
             unsigned r1 = (unsigned)(v1 * 127.0f + 0.5f);
@@ -2487,6 +2548,8 @@ static void commit_trim(void)
     float check = 0, check2 = 0;
     rd((uintptr_t)p0 + T_VALUE, &check, 4);
     rd((uintptr_t)p1 + T_VALUE, &check2, 4);
+    g_mark_v0 = v0;
+    g_mark_v1 = v1;
     mlog("mpcmini: commit core done p0=%.4f p1=%.4f (want %.4f/%.4f)\n",
          (double)check, (double)check2, (double)v0, (double)v1);
 
@@ -2639,6 +2702,18 @@ static void screen_paint(void *p, void *g)
                 shown++;
             }
         }
+    }
+    /* Trim edges of the last autotrim, drawn where the page's own markers would
+     * be: the page itself only re-reads its trim when the pad is re-selected, so
+     * without this the result of SHIFT+B3 would be invisible. */
+    if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f) {
+        int x0 = 10 + (int)(g_mark_v0 * 295.0f + 0.5f);
+        int x1 = 10 + (int)(g_mark_v1 * 295.0f + 0.5f);
+        draw_colour(g, 0xffffffff);
+        draw_rect(g, (uint64_t)x0, 88, 1, 98);
+        draw_rect(g, (uint64_t)x1, 88, 1, 98);
+        draw_rect(g, (uint64_t)x0, 88, 3, 1);
+        draw_rect(g, (uint64_t)x1, 88, 3, 1);
     }
     if (!g_shift)
         return;

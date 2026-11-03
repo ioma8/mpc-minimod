@@ -39,7 +39,10 @@ released   : Trim        Tune        Filter
   not also run. The shift is applied in
   `0x27e4400(ctx, ?, ?, semitoneOffset)` — the function the 16-Levels renderer
   calls with `(pad & 0xf) - originalPad`.
-* **Autotrim** — `SHIFT` + **B3**. Computes the first/last non-silent frame of
+* **Autotrim** — `SHIFT` + **B3**. The two resulting edges are drawn on the
+  waveform (the page itself only re-reads its trim when the pad is re-selected,
+  so without this the result would be invisible); any knob move or leaving the
+  page removes them. Computes the first/last non-silent frame of
   the pad's sample from the app's own WAV copy (24-bit aware). The silence
   threshold is **relative to the file's peak** (default −40 dB, so low-level
   noise at the ends is trimmed as well, not only digital silence) with an

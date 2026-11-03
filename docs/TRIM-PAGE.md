@@ -937,3 +937,47 @@ byte copy of the changed pages to name the field.
 
 So the replay performs the correct update and then the app calls a stack address
 as code. That is the one thing left to explain.
+
+
+## 19. Round 8: what the trim really is, and the edges drawn
+
+**The threshold is right.** The sample's level envelope, measured in 32 windows
+(`MPCMINI_ENV=1`):
+
+```
+ 3/32 peak 29205   9/32 7942   16/32 1821   20/32 1156   24/32 418   28/32 95
+```
+
+The tail decays smoothly to ~70 counts, so a -40 dB threshold (292) cutting at
+82.5 % is correct for this material - the "content ends at 45 %" impression was
+the display compressing 15129 frames into 295 pixels. `MPCMINI_TRIM_DB` remains
+the knob for more or less aggressive trimming.
+
+**The edges are now visible.** The page's own trim display only refreshes when
+the pad is re-selected (section 13), and the parameter write does not update it
+(section 17), so the paint hook draws the two edges of the last autotrim over
+the waveform at `x = 10 + v * 295`, y 88..186. Verified by pixel measurement:
+
+```
+marker columns: [(10, 80), (253, 80)]
+expected:        start 10,  end 253        (v0 = 0.0001, v1 = 0.8254)
+```
+
+They are dropped by any knob move (a real knob takes over) and by leaving the
+page (the page repaint clears them). The app's own knob indicators still show
+the old values, because they are drawn from the same model that is not updated.
+
+**The replay's fault is not in the listeners.** Logging every listener and its
+call slot right before the injection:
+
+```
+P 0xffffe4f0c718 listener 0xffffe4f18830 vt=0xaaaab18a8a10 slot28=0xaaaaabf3da50
+P 0xffffe4f0c718 listener 0xffffe49132e0 vt=0xaaaab18bb9a8 slot28=0xaaaaac08fe00
+P 0xffffe4f0c770 listener 0xffffe4f18990 vt=0xaaaab18a8a10 slot28=0xaaaaabf3da50
+P 0xffffe4f0c770 listener 0xffffe23051e0 vt=0xaaaab18bb9a8 slot28=0xaaaaac08fe00
+```
+
+All four targets, vtables and call slots are valid image addresses, and the
+fault (`0xffffe60544d8`) matches none of them. The crash therefore happens in
+the app's follow-up work after the broadcast, with a bogus stack pointer
+(`sp=0xfffffffff3d0`), not in the dispatch itself.
