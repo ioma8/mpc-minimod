@@ -1,3 +1,7 @@
+> See [TouchPreferences wiring investigation](TOUCH-PREFERENCES-WIRING.md) for
+> verified constructor, layout, tab-switch and close routines. The touchscreen
+> entry-point claims below are historical inferences, not runtime evidence.
+
 # How the Preferences tabs are (not) reachable
 
 The ten tabs observed in the binary — `WiFiTab`, `EthernetTab`, `BluetoothTab`,
