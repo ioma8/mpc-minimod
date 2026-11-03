@@ -1045,3 +1045,27 @@ initial fill.
 This is the most promising lead: writing the two trim values into the right one
 of those objects and calling `0x2822260` is the app's own
 model -> properties -> UI path, with no synthetic event involved.
+
+
+### 20.2 The replay is pixel-perfect; only its aftermath kills the app
+
+Three more experiments this round (see `HYPOTHESES.csv`):
+
+* **The sync function is the save path, not the load path.** Its two arguments
+  are stack temporaries `0x3d30` apart that grow by `0x11860` per call, and their
+  trim fields read 0.0 - it serializes state, it does not push it to the UI.
+* **Recovering from the fault is not possible from our side.** The fault happens
+  *after* the replay returns (asynchronously), so no `sigsetjmp` recovery point
+  is active when it lands; the handler's `siglongjmp` path was never taken.
+* **Splitting the two controls across paints removes the crash but also the
+  update.** With one control per paint (`step 1 done` / `step 2 done`) the pid
+  stays stable and nothing crashes, but the page does not change
+  (`HAND vs AUTO 4817 px`). With both controls in one turn the page becomes
+  **pixel-identical to a hand trim** (`HAND vs AUTO 0 px`, `FULL vs AUTO 4626 px`)
+  and the app dies about a second later.
+
+So the app applies a trim *and* repaints only when both controls are delivered in
+one UI turn, and that same turn leaves something behind that faults afterwards.
+
+The shipping default stays the stable path: exact parameter write plus the drawn
+edges (192 px), verified again at the end of this round.

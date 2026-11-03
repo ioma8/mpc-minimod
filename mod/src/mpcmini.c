@@ -25,6 +25,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
+#include <setjmp.h>
 #include <ucontext.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -89,6 +90,9 @@ static int debug_mode;
 static int probe_mode;
 static int probe_bits = 0x7f;
 
+static volatile int g_cc_recover;
+static sigjmp_buf g_cc_jmp;
+
 static void mlog(const char *fmt, ...);
 static void *g_screen;
 static void *g_trim_page;
@@ -145,8 +149,18 @@ static void fault_handler(int sig, siginfo_t *si, void *ucv)
     }
     mlog("mpcmini: FAULT sig=%d addr=%p pc=%p lr=%p sp=%p\n", sig,
          si ? si->si_addr : 0, (void *)pc, (void *)lr, (void *)sp);
+    /* The knob replay can end in a call through a bad pointer inside the app's
+     * follow-up work. That jump faults before touching the stack, so jumping
+     * back out of it is safe enough and keeps the app alive. */
+    if (g_cc_recover) {
+        g_cc_recover = 0;
+        siglongjmp(g_cc_jmp, 1);
+    }
     _exit(139);
 }
+
+static volatile int g_cc_recover;
+static sigjmp_buf g_cc_jmp;
 
 static void mlog(const char *fmt, ...)
 {
@@ -969,16 +983,19 @@ static void (*orig_sync)(void *, void *, void *, void *);
 static void sync_probe(void *a0, void *a1, void *a2, void *a3)
 {
     static int n;
-    if (n < 6) {
+    if (n < 12) {
         n++;
-        mlog("mpcmini: sync args %p %p %p %p\n", a0, a1, a2, a3);
-        if (n == 1 && a0 && a1) {
-            float f = 0;
-            for (unsigned off = 0x18b8; off <= 0x1ac8; off += 0x58) {
-                if (rd((uintptr_t)a1 + off, &f, 4))
-                    mlog("mpcmini:   model+0x%x = %.4f\n", off, (double)f);
-            }
+        float f0 = -1, f1 = -1, g0 = -1, g1 = -1;
+        if (a0) {
+            rd((uintptr_t)a0 + 0x1ac0, &f0, 4);
+            rd((uintptr_t)a0 + 0x1b18, &f1, 4);
         }
+        if (a1) {
+            rd((uintptr_t)a1 + 0x1ac0, &g0, 4);
+            rd((uintptr_t)a1 + 0x1b18, &g1, 4);
+        }
+        mlog("mpcmini: sync a0=%p(a0k1=%.4f a0k2=%.4f) a1=%p(a1k1=%.4f a1k2=%.4f)\n",
+             a0, (double)f0, (double)f1, a1, (double)g0, (double)g1);
     }
     if (orig_sync)
         orig_sync(a0, a1, a2, a3);
@@ -1070,6 +1087,9 @@ static volatile float g_poke_value;
 static float g_mark_v0 = -1.0f, g_mark_v1 = -1.0f;
 static volatile int g_pending_cc;
 static volatile int g_in_inject;
+static int g_cc_step;
+static uintptr_t g_cc_obj;
+static unsigned g_cc_r0, g_cc_r1;
 static void commit_trim(void);
 
 static void buttons(void *event)
@@ -2156,7 +2176,13 @@ static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
      *   fdiv s0,s0,s1     -> s1 is the range (so: two float parameters)
      *   ldr  x0,[x0] / ldr x0,[x0,0x10] / add x0,x0,#0x1ac0 -> the property
      * so the call is (event, raw, min, range). */
-    FN(0x159f230, void (*)(void *, unsigned, float, float))(ev, raw, 0.0f, 127.0f);
+    if (sigsetjmp(g_cc_jmp, 1) == 0) {
+        g_cc_recover = 1;
+        FN(0x159f230, void (*)(void *, unsigned, float, float))(ev, raw, 0.0f, 127.0f);
+        g_cc_recover = 0;
+    } else {
+        mlog("mpcmini: replay faulted - recovered\n");
+    }
 }
 
 /* Whole-heap fingerprint: hash every 4 KiB page of writable memory. Two
@@ -2447,8 +2473,10 @@ static void commit_trim(void)
      * result of a manual trim (verified pixel-identical), but it crashes the
      * app when called from inside the button dispatch, so it is deferred to the
      * paint hook (opt-in). */
-    if (getenv("MPCMINI_CCINJECT") && !g_in_inject)
+    if (getenv("MPCMINI_CCINJECT") && !g_in_inject) {
+        g_cc_step = 0;
         g_pending_cc = 1;
+    }
     if (g_in_inject) {
         uintptr_t base = 0, obj = 0;
         if (pr0)
@@ -2519,12 +2547,29 @@ static void commit_trim(void)
         if (obj) {
             unsigned r0 = (unsigned)(v0 * 127.0f + 0.5f);
             unsigned r1 = (unsigned)(v1 * 127.0f + 0.5f);
-            if (g_cc_ev_valid) {
-                cc_replay(0x10, r0);
-                cc_replay(0x11, r1);
-            } else {
-                cc_inject(obj, 0x10, r0);
-                cc_inject(obj, 0x11, r1);
+            /* One control per paint: two broadcasts inside the same UI turn
+             * left the app in a state it died on afterwards. */
+            if (g_cc_step == 0) {
+                g_cc_step = 1;
+                g_cc_obj = obj;
+                g_cc_r0 = r0;
+                g_cc_r1 = r1;
+                if (g_cc_ev_valid)
+                    cc_replay(0x11, r1);
+                else
+                    cc_inject(obj, 0x11, r1);
+                g_pending_cc = 1; /* come back for the second one */
+                mlog("mpcmini: step 1 done\n");
+                return;
+            }
+            if (g_cc_step == 1) {
+                g_cc_step = 2;
+                if (g_cc_ev_valid)
+                    cc_replay(0x10, g_cc_r0);
+                else
+                    cc_inject(g_cc_obj, 0x10, g_cc_r0);
+                mlog("mpcmini: step 2 done\n");
+                return;
             }
             mlog("mpcmini: injected CC 0x10=%u 0x11=%u\n", r0, r1);
             {
