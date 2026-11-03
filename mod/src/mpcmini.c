@@ -992,6 +992,39 @@ static void (*orig_resized)(void *, long, long, long);
 static void (*orig_reg)(void *, void *);
 static void *(*orig_prog_inst)(void *, int);
 static void (*orig_rotary)(void *, float);
+/* The Sample page (0x2468 bytes) captured from SamplePage_Ctor; it owns the
+ * Start/End widgets and is what must be repainted after a property change. */
+static void *g_page;
+typedef void (*pagector_fn)(void *, void *, void *, void *, void *, void *,
+                            void *, void *, void *, void *, void *, void *);
+static pagector_fn orig_pagector;
+
+static void pagector_probe(void *a0, void *a1, void *a2, void *a3, void *a4, void *a5,
+                           void *a6, void *a7, void *a8, void *a9, void *a10, void *a11)
+{
+    uintptr_t vt = 0;
+    if (a0 && rd((uintptr_t)a0, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL)
+        g_page = a0;
+    if (orig_pagector)
+        orig_pagector(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
+}
+
+/* The app's own "apply a control value" entry - exactly what a knob turn calls
+ * (FUN_01a68020(0, surface, controlId, value, mode)). Capturing the surface lets
+ * commit_trim drive the Start/End controls the same way the UI does. */
+static void *g_surface;
+static void (*orig_setctl)(void *, void *, long, int, int);
+
+static void setctl_probe(void *a0, void *a1, long a2, int a3, int a4)
+{
+    uintptr_t vt = 0;
+    if (a1 && rd((uintptr_t)a1, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
+        g_surface = a1;
+    }
+    if (orig_setctl)
+        orig_setctl(a0, a1, a2, a3, a4);
+}
+
 static void (*orig_bcast)(void *, float);
 static void (*orig_cc)(void *, unsigned, float, float);
 static void (*orig_sync)(void *, void *, void *, void *);
@@ -2773,9 +2806,18 @@ done:
         g_replaying_pad = 0;
         mlog("mpcmini: re-pressed %p to refresh the page\n", (void *)g_last_press_obj);
     }
-    if (g_screen)
+    /* Repaint the page itself: with the property values written above, this is
+     * what makes the app's own Start/End edge follow the trim. */
+    uintptr_t pvt = 0;
+    if (g_page && rd((uintptr_t)g_page, &pvt, 8) &&
+        pvt >= base && pvt <= base + 0x12000000ULL) {
+        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
+            g_page, 0, FIELD(g_page, 0x28, uint64_t));
+        mlog("mpcmini: repainted page %p\n", g_page);
+    } else if (g_screen) {
         FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
             g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
+    }
 }
 
 
@@ -4096,6 +4138,12 @@ __attribute__((constructor)) static void load(void)
     void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)note_on) : 0;
     void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)cs_event) : 0;
     void *t_off = (hook_mask & 128) ? install_hook(base + A_NOTE_OFF, (void *)note_off) : 0;
+    void *t_pg = install_hook(base + 0x28100c0, (void *)pagector_probe);
+    if (t_pg)
+        orig_pagector = (pagector_fn)t_pg;
+    void *t_sc = install_hook(base + 0x1968020, (void *)setctl_probe);
+    if (t_sc)
+        orig_setctl = (void (*)(void *, void *, long, int, int))t_sc;
     void *t_trim = install_hook(base + A_TRIM_CORE, (void *)trim_probe); /* also learns param->property */
     void *t_bc = install_hook(base + A_BROADCAST, (void *)bcast_hook);
     if (t_bc)

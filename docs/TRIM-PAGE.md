@@ -1632,3 +1632,56 @@ App restarted cleanly and re-verified:
 autotrim: 5197 px | pid unchanged
 commit core done p0=0.0000 p1=0.8268
 ```
+
+## 30. The property DOES drive the display (round 19)
+
+Three measurements with the live debugger and the panel settled the picture:
+
+### 30.1 Both knobs repaint the waveform
+
+```
+K1 10 -> 90 : waveform 3722 px, bottom 112 px, top 0 px
+K2 20 -> 110: waveform 1704 px, bottom  20 px, top 0 px
+```
+
+Earlier "0 px on a knob move" measurements were wrong (the knob change had not
+registered). The page *does* redraw its trim on every knob turn.
+
+### 30.2 Control ids
+
+A breakpoint on the dispatch funnel `FUN_029c6510` with a knob turn gives:
+
+```
+x0 = surface, x1 = 0, x2 = 0x462, x3 = 0x462   (Start knob)
+x0 = surface, x1 = 0, x2 = 0x466, x3 = 0x466   (End knob)
+```
+
+so **Start = control 0x462, End = control 0x466** (four apart - the same knob
+group). `FUN_029c6510` then calls the surface's virtual method at
+`vtable + 0x160` = `FUN_02904e90`, which is a **getter**: for 0x462 it reads
+`FUN_02912f10(*(page+0x22e8) + idx*0xb30) + 0x78`, for 0x466 the same object at
+`+0xd0`. The matching *setter* path is `FUN_01a68020(0, surface, controlId,
+value, 0xd28)` -> `FUN_01a679e0(...)`.
+
+### 30.3 Writing the property and forcing one redraw works
+
+With the overlay disabled:
+
+1. set the knobs to Start = 0, End = 127 (full sample);
+2. write `0.5` into the learned Start property at `prop + 0x50`;
+3. nudge the End knob (127 -> 126 -> 127) to make the app redraw.
+
+The app's own Start edge moves to **50 %** - confirmed by screenshot. So the
+property value *is* what the page paints, and the only missing piece is a redraw
+the mod can trigger without touching a knob.
+
+### 30.4 What does not work yet
+
+* calling the repaint `FUN_01149880` on the captured page or on `g_screen` after
+  the property write: 0 px;
+* calling the app's setter `FUN_01a68020` directly: crashed the app (needs the
+  exact surface object and mode, which the hook had not captured reliably);
+* the page captured from `SamplePage_Ctor` (`0xfffff2a8d9b0`) looks like a stack
+  address, so it is not the visible page.
+
+Shipped build: overlay on, verified at 5197 px with an unchanged pid.
