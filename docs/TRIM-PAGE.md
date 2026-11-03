@@ -1328,3 +1328,86 @@ The remaining step is to find the pad pointer at runtime - the most promising
 route is the object that owns the pad array (`*(owner + 0x22e8)`, eight `0xb30`
 blocks, see section 22), since the pad state and the block array belong to the
 same container.
+
+## 24. What the three setters are, and why the page still ignores our writes
+
+### 24.1 They are the same thread-safe value setter
+
+`FUN_014b16a0`, `FUN_01db15f0` and `FUN_0160b380` decompile to the *same* body:
+
+```c
+void Setter(long widget,int v) {
+  pthread_mutex_lock(widget + 0x20);
+  if (*(int *)(widget + 0x50) != v) {      /* current value slot */
+    *(short *)(widget + 0x18) += 1;        /* version counter    */
+    *(int *)(widget + 0x50) = v;           /* new value          */
+    ... notify ...
+  }
+}
+```
+
+So **a value holder keeps its value at `+0x50`, a version at `+0x18` and a
+mutex at `+0x20`**. Renamed `Value_SetInt` / `Value_SetIntEnd` /
+`Value_SetIntLoop`.
+
+Because the page's Start widget is `page+0x1538`, its value is at
+`page+0x1588` - the same offset the pad uses, so page and pad share the layout.
+
+### 24.2 The knobs write the property, not the widget
+
+Hooking `Value_SetInt` produced **no** events on a knob turn. The mod's own
+learning line shows why:
+
+```
+learn? prop=0xffffe4ecc718 c50=0.4724 v=0.4724
+```
+
+i.e. by the time the broadcaster is reached, the property's `+0x50` already
+holds the new value - the knob writes that slot directly (through its own
+event path), and `Value_SetInt` is used by other code.
+
+### 24.3 Runtime results
+
+| experiment | result |
+|---|---|
+| write `page+0x1588` / `page+0x15e0`, repaint (no reload) | 0 px |
+| write `page+0x1588` / `page+0x15e0`, then re-select the pad | 0 px (the reload restores the pad's values) |
+| write the learned property `+0x50`, repaint | 0 px |
+
+Reading `page+0x1588` through `guestmem` reports the address **unmapped**, so the
+object the mod knows as `g_screen` is *not* the Sample page - it is too small to
+own a widget at `+0x1538`. The page object has not been captured yet:
+`Page_LoadPad` and the page constructor never fire during normal use, and
+`PadState_CopyIntoPage` is only ever observed with stack temporaries.
+
+### 24.4 The remaining unknown, stated precisely
+
+The waveform is drawn from a **cached** model: the page does not repaint its
+trim when a value changes (measured 0 px), and only a rebuild of the page makes
+it read the pad again. So the reliable path is: write the pad object's
+`+0x1588`/`+0x15e0`, then force the app to rebuild the page. Locating the live
+pad object is the single remaining blocker.
+
+## 25. Ghidra database annotations
+
+Functions renamed for future sessions:
+
+| address | name |
+|---|---|
+| `0x2918be0` | `PadState_Apply` |
+| `0x2902e60` | `Pads_ApplyAll` |
+| `0x290dca0` | `PadState_CopyIntoPage` |
+| `0x290f130` | `Page_LoadPad` |
+| `0x290f080` | `Page_ResetPad` |
+| `0x16e70c0` | `TrimParam_SetValue` |
+| `0x14bb930` | `Property_Broadcast` |
+| `0x14b16a0` | `Value_SetInt` |
+| `0x1db15f0` | `Value_SetIntEnd` |
+| `0x160b380` | `Value_SetIntLoop` |
+| `0x1a9e460` | `PadStateBlock_Copy` |
+| `0x29100c0` | `SamplePage_Ctor` |
+
+Parameters renamed: `PadState_CopyIntoPage(page, padState)`,
+`PadState_Apply(page, padState)`, `TrimParam_SetValue(value, trimParam)`.
+Each of the above carries a plate comment summarising what it does and the
+offsets involved.

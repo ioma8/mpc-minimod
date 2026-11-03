@@ -1000,20 +1000,40 @@ static void (*orig_loadpad)(void *, void *);
 
 static void loadpad_probe(void *page, void *pad)
 {
-    if (pad && (uintptr_t)pad > 0xffffe0000000ULL && (uintptr_t)pad < 0xfffff0000000ULL) {
-        if (g_pad_obj != pad) {
-            float f0 = -1, f1 = -1;
-            if (rd((uintptr_t)pad + 0x1588, &f0, 4) &&
-                rd((uintptr_t)pad + 0x15e0, &f1, 4)) {
-                g_pad_obj = pad;
-                g_pad_page = page;
-                mlog("mpcmini: pad obj=%p page=%p start=%.4f end=%.4f\n",
-                     pad, page, (double)f0, (double)f1);
-            }
+    static int n;
+    if (n < 24) {
+        n++;
+        float f0 = -1, f1 = -1;
+        int r0 = page && rd((uintptr_t)page + 0x1588, &f0, 4);
+        int r1 = pad && rd((uintptr_t)pad + 0x15e0, &f1, 4);
+        mlog("mpcmini: loadpad page=%p(r%d %.4f) pad=%p(r%d %.4f)\n",
+             page, r0, (double)f0, pad, r1, (double)f1);
+        if (r0 && r1) {
+            g_pad_obj = pad;
+            g_pad_page = page;
         }
     }
     if (orig_loadpad)
         orig_loadpad(page, pad);
+}
+
+/* Value_SetInt(widget, int-bits): a real change of a [0,1] float value shows
+ * which widget the knobs actually write. */
+static void (*orig_setint)(void *, int);
+
+static void setint_probe(void *w, int v)
+{
+    static int n;
+    int cur = 0;
+    float fv;
+    memcpy(&fv, &v, 4);
+    if (n < 40 && w && rd((uintptr_t)w + 0x50, &cur, 4) && cur != v &&
+        fv >= -0.01f && fv <= 1.01f) {
+        n++;
+        mlog("mpcmini: setint widget=%p %d -> %.4f\n", w, cur, (double)fv);
+    }
+    if (orig_setint)
+        orig_setint(w, v);
 }
 
 static void (*orig_apply)(void *, void *);
@@ -3841,6 +3861,10 @@ static void *heap_probe_thread(void *arg)
                 mlog("mpcmini: findtrim done %d\n", hits);
             }
         }
+        else if (!strncmp(buf, "repaint", 7)) {
+            FN(A_REPAINT, void (*)(void *, uint64_t, uint64_t))((void *)g_screen, 0, 0);
+            mlog("mpcmini: repaint asked on %p\n", (void *)g_screen);
+        }
         else if (!strncmp(buf, "reg ", 4)) {
             g_reg_base = (uintptr_t)strtoull(buf + 4, 0, 16);
             g_reg_have = rd(g_reg_base, g_reg_buf, sizeof g_reg_buf) ? 1 : 0;
@@ -4204,6 +4228,13 @@ __attribute__((constructor)) static void load(void)
     void *t_lp = install_hook(base + 0x280f130, (void *)loadpad_probe);
     if (t_lp)
         orig_loadpad = (void (*)(void *, void *))t_lp;
+    /* The page is *constructed* per pad from the pad state: this is the call
+     * that receives the authoritative pad object. */
+    void *t_pc = install_hook(base + 0x280f1e0, (void *)loadpad_probe);
+    (void)t_pc;
+    void *t_si = install_hook(base + 0x14b16a0, (void *)setint_probe);
+    if (t_si)
+        orig_setint = (void (*)(void *, int))t_si;
     void *t_apply = install_hook(base + 0x2818be0, (void *)apply_probe);
     if (t_apply)
         orig_apply = (void (*)(void *, void *))t_apply;
