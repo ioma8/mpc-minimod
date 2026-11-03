@@ -78,3 +78,38 @@ paint hook with the app's own `drawText`, so it disappears without a timer.
 button is held, so the handler acts on the press edge only (`g_b3_down`); without
 that, one physical press fired the cycle up to 16 times. `MPCMINI_TRIM_DB` still
 overrides the ratio for the first step only.
+
+## The toast, and how it is cleared
+
+Every trim raises a one-second box: `320x42` at `y = 198` (over the
+Start/End/Loop bar), 15 pt text, filled `0xff101014` with `0xffe6e6e6` text,
+drawn by the existing paint hook with the app's own `drawText`:
+
+| step | text |
+|---|---|
+| 1 | `trimmed by 3% loudness` |
+| 2 | `trimmed by 6% loudness` |
+| 3 | `trimmed by 9% loudness` |
+| 4 | `trim removed` |
+
+Three things had to be right, and each cost a round:
+
+1. **Arm before dispatch.** The box is set *before* the three `orig_setctl`
+   calls, because the repaint caused by the trim itself is what paints the page.
+   Armed afterwards, the box only appeared on the next unrelated repaint — in
+   practice the SHIFT release.
+2. **Clearing needs a real invalidate.** The app only repaints on change, so the
+   last frame kept the box up indefinitely. `A_REPAINT` (`0x1149880`, Ghidra
+   `FUN_01249880`) takes **two packed pairs**, not four scalars:
+   `param_2 = (x, y)` and `param_3 = (w, h)`, each split with
+   `NEON_sshr(param, 0x20)` and scaled by a float. Calling it with `(0, 0)`
+   invalidates a zero-size rectangle and does nothing. A detached thread sleeps
+   1.12 s and repaints the screen, at which point the deadline check in the paint
+   hook skips the box.
+3. **The rect is in logical coordinates.** The app's logical width is wider than
+   the 320 px framebuffer: a `320x240` rect cleared only the left two thirds and
+   left the right third of the box on screen. Passing `2000x2000` clears all of
+   it regardless of the scale factor.
+
+The toast costs nothing when idle: it is a string, a deadline and a compare
+inside the paint hook that already runs.
