@@ -4,6 +4,8 @@ I was annoyed by the complete reworks by other custom firmwares. I want the
 original MPC Sample experience, with just small fixes that enhance it for better flow. Thus I made this minimal MINIMOD for the **Akai MPC Sample** (firmware
 **1.3.0.12 only**). It adds only two features which help me enjoy it more. Can be easily reverted by removing from SD card.
 
+[![minimod — intro video](https://img.youtube.com/vi/bnnkfryecPY/maxresdefault.jpg)](https://youtu.be/bnnkfryecPY)
+
 | what | how |
 | --- | --- |
 | **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim | `SHIFT` + `B3` |
