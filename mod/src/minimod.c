@@ -427,6 +427,7 @@ static void *install_hook(uintptr_t site, void *hook)
 
 /* -------------------------------------------------------- 16 Levels state */
 static int g_octave;
+static volatile int g_levels; /* 16 LEVELS mode, tracked from button 0x28 */
 static int g_plus_held, g_minus_held;   /* octave shift applied while 16 LEVELS is active */
 static void *g_sixteen; /* the live 16 Levels screen, if seen             */
 
@@ -440,6 +441,22 @@ static int in_chop_mode(void)
     if (!s || FIELD(s, 0, uintptr_t) != base + 0x6e212a0) /* SampleModeScreen */
         return 0;
     return FN(0x112fd50, int (*)(void *))((char *)s + 0x1ee0) != 0;
+}
+
+/* 16 LEVELS has no readable state field we could find; the only way in or out
+ * on the Sample page is the 16 LEVELS button (code 0x28), which is a toggle.
+ * The mode also ends when the Sample page stops being shown, so the tracked
+ * flag is dropped whenever the screen is not visible. */
+static int levels_active(void)
+{
+    void *s = g_screen;
+    if (!s || FIELD(s, 0, uintptr_t) != base + 0x6e212a0) /* SampleModeScreen */
+        return 0;
+    if (!FN(0x112fd50, int (*)(void *))(s)) {
+        g_levels = 0;
+        return 0;
+    }
+    return g_levels;
 }
 
 static int sixteen_tune_active(void)
@@ -1565,7 +1582,11 @@ static void buttons(void *event)
                      raw[15]);
         }
     }
-    if (code == 0x36 || code == 0x37) {
+    if (code == 0x28 && down) {
+        g_levels = !g_levels;
+        mlog("minimod: 16 LEVELS mode -> %d\n", g_levels);
+    }
+    if ((code == 0x36 || code == 0x37) && levels_active()) {
         int plus = (code == 0x36);
         if (down) {
             /* both keys at once = reset the row to its original pitch */

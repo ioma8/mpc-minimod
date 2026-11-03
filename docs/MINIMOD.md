@@ -134,18 +134,29 @@ With 16 LEVELS active the pad row becomes a chromatic keyboard of 16 notes, and
 
 Two details matter, both learned the hard way on hardware:
 
-1. **The keys must be swallowed.** `0x159f2f0` is the button dispatch; both keys
-   arrive there as codes `0x36` / `0x37`. If the hook falls through to
-   `orig_buttons(event)` the stock action still runs and the *selected knob*
-   increments by one — which is exactly what the first hardware build did. The
-   handler now returns immediately for those two codes:
+1. **The keys must be swallowed — but only in 16 Levels.** `0x159f2f0` is the
+   button dispatch; both keys arrive there as codes `0x36` / `0x37`. Inside the
+   mode the handler must return immediately, otherwise the stock action runs and
+   the *selected knob* increments by one (what the first hardware build did).
+   Outside the mode the keys must reach the stock handler untouched, so the gate
+   is explicit:
 
    ```c
-   if (code == 0x36 || code == 0x37) {
+   if ((code == 0x36 || code == 0x37) && levels_active()) {
        if (down) bump_octave(code == 0x36 ? +1 : -1);
        return;
    }
+   /* falls through to orig_buttons(event): stock knob nudge */
    ```
+
+   The 16 Levels mode has no state field that could be read back (the screen
+   object changes by two bytes only, and those track whether the Trim group is
+   showing, not the mode), so `g_levels` is toggled from the `16 LEVELS` button
+   (code `0x28`, a plain toggle) and dropped whenever the Sample page stops
+   being visible — leaving the page also ends the mode. Checked against the
+   control surface's `16 LEVELS` LED (id 40) over toggling, page switches a
+   SEQ round trip and entering Chop: the tracked flag matched the LED in all
+   eight transitions.
 
 2. **The shift belongs in `0x27e4400`, not in the render entry.** The 16-Levels
    renderer `0x21472f0(self, pad, ctx)` computes the semitone offset as
