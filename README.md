@@ -1,15 +1,13 @@
-# mpc-minimod
+# MPC Sample MINIMOD
 
-I was annoyed by the too-complete reworks other custom firmwares do — I want the
-original MPC Sample experience, with just small fixes that enhance the existing
-flow. So this is the minimal MINIMOD for the **Akai MPC Sample** (firmware
-**1.3.0.12 only**): two additions to the stock app, nothing changed on disk that
-a reboot doesn't undo.
+I was annoyed by the complete reworks by other custom firmwares. I want the
+original MPC Sample experience, with just small fixes that enhance it for better flow. Thus I made this minimal MINIMOD for the **Akai MPC Sample** (firmware
+**1.3.0.12 only**). It adds only two features which help me enjoy it more. Can be easily reverted by removing from SD card.
 
 | what | how |
 | --- | --- |
 | **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim | `SHIFT` + `B3` |
-| **Octave shift** in 16 Levels — 8 semitones per press | `PLUS` / `MINUS` (both = reset) |
+| **Octave shift** of pads in 16 Levels mode — by half the grid | `PLUS` / `MINUS` keys (both = reset) |
 
 Both confirm themselves on screen for a second. Chromatic MIDI from an external
 keyboard is in progress — [`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).
@@ -24,16 +22,13 @@ keyboard is in progress — [`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).
 
 To go back to stock, delete `autorun` from the card (or boot without the card).
 
-<details>
-<summary>Building it yourself</summary>
+## Building
 
 ```sh
 cd mod && ./build.sh && ./pack.sh
 ```
 
 That writes `mod/build/minimod.zip` — the same package as the release.
-
-</details>
 
 ## Docs
 
