@@ -3109,6 +3109,29 @@ static void repaint_hook(void *comp, uint64_t a, uint64_t b)
 
 static void (*orig_screen_paint)(void *, void *);
 
+/* One-second toast after a trim: text plus a monotonic deadline, drawn by the
+ * paint hook so it costs nothing when idle. */
+static volatile long long g_toast_until;
+static char g_toast_text[48];
+
+static long long now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void toast(const char *text)
+{
+    size_t n = strlen(text);
+    if (n >= sizeof g_toast_text)
+        n = sizeof g_toast_text - 1;
+    memcpy(g_toast_text, text, n);
+    g_toast_text[n] = 0;
+    g_toast_until = now_ms() + 1000;
+    /* the caller repaints right after, so the box shows on the next frame */
+}
+
 static void draw_colour(void *g, uint32_t v)
 {
     FN(0x102d5e0, void (*)(void *, uint32_t))(g, v);
@@ -3242,6 +3265,13 @@ static void screen_paint(void *p, void *g)
     /* Trim edges of the last autotrim, drawn where the page's own markers would
      * be: the page itself only re-reads its trim when the pad is re-selected, so
      * without this the result of SHIFT+B3 would be invisible. */
+    if (g_toast_until > now_ms() && g_toast_text[0]) {
+        int w = 240, h = 34, x = 40, y = 100;
+        draw_colour(g, 0xff101014);
+        draw_rect(g, x, y, w, h);
+        draw_colour(g, 0xffe6e6e6);
+        draw_text(g, g_toast_text, x + 4, y + 4, w - 8, h - 8, 16.0f);
+    }
     if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f && !getenv("MPCMINI_NOOVERLAY")) {
         int x0 = 10 + (int)(g_mark_v0 * 295.0f + 0.5f);
         int x1 = 10 + (int)(g_mark_v1 * 295.0f + 0.5f);
@@ -3523,6 +3553,14 @@ static void do_autotrim(void)
     orig_setctl(g_control_context, g_surface, pad, 0x462, 0.0f);
     orig_setctl(g_control_context, g_surface, pad, 0x466, (float)(last+1));
     orig_setctl(g_control_context, g_surface, pad, 0x462, (float)first);
+    switch (g_trim_step) {
+    case 0: toast("trimmed by 3% loudness"); break;
+    case 1: toast("trimmed by 6% loudness"); break;
+    case 2: toast("trimmed by 9% loudness"); break;
+    default: toast("trim removed"); break;
+    }
+    if (orig_repaint && g_screen)
+        orig_repaint(g_screen, 0, 0);
     mlog("mpcmini: native trim pad=%d path='%s' frames=%u bounds=%u..%u\n",
          pad, path, frames, first, last+1);
 }

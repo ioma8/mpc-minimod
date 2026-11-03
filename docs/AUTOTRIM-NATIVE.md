@@ -70,6 +70,10 @@ SHIFT release:
 | 3 | 9 % of peak (2628) | bounds `71..5358` (tighter still) |
 | 4 | none | bounds `0..15129` (trim removed) |
 
+Each step shows a toast for one second — a 240x34 box centred on the screen with
+`trimmed by 3% loudness`, `… 6% …`, `… 9% …` or `trim removed` — drawn by the
+paint hook with the app's own `drawText`, so it disappears without a timer.
+
 `B3` is button code `0x0e`, the same code the control surface repeats while the
 button is held, so the handler acts on the press edge only (`g_b3_down`); without
 that, one physical press fired the cycle up to 16 times. `MPCMINI_TRIM_DB` still
