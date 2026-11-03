@@ -1838,3 +1838,37 @@ Fully mapped and verified:
 Still open: the app's own renderer source. All three routes are closed - the
 paint ignores the property, the paint Graphics is stack-local, and the control
 entry faults when called externally.
+
+### 30.13 Store tracing (round 6)
+
+A second tracer was written that breaks at a function, single-steps it and
+decodes `STR/STP (immediate)` to log heap-destined stores with their source
+register values (`docs` note: the decoder covers `0xF9000000`, `0xB9000000`,
+`0x39000000`, `0x79000000`, `0xFD000000`, `0xBD000000` encodings).
+
+Tracing `FUN_01a679e0` (the apply function) during a K1 turn yields only four
+stores, all pointer-sized:
+
+```
+STORE pc=0xfffff702fa4c [0xffffe35e9138] <- 0xaaaab1d45020   (image pointer)
+STORE pc=0xaaaaac407c38 [0xffffe35e9138] <- 0xaaaab1d45020
+STORE pc=0xfffff702fa4c [0xffffce6e4508] <- 0xfffffffff200
+STORE pc=0xaaaaaba308ec [0xffffce6e4508] <- 0x10
+```
+
+i.e. the apply function installs a type/vtable pointer and a small counter, not
+the control value - the value write happens elsewhere in the chain.
+
+A second run tracing from the outer entry `FUN_01a68020` with a float-value
+filter produced no hits inside the observation window, so that part remains
+unmeasured.
+
+### 30.14 Honest position after six rounds
+
+Every verified piece is in 30.12. The one open item - which structure the page's
+renderer reads - has now resisted: property writes (inside and outside the
+paint), page-widget writes, a live page capture, the app's own control entry
+(correct register layout, still faults), a four-point value scan, and store
+tracing of the apply function. The remaining technique is a longer store trace
+over the whole control-event chain with a float filter, which is slow (single
+stepping) but has not yet been tried to completion.
