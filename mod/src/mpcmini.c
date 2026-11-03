@@ -2874,10 +2874,11 @@ static void commit_trim(void)
     rd((uintptr_t)p1 + T_VALUE, &check2, 4);
     /* Also write the property caches: the broadcaster stores the value there
      * before notifying, so anything that polls the property sees the new trim. */
-    if (pr0)
-        wr(pr0 + 0x50, &v0, 4);
-    if (pr1)
-        wr(pr1 + 0x50, &v1, 4);
+    /* NOTE: do NOT store prop+0x50 directly. Property_Broadcast(value, prop)
+     * early-outs when the stored value already equals the new one, so writing
+     * the slot first suppresses the listener notification (which is what the
+     * page needs in order to update and redraw). The broadcast below does the
+     * store itself. */
     /* Move the app's own slider widgets too: the page draws the Start/End bars
      * from them at paint time. */
     for (int i = 0; i < g_nps; ++i) {

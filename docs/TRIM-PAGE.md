@@ -1963,3 +1963,73 @@ To go further, one of these is required:
 Until one of those is available, the feature ships as: trim computed and applied
 to the audio parameters exactly, and the trim drawn on screen by the mod's
 overlay during the app's own paint pass.
+
+## 31. Hardware watchpoints via QEMU's gdbstub (the missing tool)
+
+The guest has no `gdb`, no `perf`, and its CPU exposes **no debug feature**
+(`/proc/cpuinfo` has neither `debug` nor `breakpoint`), so in-guest hardware
+watchpoints are impossible - `PTRACE_SETREGSET` with `NT_ARM_HW_WATCH` fails with
+`ENOSPC` even though `GETREGSET` reports slots.
+
+The answer is outside the guest: QEMU has a gdbstub, and it can be started on a
+*running* VM through QMP:
+
+```
+{"execute":"human-monitor-command","arguments":{"command-line":"gdbserver tcp::1234"}}
+```
+
+A ~120-line RSP client (no gdb binary needed) then does the work:
+
+* `Z2,<vaddr>,4` - write watchpoint on a guest **virtual** address (QEMU
+  translates it, so no pagemap work is required; verified by reading a property
+  through `m<addr>,4` and getting `0x3EA14285` = 0.3150);
+* `c` to resume, and QEMU reports `T05watch:<addr>;` when it fires;
+* `g` to dump registers, giving the exact PC of the writer;
+* always `c` + close on the way out - leaving a watchpoint armed freezes the
+  guest, and `D` is not needed.
+
+### 31.1 The first catch
+
+Watching the Start property's value slot during a knob turn:
+
+```
+Z2(0xffffe4ecc768) -> OK
+stop: T05thread:01;watch:ffffe4ecc768;
+WRITER pc=0xaaaaabe5b9f4  x0=0x0 x1=0x1 x2=0x1 x3=0x0 lr=0xaaaaabe5b984
+```
+
+`file 0x13bb9f4` = Ghidra `0x14bb9f4`, inside `Property_Broadcast`:
+
+```
+14bb94c  mov  x20, x0          ; x0 = the property
+14bb954  fmov w21, s0          ; s0 = the new value (float bits)
+14bb988  ldr  w0, [x20, #0x50]
+14bb98c  cmp  w0, w21          ; equal -> skip everything
+14bb9f4  str  w21, [x20, #0x50]
+```
+
+So the signature is `Property_Broadcast(void *prop, float value)` with the value
+in **s0**, and the function **early-outs when the stored value already equals the
+new one**.
+
+### 31.2 The bug that had been hiding the trim
+
+`commit_trim` wrote the property slot directly *and then* called the broadcaster:
+
+```c
+wr(pr0 + 0x50, &v0, 4);       /* value now already correct */
+orig_bcast(pr0, v0);          /* sees equal -> returns without notifying */
+```
+
+The notification - which is what tells the page to update and repaint - was
+therefore **always suppressed**. Removing the direct writes fixes it: the
+broadcaster now performs the store itself and notifies the listeners.
+
+Verified by reading the property back through the gdbstub after a trim:
+
+```
+start property = 0x388a9e36 = 0.0001     (the trim's Start value)
+```
+
+So the app's own model now really holds the auto-trim result, written through the
+app's own setter rather than by poking memory.
