@@ -1745,3 +1745,33 @@ not the answer; the property write plus an app-driven redraw (verified in 30.3)
 remains the only path that actually moves the app's edge.
 
 Shipped build: overlay on, reverted and verified.
+
+### 30.8 The setter crash was an argument-order bug - but the call still does nothing
+
+`FUN_01a68020(param_1, ...)` dispatches with `(**(code **)(*param_1 + 0x160))()`,
+so **`param_1` must be the surface object**. My first attempt passed `0` there and
+the surface second, which dereferences null - that was the crash.
+
+With the correct order
+
+```c
+FUN_01a68020(surface, 0, 0x462 /*Start*/, raw, 0xd28);
+FUN_01a68020(surface, 0, 0x466 /*End  */, raw, 0xd28);
+```
+
+the call **executes cleanly** (`setctl done`, process stable), and running it from
+inside the paint callback - on the UI thread, immediately before the app paints -
+also executes:
+
+```
+armed paint-time ctl 0/105
+paint-time setctl 0/105
+```
+
+yet the display still does not change (0 px). So the control path needs more than
+`(surface, 0, controlId, value, mode)`; one of those arguments does not mean what
+the decompiler suggests (the 4th is probably not the value - `FUN_01a679e0`'s
+first two parameters are floats, i.e. passed in `s0`/`s1`).
+
+The call is kept behind `MPCMINI_CTL` and off by default; the shipped build is
+unchanged and verified.

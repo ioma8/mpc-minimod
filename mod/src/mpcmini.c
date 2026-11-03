@@ -1189,6 +1189,26 @@ static void byte_snap(void);
 static void byte_diff(void);
 static void find_value(float v);
 static void (*orig_screen_paint)(void *, void *);
+static volatile int g_pending_ctl;
+static float g_pending_v0, g_pending_v1;
+static int g_pending_r0, g_pending_r1;
+static void (*orig_setctl2)(void *, void *, long, int, int);
+static void *g_surface2;
+
+static void apply_pending_ctl(void)
+{
+    if (!g_pending_ctl)
+        return;
+    g_pending_ctl = 0;
+    if (!g_surface2 || !orig_setctl2)
+        return;
+    uintptr_t svt = 0;
+    if (!rd((uintptr_t)g_surface2, &svt, 8) || svt < base || svt > base + 0x12000000ULL)
+        return;
+    orig_setctl2(g_surface2, 0, 0x462, g_pending_r0, 0xd28);
+    orig_setctl2(g_surface2, 0, 0x466, g_pending_r1, 0xd28);
+    mlog("mpcmini: paint-time setctl %d/%d\n", g_pending_r0, g_pending_r1);
+}
 static void *g_paint_comp;
 static void *g_paint_gfx;
 static void who_points_at(uintptr_t target);
@@ -2846,6 +2866,30 @@ done:
              g_surface, (void *)svt, ok, (int)(v0 * 127.0f + 0.5f),
              (int)(v1 * 127.0f + 0.5f));
     }
+    /* Drive the app's own control path exactly like a knob turn:
+     * FUN_01a68020(surface, 0, controlId, value, mode) - the first argument is
+     * the surface (it dispatches through surface->vtable+0x160). */
+    /* The control-path call is experimental: it executes cleanly but does not
+     * move the app's display, so it stays behind an env flag. */
+    if (getenv("MPCMINI_CTL")) {
+        g_surface2 = g_surface;
+        orig_setctl2 = orig_setctl;
+        g_pending_r0 = (int)(v0 * 127.0f + 0.5f);
+        g_pending_r1 = (int)(v1 * 127.0f + 0.5f);
+        g_pending_ctl = 1;
+        mlog("mpcmini: armed paint-time ctl %d/%d\n", g_pending_r0, g_pending_r1);
+    }
+    /* Notify the property's listeners: the page syncs its widget from the
+     * property when it is told the value changed. */
+    if (orig_bcast) {
+        g_own_call = 1;
+        if (pr0)
+            orig_bcast((void *)pr0, v0);
+        if (pr1)
+            orig_bcast((void *)pr1, v1);
+        g_own_call = 0;
+        mlog("mpcmini: notified props %p/%p\n", (void *)pr0, (void *)pr1);
+    }
     /* Also ask the screen to repaint with a clean (0,0) origin. */
     if (g_screen) {
         FN(0x1149880, void (*)(void *, uint64_t, uint64_t))((void *)g_screen, 0, 0);
@@ -2920,6 +2964,7 @@ static void screen_paint(void *p, void *g)
 {
     g_paint_comp = p;
     g_paint_gfx = g;
+    apply_pending_ctl();
     if (orig_screen_paint)
         orig_screen_paint(p, g);
     /* The knob replay runs here, on the UI thread at a safe point, instead of
