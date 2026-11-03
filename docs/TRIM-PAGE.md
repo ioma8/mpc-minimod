@@ -693,3 +693,43 @@ It now reads the tail in 16 KB blocks and scans each block backwards, and the
 commit still happens on the next repaint. Measured after the fix: autotrim
 returns in ~3 s on the kick and the panel stays responsive (a B1 press after
 the trim still changes the screen).
+
+
+## 11. Autotrim: root cause and current state (2026-11-03)
+
+Measured with the real framebuffer (QEMU `screendump`), because `/screen.png`
+returns stale frames and produced several false "no change" readings.
+
+### The findings that matter
+
+1. **`commit_trim` was returning too early.** Its default branch tried, in
+   order, the native-property command, the page-cache parameters, the slider
+   widgets and only then the trim core — and the slider branch returned
+   successfully, so the core was never called. The parameter therefore kept the
+   value the last knob move had written. The commit now does exactly what a knob
+   does: core → layer frames → applied → repaint, and nothing else.
+2. **The core write lands.** After that change the log reads
+   `commit core done p0=0.0000 p1=0.8189 (want 0.0001/0.8219)` — the core
+   quantises to frames, as expected.
+3. **Our parameter selection can hit the live instance.** With the page's
+   context group, `p0` and the parameter the knob drives are the same address in
+   the same process (verified twice), e.g. both `0xffffe4eccb80`.
+4. **`x20` at a trim-core call *is* the property.** Dumping `x19`–`x26` shows
+   `x20 == x21` and `*(x20+0x50) == value` exactly (0.2362 for K1 = 30/127), so
+   the property can be identified by value equality. `0x13bb930` stores that
+   cache and then walks its listener list — the step our direct core call skips.
+5. **`ui::Slider::+0x1b4` is a decoy.** Writing any of the 34 sliders and
+   repainting yields the same frame; the paint re-derives the widget.
+
+### What is still missing
+
+The page repaints only when the *broadcaster* notifies its listeners, and that
+requires the property, which is only observable while a knob is actually moving.
+The commit now learns `(parameter → property)` from real knob traffic and
+broadcasts when the pair is known, falling back to the core write otherwise. The
+remaining gap is that a fresh session has no learned property, and the
+neighbouring instance's property cannot be derived from the first one yet.
+
+Next probe: capture the property list head (`property+0x10`) while a knob moves,
+walk it, and record every listener — the page's listener is one of them and can
+be called directly without knowing the property.

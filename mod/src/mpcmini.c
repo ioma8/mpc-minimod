@@ -62,11 +62,13 @@
 #define T_LAYER 0xb0 /* -> context; [ctx+0x60] = instrument */
 #define T_MODEL 0x70
 #define T_VALUE 0x19c /* float, normalised 0..1 */
+#define T_APPLIED 0x1a0 /* float, the value the engine applied */
 #define T_MIN 0x1e0   /* u32, frames */
 #define T_MAX 0x1e8   /* u32, frames */
 
 #define A_TRIM_PARAM_VT 0x6e1b240 /* TrimParameter vtable */
 #define A_TRIM_PAGE_VT 0x6e31ee8  /* the Trim page class */
+#define A_LOC_BOUNDS 0x16b6060     /* AC50WaveformLocator::bounds */
 #define A_PITCH_OFF 0x27e4400      /* 16 Levels: set pitch offset (a3 = semitones) */
 
 #define FIELD(p, off, type) (*(type *)((char *)(p) + (off)))
@@ -495,7 +497,7 @@ static struct {
     float val;
     unsigned mn, mx;
     int bound;
-} g_tp[16];
+} g_tp[256];
 static int g_ntp;
 
 static void scan_trim_params(void)
@@ -507,16 +509,16 @@ static void scan_trim_params(void)
     unsigned char *buf = malloc(65536);
     if (!buf)
         return;
-    for (int r = 0; r < g_nrng && g_ntp < 16; ++r) {
+    for (int r = 0; r < g_nrng && g_ntp < 256; ++r) {
         if (!g_rng[r].w)
             continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ntp < 16;
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ntp < 256;
              a += 65536) {
             size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
             n &= ~(size_t)7;
             if (!rd(a, buf, n))
                 break;
-            for (size_t o = 0; o + 8 <= n && g_ntp < 16; o += 8) {
+            for (size_t o = 0; o + 8 <= n && g_ntp < 256; o += 8) {
                 uintptr_t v;
                 memcpy(&v, buf + o, 8);
                 if (v != want)
@@ -831,7 +833,7 @@ static void *find_sample_screen(void)
             n &= ~(size_t)7;
             if (!rd(a, buf, n))
                 break;
-            for (size_t o = 0; o + 8 <= n; o += 8) {
+            for (size_t o = 0; o + 8 <= n && g_ntp < 256; o += 8) {
                 uintptr_t v;
                 memcpy(&v, buf + o, 8);
                 if (v == want) {
@@ -900,6 +902,37 @@ static void (*orig_reg)(void *, void *);
 static void *(*orig_prog_inst)(void *, int);
 static void (*orig_rotary)(void *, float);
 static void (*orig_bcast)(void *, float);
+static uintptr_t g_bp[8];
+static volatile int g_nbp;
+
+/* AC50WaveformLocator::bounds (0x16b6060): x = pos[+0x168] * view->w[+0x28] - 2.
+ * Hooking it records the locators that are actually painting, which is the only
+ * way to know which objects the page positions. */
+#define MAX_LOC 12
+static uintptr_t g_loc[MAX_LOC];
+static volatile int g_nloc;
+static void (*orig_loc_bounds)(void *);
+
+static void loc_bounds(void *self)
+{
+    uintptr_t s = (uintptr_t)self;
+    if (s) {
+        int i, known = 0;
+        for (i = 0; i < g_nloc; ++i)
+            if (g_loc[i] == s) {
+                known = 1;
+                break;
+            }
+        if (!known && g_nloc < MAX_LOC) {
+            float pos = 0;
+            rd(s + 0x168, &pos, 4);
+            g_loc[g_nloc++] = s;
+            mlog("mpcmini: locator %p pos=%.4f\n", (void *)s, (double)pos);
+        }
+    }
+    if (orig_loc_bounds)
+        orig_loc_bounds(self);
+}
 static void (*orig_obs_set)(void *, float);
 static void (*orig_str_assign)(void *, const char *);
 static void *(*orig_label_text)(void *);
@@ -1138,6 +1171,29 @@ static void trim_probe(void *self, float v)
     }
     uintptr_t prop = 0;
     __asm__ volatile("mov %0, x20" : "=r"(prop));
+    if (probe_mode) {
+        uintptr_t regs[8];
+        __asm__ volatile("mov %0, x19" : "=r"(regs[0]));
+        __asm__ volatile("mov %0, x20" : "=r"(regs[1]));
+        __asm__ volatile("mov %0, x21" : "=r"(regs[2]));
+        __asm__ volatile("mov %0, x22" : "=r"(regs[3]));
+        __asm__ volatile("mov %0, x23" : "=r"(regs[4]));
+        __asm__ volatile("mov %0, x24" : "=r"(regs[5]));
+        __asm__ volatile("mov %0, x25" : "=r"(regs[6]));
+        __asm__ volatile("mov %0, x26" : "=r"(regs[7]));
+        static int rl;
+        if (rl < 4) {
+            rl++;
+            for (int i = 0; i < 8; ++i) {
+                uintptr_t r = regs[i];
+                float c50 = 0;
+                int ok = r > 0x10000 && mapped((void *)r) && rd(r + 0x50, &c50, 4) &&
+                         c50 >= -0.001f && c50 <= 1.001f;
+                mlog("mpcmini: reg x%2d=%p propish=%d c50=%.4f\n", 19 + i, (void *)r,
+                     ok, ok ? (double)c50 : 0.0);
+            }
+        }
+    }
     g_core_hit = 1;
     /* am-mod's listeners keep their property at +0x40; x20 may be that
      * listener rather than the property itself. Prefer the inner object when
@@ -1180,13 +1236,24 @@ static void trim_probe(void *self, float v)
         if (slot < 0 && g_nlis < 8) { slot = g_nlis++; g_lis[slot].param = (uintptr_t)self; }
         if (slot >= 0) g_lis[slot].listener = prop;
     }
-    if (prop && mapped((void *)prop) && prop_references(prop, (uintptr_t)self)) {
+    if (probe_mode && prop && mapped((void *)prop)) {
+        float v50 = 0;
+        int has = rd(prop + 0x50, &v50, 4);
+        int refs = prop_references(prop, (uintptr_t)self);
+        static int diag;
+        if (diag < 6) {
+            diag++;
+            mlog("mpcmini: diag prop=%p v50=%s%.4f refs=%d v=%.4f\n", (void *)prop,
+                 has ? "" : "?", (double)v50, refs, (double)v);
+        }
+    }
+    if (prop && mapped((void *)prop)) {
         float v50 = 0;
         if (rd(prop + 0x50, &v50, 4) && v50 >= -0.001f && v50 <= 1.001f) {
             float d = v50 - v;
             if (d < 0)
                 d = -d;
-            if (d <= 0.05f) {
+            if (d <= 0.02f) {
                 int i;
                 for (i = 0; i < g_npm; ++i)
                     if (g_pm[i].param == (uintptr_t)self)
@@ -1205,10 +1272,15 @@ static void trim_probe(void *self, float v)
             }
         }
     }
-    if (probe_mode && logs < 4) {
+    if (probe_mode && logs < 200) {
+        uintptr_t vt = 0, val = 0, ap = 0;
+        rd((uintptr_t)self, &vt, 8);
+        rd((uintptr_t)self + T_VALUE, &val, 4);
+        rd((uintptr_t)self + T_APPLIED, &ap, 4);
         logs++;
-        mlog("mpcmini: trim self=%p v=%.4f lr=%p\n", self, (double)v,
-             __builtin_return_address(0));
+        mlog("mpcmini: trim self=%p vptr=%p(base+0x%lx) v=%.4f val=%.4f ap=%.4f lr=%p\n",
+             self, (void *)vt, vt >= base ? (unsigned long)(vt - base) : 0UL,
+             (double)v, (double)val, (double)ap, __builtin_return_address(0));
     }
     if (orig_trim)
         orig_trim(self, v);
@@ -1220,8 +1292,23 @@ static void bcast_hook(void *self, float v)
     g_bc[i & 255].p = (uintptr_t)self;
     g_bc[i & 255].v = v;
     g_nbc = i + 1;
-    if (probe_mode && i < 24)
+    if (probe_mode && i < 64)
         mlog("mpcmini: bcast %p v=%.4f\n", self, (double)v);
+    /* Record the property a *native* broadcast uses: that is the object the
+     * page listens to. Our own broadcasts are flagged. */
+    if (!g_own_call) {
+        uintptr_t P = (uintptr_t)self;
+        int known = 0;
+        for (int k = 0; k < g_nbp; ++k)
+            if (g_bp[k] == P) {
+                known = 1;
+                break;
+            }
+        if (!known && g_nbp < 8) {
+            g_bp[g_nbp++] = P;
+            mlog("mpcmini: native bcast property=%p v=%.4f\n", self, (double)v);
+        }
+    }
     if (orig_bcast)
         orig_bcast(self, v);
 }
@@ -1539,12 +1626,12 @@ static uintptr_t param_by_value(float frac)
     for (int r = 0; r < g_nrng; ++r) {
         if (!g_rng[r].w)
             continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi; a += 65536) {
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ntp < 256; a += 65536) {
             size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
             n &= ~(size_t)7;
             if (!rd(a, buf, n))
                 break;
-            for (size_t o = 0; o + 8 <= n; o += 8) {
+            for (size_t o = 0; o + 8 <= n && g_ntp < 256; o += 8) {
                 uintptr_t q;
                 memcpy(&q, buf + o, 8);
                 if (q != want)
@@ -1632,12 +1719,12 @@ static uintptr_t find_trim_page(float c0, float c1)
     for (int r = 0; r < g_nrng; ++r) {
         if (!g_rng[r].w)
             continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi; a += 65536) {
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ntp < 256; a += 65536) {
             size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
             n &= ~(size_t)7;
             if (!rd(a, buf, n))
                 break;
-            for (size_t o = 0; o + 8 <= n; o += 8) {
+            for (size_t o = 0; o + 8 <= n && g_ntp < 256; o += 8) {
                 uintptr_t q;
                 memcpy(&q, buf + o, 8);
                 if (q != want)
@@ -1669,220 +1756,57 @@ static void commit_trim(void)
 {
     void *p0 = g_trim_param0, *p1 = g_trim_param1;
     float v0 = g_trim_v0, v1 = g_trim_v1;
-    if (!getenv("MPCMINI_LEGACY")) {
-        uintptr_t c0 = find_controls_prop((uintptr_t)p0);
-        uintptr_t c1 = find_controls_prop((uintptr_t)p1);
-        mlog("mpcmini: controls props %p/%p\n", (void *)c0, (void *)c1);
-        if (c0 && c1 && c0 != c1) {
-            float b0 = v0, b1 = v1;
-            FN(0x1671650, void (*)(void *, const void *))((void *)c0, &b0);
-            FN(0x1671650, void (*)(void *, const void *))((void *)c1, &b1);
-            mlog("mpcmini: set via native property (%.4f/%.4f)\n", (double)v0,
-                 (double)v1);
-            if (g_screen)
-                FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-                    g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
-            return;
-        }
-        {
-            uintptr_t sc[8];
-            int ns = find_screens(sc, 8);
-            uintptr_t page = 0;
-            float c0 = 0, c1 = 0;
-            for (int i = 0; i < ns; ++i) {
-                float a = 0, b = 0;
-                if (!rd(sc[i] + 0x1f4c, &a, 4) || !rd(sc[i] + 0x1f50, &b, 4))
-                    continue;
-                if (!(a >= -0.5f && a <= 100.5f && b >= -0.5f && b <= 100.5f))
-                    continue;
-                if (a < 0.5f && b < 0.5f)
-                    continue; /* not the trimmed page */
-                page = sc[i];
-                c0 = a;
-                c1 = b;
-                break;
-            }
-            if (!page && g_trim_page)
-                page = (uintptr_t)g_trim_page;
-            if (!page)
-                page = find_trim_page(g_trim_cur0 * 100.0f, g_trim_cur1 * 100.0f);
-            if (!page) {
-                uintptr_t guess = find_page_by_cache(g_trim_cur1 * 100.0f);
-                if (guess) {
-                    page = guess;
-                    rd(page + 0x1f4c, &c0, 4);
-                    rd(page + 0x1f50, &c1, 4);
-                }
-            }
-            mlog("mpcmini: trim page %p caches %.2f/%.2f\n", (void *)page,
-                 (double)c0, (double)c1);
-            if (page) {
-                uintptr_t q0 = param_by_value(c0 / 100.0f);
-                uintptr_t q1 = param_by_value(c1 / 100.0f);
-                mlog("mpcmini: page %.2f/%.2f -> params %p/%p\n", (double)c0,
-                     (double)c1, (void *)q0, (void *)q1);
-                if (q0 && q1 && q0 != q1) {
-                    float a0 = v0, a1 = v1;
-                    g_own_call = 1;
-                    FN(A_TRIM_CORE, void (*)(float, void *))(a0, (void *)q0);
-                    FN(A_TRIM_CORE, void (*)(float, void *))(a1, (void *)q1);
-                    g_own_call = 0;
-                    FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-                        (void *)page, 0, FIELD(page, 0x28, uint64_t));
-                    mlog("mpcmini: wrote page params\n");
-                    return;
-                }
-            }
-        }
-        {
-            uintptr_t sc[8];
-            int ns = find_screens(sc, 8);
-            for (int i = 0; i < ns; ++i)
-                if (apply_to_instance(sc[i], v0 * 100.0f, v1 * 100.0f))
-                    return;
-        }
-        uintptr_t s0 = 0, s1 = 0;
-        for (int i = 0; i < g_nps; ++i) {
-            if (g_ps[i].param == (uintptr_t)p0)
-                s0 = g_ps[i].slider;
-            if (g_ps[i].param == (uintptr_t)p1)
-                s1 = g_ps[i].slider;
-        }
-        mlog("mpcmini: sliders for params %p/%p\n", (void *)s0, (void *)s1);
-        int w0 = 0, w1 = 0;
-        if (s0) {
-            float p = v0 * 100.0f;
-            w0 = wr(s0 + 0x1b4, &p, 4);
-        }
-        if (s1) {
-            float p = v1 * 100.0f;
-            w1 = wr(s1 + 0x1b4, &p, 4);
-        }
-        if (!w0 && !w1) {
-            w0 = set_slider_percent(g_trim_cur0 * 100.0f, v0 * 100.0f);
-            w1 = set_slider_percent(g_trim_cur1 * 100.0f, v1 * 100.0f);
-        }
-        mlog("mpcmini: sliders written %d/%d\n", w0, w1);
-        if ((w0 || w1) && g_screen) {
-            FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-                g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
-            return;
-        }
-        /* x20 at a trim-core call is the property object itself (value at
-         * +0x50). Broadcast through it when it is known; the layer write above
-         * already carries the audio side. The knob path reaches the same core,
-         * so setting these frames is the app's own representation. */
-        uintptr_t pr0 = learned_prop((uintptr_t)p0);
-        uintptr_t pr1 = learned_prop((uintptr_t)p1);
-        mlog("mpcmini: props %p/%p\n", (void *)pr0, (void *)pr1);
-        if (pr0 && pr1 && pr0 != pr1) {
-            FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
-            FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
-        }
-        /* The page paints its locators from three mirrored fields per edge
-         * (percent at +0x1f4c/+0x288c, fraction at +0x72c8, End is the next
-         * slot). Only overwrite values that already look like a trim edge. */
-        if (g_screen) {
-            float p0p = v0 * 100.0f, p1p = v1 * 100.0f, old = 0;
-            static const long pct[2] = {0x1f4c, 0x288c};
-            static const long frc[2] = {0x72c8, 0x72cc};
-            int done = 0;
-            for (int k = 0; k < 2; ++k) {
-                long o = pct[k];
-                if (rd((uintptr_t)g_screen + o, &old, 4) && old >= -1 && old <= 101) {
-                    wr((uintptr_t)g_screen + o, &p0p, 4);
-                    wr((uintptr_t)g_screen + o + 4, &p1p, 4);
-                    done++;
-                }
-            }
-            for (int k = 0; k < 2; ++k) {
-                long o = frc[k];
-                if (rd((uintptr_t)g_screen + o, &old, 4) && old >= -0.01f && old <= 1.01f) {
-                    wr((uintptr_t)g_screen + o, &v0, 4);
-                    wr((uintptr_t)g_screen + o + 4, &v1, 4);
-                    done++;
-                }
-            }
-            mlog("mpcmini: page fields written=%d (%.2f%%/%.2f%%)\n", done,
-                 (double)p0p, (double)p1p);
-            FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-                g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
-        }
+    if (!p0 || !p1)
         return;
-    }
-    /* Only a property learned from a real knob move is trusted: the
-     * heuristics found false positives and broadcasting a wrong object
-     * makes the app abort. */
-    collect_binding_props();
-    if (!learned_prop((uintptr_t)p0)) {
-        uintptr_t own = owner_of_listener(listener_of_param((uintptr_t)p0));
-        if (own) {
-            int slot = g_npm < 8 ? g_npm : 7;
-            g_pm[slot].param = (uintptr_t)p0;
-            g_pm[slot].prop = own;
-            if (g_npm < 8) g_npm++;
-            mlog("mpcmini: owner(listener) param=%p prop=%p\n", p0, (void *)own);
-        } else {
-            probe_property((uintptr_t)p0);
-        }
-    }
-    if (!learned_prop((uintptr_t)p1))
-        probe_property((uintptr_t)p1);
+
+    /* The Trim knobs' own effect, in their own order: the core (which stores
+     * the value and the applied value on the parameter), the layer frames the
+     * engine plays, then a repaint. Everything else tried so far - page cache
+     * fields, slider widgets, property broadcasts - was measured to be a no-op
+     * or to corrupt the page, so none of it is attempted any more. */
+    /* A learned property broadcasts exactly like a knob; the others are
+     * written through the trim core. Broadcasting even one of them is what
+     * makes the page repaint. */
     uintptr_t pr0 = learned_prop((uintptr_t)p0);
     uintptr_t pr1 = learned_prop((uintptr_t)p1);
-    if (!pr0)
-        pr0 = broadcast_prop((uintptr_t)p0, g_trim_cur0);
-    if (!pr1)
-        pr1 = broadcast_prop((uintptr_t)p1, g_trim_cur1);
-    if (pr0 == pr1 || (pr0 && pr1 && !pr0 && !pr1))
-        pr0 = pr1 = 0;
-    mlog("mpcmini: commit %.4f/%.4f prop=%p/%p\n", (double)v0, (double)v1,
-         (void *)pr0, (void *)pr1);
-    uintptr_t b0 = 0, b1 = 0;
-    rd((uintptr_t)p0 + 0x80, &b0, 8);
-    rd((uintptr_t)p1 + 0x80, &b1, 8);
-    unsigned fa = (unsigned)(v0 * (float)g_trim_frames + 0.5f);
-    unsigned fb = (unsigned)(v1 * (float)g_trim_frames + 0.5f);
-    if (b0) {
-        wr(b0 + 0x38, &fa, 4);
-        wr(b0 + 0xa8, &fa, 4);
-    }
-    if (b1) {
-        wr(b1 + 0x38, &fb, 4);
-        wr(b1 + 0xa8, &fb, 4);
-    }
+    mlog("mpcmini: learned %p/%p\n", (void *)pr0, (void *)pr1);
+    g_own_call = 1;
+    if (pr0)
+        FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
+    else
+        FN(A_TRIM_CORE, void (*)(float, void *))(v0, p0);
+    if (pr1)
+        FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
+    else
+        FN(A_TRIM_CORE, void (*)(float, void *))(v1, p1);
+    g_own_call = 0;
+
     if (g_trim_layer) {
+        unsigned fa = (unsigned)(v0 * (float)g_trim_frames + 0.5f);
+        unsigned fb = (unsigned)(v1 * (float)g_trim_frames + 0.5f);
+        if (fb <= fa)
+            fb = fa + 1;
         wr(g_trim_layer + 0x4d8, &fa, 4);
         wr(g_trim_layer + 0x588, &fa, 4);
         wr(g_trim_layer + 0x530, &fb, 4);
+        mlog("mpcmini: layer %p <- %u..%u frames\n", (void *)g_trim_layer, fa, fb);
     }
-    g_own_call = 1;
-    FN(A_TRIM_CORE, void (*)(float, void *))(v0, p0);
-    FN(A_TRIM_CORE, void (*)(float, void *))(v1, p1);
-    g_own_call = 0;
-    wr((uintptr_t)p0 + 0x1a0, &v0, 4);
-    wr((uintptr_t)p1 + 0x1a0, &v1, 4);
-    /* The broadcaster stores the new value itself and returns early if the
-     * cached value already matches, so it must be called *without* pre-writing
-     * 0x50 - otherwise the listener loop (which is what updates the page)
-     * never runs. */
-    if (pr0) {
-        float cur0 = 0;
-        if (rd(pr0 + 0x50, &cur0, 4) && cur0 >= -0.001f && cur0 <= 1.001f)
-            FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
-    }
-    if (pr1) {
-        float cur1 = 0;
-        if (rd(pr1 + 0x50, &cur1, 4) && cur1 >= -0.001f && cur1 <= 1.001f)
-            FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
-    }
-    unsigned l0 = 0, l1 = 0;
-    if (g_trim_layer) {
-        rd(g_trim_layer + 0x4d8, &l0, 4);
-        rd(g_trim_layer + 0x530, &l1, 4);
-    }
-    mlog("mpcmini: after layer=%u/%u\n", l0, l1);
+
+    float a0 = v0, a1 = v1;
+    wr((uintptr_t)p0 + T_APPLIED, &a0, 4);
+    wr((uintptr_t)p1 + T_APPLIED, &a1, 4);
+
+    float check = 0, check2 = 0;
+    rd((uintptr_t)p0 + T_VALUE, &check, 4);
+    rd((uintptr_t)p1 + T_VALUE, &check2, 4);
+    mlog("mpcmini: commit core done p0=%.4f p1=%.4f (want %.4f/%.4f)\n",
+         (double)check, (double)check2, (double)v0, (double)v1);
+
+    if (g_screen)
+        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
+            g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
 }
+
 
 static void repaint_hook(void *comp, uint64_t a, uint64_t b)
 {
@@ -1961,6 +1885,46 @@ static void screen_paint(void *p, void *g)
         if (!dumped && getenv("MPCMINI_DUMP")) {
             dumped = 1;
             dump_sliders(p);
+        }
+    }
+    /* Diff the painting screen between paints: whatever changes when a knob
+     * turns is exactly what the page stores for its markers. */
+    if (getenv("MPCMINI_SNAPDIFF")) {
+        static unsigned char prev[0x8000], cur[0x8000];
+        static uintptr_t prev_p;
+        static size_t snap_len;
+        static int have;
+        if (prev_p != (uintptr_t)p) {
+            size_t got = 0;
+            for (size_t off = 0; off < sizeof prev; off += 0x1000) {
+                if (!rd((uintptr_t)p + off, prev + off, 0x1000))
+                    break;
+                got += 0x1000;
+            }
+            if (got) {
+                snap_len = got;
+                prev_p = (uintptr_t)p;
+                have = 1;
+                mlog("mpcmini: snapdiff baseline %p (%zu bytes)\n", p, got);
+            }
+        } else if (have) {
+            size_t got = 0;
+            for (size_t off = 0; off < snap_len; off += 0x1000) {
+                if (!rd((uintptr_t)p + off, cur + off, 0x1000))
+                    break;
+                got = off + 0x1000;
+            }
+            int shown = 0;
+            for (size_t i = 0; i + 4 <= got && shown < 24; i += 4) {
+                if (memcmp(cur + i, prev + i, 4) == 0)
+                    continue;
+                float a, b;
+                memcpy(&a, prev + i, 4);
+                memcpy(&b, cur + i, 4);
+                mlog("mpcmini: diff +0x%zx %.4f -> %.4f\n", i, (double)a, (double)b);
+                memcpy(prev + i, cur + i, 4);
+                shown++;
+            }
         }
     }
     if (!g_shift)
@@ -2049,7 +2013,7 @@ static void find_filter_strings(void)
     for (int r = 0; r < g_nrng && g_nfilter_strs < 6; ++r) {
         if (!g_rng[r].w)
             continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi; a += 65536) {
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ntp < 256; a += 65536) {
             size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
             n &= ~(size_t)7;
             if (!rd(a, buf, n))
@@ -2240,6 +2204,171 @@ static void do_autotrim(void)
     uintptr_t p_start = (uintptr_t)g_tp[idx[0]].p;
     uintptr_t p_end = (uintptr_t)g_tp[idx[1]].p;
 
+    /* If the knobs have been used, their parameters are the live ones: prefer
+     * the learned one and the instance nearest to it (the stale copies sit at
+     * the same address minus/plus a small offset). */
+    if (g_npm > 0) {
+        uintptr_t live = g_pm[0].param;
+        uintptr_t near = 0;
+        long bestd = 1 << 30;
+        for (int i = 0; i < g_ntp; ++i) {
+            uintptr_t pp = (uintptr_t)g_tp[i].p;
+            if (pp == live || g_tp[i].mx != N)
+                continue;
+            long d = (long)pp - (long)live;
+            if (d < 0)
+                d = -d;
+            if (d < bestd) {
+                bestd = d;
+                near = pp;
+            }
+        }
+        if (near) {
+            p_start = live;
+            p_end = near;
+            mlog("mpcmini: using learned params %p/%p (d=%ld)\n", (void *)p_start,
+                 (void *)p_end, bestd);
+        }
+    }
+
+    /* Group the wired parameters by their context (*(param+0xb0)): the two
+     * (Start/End) or three (..Loop) that belong to the displayed pad share it,
+     * and the page's own pair is the group the Trim knobs write. Groups whose
+     * context lives inside the heap near the parameter are stale copies. */
+    {
+        uintptr_t ctxs[8];
+        int cnt[8], ngrp = 0;
+        for (int k = 0; k < ngood; ++k) {
+            if (g_tp[good[k]].mx != best_len)
+                continue;
+            uintptr_t c = 0;
+            rd((uintptr_t)g_tp[good[k]].p + T_LAYER, &c, 8);
+            int g = -1;
+            for (int j = 0; j < ngrp; ++j)
+                if (ctxs[j] == c) {
+                    g = j;
+                    break;
+                }
+            if (g < 0 && ngrp < 8) {
+                g = ngrp++;
+                ctxs[g] = c;
+                cnt[g] = 0;
+            }
+            if (g >= 0)
+                cnt[g]++;
+        }
+        int best = -1;
+        for (int j = 0; j < ngrp; ++j)
+            if (cnt[j] >= 2 && (best < 0 || cnt[j] > cnt[best]))
+                best = j;
+        if (best >= 0) {
+            uintptr_t picks[8];
+            int np = 0;
+            for (int k = 0; k < ngood && np < 8; ++k) {
+                uintptr_t c = 0;
+                if (g_tp[good[k]].mx != best_len)
+                    continue;
+                rd((uintptr_t)g_tp[good[k]].p + T_LAYER, &c, 8);
+                if (c == ctxs[best])
+                    picks[np++] = (uintptr_t)g_tp[good[k]].p;
+            }
+            for (int i = 0; i < np; ++i)
+                for (int j = i + 1; j < np; ++j) {
+                    float vi = 0, vj = 0;
+                    rd(picks[i] + T_VALUE, &vi, 4);
+                    rd(picks[j] + T_VALUE, &vj, 4);
+                    if (vj < vi) {
+                        uintptr_t t = picks[i];
+                        picks[i] = picks[j];
+                        picks[j] = t;
+                    }
+                }
+            p_start = picks[0];
+            p_end = picks[1];
+            {
+                uintptr_t pg = (uintptr_t)find_sample_screen();
+                for (int k = 0; k < ngood; ++k) {
+                    if (g_tp[good[k]].mx != best_len)
+                        continue;
+                    uintptr_t pp = (uintptr_t)g_tp[good[k]].p;
+                    float v = 0, ap = 0;
+                    uintptr_t c = 0, m = 0;
+                    rd(pp + T_VALUE, &v, 4);
+                    rd(pp + T_APPLIED, &ap, 4);
+                    rd(pp + T_LAYER, &c, 8);
+                    rd(pp + T_MODEL, &m, 8);
+                    long d = (long)m - (long)pg;
+                    mlog("mpcmini: cand %p v=%.3f ap=%.3f ctx=%p model=%p d=%ld\n",
+                         (void *)pp, (double)v, (double)ap, (void *)c, (void *)m, d);
+                }
+                mlog("mpcmini: page for deltas: %p\n", (void *)pg);
+            }
+            mlog("mpcmini: ctx group %p has %d params -> %p/%p\n", (void *)ctxs[best],
+                 np, (void *)p_start, (void *)p_end);
+        } else {
+            mlog("mpcmini: no ctx group with 2+ params (groups=%d)\n", ngrp);
+        }
+    }
+
+    /* The page object itself points at the parameters it drives. Several pads
+     * can share a sample length, so length alone cannot tell which instance
+     * the Trim knobs write - this can: scan the screen for our candidates. */
+    {
+        uintptr_t page = (uintptr_t)find_sample_screen();
+        mlog("mpcmini: pagebind page=%p ngood=%d best_len=%u\n", (void *)page, ngood,
+             best_len);
+        for (int i = 0; i < g_ntp && i < 12; ++i) {
+            float v = 0, ap = 0;
+            uintptr_t l = 0, ins = 0;
+            int ok = page_layers((uintptr_t)g_tp[i].p, &l, &ins);
+            rd((uintptr_t)g_tp[i].p + T_VALUE, &v, 4);
+            rd((uintptr_t)g_tp[i].p + T_APPLIED, &ap, 4);
+            mlog("mpcmini: tp[%d] %p val=%.4f applied=%.3f len=%u layer=%p\n", i,
+                 g_tp[i].p, (double)v, (double)ap, g_tp[i].mx,
+                 ok ? (void *)(l) : 0);
+        }
+        if (page) {
+            uintptr_t bound[8];
+            int nb = 0;
+            for (int i = 0; i < ngood && nb < 8; ++i) {
+                uintptr_t cand = (uintptr_t)g_tp[good[i]].p;
+                if (g_tp[good[i]].mx != best_len)
+                    continue;
+                for (long off = 0; off < 0x9000; off += 8) {
+                    uintptr_t q = 0;
+                    if (!rd(page + off, &q, 8))
+                        break;
+                    if (q == cand) {
+                        bound[nb++] = cand;
+                        mlog("mpcmini: page %p references param %p (+0x%lx)\n",
+                             (void *)page, (void *)cand, off);
+                        break;
+                    }
+                }
+            }
+            if (nb >= 2) {
+                /* Start is the lower value, End the higher one. */
+                for (int i = 0; i < nb; ++i)
+                    for (int j = i + 1; j < nb; ++j) {
+                        float vi = 0, vj = 0;
+                        rd(bound[i] + T_VALUE, &vi, 4);
+                        rd(bound[j] + T_VALUE, &vj, 4);
+                        if (vj < vi) {
+                            uintptr_t t = bound[i];
+                            bound[i] = bound[j];
+                            bound[j] = t;
+                        }
+                    }
+                p_start = bound[0];
+                p_end = bound[nb - 1];
+                mlog("mpcmini: page-bound params %p/%p (of %d)\n", (void *)p_start,
+                     (void *)p_end, nb);
+            } else {
+                mlog("mpcmini: page references %d of our params, keeping guess\n", nb);
+            }
+        }
+    }
+
     uintptr_t layers = 0, instr = 0;
     uintptr_t sample = 0;
     unsigned a = 0, b = 0;
@@ -2369,6 +2498,20 @@ static void do_autotrim(void)
     g_trim_layer = layers;
     g_trim_screen = (uintptr_t)find_sample_screen();
     mlog("mpcmini: autotrim commit (message thread)\n");
+    {
+        char line[256];
+        int n = 0;
+        n += snprintf(line + n, sizeof line - n, "native bcast props:");
+        for (int i = 0; i < g_nbp && n < (int)sizeof line - 24; ++i)
+            n += snprintf(line + n, sizeof line - n, " %p", (void *)g_bp[i]);
+        mlog("mpcmini: %s\n", line);
+        n = 0;
+        n += snprintf(line + n, sizeof line - n, "learned props:");
+        for (int i = 0; i < g_npm && n < (int)sizeof line - 32; ++i)
+            n += snprintf(line + n, sizeof line - n, " %p(p=%p)",
+                          (void *)g_pm[i].prop, (void *)g_pm[i].param);
+        mlog("mpcmini: %s\n", line);
+    }
     commit_trim();
 }
 
@@ -2452,6 +2595,40 @@ static void *slider_probe_thread(void *arg)
         mlog("mpcmini: probe slider %d @%p = %.2f\n", idx, (void *)hit, (double)val);
         FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
             g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
+    }
+    return 0;
+}
+
+/* Probe: /run/mpcmini.bcast holds "i,v" - broadcast g_bp[i] with value v, so we
+ * can find which recorded property drives the page. */
+static void *bcast_probe_thread(void *arg)
+{
+    (void)arg;
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 300 * 1000 * 1000};
+    int last_i = -1;
+    float last_v = -1;
+    for (;;) {
+        nanosleep(&ts, 0);
+        int fd = open("/run/mpcmini.bcast", O_RDONLY);
+        if (fd < 0)
+            continue;
+        char buf[64];
+        ssize_t n = read(fd, buf, sizeof buf - 1);
+        close(fd);
+        if (n <= 0)
+            continue;
+        buf[n] = 0;
+        int idx = -1;
+        float val = 0;
+        if (sscanf(buf, "%d,%f", &idx, &val) != 2 || idx < 0 || idx >= g_nbp)
+            continue;
+        if (idx == last_i && val == last_v)
+            continue;
+        last_i = idx;
+        last_v = val;
+        mlog("mpcmini: bcast probe %d (%p) = %.4f\n", idx, (void *)g_bp[idx],
+             (double)val);
+        FN(A_BROADCAST, void (*)(void *, float))((void *)g_bp[idx], val);
     }
     return 0;
 }
@@ -2597,6 +2774,9 @@ __attribute__((constructor)) static void load(void)
         probe_bits = atoi(bits_env);
     void *t_ctor = (hook_mask & 1) ? install_hook(base + A_SIXTEEN_CTOR, (void *)sixteen_ctor) : 0;
     void *t_proc = (hook_mask & 2) ? install_hook(base + A_SIXTEEN_PROC, (void *)sixteen_proc) : 0;
+    void *t_loc = install_hook(base + A_LOC_BOUNDS, (void *)loc_bounds);
+    if (t_loc)
+        orig_loc_bounds = (void (*)(void *))t_loc;
     void *t_poff = install_hook(base + A_PITCH_OFF, (void *)pitch_off);
     if (t_poff)
         orig_pitch_off = (void (*)(void *, uint64_t, uint64_t, int))t_poff;
@@ -2644,6 +2824,8 @@ __attribute__((constructor)) static void load(void)
         pthread_create(&wth, 0, watch_thread, 0);
         pthread_t sth;
         pthread_create(&sth, 0, slider_probe_thread, 0);
+        pthread_t bth;
+        pthread_create(&bth, 0, bcast_probe_thread, 0);
     }
     if (!relay_used) {
         mlog("mpcmini: no hook installed\n");
