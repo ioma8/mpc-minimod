@@ -1071,15 +1071,15 @@ static void pagector_probe(void *a0, void *a1, void *a2, void *a3, void *a4, voi
  * (FUN_01a68020(0, surface, controlId, value, mode)). Capturing the surface lets
  * commit_trim drive the Start/End controls the same way the UI does. */
 static void *g_surface;
+static void *g_control_context;
 static void (*orig_setctl)(void *, void *, int, int, float);
 
 static void setctl_probe(void *a0, void *a1, int a2, int a3, float v)
 {
-    mlog("mpcmini: [trim-args] context=%p surface=%p mode=%d control=%#x value=%.4f\n",
-         a0, a1, a2, a3, (double)v);
     uintptr_t vt = 0;
     if (a1 && rd((uintptr_t)a1, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
         g_surface = a1;
+        g_control_context = a0;
     }
     if (orig_setctl)
         orig_setctl(a0, a1, a2, a3, v);
@@ -1331,8 +1331,10 @@ static void apply_pending_ctl(void)
     uintptr_t svt = 0;
     if (!rd((uintptr_t)g_surface2, &svt, 8) || svt < base || svt > base + 0x12000000ULL)
         return;
-    orig_setctl2(0, g_surface2, 0, 0x462, g_pending_v0);
-    orig_setctl2(0, g_surface2, 0, 0x466, g_pending_v1);
+    if (!g_control_context)
+        return;
+    orig_setctl2(g_control_context, g_surface2, 0, 0x466, g_pending_v1);
+    orig_setctl2(g_control_context, g_surface2, 0, 0x462, g_pending_v0);
     mlog("mpcmini: paint-time setctl %d/%d\n", g_pending_r0, g_pending_r1);
 }
 static void *g_paint_comp;
@@ -3015,8 +3017,8 @@ done:
         orig_setctl2 = orig_setctl;
         g_pending_r0 = (int)(v0 * 127.0f + 0.5f);
         g_pending_r1 = (int)(v1 * 127.0f + 0.5f);
-        g_pending_v0 = v0;
-        g_pending_v1 = v1;
+        g_pending_v0 = v0 * g_trim_frames;
+        g_pending_v1 = v1 * g_trim_frames;
         g_pending_ctl = 1;
         mlog("mpcmini: armed paint-time ctl %d/%d\n", g_pending_r0, g_pending_r1);
     }
@@ -3119,7 +3121,6 @@ static void screen_paint(void *p, void *g)
             }
         }
     }
-    apply_pending_ctl();
     if (orig_screen_paint)
         orig_screen_paint(p, g);
     /* The knob replay runs here, on the UI thread at a safe point, instead of
@@ -3955,6 +3956,7 @@ static void *heap_probe_thread(void *arg)
     struct timespec ts = {.tv_sec = 0, .tv_nsec = 400 * 1000 * 1000};
     for (;;) {
         nanosleep(&ts, 0);
+        apply_pending_ctl();
         int fd = open("/run/mpcmini.heap", O_RDONLY);
         if (fd < 0)
             continue;

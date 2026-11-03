@@ -222,6 +222,56 @@ Three ways to actually see the tab, in order of cost:
    per-model feature flag in the tab list, which is where the search would then
    focus.
 
+### 2.5 Enabling the developer diagnostics tab (analysis only, not implemented)
+
+The tab is **compiled out of the call graph**, not gated at runtime. Proven three
+independent ways (Ghidra VA = file offset + 0x100000):
+
+| check | result |
+|---|---|
+| direct `BL` callers of `0x3827f20` | **0** (scan validated: the same scan finds 27 387 callers for the `juce::String` ctor at `0x10535c0`) |
+| relocated pointers to `0x3827f20` in all 490 322 `R_AARCH64_RELATIVE` relocations | **0** |
+| functions called from inside the tab-code region `0x381e000–0x3824000` | the dev ctor is absent, while sibling tab factories are present (`FUN_03820220` at `0x3820220`, called twice) |
+
+So in this release build nothing allocates or constructs it; the class body
+survives only because the linker kept it. **There is no flag to flip.**
+
+A live tab factory shows the pattern that the missing one would have had
+(`FUN_03820220`):
+
+```c
+pvVar6 = operator_new(0x328);      // allocate the tab object
+FUN_01026b10(auStack..., ...);     // ctor
+```
+
+To enable the dev tab, the mod would have to reproduce its factory:
+
+1. **allocate** — the ctor writes `param_1[0x92]`, i.e. **offset 0x490**, so the
+   object must be at least 0x498 bytes (siblings allocate exact sizes, e.g.
+   `0x328`; over-allocating is safe for `operator_new`);
+2. **construct** — call `FUN_03827f20(obj)` on the UI thread; it builds the info
+   label, the `Custom tags` section with `Refresh tags`, the `CRASH REASON` pane,
+   the `Crash application` button and the `Set User ID` button, adding children
+   to the container at `obj + 0x98` via `FUN_03832480`;
+3. **attach** — insert the object into the Preferences tab strip. *This is the
+   unsolved step*: the strip's owner and its add-tab virtual have not been
+   identified. The path to them is the live factories in `0x381e000–0x3824000`
+   (they call `operator_new` + ctor and then register), or the user of the
+   `BLUETOOTH` title setter `FUN_03583900` through its vtable;
+4. **select** — the tab must also be made current. This one is not optional in
+   the lab: the app ignores touch input (§2.4), so a tab that is merely added
+   can never be clicked into view. Showing it means calling the strip's
+   *set current tab* path with its index.
+
+Cautions if this is ever implemented:
+
+* the tab contains a **`Crash application`** button and a `Set User ID` action —
+  it must live behind `MPCMINI_DEBUG` and never ship;
+* `Custom tags` / `Refresh tags` touch the app's tags database, so constructing
+  it on a user's unit risks mutating real data;
+* it is a developer diagnostics tool, unrelated to Bluetooth despite sitting in
+  the same string pool.
+
 ---
 
 ## 3. Why Bluetooth does not work in the lab emulator
