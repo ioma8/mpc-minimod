@@ -981,3 +981,38 @@ All four targets, vtables and call slots are valid image addresses, and the
 fault (`0xffffe60544d8`) matches none of them. The crash therefore happens in
 the app's follow-up work after the broadcast, with a bogus stack pointer
 (`sp=0xfffffffff3d0`), not in the dispatch itself.
+
+
+## 20. Round 9: the state-sync function (and a corrected call chain)
+
+Hook-driven hypothesis testing (log in `HYPOTHESES.csv`) produced four results:
+
+1. **The page's display is not driven by a listener.** Calling listener 1 of a
+   knob property alone changes **0 pixels**; calling listener 0 crashes the app.
+   Both share one call slot (`0xaaaaacccd640`), so neither is the page side.
+   Disproved.
+2. **`prop_of_param` was returning the class prototype inside the image**, not
+   the live heap property. It matched structurally but is never the live one.
+   Fixed by rejecting candidates in `base .. base+0x9000000`; the poke probe then
+   found heap properties and stopped crashing. **Proved - this was a real bug.**
+3. **The two bases are not the same.** The CC handler at `0x159f230` adds
+   `0x1ac0`, while the state-sync function adds `0x18b8 + 0x58*k`
+   (`0x18b8, 0x1910, 0x1968, 0x19c0, 0x1a18, 0x1a70, 0x1ac8, ...`). With `0x1ac8`
+   the handler finds no owner object at all, so `0x1ac0` is right for the
+   handler. Disproved that they share a base.
+4. **Found the state-sync function** at `0x2822400`-ish. Its shape:
+
+   ```
+   ldr s0, [x20, 0x1960]      ; read the model
+   add x0, x19, #0x1968       ; the live property
+   bl  0x13bb930              ; broadcast -> updates listeners and the UI
+   ```
+
+   repeated for ~20 properties with stride `0x58`, where the model field is
+   always `property + 0x50`. So `x20` is the model the page draws from, and this
+   function is the model -> properties -> UI bridge.
+
+The next step is therefore concrete: find that function's entry and its `x20`,
+write our two trim values into the model fields, and call it. That is the app's
+own state-loading path, so it should update the page without the synthetic-event
+crash.

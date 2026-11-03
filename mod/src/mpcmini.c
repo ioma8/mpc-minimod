@@ -1045,6 +1045,9 @@ static void heap_snapshot(const char *tag);
 static void heap_diff(const char *tag);
 static uintptr_t g_last_press_obj;
 static void find_float_pair(float v);
+static volatile int g_poke_which = -1;
+static void do_poke(void);
+static volatile float g_poke_value;
 static float g_mark_v0 = -1.0f, g_mark_v1 = -1.0f;
 static volatile int g_pending_cc;
 static volatile int g_in_inject;
@@ -1086,6 +1089,7 @@ static void buttons(void *event)
             }
         }
     }
+    do_poke();
     if (down && g_mark_v0 >= 0.0f) {
         /* any key press may change what the page shows: drop our edges and ask
          * for a repaint so they actually disappear */
@@ -2002,8 +2006,12 @@ static uintptr_t prop_of_param(uintptr_t param)
                     uintptr_t cand = next - 8;
                     uintptr_t head = 0;
                     float c50 = 0;
-                    if (rd(cand + 0x10, &head, 8) && head && mapped((void *)head) &&
-                        rd(cand + 0x50, &c50, 4) && c50 >= -2.0f && c50 <= 2.0f) {
+                    /* The image holds the class prototype of every property; it
+                     * matches structurally but is never the live one. */
+                    if (cand >= base && cand < base + 0x9000000)
+                        ; /* reject below */
+                    else if (rd(cand + 0x10, &head, 8) && head && mapped((void *)head) &&
+                             rd(cand + 0x50, &c50, 4) && c50 >= -2.0f && c50 <= 2.0f) {
                         /* prove the chain from head reaches our node */
                         uintptr_t w = head;
                         for (int i = 0; i < 32 && w; ++i) {
@@ -2322,6 +2330,44 @@ static uintptr_t param_from_prop(uintptr_t P)
         node = next;
     }
     return 0;
+}
+
+static void do_poke(void)
+{
+    if (g_poke_which >= 0) {
+        int which = g_poke_which;
+        g_poke_which = -1;
+        mlog("mpcmini: poke fire %d v=%.3f\n", which, (double)g_poke_value);
+        uintptr_t pp = prop_of_param((uintptr_t)g_trim_param0);
+        if (!pp)
+            pp = prop_of_param((uintptr_t)g_trim_param1);
+        if (!pp) {
+            uintptr_t kp = find_knob_props();
+            if (kp)
+                pp = kp;
+        }
+        mlog("mpcmini: poke prop=%p\n", (void *)pp);
+        if (pp) {
+            uintptr_t node = 0;
+            if (rd(pp + 0x10, &node, 8) && node) {
+                for (int i = 0; i < which && node && node != pp + 8; ++i) {
+                    uintptr_t next = 0;
+                    if (!rd(node + 8, &next, 8))
+                        break;
+                    node = next;
+                }
+                uintptr_t tgt = 0, vt = 0, slot = 0;
+                if (rd(node + 0x18, &tgt, 8) && rd(tgt & ~(uintptr_t)3, &vt, 8) &&
+                    rd(vt + 0x28, &slot, 8)) {
+                    uintptr_t t = tgt & ~(uintptr_t)3;
+                    mlog("mpcmini: poke %d target=%p slot=%p v=%.4f\n", which, (void *)t,
+                         (void *)slot, (double)g_poke_value);
+                    ((void (*)(float, void *))slot)(g_poke_value, (void *)t);
+                    mlog("mpcmini: poke done\n");
+                }
+            }
+        }
+    }
 }
 
 static void commit_trim(void)
@@ -3472,6 +3518,12 @@ static void *heap_probe_thread(void *arg)
             heap_diff("after knob");
         else if (!strncmp(buf, "find ", 5))
             find_float_pair((float)atof(buf + 5));
+        else if (!strncmp(buf, "poke ", 5)) {
+            int w = atoi(buf + 5);
+            const char *sp = strchr(buf + 5, ' ');
+            g_poke_value = sp ? (float)atof(sp + 1) : 0.5f;
+            g_poke_which = w;
+        }
     }
     return 0;
 }
