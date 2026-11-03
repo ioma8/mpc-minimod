@@ -2075,3 +2075,37 @@ Established with it:
   fixed, and the property verifiably holds the trim (`0.0001`);
 * the property's only reader is the clamped getter at `0x1773090`, i.e. the
   renderer of the Start/End edges does **not** read the property.
+
+### 31.5 The page object does not change on a knob turn (round 10)
+
+With the gdbstub, a full snapshot of the page (`0x2400` bytes, page vtable
+verified as `0xaaaab1963ca0`) was taken before and after a knob turn - twice,
+with the CPU stopped inside the app on both sides of the window:
+
+```
+snapshot ok on try 1
+changed offsets (0): []
+```
+
+**No field in the page changes when the knob moves.** Together with §31.3 (the
+property's only reader is inside `Property_Broadcast` itself) this means the
+renderer's input is neither the page object nor the property.
+
+A breakpoint on the pad->page copy `FUN_0290dca0` with a `SAMPLE` press did not
+fire, so that copy is not what a page (re)selection goes through either, or the
+page was already built at that moment.
+
+### 31.6 Net result of rounds 9-10
+
+The watchpoint toolkit is now: `Z2`/`Z3`/`Z4` on virtual addresses with writer
+PC and registers, plus memory snapshots and software breakpoints, all through
+QEMU's gdbstub. With it:
+
+* `Property_Broadcast(prop, value)` stores at `prop+0x50`, early-outs on equal
+  values (`0x14bb9f4`), and is the only reader of the property on a knob turn
+  (`0x14bb988`);
+* the notification bug in `commit_trim` was found and fixed, so the app's model
+  now verifiably holds the trim (`0.0001`);
+* the page object is unchanged by a knob turn;
+* the renderer therefore draws the edges from something not yet identified,
+  which no longer includes the property or the page.
