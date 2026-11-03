@@ -1775,3 +1775,36 @@ first two parameters are floats, i.e. passed in `s0`/`s1`).
 
 The call is kept behind `MPCMINI_CTL` and off by default; the shipped build is
 unchanged and verified.
+
+### 30.9 The paint does not read the property (round 4)
+
+Writing the property values **inside** the paint callback, immediately before
+the app's own paint runs, produces:
+
+```
+props written in paint 0.0001/0.8254
+app display change: 0 px
+```
+
+So the app's paint does not read `property + 0x50`. The knob path must write a
+different object that the paint *does* read, and that write has not been
+located. The control entry `FUN_01a68020` was called with the corrected
+register layout (`x1` = surface, `w2` = mode, `w3` = controlId, `s0` = float
+value, taken from the disassembly at `0x1a68020`) and still faults, so its
+remaining arguments are not yet right either.
+
+### 30.10 What is definitively established
+
+* the trim is computed correctly and both parameters are set exactly
+  (`p0 = 0.0000`, `p1 = 0.8268`, knobs produce `0.8254`);
+* the parameter's property is written (`prop + 0x50`), which is the model the
+  app's *controls* use;
+* the visible trim is drawn by the mod's overlay during the app's paint pass,
+  with the app's own Graphics - pixel-comparable to a hand-set trim;
+* the app's own Start/End edges cannot be driven from a hook: the paint ignores
+  the property, the paint's Graphics is stack-local (so no forced repaint), and
+  the control-setter entry faults from an external call.
+
+Full internal-state sync therefore needs the write side of the knob path, which
+four rounds of Ghidra work and live debugging have narrowed to
+`FUN_01a68020`/`FUN_01a679e0` but not yet pinned down.

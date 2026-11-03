@@ -1013,16 +1013,16 @@ static void pagector_probe(void *a0, void *a1, void *a2, void *a3, void *a4, voi
  * (FUN_01a68020(0, surface, controlId, value, mode)). Capturing the surface lets
  * commit_trim drive the Start/End controls the same way the UI does. */
 static void *g_surface;
-static void (*orig_setctl)(void *, void *, long, int, int);
+static void (*orig_setctl)(void *, void *, int, int, float);
 
-static void setctl_probe(void *a0, void *a1, long a2, int a3, int a4)
+static void setctl_probe(void *a0, void *a1, int a2, int a3, float v)
 {
     uintptr_t vt = 0;
     if (a1 && rd((uintptr_t)a1, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
         g_surface = a1;
     }
     if (orig_setctl)
-        orig_setctl(a0, a1, a2, a3, a4);
+        orig_setctl(a0, a1, a2, a3, v);
 }
 
 /* The page object, captured from the control handler FUN_02904e90(page, id, ...)
@@ -1192,8 +1192,32 @@ static void (*orig_screen_paint)(void *, void *);
 static volatile int g_pending_ctl;
 static float g_pending_v0, g_pending_v1;
 static int g_pending_r0, g_pending_r1;
-static void (*orig_setctl2)(void *, void *, long, int, int);
+static void (*orig_setctl2)(void *, void *, int, int, float);
 static void *g_surface2;
+
+static void *g_pend_prop0, *g_pend_prop1;
+static float g_pend_pv0, g_pend_pv1;
+static volatile int g_pending_prop;
+
+/* Write the property values immediately before the app paints, so the paint
+ * reads the trim we computed. */
+static void apply_pending_props(void)
+{
+    float v;
+    if (!g_pending_prop)
+        return;
+    g_pending_prop = 0;
+    if (g_pend_prop0) {
+        v = g_pend_pv0;
+        wr((uintptr_t)g_pend_prop0 + 0x50, &v, 4);
+    }
+    if (g_pend_prop1) {
+        v = g_pend_pv1;
+        wr((uintptr_t)g_pend_prop1 + 0x50, &v, 4);
+    }
+    mlog("mpcmini: props written in paint %.4f/%.4f\n",
+         (double)g_pend_pv0, (double)g_pend_pv1);
+}
 
 static void apply_pending_ctl(void)
 {
@@ -1205,8 +1229,8 @@ static void apply_pending_ctl(void)
     uintptr_t svt = 0;
     if (!rd((uintptr_t)g_surface2, &svt, 8) || svt < base || svt > base + 0x12000000ULL)
         return;
-    orig_setctl2(g_surface2, 0, 0x462, g_pending_r0, 0xd28);
-    orig_setctl2(g_surface2, 0, 0x466, g_pending_r1, 0xd28);
+    orig_setctl2(0, g_surface2, 0, 0x462, g_pending_v0);
+    orig_setctl2(0, g_surface2, 0, 0x466, g_pending_v1);
     mlog("mpcmini: paint-time setctl %d/%d\n", g_pending_r0, g_pending_r1);
 }
 static void *g_paint_comp;
@@ -2876,6 +2900,8 @@ done:
         orig_setctl2 = orig_setctl;
         g_pending_r0 = (int)(v0 * 127.0f + 0.5f);
         g_pending_r1 = (int)(v1 * 127.0f + 0.5f);
+        g_pending_v0 = v0;
+        g_pending_v1 = v1;
         g_pending_ctl = 1;
         mlog("mpcmini: armed paint-time ctl %d/%d\n", g_pending_r0, g_pending_r1);
     }
@@ -4223,7 +4249,7 @@ __attribute__((constructor)) static void load(void)
         orig_pagector = (pagector_fn)t_pg;
     void *t_sc = install_hook(base + 0x1968020, (void *)setctl_probe);
     if (t_sc)
-        orig_setctl = (void (*)(void *, void *, long, int, int))t_sc;
+        orig_setctl = (void (*)(void *, void *, int, int, float))t_sc;
     void *t_ch = install_hook(base + 0x2804e90, (void *)ctlhandler_probe);
     if (t_ch)
         orig_ctlhandler = (void (*)(void *, uint64_t, uint64_t))t_ch;
