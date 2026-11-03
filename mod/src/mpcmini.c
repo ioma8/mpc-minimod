@@ -528,6 +528,12 @@ static int pcm_at(const unsigned char *p, unsigned bps, unsigned format)
     return (short)(v >> 16);
 }
 
+/* SHIFT+B3 cycles 3 % -> 6 % -> untrimmed while SHIFT stays held; releasing
+ * SHIFT resets the cycle. */
+static int g_trim_step;
+static double g_trim_ratio;
+static int g_b3_down;      /* edge detection: the button auto-repeats while held */
+
 static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
                      unsigned ch, unsigned bps, unsigned format, unsigned *first, unsigned *last)
 {
@@ -540,17 +546,23 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
         bps = 2;
     /* Threshold: relative to the file's peak so quiet material is trimmed as
      * well, with an absolute floor so a nearly silent file is not trimmed to
-     * nothing. MPCMINI_TRIM_DB overrides the relative part (default -30.46 dB (3% of peak)). */
+     * nothing. g_trim_ratio is set per SHIFT+B3 press (3 %, then 6 %);
+     * MPCMINI_TRIM_DB overrides the relative part for the default case. */
     unsigned char buf[16384];
     short thr = 328; /* -40 dBFS fallback */
     {
         double db = -30.45757490560675; /* 3% of peak: three times the old threshold */
-        const char *e = getenv("MPCMINI_TRIM_DB");
-        if (e && *e)
-            db = atof(e);
-        if (db < -90.0) db = -90.0;
-        if (db > -6.0) db = -6.0;
-        double ratio = pow(10.0, db / 20.0);
+        double ratio;
+        if (g_trim_ratio > 0.0) {
+            ratio = g_trim_ratio;
+        } else {
+            const char *e = getenv("MPCMINI_TRIM_DB");
+            if (e && *e)
+                db = atof(e);
+            if (db < -90.0) db = -90.0;
+            if (db > -6.0) db = -6.0;
+            ratio = pow(10.0, db / 20.0);
+        }
         int peak = 0;
         unsigned g = 0;
         while (g < frames) {
@@ -1394,16 +1406,24 @@ static void buttons(void *event)
     unsigned down = event ? FIELD(event, 9, uint8_t) : 0;
     if (code == 0x31) { /* SHIFT */
         g_shift = down ? 1 : 0;
+        if (!down) {
+            g_trim_step = 0;      /* the cycle only lives while SHIFT is held */
+            g_b3_down = 0;
+        }
         set_filter_text(down ? "AutoTrim" : "Filter");
         if (orig_buttons)
             orig_buttons(event);
         return;
     }
-    if (down && g_shift && code == 0x0e) { /* SHIFT + B3 */
-        mlog("mpcmini: combo SHIFT+B3 -> autotrim\n");
-        /* Analysis is cheap now (block reads); it must stay on this thread so
-         * the commit is queued for the very next repaint. */
-        do_autotrim();
+    if (code == 0x0e && g_shift) { /* SHIFT + B3: 3 %, 6 %, untrimmed */
+        /* The button repeats while held, so act on the press edge only. */
+        if (down && !g_b3_down) {
+            /* Analysis is cheap now (block reads); it must stay on this thread
+             * so the commit is queued for the very next repaint. */
+            do_autotrim();
+            g_trim_step = (g_trim_step + 1) % 3;
+        }
+        g_b3_down = down;
         return;
     }
     /* PLUS / MINUS move the 16 Levels row by an octave. The pitch hook only
@@ -3487,8 +3507,18 @@ static void do_autotrim(void)
     unsigned first=0, last=0, format=0;
     char path[512] = {0};
     if (!frames || !wav_path_of(sample, frames, path, sizeof path) ||
-        !wav_info(path, &fr, &rate, &ch, &off, &bytes, &format) || fr != frames ||
-        !wav_edges(path, fr, off, ch, bytes, format, &first, &last)) return;
+        !wav_info(path, &fr, &rate, &ch, &off, &bytes, &format) || fr != frames) return;
+    if (g_trim_step >= 2) {
+        /* third press: remove the trim entirely */
+        first = 0;
+        last = frames ? frames - 1 : 0;
+    } else {
+        g_trim_ratio = g_trim_step == 1 ? 0.06 : 0.03;
+        int ok = wav_edges(path, fr, off, ch, bytes, format, &first, &last);
+        g_trim_ratio = 0.0;
+        if (!ok)
+            return;
+    }
     orig_setctl(g_control_context, g_surface, pad, 0x462, 0.0f);
     orig_setctl(g_control_context, g_surface, pad, 0x466, (float)(last+1));
     orig_setctl(g_control_context, g_surface, pad, 0x462, (float)first);

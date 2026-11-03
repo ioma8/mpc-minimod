@@ -57,3 +57,19 @@ The default relative amplitude threshold is now 3% of peak (about -30.46 dB),
 three times the former 1%. `MPCMINI_TRIM_DB` still overrides it. Verified in the
 emulator: ratio 0.0300, threshold 876 for peak 29204; A07 bounds 84..52786,
 A09 bounds 89..73431. The PCM/float regression checks still pass.
+
+## Three-step trim cycle (SHIFT held)
+
+`SHIFT` + `B3` now cycles while SHIFT stays held, and the counter resets on
+SHIFT release:
+
+| press | threshold | effect on A01 `BoomBap-Kik-BTB MD` (15 129 frames) |
+|---|---|---|
+| 1 | 3 % of peak (876) | bounds `23..9794` |
+| 2 | 6 % of peak (1752) | bounds `62..7731` (tighter) |
+| 3 | none | bounds `0..15129` (trim removed) |
+
+`B3` is button code `0x0e`, the same code the control surface repeats while the
+button is held, so the handler acts on the press edge only (`g_b3_down`); without
+that, one physical press fired the cycle up to 16 times. `MPCMINI_TRIM_DB` still
+overrides the ratio for the first step only.
