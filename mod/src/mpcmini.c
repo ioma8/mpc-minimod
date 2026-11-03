@@ -1068,10 +1068,28 @@ static void buttons(void *event)
         orig_buttons(event);
 }
 
+static int g_replaying_pad;
+static struct {
+    void *input;
+    int src, pad;
+    void *props;
+    float vel;
+    int valid;
+} g_pad_rec[128];
+
 static void note_on(void *input, int src, int pad, void *props, float vel)
 {
     g_last_pad = pad;
     g_props = props;
+    if (!g_replaying_pad && pad >= 0 && pad < 128) {
+        /* remember a real pad press so the page can be re-selected later */
+        g_pad_rec[pad].input = input;
+        g_pad_rec[pad].src = src;
+        g_pad_rec[pad].pad = pad;
+        g_pad_rec[pad].props = props;
+        g_pad_rec[pad].vel = vel;
+        g_pad_rec[pad].valid = 1;
+    }
     if (debug_mode && g_dbg < 120) {
         g_dbg++;
         mlog("mpcmini: note_on pad=%d vel=%.2f\n", pad, (double)vel);
@@ -1327,6 +1345,14 @@ static void trim_probe(void *self, float v)
         }
     }
     if (probe_mode && logs < 200) {
+        uintptr_t lay = 0, ins = 0;
+        if (page_layers((uintptr_t)self, &lay, &ins)) {
+            unsigned a = 0, b = 0, c = 0;
+            rd(lay + 0x4d8, &a, 4);
+            rd(lay + 0x530, &b, 4);
+            rd(lay + 0x588, &c, 4);
+            mlog("mpcmini: layer@knob %p 4d8=%u 530=%u 588=%u\n", (void *)lay, a, b, c);
+        }
         uintptr_t vt = 0, val = 0, ap = 0;
         rd((uintptr_t)self, &vt, 8);
         rd((uintptr_t)self + T_VALUE, &val, 4);
@@ -1914,6 +1940,53 @@ static uintptr_t prop_of_param(uintptr_t param)
     return result;
 }
 
+/* The app's own CC path: 0x159f230(range, event, raw) divides raw by range and
+ * broadcasts through the property at *(event[0]+0x10) + 0x1ac0 (CC 0x10 = K1)
+ * or +0x1b18 (CC 0x11 = K2). Calling it is exactly a knob turn. */
+static uintptr_t ctl_obj_for(uintptr_t base)
+{
+    ranges_load();
+    unsigned char *buf = malloc(65536);
+    if (!buf)
+        return 0;
+    uintptr_t hit = 0;
+    for (int r = 0; r < g_nrng && !hit; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && !hit; a += 65536) {
+            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+            n &= ~(size_t)7;
+            if (!rd(a, buf, n))
+                break;
+            for (size_t o = 0; o + 8 <= n; o += 8) {
+                uintptr_t q;
+                memcpy(&q, buf + o, 8);
+                if (q == base) {
+                    hit = a + o - 0x10;
+                    break;
+                }
+            }
+        }
+    }
+    free(buf);
+    return hit;
+}
+
+static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
+{
+    unsigned char ev[16];
+    memset(ev, 0, sizeof ev);
+    *(uintptr_t *)ev = obj;
+    ev[8] = (unsigned char)cc;
+    /* Disassembly of 0x159f230:
+     *   ldrb w3,[x0,8]    -> x0 is the event, byte +8 is the CC
+     *   and  w2,w1,0x7f   -> w1 is the raw 7-bit value
+     *   fdiv s0,s0,s1     -> s1 is the range (so: two float parameters)
+     *   ldr  x0,[x0] / ldr x0,[x0,0x10] / add x0,x0,#0x1ac0 -> the property
+     * so the call is (event, raw, min, range). */
+    FN(0x159f230, void (*)(void *, unsigned, float, float))(ev, raw, 0.0f, 127.0f);
+}
+
 static void commit_trim(void)
 {
     void *p0 = g_trim_param0, *p1 = g_trim_param1;
@@ -1951,6 +2024,56 @@ static void commit_trim(void)
         pr1 = prop_of_param((uintptr_t)p1);
     mlog("mpcmini: props %p/%p (cur %.4f/%.4f, seen %d)\n", (void *)pr0,
          (void *)pr1, (double)cur0, (double)cur1, g_nbc);
+
+    /* Preferred: replay the knob through the app's own CC dispatcher, so the
+     * app performs the write, the notification and the repaint itself. */
+    {
+        uintptr_t base = 0, obj = 0;
+        if (pr0)
+            base = pr0 - 0x1ac0;
+        else if (pr1)
+            base = pr1 - 0x1b18;
+        if (base)
+            obj = ctl_obj_for(base);
+        mlog("mpcmini: cc base=%p obj=%p\n", (void *)base, (void *)obj);
+        if (obj) {
+            unsigned r0 = (unsigned)(v0 * 127.0f + 0.5f);
+            unsigned r1 = (unsigned)(v1 * 127.0f + 0.5f);
+            cc_inject(obj, 0x10, r0);
+            cc_inject(obj, 0x11, r1);
+            mlog("mpcmini: injected CC 0x10=%u 0x11=%u\n", r0, r1);
+            /* The page draws its trim only when it reloads the pad, so repeat
+             * the pad press that is already in progress. */
+            {
+                int pd = g_last_pad;
+                if (pd >= 0 && pd < 128 && g_pad_rec[pd].valid && orig_note_on) {
+                    g_replaying_pad = 1;
+                    orig_note_on(g_pad_rec[pd].input, g_pad_rec[pd].src,
+                                 g_pad_rec[pd].pad, g_pad_rec[pd].props,
+                                 g_pad_rec[pd].vel);
+                    g_replaying_pad = 0;
+                    mlog("mpcmini: re-selected pad %d to refresh the page\n", pd);
+                }
+            }
+            /* Repaint the whole window, not just the page: the page is a
+             * child and the app repaints from the top-level component. */
+            if (g_screen) {
+                uintptr_t root = (uintptr_t)g_screen;
+                for (int i = 0; i < 8; ++i) {
+                    uintptr_t parent = 0;
+                    if (!rd(root + 0x18, &parent, 8) || !parent || !mapped((void *)parent))
+                        break;
+                    root = parent;
+                }
+                mlog("mpcmini: repaint root=%p (page %p)\n", (void *)root, g_screen);
+                FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
+                    (void *)root, 0, FIELD(root, 0x28, uint64_t));
+                FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
+                    g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
+            }
+            return;
+        }
+    }
     /* Write the end first: the core clamps a start that would pass the current
      * end, so the pair must move outward before inward. */
     g_own_call = 1;
@@ -1993,6 +2116,7 @@ static void commit_trim(void)
     mlog("mpcmini: commit core done p0=%.4f p1=%.4f (want %.4f/%.4f)\n",
          (double)check, (double)check2, (double)v0, (double)v1);
 
+done:
     if (g_screen)
         FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
             g_screen, 0, FIELD(g_screen, 0x28, uint64_t));

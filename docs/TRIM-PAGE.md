@@ -772,3 +772,42 @@ page pointer is guaranteed live) and see which field tracks the marker, then
 write that field and trigger the same repaint the knob's event does.
 
 Everything is committed; the build is stable and the emulator runs it.
+
+
+## 13. Round 3: the trim is rendered — and the app has a CC entry point
+
+Three findings that change the picture:
+
+1. **The page never redraws its trim on a knob move.** Measured: `K2` 127 → 30
+   changes **0 pixels**; `K1` 0 → 100 changes 472 pixels, all in the label row
+   (the focused-knob bracket). The waveform and the shaded region only refresh
+   when the **pad is re-selected** — pressing the same pad again changes 14261
+   pixels. That is why "nothing happens" after a trim, on the emulator as well
+   as on the device.
+2. **There is a single CC entry point**: `0x159f230`. Disassembly:
+
+   ```
+   ldrb w3,[x0,8]      ; x0 = event, byte +8 = CC number
+   and  w2,w1,0x7f     ; w1 = raw 7-bit value
+   ldr  x0,[x0]        ; object
+   scvtf s0,w2
+   fdiv s0,s0,s1       ; s1 = range  -> the call is (event, raw, min, range)
+   ... ldr x0,[x0,0x10] / add x0,x0,#0x1ac0 -> broadcast(value, property)
+   ```
+
+   CC `0x10` (K1) broadcasts through `base+0x1ac0`, CC `0x11` (K2) through
+   `base+0x1b18`; the two properties are exactly `0x58` apart, matching the
+   Start/End properties we derive from the parameters. Broadcasting a synthetic
+   event therefore makes the **app** do the write, the notification and the
+   repaint — the knob's own path, from inside the process.
+3. **Autotrim now changes the page.** After the injection the framebuffer
+   differs from the full-sample view by 14261 pixels (the same magnitude as a
+   manual trim followed by a pad re-selection), and the screenshot shows the
+   trimmed waveform with the removed region shaded.
+
+### What is still imperfect
+
+Our resolved `p0`/`p1` are not always the live instances (after a hand-set
+`K2 = 105` the logged `p1` still read 0.0000), so the CC injection - which the
+app resolves itself - is the reliable path. The commit uses it first and only
+falls back to direct parameter writes.
