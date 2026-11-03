@@ -1712,3 +1712,36 @@ trigger itself. Everything upstream of it is resolved - the property slot
 (`prop + 0x50`), the control ids (`0x462` / `0x466`), the raw value encoding
 (0..127) and the fact that the page paints from the property (verified: writing
 `0.5` and nudging a knob moves the app's own Start edge to 50 %).
+
+### 30.6 Why a self-triggered repaint is impossible from a hook
+
+Caching the arguments our paint hook receives gives:
+
+```
+painter state orig=<valid> comp=0xffffe4a2ce70 gfx=0xfffffffff648
+```
+
+`comp` is a heap object, but **`gfx` is a stack address** - the Graphics handed to
+`paint()` lives on the paint call's stack frame and dies when the call returns.
+Any later reuse of it is a dangling pointer, so a hook cannot re-run the app's
+painter; only drawing *during* the app's own paint pass is safe. That is exactly
+what the overlay does, and it is why the overlay works while every forced
+repaint returns 0 px.
+
+### 30.7 The live page, captured in-process
+
+Hooking the control handler `FUN_02904e90(page, controlId, flags)` and validating
+`page[0]` (a static vtable) plus `*(page + 0x22e8)` (a heap pointer to the pad
+blocks) yields a reliable page pointer that is refreshed on every knob turn:
+
+```
+repainted page 0xffffe2641510
+```
+
+Writing `page + 0x1588` / `+0x15e0` directly was tried and **made the display
+worse** (those offsets hold small enums, not the trim floats) - the markers
+disappeared until the build was reverted. Writing the widget values is therefore
+not the answer; the property write plus an app-driven redraw (verified in 30.3)
+remains the only path that actually moves the app's edge.
+
+Shipped build: overlay on, reverted and verified.

@@ -1025,6 +1025,25 @@ static void setctl_probe(void *a0, void *a1, long a2, int a3, int a4)
         orig_setctl(a0, a1, a2, a3, a4);
 }
 
+/* The page object, captured from the control handler FUN_02904e90(page, id, ...)
+ * - refreshed on every knob turn, so it is always a live pointer. */
+static void *g_livepage;
+static void (*orig_ctlhandler)(void *, uint64_t, uint64_t);
+
+static void ctlhandler_probe(void *a0, uint64_t a1, uint64_t a2)
+{
+    uintptr_t vt = 0;
+    if (a0 && rd((uintptr_t)a0, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
+        uintptr_t arr = 0;
+        /* arr is the pad-block array - a heap pointer, not an image one. */
+        if (rd((uintptr_t)a0 + 0x22e8, &arr, 8) &&
+            arr > 0xffff00000000ULL && arr < 0xffffff000000ULL)
+            g_livepage = a0;
+    }
+    if (orig_ctlhandler)
+        orig_ctlhandler(a0, a1, a2);
+}
+
 static void (*orig_bcast)(void *, float);
 static void (*orig_cc)(void *, unsigned, float, float);
 static void (*orig_sync)(void *, void *, void *, void *);
@@ -1169,6 +1188,9 @@ static void find_value(float v)
 static void byte_snap(void);
 static void byte_diff(void);
 static void find_value(float v);
+static void (*orig_screen_paint)(void *, void *);
+static void *g_paint_comp;
+static void *g_paint_gfx;
 static void who_points_at(uintptr_t target);
 static uintptr_t g_reg_base;
 static unsigned char g_reg_buf[0x40000];
@@ -2808,6 +2830,7 @@ done:
     }
     /* Repaint the page itself: with the property values written above, this is
      * what makes the app's own Start/End edge follow the trim. */
+    if (g_livepage) g_page = g_livepage;
     uintptr_t pvt = 0;
     if (g_page && rd((uintptr_t)g_page, &pvt, 8) &&
         pvt >= base && pvt <= base + 0x12000000ULL) {
@@ -2895,6 +2918,8 @@ static void dump_sliders(void *p)
 
 static void screen_paint(void *p, void *g)
 {
+    g_paint_comp = p;
+    g_paint_gfx = g;
     if (orig_screen_paint)
         orig_screen_paint(p, g);
     /* The knob replay runs here, on the UI thread at a safe point, instead of
@@ -4154,6 +4179,9 @@ __attribute__((constructor)) static void load(void)
     void *t_sc = install_hook(base + 0x1968020, (void *)setctl_probe);
     if (t_sc)
         orig_setctl = (void (*)(void *, void *, long, int, int))t_sc;
+    void *t_ch = install_hook(base + 0x2804e90, (void *)ctlhandler_probe);
+    if (t_ch)
+        orig_ctlhandler = (void (*)(void *, uint64_t, uint64_t))t_ch;
     void *t_trim = install_hook(base + A_TRIM_CORE, (void *)trim_probe); /* also learns param->property */
     void *t_bc = install_hook(base + A_BROADCAST, (void *)bcast_hook);
     if (t_bc)
