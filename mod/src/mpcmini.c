@@ -1075,6 +1075,8 @@ static void (*orig_setctl)(void *, void *, int, int, float);
 
 static void setctl_probe(void *a0, void *a1, int a2, int a3, float v)
 {
+    mlog("mpcmini: [trim-args] context=%p surface=%p mode=%d control=%#x value=%.4f\n",
+         a0, a1, a2, a3, (double)v);
     uintptr_t vt = 0;
     if (a1 && rd((uintptr_t)a1, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
         g_surface = a1;
@@ -1113,11 +1115,11 @@ static void *gettrim_probe(void *blk)
     if (r && (uintptr_t)r > 0xffff00000000ULL && (uintptr_t)r < 0xffffff000000ULL) {
         static int n;
         if (g_trimobj != r || n < 3) {
-            float f0 = -1, f1 = -1;
-            rd((uintptr_t)r + 0x78, &f0, 4);
-            rd((uintptr_t)r + 0xd0, &f1, 4);
-            mlog("mpcmini: trimobj=%p (blk=%p) start=%.4f end=%.4f\n",
-                 r, blk, (double)f0, (double)f1);
+            int64_t f0 = -1, f1 = -1;
+            rd((uintptr_t)r + 0x78, &f0, sizeof f0);
+            rd((uintptr_t)r + 0xd0, &f1, sizeof f1);
+            mlog("mpcmini: trimobj=%p (blk=%p) start=%lld end=%lld\n",
+                 r, blk, (long long)f0, (long long)f1);
             n++;
         }
         g_trimobj = r;

@@ -177,32 +177,50 @@ device and then press the Enter/Return key:") and the error path
 (`Bluetooth failed to connect`, `Failed to connect to … Please check your device
 and try again.`). None of that is developer-facing text.
 
-Two things that *could* look like gating, checked explicitly:
+Two things that *could* look like gating, both resolved:
 
-* the string `"This tab only exists in non-release builds"` sits in the same
-  string pool as the Bluetooth text, together with `infolabel`, and is referenced
-  from code at Ghidra `0x3827fb0` (it loads `infolabel` and then this text). So at
-  least one Preferences tab is a **non-release-only** tab. Which tab it belongs to
-  could not be proven — the enclosing function is not recognised by Ghidra
-  (`force_decompile` returns nothing at `0x3827f10`/`0x3827f20`), and the string
-  may well belong to a developer/debug tab rather than to Bluetooth;
-* there is an `Embedded::UnsupportedDeviceDetector` class
-  (`…UnsupportedDeviceDetector17UnsupportedDevice…`) that can disable features
-  per device model — but every message reachable from it is about project
-  compatibility ("project uses unsupported number of …"), not about Bluetooth.
-
-Searched for an explicit flag and found none:
-
-```
-hasBluetooth / bluetoothEnabled / supportsBluetooth / BLUETOOTH_ENABLED   -> 0 hits
-"not supported on this device" / "disabled on"                           -> 0 hits
-```
+* the string `"This tab only exists in non-release builds"` is **not Bluetooth**.
+  Its constructor is `FUN_03827f20` (1300 bytes, Ghidra did not auto-create it;
+  `create_function` was needed). Decompiled, it builds a **developer diagnostics
+  tab**: an info label carrying that text, a `Custom tags` header with a
+  `Refresh tags` button, a `CRASH REASON` pane, and a **`Crash application`**
+  button (`"Crash Button"` / `"Crash application"`). It is a dev-only crash/tags
+  tool, so there is no Bluetooth gate there and nothing to "ungate" for Bluetooth;
+* `Embedded::UnsupportedDeviceDetector` exists (`…UnsupportedDeviceDetector17UnsupportedDevice…`)
+  and can disable features per device model, but every message reachable from it
+  is about project compatibility ("project uses unsupported number of …") and
+  none concerns Bluetooth.
 
 **Conclusion:** the Bluetooth screen exists in the shipped binary as normal
 production UI; nothing in the strings disables it. Whether it is *reachable* on a
 given unit depends on the Preferences tab being built and on a Bluetooth adapter
 being present (`BLUETOOTH IS OFF` is what it shows when there is none — which is
 exactly the emulator's state).
+
+**It cannot be seen in the emulator at all**, for a reason unrelated to gating:
+the app **ignores tablet/touch input**, so the Preferences screen cannot be
+opened. The lab documents this itself in `panel/server.py:414` — *"Screen capture
+through QEMU's QMP socket (the app ignores tablet/touch input)"* — and it was
+verified by injecting an absolute pointer tap over QMP `input-send-event` onto
+the `virtio-tablet`: the screen changed by 0 px. The app opens
+`/dev/input/event0..2` (tablet, keyboard, gpio-keys) but does not act on the
+tablet's pointer events; its touchscreen path is not emulated.
+
+Three ways to actually see the tab, in order of cost:
+
+1. **Open Preferences programmatically from the mod** — call the entry that
+   raises the Preferences screen once the UI is up, then screenshot the tab
+   strip. Smallest change, and it answers whether the Bluetooth tab is in the
+   list. Not yet identified: the candidates that reference the `"Preferences"`
+   string are `FUN_01d0f5b0` (a mode-name lookup switch, returns strings like
+   "Main Mode" — not it) and `FUN_02f85de0` (1272 lines, no Bluetooth reference —
+   also not the tab list).
+2. **Make the emulator deliver touch** — the app reads a touch controller the lab
+   does not emulate; virtio-tablet is ignored. A lab-side device change, much
+   bigger.
+3. **Check on real hardware** — if the tab is missing there too, the gate is a
+   per-model feature flag in the tab list, which is where the search would then
+   focus.
 
 ---
 
