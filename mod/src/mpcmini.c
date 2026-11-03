@@ -1097,6 +1097,46 @@ static void heap_snapshot(const char *tag);
 static void heap_diff(const char *tag);
 static uintptr_t g_last_press_obj;
 static void find_float_pair(float v);
+/* "findv <float>" - every address in the small writable ranges holding exactly
+ * this float. Run with two knob values and intersect to find the stored state. */
+static void find_value(float v)
+{
+    ranges_load();
+    unsigned char *buf = malloc(65536);
+    if (!buf)
+        return;
+    unsigned char pat[4];
+    memcpy(pat, &v, 4);
+    int shown = 0;
+    for (int r = 0; r < g_nrng; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        if (g_rng[r].lo >= base && g_rng[r].hi <= base + 0x9000000)
+            continue;
+        if (g_rng[r].hi - g_rng[r].lo > 0x8000000)
+            continue; /* skip only the very large buffers */
+        for (uintptr_t a = g_rng[r].lo; a + 4 < g_rng[r].hi; a += 65536) {
+            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+            n &= ~(size_t)3;
+            if (!rd(a, buf, n))
+                break;
+            for (size_t o = 0; o + 4 <= n && shown < 60; o += 4) {
+                if (memcmp(buf + o, pat, 4) == 0) {
+                    mlog("mpcmini: fv %#llx %.6f\n",
+                         (unsigned long long)(a + o), (double)v);
+                    shown++;
+                }
+            }
+        }
+    }
+    mlog("mpcmini: fv done %d\n", shown);
+    free(buf);
+}
+
+static void byte_snap(void);
+static void byte_diff(void);
+static void find_value(float v);
+static void who_points_at(uintptr_t target);
 static uintptr_t g_reg_base;
 static unsigned char g_reg_buf[0x40000];
 static int g_reg_have;
@@ -2691,6 +2731,12 @@ static void commit_trim(void)
     float check = 0, check2 = 0;
     rd((uintptr_t)p0 + T_VALUE, &check, 4);
     rd((uintptr_t)p1 + T_VALUE, &check2, 4);
+    /* Also write the property caches: the broadcaster stores the value there
+     * before notifying, so anything that polls the property sees the new trim. */
+    if (pr0)
+        wr(pr0 + 0x50, &v0, 4);
+    if (pr1)
+        wr(pr1 + 0x50, &v1, 4);
     /* Move the app's own slider widgets too: the page draws the Start/End bars
      * from them at paint time. */
     for (int i = 0; i < g_nps; ++i) {
@@ -2867,7 +2913,7 @@ static void screen_paint(void *p, void *g)
     /* Trim edges of the last autotrim, drawn where the page's own markers would
      * be: the page itself only re-reads its trim when the pad is re-selected, so
      * without this the result of SHIFT+B3 would be invisible. */
-    if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f) {
+    if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f && !getenv("MPCMINI_NOOVERLAY")) {
         int x0 = 10 + (int)(g_mark_v0 * 295.0f + 0.5f);
         int x1 = 10 + (int)(g_mark_v1 * 295.0f + 0.5f);
         /* The page fills the trimmed-out parts with the waveform background
@@ -3640,6 +3686,40 @@ static void *heap_probe_thread(void *arg)
             heap_diff("after knob");
         else if (!strncmp(buf, "find ", 5))
             find_float_pair((float)atof(buf + 5));
+        else if (!strncmp(buf, "model", 5)) {
+            /* Resolve the pad-state container from the trim parameter and show
+             * the fields that track the Start/End knobs. */
+            uintptr_t pr = g_npm > 0 ? g_pm[0].param : (uintptr_t)g_trim_param0;
+            uintptr_t c = 0;
+            const char *sp = strchr(buf, ' ');
+            if (sp) {
+                float v = (float)atof(sp + 1);
+                if (pr && rd(pr + 0x90, &c, 8) && c) {
+                    int ok = wr(c + 0x7ea0, &v, 4);
+                    mlog("mpcmini: model c=%p +0x7ea0 <- %.4f ok=%d\n", (void *)c,
+                         (double)v, ok);
+                }
+            }
+            if (pr && rd(pr + 0x90, &c, 8) && c) {
+                mlog("mpcmini: model param used = %p\n", (void *)pr);
+                for (unsigned off = 0x7000; off <= 0x9000; off += 4) {
+                    float f = 0;
+                    if (rd(c + off, &f, 4) && f > -0.01f && f < 1.01f)
+                        mlog("mpcmini:   c+%#x = %.4f\n", off, (double)f);
+                }
+            }
+        } else if (!strncmp(buf, "set ", 4)) {
+            uintptr_t a = (uintptr_t)strtoull(buf + 4, 0, 16);
+            const char *sp = strchr(buf + 4, ' ');
+            float v = sp ? (float)atof(sp + 1) : 0.0f;
+            int ok = wr(a, &v, 4);
+            mlog("mpcmini: set %p = %.4f ok=%d\n", (void *)a, (double)v, ok);
+        } else if (!strncmp(buf, "snapb", 5))
+            byte_snap();
+        else if (!strncmp(buf, "diffb", 5))
+            byte_diff();
+        else if (!strncmp(buf, "who ", 4))
+            who_points_at((uintptr_t)strtoull(buf + 4, 0, 16));
         else if (!strncmp(buf, "reg ", 4)) {
             g_reg_base = (uintptr_t)strtoull(buf + 4, 0, 16);
             g_reg_have = rd(g_reg_base, g_reg_buf, sizeof g_reg_buf) ? 1 : 0;
@@ -3710,6 +3790,118 @@ static void find_float_pair(float v)
         }
     }
     mlog("mpcmini: pair search done, %d hits\n", shown);
+    free(buf);
+}
+
+/* Byte-level snapshot of the small writable ranges: a knob move changes the
+ * pad's stored trim, and this names it exactly. */
+#define BS_MAX (48u << 20)
+static unsigned char *g_bs;
+static size_t g_bs_len;
+
+/* "findv <float>" - every address in the small writable ranges holding exactly
+ * this float. Run with two knob values and intersect to find the stored state. */
+static void byte_snap(void)
+{
+    ranges_load();
+    free(g_bs);
+    g_bs = 0;
+    g_bs_len = 0;
+    size_t cap = BS_MAX, used = 0;
+    unsigned char *buf = malloc(cap);
+    if (!buf)
+        return;
+    for (int r = 0; r < g_nrng; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        if (g_rng[r].lo >= base && g_rng[r].hi <= base + 0x9000000)
+            continue;
+        size_t len = (size_t)(g_rng[r].hi - g_rng[r].lo);
+        if (len > 0x400000)      /* skip the big audio buffers */
+            continue;
+        if (used + 16 + len > cap)
+            break;
+        uint64_t addr = g_rng[r].lo;
+        memcpy(buf + used, &addr, 8);
+        memcpy(buf + used + 8, &len, 8);
+        if (!rd(g_rng[r].lo, buf + used + 16, len)) {
+            continue;
+        }
+        used += 16 + len;
+    }
+    g_bs = buf;
+    g_bs_len = used;
+    mlog("mpcmini: byte snapshot %zu bytes\n", used);
+}
+
+static void byte_diff(void)
+{
+    if (!g_bs)
+        return;
+    unsigned char *cur = malloc(0x400000);
+    if (!cur)
+        return;
+    int shown = 0;
+    size_t o = 0;
+    while (o + 16 <= g_bs_len && shown < 24) {
+        uint64_t addr, len;
+        memcpy(&addr, g_bs + o, 8);
+        memcpy(&len, g_bs + o + 8, 8);
+        if (o + 16 + len > g_bs_len)
+            break;
+        if (len <= 0x400000 && rd((uintptr_t)addr, cur, len)) {
+            for (size_t i = 0; i + 4 <= len && shown < 24; i += 4) {
+                if (memcmp(cur + i, g_bs + o + 16 + i, 4) == 0)
+                    continue;
+                float a, b;
+                memcpy(&a, g_bs + o + 16 + i, 4);
+                memcpy(&b, cur + i, 4);
+                if (!(a > -2.0f && a < 2.0f) && !(b > -2.0f && b < 2.0f))
+                    continue;
+                mlog("mpcmini: bdiff %#llx %.4f -> %.4f\n",
+                     (unsigned long long)(addr + i), (double)a, (double)b);
+                shown++;
+            }
+        }
+        o += 16 + len;
+    }
+    free(cur);
+    mlog("mpcmini: byte diff done\n");
+}
+
+/* Probe: "who <addr>" - every object that holds a pointer to <addr>, with the
+ * holder's offset and whether it looks like an object (vtable in the image). */
+static void who_points_at(uintptr_t target)
+{
+    ranges_load();
+    unsigned char *buf = malloc(65536);
+    if (!buf)
+        return;
+    int shown = 0;
+    for (int r = 0; r < g_nrng && shown < 20; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && shown < 20; a += 65536) {
+            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+            n &= ~(size_t)7;
+            if (!rd(a, buf, n))
+                break;
+            for (size_t o = 0; o + 8 <= n && shown < 20; o += 8) {
+                uintptr_t q;
+                memcpy(&q, buf + o, 8);
+                if (q != target)
+                    continue;
+                uintptr_t holder = a + o;
+                uintptr_t vt = 0;
+                rd(a, &vt, 8); /* object base in this chunk */
+                int base_off = (int)(holder & 0xffff);
+                mlog("mpcmini: who %p holder %p chunkvt=%p off_in_chunk=%#x\n",
+                     (void *)target, (void *)holder, (void *)vt, base_off);
+                shown++;
+            }
+        }
+    }
+    mlog("mpcmini: who done, %d holders\n", shown);
     free(buf);
 }
 
