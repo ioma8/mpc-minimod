@@ -1685,3 +1685,30 @@ the mod can trigger without touching a knob.
   address, so it is not the visible page.
 
 Shipped build: overlay on, verified at 5197 px with an unchanged pid.
+
+### 30.5 The surface is real, but calling the setter still crashes
+
+Hooking `FUN_01a68020` and logging the argument it receives on a knob turn gives:
+
+```
+surface=0xffffe2c31010 vt=0xaaaab1966860 valid=1 raw0=0 raw1=105
+```
+
+so the surface is a real heap object with a static vtable, and the raw control
+values (0 and 105 for Start/End) are known. Calling
+
+```c
+FUN_01a68020(0, surface, 0x462 /*Start*/, raw, 0xd28);
+FUN_01a68020(0, surface, 0x466 /*End  */, raw, 0xd28);
+```
+
+from the commit **faults every time** (the process restarts). Either the first
+argument must be a real event object rather than 0, or `param_5 = 0xd28`
+encodes a source that the callee dereferences. The call was removed and the
+build restored.
+
+What remains for a complete solution is exactly one thing: a redraw the mod can
+trigger itself. Everything upstream of it is resolved - the property slot
+(`prop + 0x50`), the control ids (`0x462` / `0x466`), the raw value encoding
+(0..127) and the fact that the page paints from the property (verified: writing
+`0.5` and nudging a knob moves the app's own Start edge to 50 %).

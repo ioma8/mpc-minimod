@@ -2814,9 +2814,19 @@ done:
         FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
             g_page, 0, FIELD(g_page, 0x28, uint64_t));
         mlog("mpcmini: repainted page %p\n", g_page);
-    } else if (g_screen) {
-        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-            g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
+    }
+    /* Dry run: report the surface we would drive the controls with. */
+    if (g_surface) {
+        uintptr_t svt = 0;
+        int ok = rd((uintptr_t)g_surface, &svt, 8) && svt >= base && svt <= base + 0x12000000ULL;
+        mlog("mpcmini: surface=%p vt=%p valid=%d raw0=%d raw1=%d\n",
+             g_surface, (void *)svt, ok, (int)(v0 * 127.0f + 0.5f),
+             (int)(v1 * 127.0f + 0.5f));
+    }
+    /* Also ask the screen to repaint with a clean (0,0) origin. */
+    if (g_screen) {
+        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))((void *)g_screen, 0, 0);
+        mlog("mpcmini: repainted screen %p\n", (void *)g_screen);
     }
 }
 
