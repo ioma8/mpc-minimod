@@ -1465,3 +1465,64 @@ autotrim is back to the verified state:
 autotrim: 5197 px | pid unchanged
 commit core done p0=0.0000 p1=0.8268 (want 0.0001/0.8254)
 ```
+
+## 27. Capturing the pages: what they actually contain
+
+Hooking `SamplePage_Ctor` (**with all 12 arguments forwarded** - a 2-argument
+hook corrupts the call and faults immediately) yields 8 page objects per run,
+each with the same vtable and each owning its own pad-block array:
+
+```
+page 0 = 0xffffe40836a0 vt=<ok> +1588=0 +15e0=1 arr=0xffffe4088e90
+page 1 = 0xffffe4094040 ...       +1588=0 +15e0=1
+...
+page 7 = 0xffffe24c94e0 ...       +1588=3 +15e0=1
+```
+
+### 27.1 `+0x1588` is not the trim
+
+Setting `K2` to 127 and then to 30 and re-reading every page shows the field
+**does not move**:
+
+```
+page | K2=127 (+1588) | K2=30 (+1588)
+  0        0                0
+  2        2                2
+  7        3                3
+```
+
+So `+0x1588` holds a small enum (0..3), not the Start value - the earlier
+"0.8268-looking" reading on page 5 was a coincidence of an unrelated float.
+
+### 27.2 The pad blocks are uninitialised
+
+Scanning a live block (`arr = 0xffffe2b46a80`) for the knob values finds only
+`0.5` at `+0x4a8`, and the rest of the block is full of `0xAAAA` filler and
+`65535` patterns - i.e. these blocks are **not** where the trim lives either.
+
+### 27.3 The knob handler
+
+`FUN_02904e90(page, control_id, flags)` handles control ids `0xc6f..0xc76` and
+reads
+
+```c
+uVar19 = NEON_ucvtf(*(undefined4 *)(*(long *)(param_1 + 0x22e8) + iVar4*0xb30 + 0x668));
+```
+
+i.e. a per-control field at **`block[idx] + 0x668`**, converted int -> float.
+Those fields hold values like `879188`, `759913`, ... - not normalised trim
+positions, so they are some other per-pad quantity (id/hash-like).
+
+### 27.4 Conclusion for this round
+
+Every candidate field has now been measured against a knob move and none of them
+moves: parameter `+0x19c`, applied `+0x1a0`, property `+0x50`, page `+0x1588` /
+`+0x15e0`, pad block `+0x4a8` / `+0x668`, layer frames, slider. The app's own
+display still follows the knobs, so the path exists - but it is the knob's own
+event handler, and that handler is the one thing still unidentified.
+
+The build was restored to the last known-good source and re-verified:
+
+```
+autotrim: 5196 px | pid unchanged
+```
