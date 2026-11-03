@@ -2207,3 +2207,28 @@ is now known and documented:
 * recover with QMP `cont` if anything goes wrong.
 
 App state: pid 1219, healthy, overlay drawing the trim.
+
+## 32. Final state (delivered)
+
+Package: `mod/build/mpc-mini.zip` (34 KB) - an SD autorun package containing
+`autorun/mpcmini.so`, `autorun.sh`, `autorun.check`, `autorun.json`.
+
+Verified in the emulator on firmware 1.3.0.12:
+
+* **AutoTrim** (SHIFT+B3): analyses the selected pad's sample with a
+  peak-relative threshold (default -40 dB, `MPCMINI_TRIM_DB`), computes the
+  silent/noisy edges, writes the Start/End trim parameters through the app's own
+  `Property_Broadcast` (so listeners are notified and the model holds the
+  result), and draws the trim on the Sample/Trim page.
+  Measured: `commit core done p0=0.0000 p1=0.8268 (want 0.0001/0.8254)`,
+  property read back `0.0001`, overlay 384 marker pixels, app stable.
+* **Pitch shift**: +/- 8 semitones per press, PLUS+MINUS resets.
+* **Chromatic control** from external MIDI.
+
+Known limitation, documented at length in section 30-31: the app's *own* page
+widgets do not re-render from the trim value (the renderer's data source was not
+identified); the trim is displayed by the mod's overlay, drawn during the app's
+own paint pass with the app's Graphics.
+
+The debugging tooling built along the way (QEMU gdbstub + RSP client + LLDB with
+conditional breakpoints) is documented in section 31 for future work.
