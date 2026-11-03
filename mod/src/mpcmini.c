@@ -3121,6 +3121,21 @@ static long long now_ms(void)
     return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+static void *toast_expiry(void *arg)
+{
+    (void)arg;
+    struct timespec ts = {.tv_sec = 1, .tv_nsec = 120 * 1000 * 1000};
+    nanosleep(&ts, 0);
+    /* the app only repaints on change, so the last frame would keep the box up */
+    mlog("mpcmini: toast expiry comp=%p repaint=%p\n", g_paint_comp, orig_repaint);
+    if (orig_repaint && g_paint_comp) {
+        /* the entry takes two packed pairs: (x,y) and (w,h) */
+        orig_repaint(g_paint_comp, 0, ((uint64_t)320 << 32) | (uint64_t)240);
+        mlog("mpcmini: toast expiry repainted 320x240\n");
+    }
+    return 0;
+}
+
 static void toast(const char *text)
 {
     size_t n = strlen(text);
@@ -3129,7 +3144,12 @@ static void toast(const char *text)
     memcpy(g_toast_text, text, n);
     g_toast_text[n] = 0;
     g_toast_until = now_ms() + 1000;
-    /* the caller repaints right after, so the box shows on the next frame */
+    pthread_t th;
+    int cr = pthread_create(&th, 0, toast_expiry, 0);
+    if (cr == 0)
+        pthread_detach(th);
+    else
+        mlog("mpcmini: toast thread failed %d\n", cr);
 }
 
 static void draw_colour(void *g, uint32_t v)
@@ -3266,11 +3286,14 @@ static void screen_paint(void *p, void *g)
      * be: the page itself only re-reads its trim when the pad is re-selected, so
      * without this the result of SHIFT+B3 would be invisible. */
     if (g_toast_until > now_ms() && g_toast_text[0]) {
-        int w = 240, h = 34, x = 40, y = 100;
+        /* cover the Start/End/Loop bar along the bottom of the page */
+        int x = 0, y = 198, w = 320, h = 42;
+        mlog("mpcmini: toast draw '%s' comp=%p vt=%#lx\n", g_toast_text, p,
+             (unsigned long)(FIELD(p, 0, uintptr_t) - base));
         draw_colour(g, 0xff101014);
         draw_rect(g, x, y, w, h);
         draw_colour(g, 0xffe6e6e6);
-        draw_text(g, g_toast_text, x + 4, y + 4, w - 8, h - 8, 16.0f);
+        draw_text(g, g_toast_text, x + 6, y + 4, w - 12, h - 8, 15.0f);
     }
     if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f && !getenv("MPCMINI_NOOVERLAY")) {
         int x0 = 10 + (int)(g_mark_v0 * 295.0f + 0.5f);
@@ -3550,17 +3573,23 @@ static void do_autotrim(void)
         if (!ok)
             return;
     }
-    orig_setctl(g_control_context, g_surface, pad, 0x462, 0.0f);
-    orig_setctl(g_control_context, g_surface, pad, 0x466, (float)(last+1));
-    orig_setctl(g_control_context, g_surface, pad, 0x462, (float)first);
+    /* Arm the toast first: the trim's own repaint is what paints the page, so
+     * the box has to be set before the dispatch or it only appears on the next
+     * unrelated repaint (previously SHIFT release). */
     switch (g_trim_step) {
     case 0: toast("trimmed by 3% loudness"); break;
     case 1: toast("trimmed by 6% loudness"); break;
     case 2: toast("trimmed by 9% loudness"); break;
     default: toast("trim removed"); break;
     }
-    if (orig_repaint && g_screen)
-        orig_repaint(g_screen, 0, 0);
+    orig_setctl(g_control_context, g_surface, pad, 0x462, 0.0f);
+    orig_setctl(g_control_context, g_surface, pad, 0x466, (float)(last+1));
+    orig_setctl(g_control_context, g_surface, pad, 0x462, (float)first);
+    {
+        void *comp = g_paint_comp ? g_paint_comp : g_screen;
+        if (orig_repaint && comp)
+            orig_repaint(comp, 0, ((uint64_t)320 << 32) | (uint64_t)240);
+    }
     mlog("mpcmini: native trim pad=%d path='%s' frames=%u bounds=%u..%u\n",
          pad, path, frames, first, last+1);
 }
