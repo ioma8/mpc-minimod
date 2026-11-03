@@ -733,3 +733,42 @@ neighbouring instance's property cannot be derived from the first one yet.
 Next probe: capture the property list head (`property+0x10`) while a knob moves,
 walk it, and record every listener — the page's listener is one of them and can
 be called directly without knowing the property.
+
+
+## 12. Round 2: the property is derivable, the repaint is still missing
+
+New, verified this round:
+
+1. **The property can be recovered from the parameter.** Walking a listener
+   node's `next` chain until it reaches the sentinel and taking `sentinel - 8`
+   yields the owning property, validated by `property+0x10` (head) and
+   `property+0x50` (cached float). `prop_of_param()` does exactly that and found
+   the same property a knob broadcast uses (`0xffffe532c718`).
+2. **A trim property has exactly two listeners**, dumped during a real knob
+   move:
+
+   ```
+   prop 0xffffe532c718 head=0xffffe53384b0 sentinel=0xffffe532c720
+     node 0xffffe53384b0 target=0xffffe5338490 next=0xffffe16bf130
+     node 0xffffe16bf130 target=0xffffe16bf110 next=0xffffe532c720
+   ```
+
+   One target is the trim parameter, the other is the page side.
+3. **Broadcasting through that property still does not repaint.** So neither
+   listener repaints the page, and the knob's repaint comes from the *event
+   processing* around the broadcast, not from it.
+4. **`+0x19c` is not the displayed state.** Our core write sticks
+   (`p0=0.0000`, `p1=0.8268` after the retry) yet neither the live page nor a
+   rebuilt one (leaving the page and coming back) shows any change: 0 pixels.
+5. **The core clamps a start past the current end** (`start rejected (-1.000)`),
+   so the pair must be written end-first; the commit now does that and retries.
+
+### What this leaves
+
+The display is driven by neither the parameter, the property broadcast, the
+page cache nor the slider widget. The next step is to diff the *page* object's
+memory across a knob move using the paint hook as the anchor (the only place the
+page pointer is guaranteed live) and see which field tracks the marker, then
+write that field and trigger the same repaint the knob's event does.
+
+Everything is committed; the build is stable and the emulator runs it.

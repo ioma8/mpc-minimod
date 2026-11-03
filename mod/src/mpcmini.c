@@ -1270,6 +1270,32 @@ static void trim_probe(void *self, float v)
     }
     if (prop && mapped((void *)prop)) {
         float v50 = 0;
+        /* When x20 really is the property (its cache equals the value), dump
+         * the listener list: that is the set of objects the page updates. */
+        if (rd(prop + 0x50, &v50, 4)) {
+            float d = v50 - v;
+            if (d < 0)
+                d = -d;
+            if (d <= 0.001f) {
+                static int walks;
+                if (walks < 2) {
+                    walks++;
+                    uintptr_t head = 0, node = 0;
+                    rd(prop + 0x10, &head, 8);
+                    node = head;
+                    mlog("mpcmini: prop %p head=%p sentinel=%p\n", (void *)prop,
+                         (void *)head, (void *)(prop + 8));
+                    for (int i = 0; i < 8 && node && node != prop + 8; ++i) {
+                        uintptr_t tgt = 0, next = 0;
+                        if (!rd(node + 0x18, &tgt, 8) || !rd(node + 8, &next, 8))
+                            break;
+                        mlog("mpcmini:   node %p target=%p next=%p\n", (void *)node,
+                             (void *)(tgt & ~(uintptr_t)3), (void *)next);
+                        node = next;
+                    }
+                }
+            }
+        }
         static int learn_diag;
         if (learn_diag < 12) {
             learn_diag++;
@@ -1826,6 +1852,68 @@ static void probe_node(uintptr_t param)
     free(buf);
 }
 
+/* Recover a parameter's owning property without watching a knob.
+ *
+ * A property P keeps its list head at P+0x10 and its sentinel at P+8. A node
+ * keeps its target (tagged) at +0x18 and its next at +8; the last next in the
+ * chain is the sentinel, so P = sentinel - 8. Validation: P+0x10 must be a
+ * mapped node and P+0x50 a plausible float. */
+static uintptr_t prop_of_param(uintptr_t param)
+{
+    ranges_load();
+    unsigned char *buf = malloc(65536);
+    if (!buf)
+        return 0;
+    uintptr_t result = 0;
+    for (int r = 0; r < g_nrng && !result; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && !result; a += 65536) {
+            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+            n &= ~(size_t)7;
+            if (!rd(a, buf, n))
+                break;
+            for (size_t o = 0; o + 8 <= n && !result; o += 8) {
+                uintptr_t q;
+                memcpy(&q, buf + o, 8);
+                if ((q & ~(uintptr_t)3) != param)
+                    continue;
+                uintptr_t node = a + o - 0x18;
+                for (int step = 0; step < 8 && !result; ++step) {
+                    uintptr_t next = 0;
+                    if (!rd(node + 8, &next, 8) || !next || !mapped((void *)next))
+                        break;
+                    uintptr_t cand = next - 8;
+                    uintptr_t head = 0;
+                    float c50 = 0;
+                    if (rd(cand + 0x10, &head, 8) && head && mapped((void *)head) &&
+                        rd(cand + 0x50, &c50, 4) && c50 >= -2.0f && c50 <= 2.0f) {
+                        /* prove the chain from head reaches our node */
+                        uintptr_t w = head;
+                        for (int i = 0; i < 32 && w; ++i) {
+                            if (w == node) {
+                                result = cand;
+                                break;
+                            }
+                            uintptr_t nx = 0;
+                            if (!rd(w + 8, &nx, 8) || !nx || !mapped((void *)nx))
+                                break;
+                            if (nx == cand + 8)
+                                break;
+                            w = nx;
+                        }
+                    }
+                    node = next;
+                    if (node == cand + 8)
+                        break;
+                }
+            }
+        }
+    }
+    free(buf);
+    return result;
+}
+
 static void commit_trim(void)
 {
     void *p0 = g_trim_param0, *p1 = g_trim_param1;
@@ -1843,18 +1931,45 @@ static void commit_trim(void)
      * makes the page repaint. */
     if (getenv("MPCMINI_NODEPROBE"))
         probe_node((uintptr_t)p0);
+
+    /* A property seen broadcasting the parameter's *current* value is the one
+     * that owns it. Broadcasting through it is the knob's own path: the
+     * broadcaster stores the value and notifies every listener, which is the
+     * step that repaints the page. */
+    float cur0 = 0, cur1 = 0;
+    rd((uintptr_t)p0 + T_VALUE, &cur0, 4);
+    rd((uintptr_t)p1 + T_VALUE, &cur1, 4);
     uintptr_t pr0 = learned_prop((uintptr_t)p0);
     uintptr_t pr1 = learned_prop((uintptr_t)p1);
-    mlog("mpcmini: learned %p/%p\n", (void *)pr0, (void *)pr1);
+    if (!pr0)
+        pr0 = broadcast_prop((uintptr_t)p0, cur0);
+    if (!pr1)
+        pr1 = broadcast_prop((uintptr_t)p1, cur1);
+    if (!pr0)
+        pr0 = prop_of_param((uintptr_t)p0);
+    if (!pr1)
+        pr1 = prop_of_param((uintptr_t)p1);
+    mlog("mpcmini: props %p/%p (cur %.4f/%.4f, seen %d)\n", (void *)pr0,
+         (void *)pr1, (double)cur0, (double)cur1, g_nbc);
+    /* Write the end first: the core clamps a start that would pass the current
+     * end, so the pair must move outward before inward. */
     g_own_call = 1;
-    if (pr0)
-        FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
-    else
-        FN(A_TRIM_CORE, void (*)(float, void *))(v0, p0);
     if (pr1)
         FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
     else
         FN(A_TRIM_CORE, void (*)(float, void *))(v1, p1);
+    if (pr0)
+        FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
+    else
+        FN(A_TRIM_CORE, void (*)(float, void *))(v0, p0);
+    {
+        float got = 0;
+        if (rd((uintptr_t)p0 + T_VALUE, &got, 4) && got < -0.5f) {
+            mlog("mpcmini: start rejected (%.3f), retrying after end\n", (double)got);
+            FN(A_TRIM_CORE, void (*)(float, void *))(v1, p1);
+            FN(A_TRIM_CORE, void (*)(float, void *))(v0, p0);
+        }
+    }
     g_own_call = 0;
 
     if (g_trim_layer) {
@@ -2283,6 +2398,53 @@ static void do_autotrim(void)
     /* If the knobs have been used, their parameters are the live ones: prefer
      * the learned one and the instance nearest to it (the stale copies sit at
      * the same address minus/plus a small offset). */
+    /* The page initialises the parameters it drives; stale copies of the same
+     * class keep -1. If two are initialised they are the live Start/End pair -
+     * order them by value. */
+    {
+        uintptr_t init[8];
+        float iv[8];
+        int ni = 0;
+        for (int i = 0; i < g_ntp && ni < 8; ++i) {
+            if (g_tp[i].mx != N)
+                continue;
+            float v = 0;
+            if (!rd((uintptr_t)g_tp[i].p + T_VALUE, &v, 4))
+                continue;
+            if (v < -0.5f || v > 1.5f)
+                continue;
+            init[ni] = (uintptr_t)g_tp[i].p;
+            iv[ni] = v;
+            ni++;
+        }
+        mlog("mpcmini: %d initialised params of %u\n", ni, N);
+        for (int i = 0; i < g_nlis; ++i) {
+            int found = 0;
+            for (int k = 0; k < g_ntp; ++k)
+                if ((uintptr_t)g_tp[k].p == g_lis[i].param)
+                    found = 1;
+            float v = 0;
+            rd(g_lis[i].param + T_VALUE, &v, 4);
+            mlog("mpcmini: knob param %p in scan=%d val=%.4f\n", (void *)g_lis[i].param,
+                 found, (double)v);
+        }
+        if (ni >= 2) {
+            for (int a = 0; a < ni; ++a)
+                for (int b = a + 1; b < ni; ++b)
+                    if (iv[b] < iv[a]) {
+                        float t = iv[a];
+                        iv[a] = iv[b];
+                        iv[b] = t;
+                        uintptr_t u = init[a];
+                        init[a] = init[b];
+                        init[b] = u;
+                    }
+            p_start = init[0];
+            p_end = init[ni - 1];
+            mlog("mpcmini: live pair %p(%.3f)/%p(%.3f)\n", (void *)p_start,
+                 (double)iv[0], (void *)p_end, (double)iv[ni - 1]);
+        }
+    }
     if (g_npm > 0) {
         uintptr_t live = g_pm[0].param, other = 0;
         for (int i = 1; i < g_npm; ++i)
