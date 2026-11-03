@@ -939,6 +939,7 @@ static void (*orig_reg)(void *, void *);
 static void *(*orig_prog_inst)(void *, int);
 static void (*orig_rotary)(void *, float);
 static void (*orig_bcast)(void *, float);
+static void (*orig_cc)(void *, unsigned, float, float);
 static uintptr_t g_bp[8];
 static volatile int g_nbp;
 
@@ -1377,6 +1378,13 @@ static void bcast_hook(void *self, float v)
     /* Record the property a *native* broadcast uses: that is the object the
      * page listens to. Our own broadcasts are flagged. */
     if (!g_own_call) {
+        static int lrc;
+        int nice = (v > 0.001f && v < 0.999f) && v != 0.5f;
+        if (nice && lrc < 24) {
+            lrc++;
+            mlog("mpcmini: bcast lr=%p prop=%p v=%.4f\n",
+                 __builtin_return_address(0), self, (double)v);
+        }
         uintptr_t P = (uintptr_t)self;
         int known = 0;
         for (int k = 0; k < g_nbp; ++k)
@@ -1972,6 +1980,53 @@ static uintptr_t ctl_obj_for(uintptr_t base)
     return hit;
 }
 
+/* A real CC event captured from the app, replayed with our own number so the
+ * app performs exactly what a knob does. */
+static unsigned char g_cc_ev[32];
+static int g_cc_ev_valid;
+static unsigned g_cc_raw[2];
+static float g_cc_range[2] = {127.0f, 127.0f};
+static int g_cc_seen[2];
+static int g_in_cc_replay;
+
+static void cc_capture(void *ev, unsigned raw, float lo, float range)
+{
+    (void)lo;
+    if (!g_in_cc_replay && ev) {
+        unsigned char cc = ((unsigned char *)ev)[8];
+        int idx = -1;
+        if (cc == 0x10)
+            idx = 0;
+        else if (cc == 0x11)
+            idx = 1;
+        if (idx >= 0) {
+            if (!g_cc_ev_valid) {
+                memcpy(g_cc_ev, ev, sizeof g_cc_ev);
+                g_cc_ev_valid = 1;
+                mlog("mpcmini: captured CC event (cc=0x%x raw=%u range=%.1f)\n", cc,
+                     raw, (double)range);
+            }
+            g_cc_raw[idx] = raw;
+            if (range > 1.0f)
+                g_cc_range[idx] = range;
+            g_cc_seen[idx] = 1;
+        }
+    }
+    if (orig_cc)
+        orig_cc(ev, raw, lo, range);
+}
+
+static void cc_replay(unsigned cc, unsigned raw)
+{
+    unsigned char ev[32];
+    memcpy(ev, g_cc_ev, sizeof ev);
+    ev[8] = (unsigned char)cc;
+    g_in_cc_replay = 1;
+    if (orig_cc)
+        orig_cc(ev, raw, 0.0f, 127.0f);
+    g_in_cc_replay = 0;
+}
+
 static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
 {
     unsigned char ev[16];
@@ -2039,9 +2094,23 @@ static void commit_trim(void)
         if (obj) {
             unsigned r0 = (unsigned)(v0 * 127.0f + 0.5f);
             unsigned r1 = (unsigned)(v1 * 127.0f + 0.5f);
-            cc_inject(obj, 0x10, r0);
-            cc_inject(obj, 0x11, r1);
+            if (g_cc_ev_valid) {
+                cc_replay(0x10, r0);
+                cc_replay(0x11, r1);
+            } else {
+                cc_inject(obj, 0x10, r0);
+                cc_inject(obj, 0x11, r1);
+            }
             mlog("mpcmini: injected CC 0x10=%u 0x11=%u\n", r0, r1);
+            {
+                float c0 = -9, c1 = -9;
+                if (pr0)
+                    rd(pr0 + 0x50, &c0, 4);
+                if (pr1)
+                    rd(pr1 + 0x50, &c1, 4);
+                mlog("mpcmini: app stored %.4f/%.4f (want %.4f/%.4f)\n", (double)c0,
+                     (double)c1, (double)v0, (double)v1);
+            }
             /* The page draws its trim only when it reloads the pad, so repeat
              * the pad press that is already in progress. */
             {
@@ -3151,6 +3220,9 @@ __attribute__((constructor)) static void load(void)
         probe_bits = atoi(bits_env);
     void *t_ctor = (hook_mask & 1) ? install_hook(base + A_SIXTEEN_CTOR, (void *)sixteen_ctor) : 0;
     void *t_proc = (hook_mask & 2) ? install_hook(base + A_SIXTEEN_PROC, (void *)sixteen_proc) : 0;
+    void *t_cc = install_hook(base + 0x159f230, (void *)cc_capture);
+    if (t_cc)
+        orig_cc = (void (*)(void *, unsigned, float, float))t_cc;
     void *t_loc = install_hook(base + A_LOC_BOUNDS, (void *)loc_bounds);
     if (t_loc)
         orig_loc_bounds = (void (*)(void *))t_loc;

@@ -811,3 +811,32 @@ Our resolved `p0`/`p1` are not always the live instances (after a hand-set
 `K2 = 105` the logged `p1` still read 0.0000), so the CC injection - which the
 app resolves itself - is the reliable path. The commit uses it first and only
 falls back to direct parameter writes.
+
+
+## 14. Round 4: persistence is the difference
+
+Measured, all on the real framebuffer:
+
+| experiment | result |
+| --- | --- |
+| hand knob `K2` = 30, reload, reload again | **0 pixels** - the knob's change persists |
+| hand knob `K2` 30 vs 127 | 14261 pixels |
+| our CC injection, reload, reload again | the second reload **reverts** the view |
+| `0x159f230` hooked | **never fires** on a panel knob |
+
+So two independent facts:
+
+1. **`0x159f230` is not the panel path.** It broadcasts through exactly the right
+   properties (`base+0x1ac0` / `base+0x1b18`, which are 0x58 apart - our Start
+   and End), and calling it does store the value (`app stored .../0.8268`), but
+   the panel's own knobs never call it. It must belong to a different input
+   (external MIDI CC).
+2. **A knob's change survives a page reload; ours does not.** The knob updates
+   the pad's stored trim; our write only reaches the live parameter and the
+   property cache, which the reload discards.
+
+The remaining unknown is therefore narrow and well posed: which function the
+panel's knob events enter, and what it does after the broadcast to persist the
+trim. The next probe is to hook the MCU/serial input path and capture the call
+chain of a knob move, since the broadcast's own return address is inside our
+relay and useless for this.
