@@ -1115,3 +1115,28 @@ Two things follow:
 The shipping default stays: exact parameter write (`p0=0.0000 p1=0.8268`) plus
 the two drawn edges (193 px, markers at x=253), verified again on a fresh
 process with no crash.
+
+
+### 20.5 The page's own trim rendering, reproduced
+
+Sampling a row across the waveform for a hand-set trim shows the app's convention:
+
+```
+hand-set K2=105:  x 84..254 black (waveform)   x 257..304 grey (27,27,30)  <- trimmed out
+```
+
+so the trimmed-out region is **grey**, not black. Drawing the same grey (plus the
+1 px edge) in the paint hook gives:
+
+| comparison | before the fix | after |
+| --- | --- | --- |
+| FULL vs AUTO | 557 px | **5197 px** (trim clearly visible) |
+| HAND vs AUTO | 5078 px | **1090 px** |
+
+The 1090 px remainder is our own 1-px edge line plus the 0.5 % difference between
+the computed edge (82.54 %) and the hand-set knob (105/127 = 82.68 %). No crash,
+pid unchanged.
+
+So the page now shows the trim the way the app does; only the app's own
+Start/End *widget bars* at the bottom still show the old values, because they are
+drawn from the model our writes do not reach.

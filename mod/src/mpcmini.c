@@ -1097,6 +1097,9 @@ static void heap_snapshot(const char *tag);
 static void heap_diff(const char *tag);
 static uintptr_t g_last_press_obj;
 static void find_float_pair(float v);
+static uintptr_t g_reg_base;
+static unsigned char g_reg_buf[0x40000];
+static int g_reg_have;
 static volatile int g_poke_which = -1;
 static void do_poke(void);
 static volatile float g_poke_value;
@@ -2847,6 +2850,13 @@ static void screen_paint(void *p, void *g)
     if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f) {
         int x0 = 10 + (int)(g_mark_v0 * 295.0f + 0.5f);
         int x1 = 10 + (int)(g_mark_v1 * 295.0f + 0.5f);
+        /* The page fills the trimmed-out parts with the waveform background
+         * (27,27,30); draw the same so the picture matches a manual trim. */
+        draw_colour(g, 0xff1b1b1e);
+        if (x0 > 10)
+            draw_rect(g, 10, 88, (uint64_t)(x0 - 10), 98);
+        if (x1 < 305)
+            draw_rect(g, (uint64_t)x1, 88, (uint64_t)(305 - x1), 98);
         draw_colour(g, 0xffffffff);
         draw_rect(g, (uint64_t)x0, 88, 1, 98);
         draw_rect(g, (uint64_t)x1, 88, 1, 98);
@@ -3610,7 +3620,30 @@ static void *heap_probe_thread(void *arg)
             heap_diff("after knob");
         else if (!strncmp(buf, "find ", 5))
             find_float_pair((float)atof(buf + 5));
-        else if (!strncmp(buf, "poke ", 5)) {
+        else if (!strncmp(buf, "reg ", 4)) {
+            g_reg_base = (uintptr_t)strtoull(buf + 4, 0, 16);
+            g_reg_have = rd(g_reg_base, g_reg_buf, sizeof g_reg_buf) ? 1 : 0;
+            mlog("mpcmini: region mark %p ok=%d\n", (void *)g_reg_base, g_reg_have);
+        } else if (!strncmp(buf, "regdiff", 7)) {
+            if (g_reg_have) {
+                unsigned char *cur = malloc(sizeof g_reg_buf);
+                if (cur && rd(g_reg_base, cur, sizeof g_reg_buf)) {
+                    int shown = 0;
+                    for (size_t i = 0; i + 4 <= sizeof g_reg_buf && shown < 30; i += 4) {
+                        if (memcmp(cur + i, g_reg_buf + i, 4) == 0)
+                            continue;
+                        float a, b;
+                        memcpy(&a, g_reg_buf + i, 4);
+                        memcpy(&b, cur + i, 4);
+                        mlog("mpcmini: reg %p+%#zx %.4f -> %.4f\n",
+                             (void *)g_reg_base, i, (double)a, (double)b);
+                        shown++;
+                    }
+                    mlog("mpcmini: regdiff done\n");
+                }
+                free(cur);
+            }
+        } else if (!strncmp(buf, "poke ", 5)) {
             int w = atoi(buf + 5);
             const char *sp = strchr(buf + 5, ' ');
             g_poke_value = sp ? (float)atof(sp + 1) : 0.5f;
