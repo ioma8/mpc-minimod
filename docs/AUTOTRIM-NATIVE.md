@@ -118,3 +118,24 @@ Three things had to be right, and each cost a round:
 
 The toast costs nothing when idle: it is a string, a deadline and a compare
 inside the paint hook that already runs.
+
+## Resolving the sample file
+
+The trim needs the audio, and a sample does not always carry a path where a scan
+would find it. Resolution order:
+
+1. **The object field.** `sample+0x30` is the holder object; `holder+0x120` is a
+   `std::string` with the file path. This is the normal case and is used first
+   (`path from the sample object -> …`).
+2. **The generic scan** (`wav_path_of`): walks the sample's pointers and one
+   level deeper looking for a printable `*.wav` whose frame count matches.
+3. **Frame count in the temp project**: a just-recorded, still-unsaved sample can
+   have an empty path field, so the file is located under
+   `/data/TempProjects/*/` by matching `frames` exactly (newest wins).
+
+The WAV parser walks the chunk list rather than reading fixed offsets: Akai
+recordings put a `JUNK` chunk before `fmt`, so `fmt` sits at 72 instead of 20.
+`WAVE_FORMAT_EXTENSIBLE` is resolved through its subformat GUID.
+
+Verified on real recordings: `Sample 001.wav → 80166 frames`,
+`Sample 002.wav → 64650 frames`, a 0-byte `Sample 003.wav` rejected.

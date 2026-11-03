@@ -848,6 +848,23 @@ static int find_wav_by_frames(unsigned want, char *out, size_t n)
     return 1;
 }
 
+/* The sample object carries its file: sample+0x30 is the holder, whose +0x120
+ * is a std::string with the path. Read it directly before falling back to the
+ * generic scan or the frame-count lookup. */
+static int path_from_object(uintptr_t sample, unsigned want, char *out, size_t n)
+{
+    uintptr_t holder = 0, sptr = 0;
+    char buf[512];
+    if (!rd(sample + 0x30, &holder, 8) || !holder || !mapped((void *)holder))
+        return 0;
+    if (!rd(holder + 0x120, &sptr, 8) || !sptr || !mapped((void *)sptr))
+        return 0;
+    if (!rd(sptr, buf, sizeof buf - 1))
+        return 0;
+    buf[sizeof buf - 1] = 0;
+    return path_from_buffer(buf, want, out, n);
+}
+
 static int wav_path_of(uintptr_t obj, unsigned want, char *out, size_t n)
 {
     ranges_load();
@@ -3629,9 +3646,14 @@ static void do_autotrim(void)
     unsigned frames = frames_of_sample(sample), fr=0, rate=0, ch=0, off=0, bytes=0;
     unsigned first=0, last=0, format=0;
     char path[512] = {0};
-    if (frames && !wav_path_of(sample, frames, path, sizeof path) &&
-        find_wav_by_frames(frames, path, sizeof path))
-        mlog("minimod: recorded sample -> %s\n", path);
+    if (frames) {
+        if (path_from_object(sample, frames, path, sizeof path))
+            mlog("minimod: path from the sample object -> %s\n", path);
+        else if (wav_path_of(sample, frames, path, sizeof path))
+            ;
+        else if (find_wav_by_frames(frames, path, sizeof path))
+            mlog("minimod: recorded sample (no path yet) -> %s\n", path);
+    }
     if (!frames || !path[0] ||
         !wav_info(path, &fr, &rate, &ch, &off, &bytes, &format) || fr != frames) {
         return;
