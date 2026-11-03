@@ -1,3 +1,16 @@
+# mpc-sample-mod
+
+Two things live here, both for the Akai MPC Sample:
+
+| | what | where |
+| --- | --- | --- |
+| **mpc-mini** | an `LD_PRELOAD` mod shipped as an SD `autorun` package — pitch shift, autotrim, chromatic MIDI, a SHIFT overlay label. Firmware **1.3.0.12 only** | [`mod/README.md`](mod/README.md), status and evidence in [`docs/MOD-MINI.md`](docs/MOD-MINI.md) |
+| **mpc2stems** | the converter below: an `.xpj` project + `[ProjectData]` → per-pad DAW stems | [`README.md`](#mpc2stems) (this file) |
+
+Current release: `v1.3.0.12-mpc-mini.1` (verified on hardware 2026-11-03).
+
+---
+
 # mpc2stems
 
 Convert an Akai MPC sample project (`.xpj` + `[ProjectData]` folder) into
