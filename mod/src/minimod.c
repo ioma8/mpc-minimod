@@ -464,28 +464,14 @@ static int wav_info(const char *path, unsigned *frames, unsigned *rate,
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return 0;
-    unsigned char h[4096];
-    ssize_t n = pread(fd, h, sizeof h, 0);
-    if (n < 44 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4)) {
+    unsigned char h[12];
+    if (pread(fd, h, 12, 0) != 12 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4)) {
         close(fd);
         return 0;
     }
-    unsigned encoding = (unsigned)h[20] | ((unsigned)h[21] << 8);
-    if (encoding != 1 && !(encoding == 3 && h[34] == 32 && h[35] == 0)) {
-        close(fd);
-        return 0;
-    }
-    unsigned chn = (unsigned)h[22] | ((unsigned)h[23] << 8);
-    unsigned bits = (unsigned)h[34] | ((unsigned)h[35] << 8);
-    unsigned rt = (unsigned)h[24] | ((unsigned)h[25] << 8) |
-                  ((unsigned)h[26] << 16) | ((unsigned)h[27] << 24);
-    if (!chn || !rt || (bits != 16 && bits != 24 && bits != 32)) {
-        close(fd);
-        return 0;
-    }
-    /* Walk the chunk list properly: Akai files carry a large metadata chunk
-     * before "data", so a fixed-size prefix scan is not enough. */
-    unsigned dof = 0, len = 0;
+    /* Walk the chunks and take fmt where it actually is: recordings carry a
+     * JUNK chunk first, so the fmt fields are not at fixed offsets. */
+    unsigned encoding = 0, chn = 0, bits = 0, rt = 0, dof = 0, len = 0;
     off_t off = 12;
     for (int guard = 0; guard < 64; ++guard) {
         unsigned char ck[8];
@@ -493,15 +479,31 @@ static int wav_info(const char *path, unsigned *frames, unsigned *rate,
             break;
         unsigned sz = (unsigned)ck[4] | ((unsigned)ck[5] << 8) |
                       ((unsigned)ck[6] << 16) | ((unsigned)ck[7] << 24);
-        if (!memcmp(ck, "data", 4)) {
+        if (!memcmp(ck, "fmt ", 4) && sz >= 16 && sz <= 40) {
+            unsigned char f[40] = {0};
+            if (pread(fd, f, sz, off + 8) != (ssize_t)sz)
+                break;
+            encoding = (unsigned)f[0] | ((unsigned)f[1] << 8);
+            chn = (unsigned)f[2] | ((unsigned)f[3] << 8);
+            rt = (unsigned)f[4] | ((unsigned)f[5] << 8) |
+                 ((unsigned)f[6] << 16) | ((unsigned)f[7] << 24);
+            bits = (unsigned)f[14] | ((unsigned)f[15] << 8);
+            if (encoding == 0xfffe && sz >= 40)   /* EXTENSIBLE: subformat GUID */
+                encoding = (unsigned)f[24] | ((unsigned)f[25] << 8);
+        } else if (!memcmp(ck, "data", 4)) {
             dof = (unsigned)off + 8;
             len = sz;
-            break;
+            if (encoding)
+                break;
         }
         off += 8 + (off_t)sz + (off_t)(sz & 1);
     }
     close(fd);
-    if (!dof || !len)
+    if (!dof || !len || !chn || !rt || !encoding)
+        return 0;
+    if (encoding != 1 && !(encoding == 3 && bits == 32))
+        return 0;
+    if (bits != 16 && bits != 24 && bits != 32)
         return 0;
     *frames = len / ((bits / 8u) * chn);
     *rate = rt;
@@ -795,6 +797,55 @@ static int path_from_buffer(const char *buf, unsigned want, char *out, size_t n)
         return 1;
     }
     return 0;
+}
+
+/* A freshly recorded (unsaved) sample has no path anywhere near its object, but
+ * the app has already written the audio into the temp project. Find the file by
+ * its frame count - the recording's own length is a strong identifier. */
+static int find_wav_by_frames(unsigned want, char *out, size_t n)
+{
+    DIR *root = opendir("/data/TempProjects");
+    if (!root)
+        return 0;
+    struct dirent *de;
+    char best[512] = {0};
+    time_t best_t = 0;
+    while ((de = readdir(root)) != 0) {
+        if (de->d_name[0] == '.')
+            continue;
+        char dirp[512];
+        snprintf(dirp, sizeof dirp, "/data/TempProjects/%s", de->d_name);
+        struct stat ds;
+        if (stat(dirp, &ds) != 0 || !S_ISDIR(ds.st_mode))
+            continue;
+        DIR *sub = opendir(dirp);
+        if (!sub)
+            continue;
+        struct dirent *fe;
+        while ((fe = readdir(sub)) != 0) {
+            size_t l = strlen(fe->d_name);
+            if (l < 5 || strcasecmp(fe->d_name + l - 4, ".wav") != 0)
+                continue;
+            char full[512];
+            snprintf(full, sizeof full, "%s/%s", dirp, fe->d_name);
+            unsigned fr = 0, rate = 0, ch = 0, off = 0, bytes = 0, fmt = 0;
+            if (!wav_info(full, &fr, &rate, &ch, &off, &bytes, &fmt) || fr != want)
+                continue;
+            struct stat fs;
+            if (stat(full, &fs) != 0)
+                continue;
+            if (fs.st_mtime >= best_t) {
+                best_t = fs.st_mtime;
+                snprintf(best, sizeof best, "%s", full);
+            }
+        }
+        closedir(sub);
+    }
+    closedir(root);
+    if (!best[0])
+        return 0;
+    snprintf(out, n, "%s", best);
+    return 1;
 }
 
 static int wav_path_of(uintptr_t obj, unsigned want, char *out, size_t n)
@@ -3578,8 +3629,13 @@ static void do_autotrim(void)
     unsigned frames = frames_of_sample(sample), fr=0, rate=0, ch=0, off=0, bytes=0;
     unsigned first=0, last=0, format=0;
     char path[512] = {0};
-    if (!frames || !wav_path_of(sample, frames, path, sizeof path) ||
-        !wav_info(path, &fr, &rate, &ch, &off, &bytes, &format) || fr != frames) return;
+    if (frames && !wav_path_of(sample, frames, path, sizeof path) &&
+        find_wav_by_frames(frames, path, sizeof path))
+        mlog("minimod: recorded sample -> %s\n", path);
+    if (!frames || !path[0] ||
+        !wav_info(path, &fr, &rate, &ch, &off, &bytes, &format) || fr != frames) {
+        return;
+    }
     if (g_trim_step >= 3) {
         /* fourth press: remove the trim entirely */
         first = 0;

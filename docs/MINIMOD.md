@@ -1,7 +1,9 @@
 # minimod — a minimal MPC Sample mod
 
+**Version 0.3.1**
+
 `minimod` is an `LD_PRELOAD` library for the Akai MPC Sample (app
-`/usr/bin/MPC Sample`, firmware 1.3.0.12) that adds three small features without
+`/usr/bin/MPC Sample`, firmware 1.3.0.12) that adds two small features without
 touching the firmware on disk. It is delivered as an SD `autorun` package (see
 [`ECOSYSTEM.md`](ECOSYSTEM.md) for the boot contract) and disappears on reboot.
 
