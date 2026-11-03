@@ -391,3 +391,22 @@ docs/MOD-MINI.md     this document
 docs/TRIM-PAGE.md    the Sample/Trim page: layout, marker source, findings A–J
 docs/AM-MOD-NOTES.md the overdraw technique taken from am-mod
 ```
+
+## On-screen feedback
+
+Both features confirm themselves with the same one-second toast: a `320x46` band
+over the Start/End/Loop bar, near-black fill, amber 2 px rules top and bottom and
+white 18 pt text, drawn by the paint hook and cleared by repainting through
+`A_REPAINT`. It costs nothing when idle (a string plus a deadline check).
+
+| action | toast |
+|---|---|
+| `SHIFT` + `B3`, first press | `Trim 3% of peak` |
+| second press | `Trim 6% of peak` |
+| third press | `Trim 9% of peak` |
+| fourth press | `Trim cleared` |
+| `PLUS` / `MINUS` | `Pitch +8 semitones`, `Pitch +16 semitones`, `Pitch -8 semitones`, … |
+| `PLUS` + `MINUS` together | `Pitch reset` |
+
+The label always states the resulting state of the sample or the row, not the
+key that was pressed, so `Pitch +16 semitones` is what the pads now play.

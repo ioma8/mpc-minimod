@@ -111,6 +111,7 @@ static volatile int g_cc_recover;
 static sigjmp_buf g_cc_jmp;
 
 static void mlog(const char *fmt, ...);
+static void toast(const char *text);
 static void *g_screen;
 static void *g_trim_page;
 static int prop_references(uintptr_t P, uintptr_t param);
@@ -446,6 +447,11 @@ static int bump_octave(int d)
         return 0;
     g_octave = next;
     mlog("mpcmini: pitch shift=%d (%+d semitones)\n", next, next * 8);
+    {
+        char buf[48];
+        snprintf(buf, sizeof buf, "Pitch %+d semitones", next * 8);
+        toast(buf);
+    }
     return 1;
 }
 
@@ -1480,6 +1486,7 @@ static void buttons(void *event)
             if (plus ? g_minus_held : g_plus_held) {
                 g_octave = 0;
                 mlog("mpcmini: PLUS+MINUS -> pitch reset to original\n");
+                toast("Pitch reset");
             } else {
                 bump_octave(plus ? +1 : -1);
             }
@@ -3144,6 +3151,11 @@ static void toast(const char *text)
     memcpy(g_toast_text, text, n);
     g_toast_text[n] = 0;
     g_toast_until = now_ms() + 1000;
+    {
+        void *comp = g_paint_comp ? g_paint_comp : g_screen;
+        if (orig_repaint && comp)
+            orig_repaint(comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
+    }
     pthread_t th;
     int cr = pthread_create(&th, 0, toast_expiry, 0);
     if (cr == 0)
