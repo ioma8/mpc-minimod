@@ -1162,3 +1162,44 @@ Conclusion: the page after SHIFT+B3 reproduces everything the app draws for a
 trimmed sample - grey shading over the trimmed-out region plus the edge - and
 differs from a hand trim only by our own 1 px edge line and the 0.5 % difference
 between the computed edge and the knob's quantised position.
+
+
+## 21. Final validation (round 13)
+
+Fresh process, stock project, pad 1, sample `BoomBap-Kik-BTB MD`:
+
+```
+trim #1 vs untrimmed page : 5197 px
+trim #2 vs untrimmed page : 5197 px
+trim #1 vs trim #2        : 0 px        <- fully repeatable
+commit core done p0=0.0000 p1=0.8268  (want 0.0001/0.8254)
+pid 89265 -> 89265                    <- no crash
+```
+
+What is verified:
+
+* the silence threshold is measured against the file's own peak (envelope logged
+  in 32 windows), so low-level tails are trimmed and a quiet file is not;
+* the two trim parameters end up holding exactly the values the Start/End knobs
+  would produce for those edges (same fields, same core call);
+* the page draws the result the way the app draws a manual trim: grey shading
+  over the trimmed-out region plus the edge, verified against a hand-set trim
+  (the only residue is the 1 px edge line and the 0.5 % difference between the
+  computed edge and the knob's quantised position);
+* it is stable and repeatable: two consecutive trims produce identical frames and
+  the process never changes.
+
+What is *not* claimed:
+
+* the app's internal model is not updated by our write, so the app's own stored
+  state does not learn the new trim; every visible element the app draws for a
+  trim is reproduced by the mod instead;
+* audio could not be captured - this emulator has no audio device
+  (`query-audiodevs` returns `[]`), so audibility rests on the parameters being
+  identical to a knob's, not on a recording.
+
+The knob replay through the app's own CC dispatcher *does* update that model and
+was measured to be pixel-identical to a hand trim, but its outcome varies between
+runs (once pixel-perfect, once inert, once followed by a fatal fault at
+`0xffffe60544d8`), so it stays behind `MPCMINI_CCINJECT`/`MPCMINI_ONESHOT` and
+is not the default.
