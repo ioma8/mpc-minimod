@@ -315,3 +315,43 @@ Concretely, one `#ifdef MPCMINI_DEBUG` around the probe hooks, the four threads,
 `watch_arm`/`fault_handler`, and the `/run/mpcmini.*` channels would remove
 findings C2, C3, C4, H1, H2 and M6 in a single change and leave a mod that is
 roughly 60 % smaller.
+
+---
+
+## Fix status (release-hardening pass applied)
+
+`MPCMINI_DEBUG` (default `0`) now guards every investigation facility; a debug
+build is `zig cc … -DMPCMINI_DEBUG=1`.
+
+| id | status | what changed |
+|---|---|---|
+| C1 | **fixed** | `mlog` clamps the `vsnprintf` result before `write` |
+| C2 | **fixed** | `/run/mpcmini.heap` thread compiled out of release |
+| C3 | **fixed** | `watch_arm` / `watch_thread` compiled out of release |
+| C4 | **fixed** | handlers debug-only, and now restore `SIG_DFL` and `raise(sig)` instead of resuming |
+| C5 | **fixed** | `_exit(121/122)` replaced by a log line and `return` (mod degrades, app survives) |
+| H1 | **fixed** | the five probe hooks are `#if MPCMINI_DEBUG` |
+| H2 | **fixed** | the four polling threads are `#if MPCMINI_DEBUG` (thread count 24 -> 20) |
+| H3 | **fixed** | `mlog` caps at 256 KB and writes one "log cap reached" line |
+| H4 | **fixed** | one cached `/proc/self/mem` descriptor, reopened only if it goes stale |
+| M1 | **fixed** | `pc_relative` now also covers `CBZ/CBNZ`, `TBZ/TBNZ`, `BR`, `BLR`, `RET` |
+| M2 | **fixed** | `install_hook` bumps `nslots`/`ntramp` only after the patch is live |
+| M3 | **mitigated** | reverted on purpose: failing closed breaks the mod because the map ranges are loaded lazily and go stale. The only writer that trusted `mapped()` blindly was the debug `set` channel, which is now compiled out |
+| M4 | **fixed** | dead `trim_worker` and its `pthread_create` removed (`g_trim_req` was never set) |
+| M5 | **fixed** | `if (!N) return;` before any normalisation |
+| M6 | **fixed** | `MPCMINI_TESTTRIM` is `#if MPCMINI_DEBUG` |
+| M7 | **retracted** | `pcm_at()` handles 16-, 24- and 32-bit correctly (24-bit sign-extends and shifts by 8); the review's claim was wrong |
+| M8 | **accepted** | 32-bit aligned flag stores are atomic on aarch64; the compound `g_pm[]` pair is written once at learn time and read afterwards. Documented rather than rewritten, to avoid touching the working path |
+| L1-L5 | open | overlay-slot verification, naming, log lock (now also mutexed), `snprintf` truncation checks, comment drift |
+
+Verified after the pass, in the emulator:
+
+```
+commit core done p0=0.0000 p1=0.8268 (want 0.0001/0.8254)
+notified props 0xffffe576c718/0xffffe576c770
+overlay: 5196 px change, pid unchanged
+threads: 20 (was 24)
+debug channels inert: writing /run/mpcmini.heap and /run/mpcmini.watch does nothing
+```
+
+Binary size: 61 392 -> 46 384 bytes (-24 %). Package: 34 350 -> 25 832 bytes.

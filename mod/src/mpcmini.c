@@ -41,6 +41,12 @@
 
 /* ---------------------------------------------------------------- anchors */
 /* application file offsets (== virtual addresses in the PIE of 1.3.0.12) */
+/* Release builds carry no probes: the /run channels, the experimental hooks
+ * and the polling threads are all compiled out unless MPCMINI_DEBUG is set. */
+#ifndef MPCMINI_DEBUG
+#define MPCMINI_DEBUG 0
+#endif
+
 #define A_SIXTEEN_CTOR 0x1545a50   /* 16 Levels screen constructor        */
 #define A_SIXTEEN_PROC 0x21472f0   /* 16 Levels pitch computation         */
 #define A_BUTTONS 0x159f2f0        /* physical button dispatch (event)    */
@@ -173,22 +179,52 @@ static void fault_handler(int sig, siginfo_t *si, void *ucv)
         siglongjmp(g_cc_jmp, 1);
     }
     _exit(139);
+    /* Never resume after a fatal signal: restore the default disposition and
+     * let the app die the way it would without the mod. */
+    {
+        struct sigaction dfl;
+        memset(&dfl, 0, sizeof dfl);
+        dfl.sa_handler = SIG_DFL;
+        sigemptyset(&dfl.sa_mask);
+        sigaction(sig, &dfl, 0);
+        raise(sig);
+    }
 }
 
 static volatile int g_cc_recover;
 static sigjmp_buf g_cc_jmp;
 
+#define LOG_CAP (256u * 1024u)
+static pthread_mutex_t g_log_mtx = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long g_log_bytes;
+static int g_log_full;
+
 static void mlog(const char *fmt, ...)
 {
-    if (log_fd < 0)
+    if (log_fd < 0 || g_log_full)
         return;
     char buf[512];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    if (n > 0)
+    if (n <= 0)
+        return;
+    /* vsnprintf returns the length the output *would* have had; clamp it or the
+     * write below would read past buf. */
+    if (n > (int)sizeof buf - 1)
+        n = (int)sizeof buf - 1;
+
+    pthread_mutex_lock(&g_log_mtx);
+    if (g_log_bytes + (unsigned long)n > LOG_CAP) {
+        static const char tail[] = "mpcmini: log cap reached, going quiet\n";
+        (void)!write(log_fd, tail, sizeof tail - 1);
+        g_log_full = 1;
+    } else {
         (void)!write(log_fd, buf, (size_t)n);
+        g_log_bytes += (unsigned long)n;
+    }
+    pthread_mutex_unlock(&g_log_mtx);
 }
 
 /* ------------------------------------------------------- process memory */
@@ -202,28 +238,52 @@ static int g_rng_loaded;
 
 /* /proc/self/mem keeps reads and writes out of the C compiler's way: no aliasing
  * surprises, no faults when the app unmaps a page under us. */
+/* One descriptor for the life of the process: open/pread/close per access is
+ * three syscalls and these are called in tight loops and from hooks. */
+static int mem_fd = -1;
+static pthread_mutex_t g_mem_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+static int mem_open(void)
+{
+    if (mem_fd < 0)
+        mem_fd = open("/proc/self/mem", O_RDWR);
+    return mem_fd;
+}
+
 static int rd(uintptr_t addr, void *dst, size_t n)
 {
-    int fd = open("/proc/self/mem", O_RDONLY);
-    if (fd < 0)
-        return 0;
-    ssize_t got = pread(fd, dst, n, (off_t)addr);
-    close(fd);
+    pthread_mutex_lock(&g_mem_mtx);
+    int fd = mem_open();
+    ssize_t got = fd < 0 ? -1 : pread(fd, dst, n, (off_t)addr);
+    if (got != (ssize_t)n && mem_fd >= 0) {
+        close(mem_fd);   /* stale descriptor: retry once with a fresh one */
+        mem_fd = open("/proc/self/mem", O_RDWR);
+        got = mem_fd < 0 ? -1 : pread(mem_fd, dst, n, (off_t)addr);
+    }
+    pthread_mutex_unlock(&g_mem_mtx);
     return got == (ssize_t)n;
 }
 
 static int wr(uintptr_t addr, const void *src, size_t n)
 {
-    int fd = open("/proc/self/mem", O_WRONLY);
-    if (fd < 0)
-        return 0;
-    ssize_t put = pwrite(fd, src, n, (off_t)addr);
-    close(fd);
+    pthread_mutex_lock(&g_mem_mtx);
+    int fd = mem_open();
+    ssize_t put = fd < 0 ? -1 : pwrite(fd, src, n, (off_t)addr);
+    if (put != (ssize_t)n && mem_fd >= 0) {
+        close(mem_fd);
+        mem_fd = open("/proc/self/mem", O_RDWR);
+        put = mem_fd < 0 ? -1 : pwrite(mem_fd, src, n, (off_t)addr);
+    }
+    pthread_mutex_unlock(&g_mem_mtx);
     return put == (ssize_t)n;
 }
 
 static int mapped(const void *p)
 {
+    /* Ranges are loaded lazily (the heap grows after load), so "unknown" must
+     * stay permissive: rd()/wr() fail safely on unmapped memory anyway. The only
+     * writer that trusted this blindly was the debug `set` channel, which is now
+     * compiled out of release builds. */
     if (!g_rng_loaded)
         return 1;
     uintptr_t a = (uintptr_t)p;
@@ -271,13 +331,24 @@ static uint32_t enc_b(uintptr_t from, uintptr_t to)
 
 static int pc_relative(uint32_t insn)
 {
-    if ((insn & 0x7C000000u) == 0x14000000u) /* B / BL   */
+    if ((insn & 0x7C000000u) == 0x14000000u) /* B / BL            */
         return 1;
-    if ((insn & 0x9F000000u) == 0x90000000u) /* ADRP     */
+    if ((insn & 0x9F000000u) == 0x90000000u) /* ADRP              */
         return 1;
-    if ((insn & 0x9F000000u) == 0x10000000u) /* ADR      */
+    if ((insn & 0x9F000000u) == 0x10000000u) /* ADR               */
         return 1;
-    if ((insn & 0x3B000000u) == 0x18000000u) /* LDR lit  */
+    if ((insn & 0x3B000000u) == 0x18000000u) /* LDR literal       */
+        return 1;
+    if ((insn & 0x7E000000u) == 0x34000000u) /* CBZ / CBNZ        */
+        return 1;
+    if ((insn & 0x7E000000u) == 0x36000000u) /* TBZ / TBNZ        */
+        return 1;
+    /* Indirect branches and returns must not be copied into a trampoline. */
+    if ((insn & 0xFFFFFC1Fu) == 0xD61F0000u) /* BR  xN            */
+        return 1;
+    if ((insn & 0xFFFFFC1Fu) == 0xD63F0000u) /* BLR xN            */
+        return 1;
+    if ((insn & 0xFFFFFBFFu) == 0xD65F0000u) /* RET               */
         return 1;
     return 0;
 }
@@ -329,8 +400,6 @@ static void *install_hook(uintptr_t site, void *hook)
     memcpy(slot + 8, &hook, 8);
     memcpy(tr, pro, n * 4);
     memcpy(tr + n * 4, &b_body, 4);
-    nslots++;
-    ntramp++;
 
     uintptr_t page = site & ~(uintptr_t)0xfff;
     if (mprotect((void *)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
@@ -344,6 +413,8 @@ static void *install_hook(uintptr_t site, void *hook)
         mlog("mpcmini: patch of %p failed\n", (void *)site);
         return 0;
     }
+    nslots++;
+    ntramp++;
     __builtin___clear_cache((char *)tr, (char *)tr + n * 4 + 4);
     __builtin___clear_cache((char *)slot, (char *)slot + 16);
     relay_used = 1;
@@ -3715,6 +3786,7 @@ static void do_autotrim(void)
 
     /* Manual probe: MPCMINI_TESTTRIM="0.091,0.454" drives the write path with
      * fixed bounds so the commit mechanism can be tested on its own. */
+#if MPCMINI_DEBUG
     const char *tt = getenv("MPCMINI_TESTTRIM");
     if (tt && *tt && layers) {
         float x0 = 0.091f, x1 = 0.454f;
@@ -3732,6 +3804,11 @@ static void do_autotrim(void)
         g_trim_pending = 1;
         mlog("mpcmini: TESTTRIM %.4f..%.4f cur=%.4f/%.4f\n", (double)x0,
              (double)x1, (double)g_trim_cur0, (double)g_trim_cur1);
+        return;
+    }
+#endif
+    if (!N) {
+        mlog("mpcmini: autotrim: sample has no frames\n");
         return;
     }
     unsigned fr = 0, rt = 0, ch = 0, doff = 0, bps = 2;
@@ -4236,20 +4313,6 @@ static void *watch_thread(void *arg)
     return 0;
 }
 
-static void *trim_worker(void *arg)
-{
-    (void)arg;
-    struct timespec ts = {.tv_sec = 0, .tv_nsec = 100 * 1000 * 1000};
-    for (;;) {
-        nanosleep(&ts, 0);
-        if (g_trim_req) {
-            g_trim_req = 0;
-            do_autotrim();
-        }
-    }
-    return 0;
-}
-
 static int find_main(struct dl_phdr_info *info, size_t size, void *out)
 {
     (void)size;
@@ -4278,6 +4341,10 @@ static int find_main(struct dl_phdr_info *info, size_t size, void *out)
 __attribute__((constructor)) static void load(void)
 {
     log_fd = open("/run/mpcmini.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+#if MPCMINI_DEBUG
+    /* Debug builds only: the watch probe needs to see the fault it caused.
+     * Never installed in release - swallowing a SIGSEGV/SIGBUS changes the
+     * host app's behaviour on every fault. */
     {
         struct sigaction sa;
         memset(&sa, 0, sizeof sa);
@@ -4286,9 +4353,8 @@ __attribute__((constructor)) static void load(void)
         sigemptyset(&sa.sa_mask);
         sigaction(SIGSEGV, &sa, 0);
         sigaction(SIGBUS, &sa, 0);
-        sigaction(SIGILL, &sa, 0);
-        sigaction(SIGABRT, &sa, 0);
     }
+#endif
     uintptr_t found = 0;
     if (!dl_iterate_phdr(find_main, &found)) {
         mlog("mpcmini: stock app not found; not installing\n");
@@ -4350,6 +4416,7 @@ __attribute__((constructor)) static void load(void)
     void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)note_on) : 0;
     void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)cs_event) : 0;
     void *t_off = (hook_mask & 128) ? install_hook(base + A_NOTE_OFF, (void *)note_off) : 0;
+#if MPCMINI_DEBUG
     void *t_pg = install_hook(base + 0x28100c0, (void *)pagector_probe);
     if (t_pg)
         orig_pagector = (pagector_fn)t_pg;
@@ -4365,6 +4432,7 @@ __attribute__((constructor)) static void load(void)
     void *t_cp = install_hook(base + 0x280dca0, (void *)copypad_probe);
     if (t_cp)
         orig_copypad = (void (*)(void *, void *))t_cp;
+#endif
     void *t_trim = install_hook(base + A_TRIM_CORE, (void *)trim_probe); /* also learns param->property */
     void *t_bc = install_hook(base + A_BROADCAST, (void *)bcast_hook);
     if (t_bc)
@@ -4400,24 +4468,29 @@ __attribute__((constructor)) static void load(void)
     if (t_dt)
         orig_draw_text = (void (*)(void *, const uint64_t *, int, int, int, int, int, int, float))t_dt;
     install_screen_paint();
+#if MPCMINI_DEBUG
     {
-        pthread_t wth;
+        pthread_t wth, sth, bth, hth;
         pthread_create(&wth, 0, watch_thread, 0);
-        pthread_t sth;
         pthread_create(&sth, 0, slider_probe_thread, 0);
-        pthread_t bth;
         pthread_create(&bth, 0, bcast_probe_thread, 0);
-        pthread_t hth;
         pthread_create(&hth, 0, heap_probe_thread, 0);
     }
+#endif
     if (!relay_used) {
         mlog("mpcmini: no hook installed\n");
         return;
     }
-    if (mprotect(relay_page, 4096, PROT_READ | PROT_EXEC) != 0)
-        _exit(121);
-    if (mprotect(tramp_page, 4096, PROT_READ | PROT_EXEC) != 0)
-        _exit(122);
+    /* Hardening failures must never take the host app down: leave the pages
+     * writable and keep running unhooked rather than exit. */
+    if (mprotect(relay_page, 4096, PROT_READ | PROT_EXEC) != 0) {
+        mlog("mpcmini: relay mprotect failed: %s (continuing)\n", strerror(errno));
+        return;
+    }
+    if (mprotect(tramp_page, 4096, PROT_READ | PROT_EXEC) != 0) {
+        mlog("mpcmini: tramp mprotect failed: %s (continuing)\n", strerror(errno));
+        return;
+    }
     mlog("mpcmini: codes relay=%p tramp=%p\n", (void *)relay_page,
          (void *)tramp_page);
     pthread_t th;
@@ -4427,10 +4500,6 @@ __attribute__((constructor)) static void load(void)
     const char *midi_env = getenv("MPCMINI_MIDI");
     if (midi_env && atoi(midi_env) != 0)
         pthread_create(&th, 0, midi_thread, 0);
-    {
-        pthread_t tw;
-        pthread_create(&tw, 0, trim_worker, 0);
-    }
     mlog("mpcmini: base=%p mask=%d safe=%d probe=%d (ctor=%d proc=%d plus=%d minus=%d)\n",
          (void *)base, hook_mask, safe_mode, probe_mode, t_ctor != 0, t_proc != 0);
 }
