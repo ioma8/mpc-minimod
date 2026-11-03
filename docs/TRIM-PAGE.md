@@ -1808,3 +1808,33 @@ remaining arguments are not yet right either.
 Full internal-state sync therefore needs the write side of the knob path, which
 four rounds of Ghidra work and live debugging have narrowed to
 `FUN_01a68020`/`FUN_01a679e0` but not yet pinned down.
+
+### 30.11 Exhaustive value scan (round 5)
+
+A tolerant heap scan (`findval <float>`, 1e-4) run at four knob positions and
+intersected leaves ~200 addresses, because the heap churns between scans. One of
+them is `0xffffe4ecc768` - the Start property's value slot (`prop + 0x50`), which
+confirms the scan works but shows that no single field can be isolated this way:
+the renderer's source does not stand out from ordinary heap traffic.
+
+The only remaining technique that could identify the write is **store tracing**
+single-stepping the control handler and logging every store address across two
+knob values, which needs an instruction decoder in the tracer and is far slower
+than anything tried so far.
+
+### 30.12 Where the investigation stands after five rounds
+
+Fully mapped and verified:
+
+| piece | evidence |
+|---|---|
+| trim computation | envelope analysis, `p0=0.0000 p1=0.8268` vs knob `0.8254` |
+| parameter write | `commit core done`, values read back from the param |
+| property model | `prop+0x50` written, confirmed in the scan |
+| control ids | debugger: Start `0x462`, End `0x466` |
+| control path | `FUN_01a68020` / `FUN_01a679e0`, register layout decoded |
+| visual | overlay drawn during the app's paint, 400 marker pixels, 5197 px delta |
+
+Still open: the app's own renderer source. All three routes are closed - the
+paint ignores the property, the paint Graphics is stack-local, and the control
+entry faults when called externally.

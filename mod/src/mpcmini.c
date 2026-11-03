@@ -3868,6 +3868,41 @@ static void *heap_probe_thread(void *arg)
             byte_diff();
         else if (!strncmp(buf, "who ", 4))
             who_points_at((uintptr_t)strtoull(buf + 4, 0, 16));
+        else if (!strncmp(buf, "findval ", 8)) {
+            /* Every float equal to <val> (tolerance 1e-4) in the app's heap.
+             * Run at two knob positions and intersect to find the stored trim. */
+            float want = (float)atof(buf + 8);
+            ranges_load();
+            unsigned char *chunk = malloc(65536);
+            int hits = 0;
+            for (int r = 0; r < g_nrng && chunk && hits < 200; ++r) {
+                if (!g_rng[r].w)
+                    continue;
+                /* skip the image and the big audio buffers */
+                if (g_rng[r].lo >= base && g_rng[r].hi <= base + 0x9000000)
+                    continue;
+                if (g_rng[r].hi - g_rng[r].lo > 0x4000000)
+                    continue;
+                for (uintptr_t a = g_rng[r].lo; a + 4 < g_rng[r].hi; a += 65536) {
+                    size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+                    n &= ~(size_t)3;
+                    if (!rd(a, chunk, n))
+                        break;
+                    for (size_t o = 0; o + 4 <= n && hits < 200; o += 4) {
+                        float f;
+                        memcpy(&f, chunk + o, 4);
+                        float d = f - want;
+                        if (d < 0.0001f && d > -0.0001f) {
+                            mlog("mpcmini: fv %#llx %.6f\n",
+                                 (unsigned long long)(a + o), (double)f);
+                            hits++;
+                        }
+                    }
+                }
+            }
+            free(chunk);
+            mlog("mpcmini: fv done %d\n", hits);
+        }
         else if (!strncmp(buf, "reg ", 4)) {
             g_reg_base = (uintptr_t)strtoull(buf + 4, 0, 16);
             g_reg_have = rd(g_reg_base, g_reg_buf, sizeof g_reg_buf) ? 1 : 0;
