@@ -10,9 +10,8 @@ a reboot restores stock.
 | **AutoTrim** — trims the selected sample to its silent edges | `SHIFT` + `B3` |
 | **Octave shift** in 16 Levels — 8 semitones per press | `PLUS` / `MINUS` (both = reset) |
 
-Chromatic play from an external MIDI keyboard is **not shipped**: the control
-surface speaks a proprietary frame format rather than MIDI, so that feature
-waits on its decoder — see [`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).
+**Work in progress:** chromatic play from an external MIDI keyboard — see
+[`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).
 
 ## Install
 
