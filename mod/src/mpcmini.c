@@ -1017,6 +1017,9 @@ static void pitch_off(void *a0, uint64_t a1, uint64_t a2, int a3)
         orig_pitch_off(a0, a1, a2, off);
 }
 
+static void heap_snapshot(const char *tag);
+static void heap_diff(const char *tag);
+
 static void buttons(void *event)
 {
 
@@ -1039,6 +1042,20 @@ static void buttons(void *event)
     /* PLUS / MINUS move the 16 Levels row by an octave. The pitch hook only
      * runs for that screen, so bumping unconditionally is safe - and the old
      * guard (g_octave != 0) made the first press a no-op. */
+    if (getenv("MPCMINI_BTNLOG")) {
+        static int n;
+        if (n < 24) {
+            n++;
+            unsigned char raw[16];
+            if (rd((uintptr_t)event, raw, sizeof raw)) {
+                mlog("mpcmini: btn ev="
+                     "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                     raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                     raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14],
+                     raw[15]);
+            }
+        }
+    }
     if (code == 0x36 || code == 0x37) {
         int plus = (code == 0x36);
         if (down) {
@@ -1082,6 +1099,14 @@ static void note_on(void *input, int src, int pad, void *props, float vel)
 {
     g_last_pad = pad;
     g_props = props;
+    {
+        static int nn;
+        if (nn < 12) {
+            nn++;
+            mlog("mpcmini: note_on pad=%d src=%d vel=%.2f props=%p\n", pad, src,
+                 (double)vel, props);
+        }
+    }
     if (!g_replaying_pad && pad >= 0 && pad < 128) {
         /* remember a real pad press so the page can be re-selected later */
         g_pad_rec[pad].input = input;
@@ -1994,6 +2019,12 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
     (void)lo;
     if (!g_in_cc_replay && ev) {
         unsigned char cc = ((unsigned char *)ev)[8];
+        static int allc;
+        if (allc < 16) {
+            allc++;
+            mlog("mpcmini: cc_in cc=0x%x raw=%u range=%.1f ev0=%p\n", cc, raw,
+                 (double)range, *(void **)ev);
+        }
         int idx = -1;
         if (cc == 0x10)
             idx = 0;
@@ -2040,6 +2071,74 @@ static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
      *   ldr  x0,[x0] / ldr x0,[x0,0x10] / add x0,x0,#0x1ac0 -> the property
      * so the call is (event, raw, min, range). */
     FN(0x159f230, void (*)(void *, unsigned, float, float))(ev, raw, 0.0f, 127.0f);
+}
+
+/* Whole-heap fingerprint: hash every 4 KiB page of writable memory. Two
+ * snapshots around a knob move show *everything* the knob changes (the model,
+ * not just the parameter), which is what the page reloads from. */
+#define HP_PAGE 4096
+#define HP_MAX 200000
+static struct {
+    uintptr_t addr;
+    uint64_t hash;
+} g_hp[HP_MAX];
+static volatile int g_nhp;
+
+static unsigned char *g_hp_bytes; /* optional byte copy for diffs */
+
+static void heap_snapshot(const char *tag)
+{
+    ranges_load();
+    g_nhp = 0;
+    unsigned char *buf = malloc(HP_PAGE);
+    if (!buf)
+        return;
+    for (int r = 0; r < g_nrng && g_nhp < HP_MAX; ++r) {
+        if (!g_rng[r].w)
+            continue;
+        if (g_rng[r].lo >= base && g_rng[r].hi <= base + 0x9000000)
+            continue; /* the image, not the heap */
+        if (g_rng[r].hi - g_rng[r].lo > 0x4000000)
+            continue; /* huge audio buffers dwarf everything else */
+        for (uintptr_t a = g_rng[r].lo; a + HP_PAGE <= g_rng[r].hi && g_nhp < HP_MAX;
+             a += HP_PAGE) {
+            if (!rd(a, buf, HP_PAGE))
+                break;
+            uint64_t h = 1469598103934665603ULL;
+            for (int i = 0; i < HP_PAGE; ++i) {
+                h ^= buf[i];
+                h *= 1099511628211ULL;
+            }
+            g_hp[g_nhp].addr = a;
+            g_hp[g_nhp].hash = h;
+            g_nhp++;
+        }
+    }
+    free(buf);
+    mlog("mpcmini: heap snapshot '%s': %d pages\n", tag, g_nhp);
+}
+
+static void heap_diff(const char *tag)
+{
+    ranges_load();
+    unsigned char *buf = malloc(HP_PAGE);
+    if (!buf)
+        return;
+    int shown = 0;
+    for (int i = 0; i < g_nhp && shown < 24; ++i) {
+        if (!rd(g_hp[i].addr, buf, HP_PAGE))
+            continue;
+        uint64_t h = 1469598103934665603ULL;
+        for (int k = 0; k < HP_PAGE; ++k) {
+            h ^= buf[k];
+            h *= 1099511628211ULL;
+        }
+        if (h != g_hp[i].hash) {
+            mlog("mpcmini: changed page %p (%s)\n", (void *)g_hp[i].addr, tag);
+            shown++;
+        }
+    }
+    free(buf);
 }
 
 static void commit_trim(void)
@@ -3045,6 +3144,31 @@ static void *slider_probe_thread(void *arg)
     return 0;
 }
 
+/* Probe: /run/mpcmini.heap holds "snap" or "diff" for the heap fingerprint. */
+static void *heap_probe_thread(void *arg)
+{
+    (void)arg;
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 400 * 1000 * 1000};
+    for (;;) {
+        nanosleep(&ts, 0);
+        int fd = open("/run/mpcmini.heap", O_RDONLY);
+        if (fd < 0)
+            continue;
+        char buf[32];
+        ssize_t n = read(fd, buf, sizeof buf - 1);
+        close(fd);
+        unlink("/run/mpcmini.heap");
+        if (n <= 0)
+            continue;
+        buf[n] = 0;
+        if (!strncmp(buf, "snap", 4))
+            heap_snapshot("mark");
+        else if (!strncmp(buf, "diff", 4))
+            heap_diff("after knob");
+    }
+    return 0;
+}
+
 /* Probe: /run/mpcmini.bcast holds "i,v" - broadcast g_bp[i] with value v, so we
  * can find which recorded property drives the page. */
 static void *bcast_probe_thread(void *arg)
@@ -3275,6 +3399,8 @@ __attribute__((constructor)) static void load(void)
         pthread_create(&sth, 0, slider_probe_thread, 0);
         pthread_t bth;
         pthread_create(&bth, 0, bcast_probe_thread, 0);
+        pthread_t hth;
+        pthread_create(&hth, 0, heap_probe_thread, 0);
     }
     if (!relay_used) {
         mlog("mpcmini: no hook installed\n");

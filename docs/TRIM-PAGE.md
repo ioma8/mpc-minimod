@@ -840,3 +840,28 @@ panel's knob events enter, and what it does after the broadcast to persist the
 trim. The next probe is to hook the MCU/serial input path and capture the call
 chain of a knob move, since the broadcast's own return address is inside our
 relay and useless for this.
+
+
+## 15. Round 5: the hook map is wrong, not the theory
+
+Three hooks were assumed to cover the input path. Measured:
+
+| hook | address | fires for a panel knob? | fires for a pad press? |
+| --- | --- | --- | --- |
+| CC dispatcher | `0x159f230` | **never** | - |
+| note-on | `0x1e27360` | - | **never** |
+| button dispatch | `0x159f2f0` | yes, as `code=0x06` | yes (0x0c/0x0e) |
+
+So the only hook that actually sees panel input is the button dispatch, and a
+knob turn arrives there as `code 0x06` with a two-step value - an *encoder*
+event, not the 7-bit CC that the 0x159f230 handler expects. That handler belongs
+to a different input (external MIDI), which is why it never fires and why
+injecting into it stores a value the page later discards.
+
+A whole-heap fingerprint tool (`heap_snapshot`/`heap_diff`, driven by
+`/run/mpcmini.heap`) is in place and already shows that a knob move touches only
+a handful of pages, but it needs a byte copy of the pages (not just hashes) to
+name the fields.
+
+Conclusion: the trim's persistent state is updated by the *encoder* path behind
+`code 0x06`, which is the one thing not yet traced.
