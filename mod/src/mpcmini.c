@@ -436,7 +436,7 @@ static int bump_octave(int d)
 
 /* ------------------------------------------------------------- WAV helpers */
 static int wav_info(const char *path, unsigned *frames, unsigned *rate,
-                    unsigned *ch, unsigned *dataoff, unsigned *bps)
+                    unsigned *ch, unsigned *dataoff, unsigned *bps, unsigned *format)
 {
     int fd = open(path, O_RDONLY);
     if (fd < 0)
@@ -444,6 +444,11 @@ static int wav_info(const char *path, unsigned *frames, unsigned *rate,
     unsigned char h[4096];
     ssize_t n = pread(fd, h, sizeof h, 0);
     if (n < 44 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4)) {
+        close(fd);
+        return 0;
+    }
+    unsigned encoding = (unsigned)h[20] | ((unsigned)h[21] << 8);
+    if (encoding != 1 && !(encoding == 3 && h[34] == 32 && h[35] == 0)) {
         close(fd);
         return 0;
     }
@@ -480,11 +485,20 @@ static int wav_info(const char *path, unsigned *frames, unsigned *rate,
     *ch = chn;
     *dataoff = dof;
     *bps = bits / 8u;
+    if (format) *format = encoding;
     return 1;
 }
 
-static short pcm_at(const unsigned char *p, unsigned bps)
+static int pcm_at(const unsigned char *p, unsigned bps, unsigned format)
 {
+    if (format == 3) {
+        float value;
+        memcpy(&value, p, sizeof value);
+        if (!isfinite(value)) return 0;
+        if (value >= 1.0f) return 32767;
+        if (value <= -1.0f) return -32768;
+        return (int)(value * 32768.0f);
+    }
     if (bps == 2) {
         short v;
         memcpy(&v, p, 2);
@@ -500,7 +514,7 @@ static short pcm_at(const unsigned char *p, unsigned bps)
 }
 
 static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
-                     unsigned ch, unsigned bps, unsigned *first, unsigned *last)
+                     unsigned ch, unsigned bps, unsigned format, unsigned *first, unsigned *last)
 {
     int fd = open(path, O_RDONLY);
     if (fd < 0)
@@ -511,18 +525,18 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
         bps = 2;
     /* Threshold: relative to the file's peak so quiet material is trimmed as
      * well, with an absolute floor so a nearly silent file is not trimmed to
-     * nothing. MPCMINI_TRIM_DB overrides the relative part (default -50 dB). */
+     * nothing. MPCMINI_TRIM_DB overrides the relative part (default -30.46 dB (3% of peak)). */
     unsigned char buf[16384];
     short thr = 328; /* -40 dBFS fallback */
     {
-        double db = -40.0;
+        double db = -30.45757490560675; /* 3% of peak: three times the old threshold */
         const char *e = getenv("MPCMINI_TRIM_DB");
         if (e && *e)
             db = atof(e);
         if (db < -90.0) db = -90.0;
         if (db > -6.0) db = -6.0;
         double ratio = pow(10.0, db / 20.0);
-        short peak = 0;
+        int peak = 0;
         unsigned g = 0;
         while (g < frames) {
             ssize_t n = pread(fd, buf, sizeof buf, (off_t)dataoff + (off_t)g * bps * ch);
@@ -531,8 +545,8 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
             unsigned got = (unsigned)(n / (bps * ch));
             for (unsigned i = 0; i < got; ++i)
                 for (unsigned c = 0; c < ch; ++c) {
-                    short v = pcm_at(buf + (i * ch + c) * bps, bps);
-                    if (v < 0) v = (short)-v;
+                    int v = pcm_at(buf + (i * ch + c) * bps, bps, format);
+                    if (v < 0) v = -v;
                     if (v > peak) peak = v;
                 }
             g += got;
@@ -553,7 +567,7 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
                     unsigned a = w * step, b = a + step;
                     if (b > frames)
                         b = frames;
-                    short wp = 0;
+                    int wp = 0;
                     for (unsigned f = a; f < b; f += 1) {
                         unsigned char sb[8];
                         if (!rd(0, sb, 0))
@@ -562,8 +576,8 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
                         if (pread(fd, sb, (size_t)(bps * ch), (off_t)dataoff + (off_t)f * bps * ch) <= 0)
                             break;
                         for (unsigned c = 0; c < ch; ++c) {
-                            short v = pcm_at(sb + c * bps, bps);
-                            if (v < 0) v = (short)-v;
+                            int v = pcm_at(sb + c * bps, bps, format);
+                            if (v < 0) v = -v;
                             if (v > wp) wp = v;
                         }
                     }
@@ -582,7 +596,7 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
         for (unsigned i = 0; i < got; ++i) {
             int loud = 0;
             for (unsigned c = 0; c < ch; ++c) {
-                short v = pcm_at(buf + (i * ch + c) * bps, bps);
+                int v = pcm_at(buf + (i * ch + c) * bps, bps, format);
                 if (v > thr || v < -thr)
                     loud = 1;
             }
@@ -620,7 +634,7 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
         for (unsigned i = got; i-- > 0;) {
             int loud = 0;
             for (unsigned c = 0; c < ch; ++c) {
-                short v = pcm_at(buf + (i * ch + c) * bps, bps);
+                int v = pcm_at(buf + (i * ch + c) * bps, bps, format);
                 if (v > thr || v < -thr)
                     loud = 1;
             }
@@ -740,7 +754,7 @@ static int path_from_buffer(const char *buf, unsigned want, char *out, size_t n)
         char tmp[512];
         snprintf(tmp, sizeof tmp, "%.*s", (int)(end - hit), hit);
         unsigned fr = 0, rt = 0, ch = 0, doff = 0, bps = 2;
-        if (!wav_info(tmp, &fr, &rt, &ch, &doff, &bps) || fr != want)
+        if (!wav_info(tmp, &fr, &rt, &ch, &doff, &bps, NULL) || fr != want)
             continue;
         snprintf(out, n, "%s", tmp);
         return 1;
@@ -822,7 +836,7 @@ static int wav_by_frames(unsigned want, char *out, size_t n)
                 continue;
             snprintf(path, sizeof path, "%s/%s", sub, f->d_name);
             unsigned fr = 0, rt = 0, ch = 0, doff = 0, bps = 2;
-            int ok = wav_info(path, &fr, &rt, &ch, &doff, &bps);
+            int ok = wav_info(path, &fr, &rt, &ch, &doff, &bps, NULL);
             static int logged;
             if (logged < 10) {
                 logged++;
@@ -3211,9 +3225,9 @@ static void screen_paint(void *p, void *g)
         return;
     /* third soft-key cell of the Sample page */
     draw_colour(g, 0xff000000);
-    draw_rect(g, 213, 0, 107, 29);
+    draw_rect(g, 213, 0, 107, 38);
     draw_colour(g, 0xffffffff);
-    draw_text(g, "AutoTrim", 215, 1, 103, 22, 14.0f);
+    draw_text(g, "AutoTrim", 215, 5, 103, 28, 18.0f);
 }
 
 static int install_screen_paint(void)
@@ -3438,431 +3452,29 @@ static int g_nsl;
  * the knobs keep (boundary object and layer). */
 static void do_autotrim(void)
 {
-    g_ntp = 0;
-    scan_trim_params();
-
-    /* Keep only the parameters that are actually wired to the page: their
-     * context must resolve to an instrument whose layer holds a sample with
-     * exactly the parameter's length. That is what makes them live. */
-    int good[16], ngood = 0;
-    unsigned best_len = 0;
-    for (int i = 0; i < g_ntp && ngood < 16; ++i) {
-        if (g_tp[i].mx < 1000)
-            continue;
-        uintptr_t l = 0, ins = 0;
-        if (!page_layers((uintptr_t)g_tp[i].p, &l, &ins))
-            continue;
-        uintptr_t smp = 0;
-        if (!rd(l + 0x4a8, &smp, 8) || !smp)
-            continue;
-        if (frames_of_sample(smp) != g_tp[i].mx)
-            continue;
-        good[ngood++] = i;
-        if (g_tp[i].mx > best_len)
-            best_len = g_tp[i].mx;
-    }
-    mlog("mpcmini: autotrim: %d/%d params are wired (len=%u)\n", ngood, g_ntp,
-         best_len);
-    if (ngood < 2) {
-        mlog("mpcmini: autotrim: no wired trim parameters\n");
+    int pad = g_last_pad >= 0 && g_last_pad < 128 ? g_last_pad : 0;
+    uintptr_t array = 0, end = 0, state = 0, layers = 0, sample = 0;
+    if (!g_surface || !g_control_context || !orig_setctl ||
+        !rd((uintptr_t)g_surface + 0x2808, &array, 8) ||
+        !rd((uintptr_t)g_surface + 0x2810, &end, 8) ||
+        !array || end < array || (end-array)/8 <= (unsigned)pad ||
+        !rd(array + pad*8, &state, 8) || !state ||
+        !rd(state + 0x22e8, &layers, 8) || !layers ||
+        !rd(layers + 0x4a8, &sample, 8) || !sample) {
+        mlog("mpcmini: native trim: no sample for pad %d\n", pad);
         return;
     }
-    int idx[8], nidx = 0;
-    for (int pass = 1; pass >= 0 && nidx < 2; --pass) {
-        nidx = 0;
-        for (int k = 0; k < ngood && nidx < 8; ++k) {
-            if (g_tp[good[k]].mx != best_len)
-                continue;
-            if (pass && g_tp[good[k]].val < 0.0f)
-                continue;
-            idx[nidx++] = good[k];
-        }
-    }
-    if (nidx < 2) {
-        mlog("mpcmini: autotrim: need two wired params, have %d\n", nidx);
-        return;
-    }
-    unsigned N = best_len;
-    uintptr_t p_start = (uintptr_t)g_tp[idx[0]].p;
-    uintptr_t p_end = (uintptr_t)g_tp[idx[1]].p;
-
-    /* If the knobs have been used, their parameters are the live ones: prefer
-     * the learned one and the instance nearest to it (the stale copies sit at
-     * the same address minus/plus a small offset). */
-    /* The page initialises the parameters it drives; stale copies of the same
-     * class keep -1. If two are initialised they are the live Start/End pair -
-     * order them by value. */
-    {
-        uintptr_t init[8];
-        float iv[8];
-        int ni = 0;
-        for (int i = 0; i < g_ntp && ni < 8; ++i) {
-            if (g_tp[i].mx != N)
-                continue;
-            float v = 0;
-            if (!rd((uintptr_t)g_tp[i].p + T_VALUE, &v, 4))
-                continue;
-            if (v < -0.5f || v > 1.5f)
-                continue;
-            init[ni] = (uintptr_t)g_tp[i].p;
-            iv[ni] = v;
-            ni++;
-        }
-        mlog("mpcmini: %d initialised params of %u\n", ni, N);
-        for (int i = 0; i < g_nlis; ++i) {
-            int found = 0;
-            for (int k = 0; k < g_ntp; ++k)
-                if ((uintptr_t)g_tp[k].p == g_lis[i].param)
-                    found = 1;
-            float v = 0;
-            rd(g_lis[i].param + T_VALUE, &v, 4);
-            mlog("mpcmini: knob param %p in scan=%d val=%.4f\n", (void *)g_lis[i].param,
-                 found, (double)v);
-        }
-        if (ni >= 2) {
-            for (int a = 0; a < ni; ++a)
-                for (int b = a + 1; b < ni; ++b)
-                    if (iv[b] < iv[a]) {
-                        float t = iv[a];
-                        iv[a] = iv[b];
-                        iv[b] = t;
-                        uintptr_t u = init[a];
-                        init[a] = init[b];
-                        init[b] = u;
-                    }
-            p_start = init[0];
-            p_end = init[ni - 1];
-            mlog("mpcmini: live pair %p(%.3f)/%p(%.3f)\n", (void *)p_start,
-                 (double)iv[0], (void *)p_end, (double)iv[ni - 1]);
-        }
-    }
-    if (g_npm > 0) {
-        uintptr_t live = g_pm[0].param, other = 0;
-        for (int i = 1; i < g_npm; ++i)
-            if (g_pm[i].param != live) {
-                other = g_pm[i].param;
-                break;
-            }
-        if (!other) {
-            long bestd = 1 << 30;
-            for (int i = 0; i < g_ntp; ++i) {
-                uintptr_t pp = (uintptr_t)g_tp[i].p;
-                if (pp == live || g_tp[i].mx != N)
-                    continue;
-                long d = (long)pp - (long)live;
-                if (d < 0)
-                    d = -d;
-                if (d < bestd) {
-                    bestd = d;
-                    other = pp;
-                }
-            }
-        }
-        if (other && other != live) {
-            /* Start is the smaller of the two current values. */
-            float va = 0, vb = 0;
-            rd(live + T_VALUE, &va, 4);
-            rd(other + T_VALUE, &vb, 4);
-            if (vb < va) {
-                uintptr_t t = live;
-                live = other;
-                other = t;
-            }
-            p_start = live;
-            p_end = other;
-            mlog("mpcmini: using learned params %p/%p\n", (void *)p_start,
-                 (void *)p_end);
-        }
-    }
-
-    /* Group the wired parameters by their context (*(param+0xb0)): the two
-     * (Start/End) or three (..Loop) that belong to the displayed pad share it,
-     * and the page's own pair is the group the Trim knobs write. Groups whose
-     * context lives inside the heap near the parameter are stale copies. */
-    {
-        uintptr_t ctxs[8];
-        int cnt[8], ngrp = 0;
-        for (int k = 0; k < ngood; ++k) {
-            if (g_tp[good[k]].mx != best_len)
-                continue;
-            uintptr_t c = 0;
-            rd((uintptr_t)g_tp[good[k]].p + T_LAYER, &c, 8);
-            int g = -1;
-            for (int j = 0; j < ngrp; ++j)
-                if (ctxs[j] == c) {
-                    g = j;
-                    break;
-                }
-            if (g < 0 && ngrp < 8) {
-                g = ngrp++;
-                ctxs[g] = c;
-                cnt[g] = 0;
-            }
-            if (g >= 0)
-                cnt[g]++;
-        }
-        int best = -1;
-        for (int j = 0; j < ngrp; ++j)
-            if (cnt[j] >= 2 && (best < 0 || cnt[j] > cnt[best]))
-                best = j;
-        if (best >= 0) {
-            uintptr_t picks[8];
-            int np = 0;
-            for (int k = 0; k < ngood && np < 8; ++k) {
-                uintptr_t c = 0;
-                if (g_tp[good[k]].mx != best_len)
-                    continue;
-                rd((uintptr_t)g_tp[good[k]].p + T_LAYER, &c, 8);
-                if (c == ctxs[best])
-                    picks[np++] = (uintptr_t)g_tp[good[k]].p;
-            }
-            for (int i = 0; i < np; ++i)
-                for (int j = i + 1; j < np; ++j) {
-                    float vi = 0, vj = 0;
-                    rd(picks[i] + T_VALUE, &vi, 4);
-                    rd(picks[j] + T_VALUE, &vj, 4);
-                    if (vj < vi) {
-                        uintptr_t t = picks[i];
-                        picks[i] = picks[j];
-                        picks[j] = t;
-                    }
-                }
-            p_start = picks[0];
-            p_end = picks[1];
-            {
-                uintptr_t pg = (uintptr_t)find_sample_screen();
-                for (int k = 0; k < ngood; ++k) {
-                    if (g_tp[good[k]].mx != best_len)
-                        continue;
-                    uintptr_t pp = (uintptr_t)g_tp[good[k]].p;
-                    float v = 0, ap = 0;
-                    uintptr_t c = 0, m = 0;
-                    rd(pp + T_VALUE, &v, 4);
-                    rd(pp + T_APPLIED, &ap, 4);
-                    rd(pp + T_LAYER, &c, 8);
-                    rd(pp + T_MODEL, &m, 8);
-                    long d = (long)m - (long)pg;
-                    mlog("mpcmini: cand %p v=%.3f ap=%.3f ctx=%p model=%p d=%ld\n",
-                         (void *)pp, (double)v, (double)ap, (void *)c, (void *)m, d);
-                }
-                mlog("mpcmini: page for deltas: %p\n", (void *)pg);
-            }
-            mlog("mpcmini: ctx group %p has %d params -> %p/%p\n", (void *)ctxs[best],
-                 np, (void *)p_start, (void *)p_end);
-        } else {
-            mlog("mpcmini: no ctx group with 2+ params (groups=%d)\n", ngrp);
-        }
-    }
-
-    /* The page object itself points at the parameters it drives. Several pads
-     * can share a sample length, so length alone cannot tell which instance
-     * the Trim knobs write - this can: scan the screen for our candidates. */
-    {
-        uintptr_t page = (uintptr_t)find_sample_screen();
-        mlog("mpcmini: pagebind page=%p ngood=%d best_len=%u\n", (void *)page, ngood,
-             best_len);
-        for (int i = 0; i < g_ntp && i < 12; ++i) {
-            float v = 0, ap = 0;
-            uintptr_t l = 0, ins = 0;
-            int ok = page_layers((uintptr_t)g_tp[i].p, &l, &ins);
-            rd((uintptr_t)g_tp[i].p + T_VALUE, &v, 4);
-            rd((uintptr_t)g_tp[i].p + T_APPLIED, &ap, 4);
-            mlog("mpcmini: tp[%d] %p val=%.4f applied=%.3f len=%u layer=%p\n", i,
-                 g_tp[i].p, (double)v, (double)ap, g_tp[i].mx,
-                 ok ? (void *)(l) : 0);
-        }
-        if (page) {
-            uintptr_t bound[8];
-            int nb = 0;
-            for (int i = 0; i < ngood && nb < 8; ++i) {
-                uintptr_t cand = (uintptr_t)g_tp[good[i]].p;
-                if (g_tp[good[i]].mx != best_len)
-                    continue;
-                for (long off = 0; off < 0x9000; off += 8) {
-                    uintptr_t q = 0;
-                    if (!rd(page + off, &q, 8))
-                        break;
-                    if (q == cand) {
-                        bound[nb++] = cand;
-                        mlog("mpcmini: page %p references param %p (+0x%lx)\n",
-                             (void *)page, (void *)cand, off);
-                        break;
-                    }
-                }
-            }
-            if (nb >= 2) {
-                /* Start is the lower value, End the higher one. */
-                for (int i = 0; i < nb; ++i)
-                    for (int j = i + 1; j < nb; ++j) {
-                        float vi = 0, vj = 0;
-                        rd(bound[i] + T_VALUE, &vi, 4);
-                        rd(bound[j] + T_VALUE, &vj, 4);
-                        if (vj < vi) {
-                            uintptr_t t = bound[i];
-                            bound[i] = bound[j];
-                            bound[j] = t;
-                        }
-                    }
-                p_start = bound[0];
-                p_end = bound[nb - 1];
-                mlog("mpcmini: page-bound params %p/%p (of %d)\n", (void *)p_start,
-                     (void *)p_end, nb);
-            } else {
-                mlog("mpcmini: page references %d of our params, keeping guess\n", nb);
-            }
-        }
-    }
-
-    uintptr_t layers = 0, instr = 0;
-    uintptr_t sample = 0;
-    unsigned a = 0, b = 0;
+    unsigned frames = frames_of_sample(sample), fr=0, rate=0, ch=0, off=0, bytes=0;
+    unsigned first=0, last=0, format=0;
     char path[512] = {0};
-    if (!page_layers(p_start, &layers, &instr)) {
-        mlog("mpcmini: autotrim: no layer chain\n");
-        return;
-    }
-    /* Primary: the sample object the page is showing (it owns the .wav). */
-    {
-        unsigned dfr = 0;
-        char dpath[512] = {0};
-        if (find_displayed_sample(&dfr, dpath, sizeof dpath) && dfr == N &&
-            dpath[0]) {
-            snprintf(path, sizeof path, "%s", dpath);
-            for (int i = 0; i < 128 && !sample; ++i) {
-                uintptr_t s2 = 0;
-                if (rd(layers + (uintptr_t)i * 0xb30 + 0x4a8, &s2, 8) &&
-                    s2 && frames_of_sample(s2) == N)
-                    sample = s2;
-            }
-        }
-    }
-    /* The core reads layer 0 of the page instrument, so use that sample. */
-    if (!path[0]) {
-        uintptr_t s0 = 0;
-        if (rd(layers + 0x4a8, &s0, 8) && s0 && frames_of_sample(s0) == N &&
-            wav_path_of(s0, N, path, sizeof path)) {
-            sample = s0;
-            mlog("mpcmini: autotrim: pad0 sample=%p path='%s'\n", (void *)s0, path);
-        }
-    }
-    /* Fallback: any layer whose sample has N frames and whose Sample object
-     * carries a matching .wav. */
-    if (!path[0]) {
-        uintptr_t cand[16];
-        int ncand = 0, prefer = -1;
-        for (int pad = 0; pad < 128 && ncand < 16; ++pad) {
-            uintptr_t s = 0;
-            if (!rd(layers + (uintptr_t)pad * 0xb30 + 0x4a8, &s, 8) || !s)
-                continue;
-            if (frames_of_sample(s) != N)
-                continue;
-            if (pad == g_last_pad)
-                prefer = ncand;
-            cand[ncand++] = s;
-        }
-        if (prefer > 0) {
-            uintptr_t t = cand[0];
-            cand[0] = cand[prefer];
-            cand[prefer] = t;
-        }
-        for (int i = 0; i < ncand && !path[0]; ++i)
-            if (wav_path_of(cand[i], N, path, sizeof path))
-                sample = cand[i];
-        mlog("mpcmini: autotrim: candidates=%d sample=%p\n", ncand, (void *)sample);
-    }
-    if (!path[0])
-        wav_by_frames(N, path, sizeof path);
-    mlog("mpcmini: autotrim: sample=%p path='%s'\n", (void *)sample, path);
-
-    /* Manual probe: MPCMINI_TESTTRIM="0.091,0.454" drives the write path with
-     * fixed bounds so the commit mechanism can be tested on its own. */
-#if MPCMINI_DEBUG
-    const char *tt = getenv("MPCMINI_TESTTRIM");
-    if (tt && *tt && layers) {
-        float x0 = 0.091f, x1 = 0.454f;
-        sscanf(tt, "%f,%f", &x0, &x1);
-        unsigned ca = 0, cb2 = 0;
-        rd(layers + 0x4d8, &ca, 4);
-        rd(layers + 0x530, &cb2, 4);
-        g_trim_cur0 = (float)ca / (float)N;
-        g_trim_cur1 = (float)cb2 / (float)N;
-        g_trim_param0 = (void *)p_start;
-        g_trim_param1 = (void *)p_end;
-        g_trim_v0 = x0;
-        g_trim_v1 = x1;
-        g_trim_frames = N;
-        g_trim_pending = 1;
-        mlog("mpcmini: TESTTRIM %.4f..%.4f cur=%.4f/%.4f\n", (double)x0,
-             (double)x1, (double)g_trim_cur0, (double)g_trim_cur1);
-        return;
-    }
-#endif
-    if (!N) {
-        mlog("mpcmini: autotrim: sample has no frames\n");
-        return;
-    }
-    unsigned fr = 0, rt = 0, ch = 0, doff = 0, bps = 2;
-    if (!path[0] || !wav_info(path, &fr, &rt, &ch, &doff, &bps) || fr != N) {
-        mlog("mpcmini: autotrim: no verified wav for %u frames\n", N);
-        return;
-    }
-    if (!wav_edges(path, fr, doff, ch, bps, &a, &b) || (a == 0 && b + 1 >= N)) {
-        mlog("mpcmini: autotrim: nothing to trim\n");
-        return;
-    }
-    mlog("mpcmini: autotrim: frames=%u ch=%u edges=%u..%u\n", fr, ch, a, b);
-
-    float v0 = (float)a / (float)N;
-    float v1 = (float)(b + 1) / (float)N;
-    if (v1 <= v0 || v1 > 1.0f)
-        v1 = 1.0f;
-    mlog("mpcmini: autotrim frames=%u -> %.4f..%.4f p0=%p p1=%p\n", N, (double)v0,
-         (double)v1, (void *)p_start, (void *)p_end);
-
-    /* frame-level state the knobs keep (verified by diffing the layer) */
-    if (sample && layers) {
-        uintptr_t lay = layers;
-        for (int pad = 0; pad < 128; ++pad) {
-            uintptr_t s = 0;
-            if (rd(layers + (uintptr_t)pad * 0xb30 + 0x4a8, &s, 8) && s == sample) {
-                lay = layers + (uintptr_t)pad * 0xb30;
-                break;
-            }
-        }
-        unsigned ca = 0, cb = 0;
-        rd(lay + 0x4d8, &ca, 4);
-        rd(lay + 0x530, &cb, 4);
-        g_trim_cur0 = (float)ca / (float)N;
-        g_trim_cur1 = (float)cb / (float)N;
-        unsigned sa = a, sb = b;
-        wr(lay + 0x4d8, &sa, 4);
-        wr(lay + 0x588, &sa, 4);
-        wr(lay + 0x530, &sb, 4);
-        mlog("mpcmini: layer %p <- %u..%u frames\n", (void *)lay, sa, sb);
-    }
-    g_trim_param0 = (void *)p_start;
-    g_trim_param1 = (void *)p_end;
-    g_trim_v0 = v0;
-    g_trim_v1 = v1;
-    g_trim_frames = N;
-    g_trim_layer = layers;
-    g_trim_screen = (uintptr_t)find_sample_screen();
-    mlog("mpcmini: autotrim commit (message thread)\n");
-    {
-        char line[256];
-        int n = 0;
-        n += snprintf(line + n, sizeof line - n, "native bcast props:");
-        for (int i = 0; i < g_nbp && n < (int)sizeof line - 24; ++i)
-            n += snprintf(line + n, sizeof line - n, " %p", (void *)g_bp[i]);
-        mlog("mpcmini: %s\n", line);
-        n = 0;
-        n += snprintf(line + n, sizeof line - n, "learned props:");
-        for (int i = 0; i < g_npm && n < (int)sizeof line - 32; ++i)
-            n += snprintf(line + n, sizeof line - n, " %p(p=%p)",
-                          (void *)g_pm[i].prop, (void *)g_pm[i].param);
-        mlog("mpcmini: %s\n", line);
-    }
-    commit_trim();
+    if (!frames || !wav_path_of(sample, frames, path, sizeof path) ||
+        !wav_info(path, &fr, &rate, &ch, &off, &bytes, &format) || fr != frames ||
+        !wav_edges(path, fr, off, ch, bytes, format, &first, &last)) return;
+    orig_setctl(g_control_context, g_surface, pad, 0x462, 0.0f);
+    orig_setctl(g_control_context, g_surface, pad, 0x466, (float)(last+1));
+    orig_setctl(g_control_context, g_surface, pad, 0x462, (float)first);
+    mlog("mpcmini: native trim pad=%d path='%s' frames=%u bounds=%u..%u\n",
+         pad, path, frames, first, last+1);
 }
 
 
@@ -4407,13 +4019,13 @@ __attribute__((constructor)) static void load(void)
     void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)note_on) : 0;
     void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)cs_event) : 0;
     void *t_off = (hook_mask & 128) ? install_hook(base + A_NOTE_OFF, (void *)note_off) : 0;
+    void *t_sc = install_hook(base + 0x1968020, (void *)setctl_probe);
+    if (t_sc)
+        orig_setctl = (void (*)(void *, void *, int, int, float))t_sc;
 #if MPCMINI_DEBUG
     void *t_pg = install_hook(base + 0x28100c0, (void *)pagector_probe);
     if (t_pg)
         orig_pagector = (pagector_fn)t_pg;
-    void *t_sc = install_hook(base + 0x1968020, (void *)setctl_probe);
-    if (t_sc)
-        orig_setctl = (void (*)(void *, void *, int, int, float))t_sc;
     void *t_ch = install_hook(base + 0x2804e90, (void *)ctlhandler_probe);
     if (t_ch)
         orig_ctlhandler = (void (*)(void *, uint64_t, uint64_t))t_ch;

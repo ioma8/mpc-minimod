@@ -1,3 +1,8 @@
+> Branch update: `autotrim-native-fix` replaces AutoTrim's heap/property/overlay
+> write path with native control commands. See `docs/AUTOTRIM-NATIVE.md`.
+> The old pad-selection diagnosis below was invalidated by a fresh emulator:
+> PAD 3 correctly selects A03 and changes its waveform.
+
 # AutoTrim mod — handoff
 
 Everything a new engineer needs to pick this up and finish it. Written after the
