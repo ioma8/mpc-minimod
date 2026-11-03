@@ -2897,6 +2897,18 @@ done:
     }
     /* Repaint the page itself: with the property values written above, this is
      * what makes the app's own Start/End edge follow the trim. */
+    if (g_livepage) {
+        uintptr_t vt = 0;
+        if (rd((uintptr_t)g_livepage, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
+            mlog("mpcmini: page vt=%#lx file=%#lx\n", (unsigned long)vt,
+                 (unsigned long)(vt - base));
+            for (int i = 20; i < 32; ++i) {
+                uintptr_t fn = 0;
+                if (rd(vt + i * 8, &fn, 8) && fn >= base && fn <= base + 0x12000000ULL)
+                    mlog("mpcmini:   slot %d -> %#lx\n", i, (unsigned long)(fn - base));
+            }
+        }
+    }
     if (g_livepage) g_page = g_livepage;
     uintptr_t pvt = 0;
     if (g_page && rd((uintptr_t)g_page, &pvt, 8) &&
@@ -3116,6 +3128,8 @@ static int install_screen_paint(void)
         return 0;
     uintptr_t *vt = (uintptr_t *)vtaddr;
     orig_screen_paint = (void (*)(void *, void *))vt[27];
+    mlog("mpcmini: paint fn = %p (file %#lx)\n",
+         (void *)orig_screen_paint, (unsigned long)((uintptr_t)orig_screen_paint - base));
     if (!orig_screen_paint)
         return 0;
     uintptr_t page = vtaddr & ~(uintptr_t)0xfff;

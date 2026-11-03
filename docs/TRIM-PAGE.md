@@ -1905,3 +1905,27 @@ waveform then draws edge to edge), which means the fields hold something else
 
 The renderer's data source has not been identified, and every candidate write
 either does nothing or damages the page's own drawing.
+
+### 30.17 The page's paint is still not identified (round 7b)
+
+Logging the live page's vtable gives a concrete address and its slots:
+
+```
+page vt=0xaaaab1963ca0 file=0x6ec3ca0
+  slot 20 -> 0x28019d0     slot 26 -> 0x280dad0
+  slot 21 -> 0x2809be0     slot 27 -> 0x280dc60
+  slot 22 -> 0x2806680     slot 28 -> 0x27722f0
+  slot 23 -> 0x28069c0     slot 31 -> 0x6ec3b98
+```
+
+Slot 27 disassembles to `sub x19, x0, #0x18 ... delete(this, 0x2468)` - the
+**destructor**, the same one found in round 1. The clue is that the same slot
+index means different methods in the screen vtable and the page vtable, so slot
+27 is not "paint" here; the layout differs.
+
+The screen vtable our overlay patches also turned out to hold an **empty stub**
+(`FUN_011e2e10` decompiles to `return;`) at slot 27, which is why patching it
+only ever added a drawing pass on top of the app's own, never replaced it.
+
+So even the paint entry point is not identified, and with it the last chance to
+see what the renderer reads.
