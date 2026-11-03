@@ -1102,6 +1102,8 @@ static unsigned char g_reg_buf[0x40000];
 static int g_reg_have;
 static volatile int g_poke_which = -1;
 static void do_poke(void);
+static volatile int g_sdump;
+static void dump_sliders(void *p);
 static volatile float g_poke_value;
 static float g_mark_v0 = -1.0f, g_mark_v1 = -1.0f;
 static volatile int g_pending_cc;
@@ -2689,6 +2691,20 @@ static void commit_trim(void)
     float check = 0, check2 = 0;
     rd((uintptr_t)p0 + T_VALUE, &check, 4);
     rd((uintptr_t)p1 + T_VALUE, &check2, 4);
+    /* Move the app's own slider widgets too: the page draws the Start/End bars
+     * from them at paint time. */
+    for (int i = 0; i < g_nps; ++i) {
+        float pct = -1.0f;
+        if (g_ps[i].param == (uintptr_t)p0)
+            pct = v0 * 100.0f;
+        else if (g_ps[i].param == (uintptr_t)p1)
+            pct = v1 * 100.0f;
+        if (pct >= 0.0f && g_ps[i].slider) {
+            if (wr(g_ps[i].slider + 0x1b4, &pct, 4))
+                mlog("mpcmini: slider %p -> %.2f%%\n", (void *)g_ps[i].slider,
+                     (double)pct);
+        }
+    }
     g_mark_v0 = v0;
     g_mark_v1 = v1;
     mlog("mpcmini: commit core done p0=%.4f p1=%.4f (want %.4f/%.4f)\n",
@@ -2785,6 +2801,10 @@ static void screen_paint(void *p, void *g)
         orig_screen_paint(p, g);
     /* The knob replay runs here, on the UI thread at a safe point, instead of
      * inside the button dispatch where it corrupted the app's state. */
+    if (g_sdump) {
+        g_sdump = 0;
+        dump_sliders(p);
+    }
     if (g_pending_cc) {
         g_pending_cc = 0;
         g_in_inject = 1;

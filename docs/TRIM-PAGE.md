@@ -1140,3 +1140,25 @@ pid unchanged.
 So the page now shows the trim the way the app does; only the app's own
 Start/End *widget bars* at the bottom still show the old values, because they are
 drawn from the model our writes do not reach.
+
+
+### 20.6 Nothing visible is missing
+
+The last suspected gap - the bottom band not changing - is not a value display:
+
+```
+K2 = 0 / 105 / 127   non-background pixels at y226..238:
+   x = 15..20  and  x = 311..314, identical for all three values
+```
+
+The 52 px that differ between an untouched and a knob-touched page are the knob
+**focus highlight** (13x4 px at x=183..195), which appears because a knob was
+turned. Autotrim moves no knob, so it correctly does not appear.
+
+Writing the mapped slider's value (`slider+0x1b4`) lands but changes nothing, so
+that widget is not what draws anything either.
+
+Conclusion: the page after SHIFT+B3 reproduces everything the app draws for a
+trimmed sample - grey shading over the trimmed-out region plus the edge - and
+differs from a hand trim only by our own 1 px edge line and the 0.5 % difference
+between the computed edge and the knob's quantised position.
