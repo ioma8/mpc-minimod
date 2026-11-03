@@ -142,22 +142,67 @@ can detect and communicate with other nearby Bluetooth devices."* That is the
 clearest statement of intent: pairing with nearby devices from the Preferences
 screen.
 
-### 2.3 What it is *not* (as far as the strings show)
+### 2.3 What the Bluetooth screen is for — decoded from its service UUIDs
 
-Searched explicitly, all zero matches in the binary:
+Immediately after the status strings the binary holds a list of Bluetooth service
+UUIDs. They are decisive:
 
-| term | hits | term | hits |
-|---|---|---|---|
-| `a2dp` / `A2DP` | 0 / 0 | `gatt` / `GATT` | 0 / 0 |
-| `avrcp` / `AVRCP` | 0 / 0 | `BleMidi`, `MidiOverBle` | 0 |
-| `hfp` / `HFP` | 0 / 0 | `AudioSink`, `MediaControl` | 0 / 0 |
+| UUID | profile |
+|---|---|
+| `0000110a-0000-1000-8000-00805f9b34fb` | **A2DP Source** |
+| `0000110b-0000-1000-8000-00805f9b34fb` | **A2DP Sink** |
+| `00001124-0000-1000-8000-00805f9b34fb` | **HID** (Human Interface Device) |
+| `00001812-0000-1000-8000-00805f9b34fb` | **HID over GATT** (HOGP) |
+| `03b80e5a-ede8-4b33-a751-6ce34ec4c700` | **Apple BLE-MIDI** |
 
-(the single `hsp` hit is the unrelated symbol fragment `hspf`).
+and the help text next to them says it plainly:
 
-So the strings establish **generic device pairing** — adapter power, discovery,
-pair/connect/disconnect/remove, passkey and PIN confirmation — and nothing about
-audio profiles or BLE MIDI. Whether a paired device is used for MIDI, file
-transfer or something else is **not** established here; see §4.
+```
+"The currently supported peripherals are MIDI devices and QWERTY keyboards."
+```
+
+So Bluetooth is for **wireless MIDI controllers (BLE-MIDI) and Bluetooth
+keyboards (HID/HOGP)**, with the A2DP profiles also enumerated. Earlier revisions
+of this document said the purpose was "not established" because a search for the
+*literal* strings `GATT`/`BLE`/`BleMidi` returned nothing — that search was
+misleading: the app identifies profiles by **UUID**, not by name. Corrected here.
+
+### 2.4 Are the Bluetooth options hidden?
+
+**No — the UI is compiled in and user-facing.** The complete screen is present:
+status (`BLUETOOTH IS OFF`), two lists (`PAIRED DEVICES`, `AVAILABLE DEVICES`),
+actions (`CONNECT`, `REMOVE`, `PAIR`), states (`Pairing`, `Not Connected`), the
+PIN flows (`requires a PIN to connect.`, "Please enter the following code on your
+device and then press the Enter/Return key:") and the error path
+(`Bluetooth failed to connect`, `Failed to connect to … Please check your device
+and try again.`). None of that is developer-facing text.
+
+Two things that *could* look like gating, checked explicitly:
+
+* the string `"This tab only exists in non-release builds"` sits in the same
+  string pool as the Bluetooth text, together with `infolabel`, and is referenced
+  from code at Ghidra `0x3827fb0` (it loads `infolabel` and then this text). So at
+  least one Preferences tab is a **non-release-only** tab. Which tab it belongs to
+  could not be proven — the enclosing function is not recognised by Ghidra
+  (`force_decompile` returns nothing at `0x3827f10`/`0x3827f20`), and the string
+  may well belong to a developer/debug tab rather than to Bluetooth;
+* there is an `Embedded::UnsupportedDeviceDetector` class
+  (`…UnsupportedDeviceDetector17UnsupportedDevice…`) that can disable features
+  per device model — but every message reachable from it is about project
+  compatibility ("project uses unsupported number of …"), not about Bluetooth.
+
+Searched for an explicit flag and found none:
+
+```
+hasBluetooth / bluetoothEnabled / supportsBluetooth / BLUETOOTH_ENABLED   -> 0 hits
+"not supported on this device" / "disabled on"                           -> 0 hits
+```
+
+**Conclusion:** the Bluetooth screen exists in the shipped binary as normal
+production UI; nothing in the strings disables it. Whether it is *reachable* on a
+given unit depends on the Preferences tab being built and on a Bluetooth adapter
+being present (`BLUETOOTH IS OFF` is what it shows when there is none — which is
+exactly the emulator's state).
 
 ---
 
@@ -207,9 +252,10 @@ Until then the Bluetooth screen can only be inspected statically, not exercised.
 1. **Which UART** carries the BT HCI on the real device, and is it exposed in the
    shipped device tree (the compatible string is present, the node's `reg` is not
    established here).
-2. **What paired devices are for.** The UI is generic pairing. No BLE-MIDI or
-   audio-profile strings were found. If the product uses Bluetooth MIDI, the
-   profile handling would be in the paired-device path, not in the strings seen.
+2. **Whether the BLE-MIDI path feeds the sequencer/pads the same way the rear
+   UART MIDI does.** The BLE-MIDI UUID is present (`03b80e5a-…`) and the screen
+   says MIDI devices are supported, but the routing from a paired BLE-MIDI device
+   into the app's MIDI inputs was not traced.
 3. **Whether `bluetoothd` is started at boot on the device** — the unit is
    `enabled`, but it needs the controller to appear first; the start order
    between `btattach`/`bluemoon` and `bluetooth.service` was not inspected.
@@ -241,7 +287,15 @@ lab.py ssh 'ls /proc/device-tree/; find /proc/device-tree -name "*bluetooth*"'
 
 # application symbols and UI strings
 strings -a "/usr/bin/MPC Sample" | grep -iE "bluetooth|org\.bluez|inmusicbrands"
-strings -a "/usr/bin/MPC Sample" | grep -aE "DEVICESETUP|PAIRED DEVICES|Pair"
+
+# the Bluetooth screen's string block, with offsets (the UUIDs live here)
+strings -a -t x "/usr/bin/MPC Sample" | sed -n '/BLUETOOTH IS OFF/,+14p'
+
+# is anything gating it?
+strings -a "/usr/bin/MPC Sample" | grep -aiE "non-release|hasBluetooth|bluetoothEnabled|disabled on"
+
+# what references the dev-only-tab string (Ghidra VA = file offset + 0x100000)
+curl -s "http://127.0.0.1:8089/get_xrefs_to?address=0x47198d0&program=knob.bin"
 ```
 
 Related: `AUTOTRIM-HANDOFF.md` (mod status), `docs/EMULATOR.md` (lab),
