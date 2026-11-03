@@ -1,6 +1,6 @@
 # minimod — a minimal MPC Sample mod
 
-**Version 0.3.1**
+**Version 0.3.2**
 
 `minimod` is an `LD_PRELOAD` library for the Akai MPC Sample (app
 `/usr/bin/MPC Sample`, firmware 1.3.0.12) that adds two small features without
@@ -291,8 +291,9 @@ to read **AutoTrim** is done by **overdrawing**, the technique am-mod uses (see
 1. take `SampleModeScreen`'s vtable (`base + 0x6e212a0`), `mprotect` the
    `.data.rel.ro` page writable, save `vt[27]` (that slot is
    `Component::paint(Graphics&)`), and install our own paint;
-2. our paint calls the stock one first, then — only while `SHIFT` is held —
-   fills the third cell (`x 213..320, y 0..29`) black and draws `AutoTrim` with
+2. our paint calls the stock one first, then — only while `SHIFT` is held and
+   only outside Chop mode — fills the third cell (`x 213..320, y 0..29`) black
+   and draws `AutoTrim` with
    the app's own `Graphics`: `setColour 0x102d5e0`, `fillRect 0x102e000`,
    `Font 0x1082810`, `setFont 0x102dca0`, `drawText 0x10817b0`;
 3. `SHIFT` press/release forces a repaint (`0x1149880(screen, 0, screen[0x28])`).

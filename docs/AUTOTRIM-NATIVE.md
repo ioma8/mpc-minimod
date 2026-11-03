@@ -79,6 +79,38 @@ button is held, so the handler acts on the press edge only (`g_b3_down`); withou
 that, one physical press fired the cycle up to 16 times. `MINIMOD_TRIM_DB` still
 overrides the ratio for the first step only.
 
+## Chop mode disables the whole feature (verified)
+
+Chop replaces the Trim group on the Sample page: the page object holds both
+groups and simply hides one. Measured in the emulator, `SampleModeScreen` has
+two mutually exclusive children (offsets from the screen object, class vtables
+in the image):
+
+| offset | vtable | Trim page | Chop page |
+|---|---|---|---|
+| `+0x15e0` (first of four) | `0x706d428` | hidden | **visible** |
+| `+0x1ee0` | `0x6d849e8` | **visible** | hidden |
+
+Toggling the panel `CHOP` key (button code `0x4b`) flips both, and they never
+disagree, so `Component::isVisible` (`0x112fd50`) on the first Chop child is the
+mode:
+
+```c
+static int in_chop_mode(void)   /* only meaningful on SampleModeScreen */
+{
+    return isVisible(screen + 0x15e0);
+}
+```
+
+`SHIFT`+`B3` and the "AutoTrim" cell are both gated on this. When Chop is on the
+`B3` press is passed to the stock handler untouched (in Chop, `Shift+B3` is the
+stock Split), no trim is computed, and the soft-key cell is not overdrawn.
+
+Verified in the emulator after the change: `SHIFT`+`B3` in Trim logs
+`native trim pad=0 … bounds=0..7204` plus the toast; the same combo in Chop logs
+nothing. Holding `SHIFT` changes 517 pixels of the third soft-key cell in Trim
+and **0** pixels in Chop, i.e. the overlay is gone too.
+
 ## The toast, and how it is cleared
 
 Every trim raises a one-second box: `320x46` at `y = 194` (over the

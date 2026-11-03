@@ -430,6 +430,17 @@ static int g_octave;
 static int g_plus_held, g_minus_held;   /* octave shift applied while 16 LEVELS is active */
 static void *g_sixteen; /* the live 16 Levels screen, if seen             */
 
+/* Chop mode replaces the Trim group with the Chop group on the Sample page.
+ * The two groups are mutually exclusive children of the screen object, so the
+ * live visibility of the Chop group's first child (+0x15e0) is the mode. */
+static int in_chop_mode(void)
+{
+    void *s = g_screen;
+    if (!s || FIELD(s, 0, uintptr_t) != base + 0x6e212a0) /* SampleModeScreen */
+        return 0;
+    return FN(0x112fd50, int (*)(void *))((char *)s + 0x15e0) != 0;
+}
+
 static int sixteen_tune_active(void)
 {
     return g_octave != 0;
@@ -1491,7 +1502,7 @@ static void buttons(void *event)
             orig_buttons(event);
         return;
     }
-    if (code == 0x0e && g_shift) { /* SHIFT + B3: 3 %, 6 %, 9 %, untrimmed */
+    if (code == 0x0e && g_shift && !in_chop_mode()) { /* SHIFT + B3: 3 %, 6 %, 9 %, untrimmed */
         /* The button repeats while held, so act on the press edge only. */
         if (down && !g_b3_down) {
             /* Analysis is cheap now (block reads); it must stay on this thread
@@ -3398,7 +3409,7 @@ static void screen_paint(void *p, void *g)
         draw_rect(g, (uint64_t)x0, 88, 3, 1);
         draw_rect(g, (uint64_t)x1, 88, 3, 1);
     }
-    if (!g_shift)
+    if (!g_shift || in_chop_mode())
         return;
     /* third soft-key cell of the Sample page */
     draw_colour(g, 0xff000000);
