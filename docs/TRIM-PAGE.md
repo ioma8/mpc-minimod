@@ -1277,3 +1277,54 @@ this copy, and it is still not identified. What is now known for certain:
 * the per-pad trim fields are `+0x1a8` (Start) and `+0x220` (End), stride `0x78`;
 * writing the parameter, its applied copy, the property cache, the layer frames
   or the slider does **not** reach it (verified with the overlay disabled: 0 px).
+
+## 23. The per-pad state object (round 15, Ghidra)
+
+### 23.1 FUN_0290f130 is the pad-load entry
+
+```c
+void FUN_0290f130(long param_1,long param_2) {
+  ...
+  FUN_0290dca0(param_1,param_2,lVar1,local_38);   /* page <- pad state */
+}
+```
+
+`FUN_0290f130(page, pad)` is a virtual method (the callers include a vtable
+slot at `0x006d6cef8`); `FUN_0290f080(page)` is the same call with `param_2 = 0`,
+i.e. "reset the page".
+
+### 23.2 The pad's field layout
+
+`FUN_0290dca0` copies the pad state into the page's widgets, 0x58 apart:
+
+```c
+FUN_014b16a0(param_1 + 0x1538, *(undefined4 *)(param_2 + 0x1588));  /* Start */
+FUN_01db15f0(param_1 + 0x1590, *(undefined4 *)(param_2 + 0x15e0));  /* End   */
+FUN_0160b380(param_1 + 0x15e8, *(undefined4 *)(param_2 + 0x1638));  /* next  */
+FUN_014b3740(param_1 + 0x1640, *(undefined4 *)(param_2 + 0x1690));
+```
+
+So **`pad + 0x1588` = Start and `pad + 0x15e0` = End**, stride `0x58` - the same
+stride as the property objects. This is the authoritative per-pad trim state;
+the parameter object (`+0x19c`), the property cache (`+0x50`), the layer frames
+and the slider are all derived from it or written beside it.
+
+### 23.3 What did not work
+
+* hooking `FUN_0290f130` never fired with a heap pad pointer - the loads we see
+  pass stack temporaries (`FUN_0290dca0(page, 0, ...)`), i.e. resets;
+* a value scan for `Start = 0.0, End = 0.7874` at the pad offsets found only
+  static tables inside the image (`0xaaaab1c1xxxx`), not the live object;
+* `search_instructions` for stores at `+0x1588` returns only **double** stores in
+  unrelated classes (`FUN_00f6e120`, `FUN_01471d30`, ...), never a float store -
+  so the pad field is written through computed addressing that the immediate
+  operand search cannot see.
+
+### 23.4 Where that leaves it
+
+The layout is now known precisely enough to write (two floats, 0x58 apart, at
+`pad+0x1588` / `pad+0x15e0`), but the live pad instance has not been located.
+The remaining step is to find the pad pointer at runtime - the most promising
+route is the object that owns the pad array (`*(owner + 0x22e8)`, eight `0xb30`
+blocks, see section 22), since the pad state and the block array belong to the
+same container.

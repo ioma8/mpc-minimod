@@ -992,6 +992,30 @@ static void (*orig_resized)(void *, long, long, long);
 static void (*orig_reg)(void *, void *);
 static void *(*orig_prog_inst)(void *, int);
 static void (*orig_rotary)(void *, float);
+/* The pad object that FUN_0290dca0 copies into the page: the authoritative
+ * per-pad state. Captured from the load path so commit_trim can write it. */
+static void *g_pad_obj;
+static void *g_pad_page;
+static void (*orig_loadpad)(void *, void *);
+
+static void loadpad_probe(void *page, void *pad)
+{
+    if (pad && (uintptr_t)pad > 0xffffe0000000ULL && (uintptr_t)pad < 0xfffff0000000ULL) {
+        if (g_pad_obj != pad) {
+            float f0 = -1, f1 = -1;
+            if (rd((uintptr_t)pad + 0x1588, &f0, 4) &&
+                rd((uintptr_t)pad + 0x15e0, &f1, 4)) {
+                g_pad_obj = pad;
+                g_pad_page = page;
+                mlog("mpcmini: pad obj=%p page=%p start=%.4f end=%.4f\n",
+                     pad, page, (double)f0, (double)f1);
+            }
+        }
+    }
+    if (orig_loadpad)
+        orig_loadpad(page, pad);
+}
+
 static void (*orig_apply)(void *, void *);
 
 static void apply_probe(void *a0, void *a1)
@@ -3780,6 +3804,43 @@ static void *heap_probe_thread(void *arg)
                 mlog("mpcmini: findpad done %d\n", hits);
             }
         }
+        else if (!strncmp(buf, "findtrim ", 9)) {
+            /* Pad state: +0x1588 = Start, +0x15e0 = End (stride 0x58).
+             * Find the End field by value, then check Start 0x58 before it. */
+            float want[2] = {0, 0};
+            if (sscanf(buf + 9, "%f %f", &want[0], &want[1]) == 2) {
+                ranges_load();
+                unsigned char *chunk = malloc(65536);
+                int hits = 0;
+                for (int r = 0; r < g_nrng && chunk && hits < 10; ++r) {
+                    if (!g_rng[r].w)
+                        continue;
+                    if (g_rng[r].hi - g_rng[r].lo > 0x10000000)
+                        continue;
+                    for (uintptr_t a = g_rng[r].lo; a + 0x100 < g_rng[r].hi; a += 65536) {
+                        size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
+                        if (!rd(a, chunk, n))
+                            break;
+                        for (size_t o = 0x58; o + 4 < n && hits < 10; o += 4) {
+                            float fe, fs;
+                            memcpy(&fe, chunk + o, 4);
+                            if (fe < want[1] - 0.0005f || fe > want[1] + 0.0005f)
+                                continue;
+                            memcpy(&fs, chunk + o - 0x58, 4);
+                            if (fs < want[0] - 0.0005f || fs > want[0] + 0.0005f)
+                                continue;
+                            mlog("mpcmini: findtrim end=%#llx start=%#llx pad=%#llx\n",
+                                 (unsigned long long)(a + o),
+                                 (unsigned long long)(a + o - 0x58),
+                                 (unsigned long long)(a + o - 0x15e0));
+                            hits++;
+                        }
+                    }
+                }
+                free(chunk);
+                mlog("mpcmini: findtrim done %d\n", hits);
+            }
+        }
         else if (!strncmp(buf, "reg ", 4)) {
             g_reg_base = (uintptr_t)strtoull(buf + 4, 0, 16);
             g_reg_have = rd(g_reg_base, g_reg_buf, sizeof g_reg_buf) ? 1 : 0;
@@ -4140,6 +4201,9 @@ __attribute__((constructor)) static void load(void)
         probe_bits = atoi(bits_env);
     void *t_ctor = (hook_mask & 1) ? install_hook(base + A_SIXTEEN_CTOR, (void *)sixteen_ctor) : 0;
     void *t_proc = (hook_mask & 2) ? install_hook(base + A_SIXTEEN_PROC, (void *)sixteen_proc) : 0;
+    void *t_lp = install_hook(base + 0x280f130, (void *)loadpad_probe);
+    if (t_lp)
+        orig_loadpad = (void (*)(void *, void *))t_lp;
     void *t_apply = install_hook(base + 0x2818be0, (void *)apply_probe);
     if (t_apply)
         orig_apply = (void (*)(void *, void *))t_apply;
