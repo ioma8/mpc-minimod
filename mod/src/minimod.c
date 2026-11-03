@@ -447,7 +447,9 @@ static int bump_octave(int d)
         return 0;
     g_octave = next;
     mlog("minimod: pitch shift=%d (%+d semitones)\n", next, next * 8);
-    {
+    if (next == 0) {
+        toast("Pitch reset");           /* back to the original pitch */
+    } else {
         char buf[48];
         snprintf(buf, sizeof buf, "Pitch %+d semitones", next * 8);
         toast(buf);
@@ -3138,7 +3140,7 @@ static void *toast_expiry(void *arg)
     if (orig_repaint && g_paint_comp) {
         /* the entry takes two packed pairs: (x,y) and (w,h) */
         orig_repaint(g_paint_comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
-        mlog("minimod: toast expiry repainted 320x240\n");
+        mlog("minimod: toast expiry repainted the screen\n");
     }
     return 0;
 }
