@@ -238,28 +238,19 @@ static int g_rng_loaded;
 
 /* /proc/self/mem keeps reads and writes out of the C compiler's way: no aliasing
  * surprises, no faults when the app unmaps a page under us. */
-/* One descriptor for the life of the process: open/pread/close per access is
- * three syscalls and these are called in tight loops and from hooks. */
-static int mem_fd = -1;
+/* Cached descriptors. Reads and writes need *separate* descriptors: on this
+ * kernel a read through an O_RDWR /proc/self/mem returns EIO, which silently
+ * breaks every rd() and wedges the UI logic that depends on it. */
+static int mem_rd_fd = -1;
+static int mem_wr_fd = -1;
 static pthread_mutex_t g_mem_mtx = PTHREAD_MUTEX_INITIALIZER;
-
-static int mem_open(void)
-{
-    if (mem_fd < 0)
-        mem_fd = open("/proc/self/mem", O_RDWR);
-    return mem_fd;
-}
 
 static int rd(uintptr_t addr, void *dst, size_t n)
 {
     pthread_mutex_lock(&g_mem_mtx);
-    int fd = mem_open();
-    ssize_t got = fd < 0 ? -1 : pread(fd, dst, n, (off_t)addr);
-    if (got != (ssize_t)n && mem_fd >= 0) {
-        close(mem_fd);   /* stale descriptor: retry once with a fresh one */
-        mem_fd = open("/proc/self/mem", O_RDWR);
-        got = mem_fd < 0 ? -1 : pread(mem_fd, dst, n, (off_t)addr);
-    }
+    if (mem_rd_fd < 0)
+        mem_rd_fd = open("/proc/self/mem", O_RDONLY);
+    ssize_t got = mem_rd_fd < 0 ? -1 : pread(mem_rd_fd, dst, n, (off_t)addr);
     pthread_mutex_unlock(&g_mem_mtx);
     return got == (ssize_t)n;
 }
@@ -267,13 +258,9 @@ static int rd(uintptr_t addr, void *dst, size_t n)
 static int wr(uintptr_t addr, const void *src, size_t n)
 {
     pthread_mutex_lock(&g_mem_mtx);
-    int fd = mem_open();
-    ssize_t put = fd < 0 ? -1 : pwrite(fd, src, n, (off_t)addr);
-    if (put != (ssize_t)n && mem_fd >= 0) {
-        close(mem_fd);
-        mem_fd = open("/proc/self/mem", O_RDWR);
-        put = mem_fd < 0 ? -1 : pwrite(mem_fd, src, n, (off_t)addr);
-    }
+    if (mem_wr_fd < 0)
+        mem_wr_fd = open("/proc/self/mem", O_WRONLY);
+    ssize_t put = mem_wr_fd < 0 ? -1 : pwrite(mem_wr_fd, src, n, (off_t)addr);
     pthread_mutex_unlock(&g_mem_mtx);
     return put == (ssize_t)n;
 }

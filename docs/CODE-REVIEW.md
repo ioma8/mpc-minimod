@@ -355,3 +355,53 @@ debug channels inert: writing /run/mpcmini.heap and /run/mpcmini.watch does noth
 ```
 
 Binary size: 61 392 -> 46 384 bytes (-24 %). Package: 34 350 -> 25 832 bytes.
+
+---
+
+## Regression found in the field and fixed (H4)
+
+After the hardening pass the app's **UI froze**: audio (pads) still played, but no
+key or knob changed the screen.
+
+**Root cause: H4 as originally implemented.** The cached descriptor was opened
+`O_RDWR`:
+
+```c
+mem_fd = open("/proc/self/mem", O_RDWR);
+... pread(mem_fd, ...)          /* EIO on this kernel */
+```
+
+On this kernel a **read through an `O_RDWR` `/proc/self/mem` descriptor fails**
+with `EIO`. Every `rd()` therefore returned 0, which silently broke the object
+walking the mod depends on (`find_screens`, `warp_path_of`, `prop_references`,
+the paint hook's lookups) and left the UI logic wedged while the audio thread
+kept running — exactly the reported symptom.
+
+Bisected by rebuilding three variants and measuring the screen delta on a
+`SCREEN 2` press:
+
+| build | result |
+|---|---|
+| pre-hardening | 5317 px (works) |
+| hardening, `rd/wr` reverted | 5317 px (works) |
+| hardening, `O_RDWR` cached fd | **0 px (frozen)** |
+| hardening, separate `O_RDONLY`/`O_WRONLY` fds | **5318 px (works)** |
+
+Fix: two cached descriptors, one per direction, no `O_RDWR`:
+
+```c
+static int mem_rd_fd = -1, mem_wr_fd = -1;
+rd: if (mem_rd_fd < 0) mem_rd_fd = open("/proc/self/mem", O_RDONLY);
+wr: if (mem_wr_fd < 0) mem_wr_fd = open("/proc/self/mem", O_WRONLY);
+```
+
+Verified after the fix: `SCREEN 2` 5458 px, knob 11 520 px, AutoTrim 5196 px,
+`commit core done p0=0.0000 p1=0.8268`, pid stable.
+
+### Not a bug: pads do not repaint
+
+The report also said "pressing different pads plays sound but the screen does not
+change". Measured against the **stock app with no mod loaded** (drop-in removed,
+pid 3533): `PAD 2` and `PAD 3` produce **0 px** there too. Pad triggers play the
+sample and do not redraw the screen by design; only keys, knobs and page changes
+repaint.
