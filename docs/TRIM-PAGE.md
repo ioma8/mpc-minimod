@@ -2109,3 +2109,33 @@ QEMU's gdbstub. With it:
 * the page object is unchanged by a knob turn;
 * the renderer therefore draws the edges from something not yet identified,
   which no longer includes the property or the page.
+
+### 31.7 Correction: the property does NOT drive the page's edges
+
+Round 1 concluded that writing `prop+0x50` and forcing a redraw moved the app's
+own Start edge to 50 %. Re-testing that with the current tooling **refutes it**:
+
+* write the property in-process (`set 0xffffe4ecc768 0.50`, `ok=1`),
+* nudge the End knob twice to force a repaint,
+* the Trim page still shows **no edge markers at all** (`markers: []`).
+
+What was almost certainly observed in round 1 was the **End** marker moving
+because of the knob nudge itself, not the Start edge following the property.
+Combined with the read watchpoint (31.3) and the page diff (31.5) the honest
+statement is: **nothing establishes that the page renderer reads the property.**
+
+### 31.8 The renderer's input remains unidentified
+
+Candidates eliminated by measurement:
+
+| candidate | how it was eliminated |
+|---|---|
+| property `prop+0x50` | read watchpoint: only `Property_Broadcast` reads it |
+| page object | 0x2400-byte diff across a knob turn: zero changes |
+| trim parameter `param+0x19c` | read watchpoint during a page switch: no hits |
+| pad->page copy `FUN_0290dca0` | software breakpoint: never fires on pad or SAMPLE press |
+
+So the knob changes the picture through a path that touches none of the objects
+tried so far. The watchpoint tool can answer this, but the next target has to be
+the **paint function itself** - set a software breakpoint on a drawing primitive
+and walk up to the paint, then watch what that paint reads.
