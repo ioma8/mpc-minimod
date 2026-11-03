@@ -421,8 +421,45 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
         ch = 1;
     if (bps < 2 || bps > 4)
         bps = 2;
-    const short thr = 328; /* ~ -40 dBFS */
+    /* Threshold: relative to the file's peak so quiet material is trimmed as
+     * well, with an absolute floor so a nearly silent file is not trimmed to
+     * nothing. MPCMINI_TRIM_DB overrides the relative part (default -50 dB). */
     unsigned char buf[16384];
+    short thr = 328; /* -40 dBFS fallback */
+    {
+        double db = -40.0;
+        const char *e = getenv("MPCMINI_TRIM_DB");
+        if (e && *e)
+            db = atof(e);
+        if (db < -90.0) db = -90.0;
+        if (db > -6.0) db = -6.0;
+        double ratio = pow(10.0, db / 20.0);
+        short peak = 0;
+        unsigned g = 0;
+        while (g < frames) {
+            ssize_t n = pread(fd, buf, sizeof buf, (off_t)dataoff + (off_t)g * bps * ch);
+            if (n <= 0)
+                break;
+            unsigned got = (unsigned)(n / (bps * ch));
+            for (unsigned i = 0; i < got; ++i)
+                for (unsigned c = 0; c < ch; ++c) {
+                    short v = pcm_at(buf + (i * ch + c) * bps, bps);
+                    if (v < 0) v = (short)-v;
+                    if (v > peak) peak = v;
+                }
+            g += got;
+            if (got < sizeof buf / (bps * ch))
+                break;
+        }
+        if (peak > 0) {
+            double t = (double)peak * ratio;
+            if (t < 90.0) t = 90.0;      /* absolute floor ~ -51 dBFS */
+            if (t > 30000.0) t = 30000.0;
+            thr = (short)t;
+            mlog("mpcmini: trim threshold ratio %.4f peak %d -> %d\n", ratio,
+                 (int)peak, (int)thr);
+        }
+    }
     unsigned f = 0;
     int found_first = 0;
     while (f < frames && !found_first) {

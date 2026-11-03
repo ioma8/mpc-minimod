@@ -40,8 +40,12 @@ released   : Trim        Tune        Filter
   `0x27e4400(ctx, ?, ?, semitoneOffset)` — the function the 16-Levels renderer
   calls with `(pad & 0xf) - originalPad`.
 * **Autotrim** — `SHIFT` + **B3**. Computes the first/last non-silent frame of
-  the pad's sample from the app's own WAV copy (24-bit aware), writes the trim
-  core, the boundary object and the layer frames. The audio state lands; the
+  the pad's sample from the app's own WAV copy (24-bit aware). The silence
+  threshold is **relative to the file's peak** (default −40 dB, so low-level
+  noise at the ends is trimmed as well, not only digital silence) with an
+  absolute floor so a near-silent file is not trimmed away; `MPCMINI_TRIM_DB`
+  overrides it (e.g. `-30` to trim more aggressively, `-60` to keep more).
+  It then writes the trim core, the layer frames and the applied value. The audio state lands; the
   page's cached markers are not refreshed, because the page paints from a model
   object we have not identified yet (full account in `docs/TRIM-PAGE.md`).
 * **Chromatic MIDI** — always on while 16 LEVELS is lit (no toggle). Off with
