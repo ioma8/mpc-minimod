@@ -27,7 +27,7 @@ Features as shipped:
 |---|---|---|
 | AutoTrim | SHIFT + B3 on the Sample/Trim page | **works**, verified in the emulator |
 | Pitch shift | `+` / `-` in 16 Levels, PLUS+MINUS resets | works |
-| Chromatic control | external MIDI | works |
+| Chromatic control | external MIDI | **not working** — see [MIDI-CHROMATIC.md](MIDI-CHROMATIC.md) |
 
 The trim is computed, written into the app's own trim parameters *and* into its
 property model (through the app's own setter, so listeners fire), and drawn on
