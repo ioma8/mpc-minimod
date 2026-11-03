@@ -1411,3 +1411,57 @@ Parameters renamed: `PadState_CopyIntoPage(page, padState)`,
 `PadState_Apply(page, padState)`, `TrimParam_SetValue(value, trimParam)`.
 Each of the above carries a plate comment summarising what it does and the
 offsets involved.
+
+## 26. The page object, and the crash that came from a stale pointer
+
+### 26.1 Where the page is created
+
+```c
+void *FUN_02971040(long *owner) {
+  pvVar6 = operator_new(0x2468);                       /* the Sample page */
+  SamplePage_Ctor(pvVar6,owner,owner[0xd6],owner[0xd9],owner[0x3fb],owner[0xd7],
+                  owner[0x3f9],owner[0x3fa],owner[0x3f6],3,uVar5,owner[0x3fd]);
+  lVar7 = *(long *)((long)pvVar6 + 0x22e8);            /* the 8 pad blocks  */
+  ...
+}
+```
+
+So the page is a **0x2468-byte heap object**, it owns the pad-block array at
+`+0x22e8`, and its Start/End widgets are at `+0x1538` / `+0x1590` (values at
+`+0x1588` / `+0x15e0`). `FUN_02971040` is called per page creation, so the page
+is rebuilt rather than reloaded in place - which is why `Page_LoadPad` never
+fires.
+
+### 26.2 The right call to make
+
+Calling the app's own setters on the live page is the correct way to move the
+trim *inside* the app:
+
+```c
+Value_SetInt    (page + 0x1538, bits(start));   /* bumps version, notifies */
+Value_SetIntEnd (page + 0x1590, bits(end));
+repaint(page);
+```
+
+### 26.3 The crash and its cause
+
+Doing exactly that crashed the app twice (`pid` changed, 8.8k px of stray
+change): the stored `g_page` came from a **previous process**. The heap address
+was still plausible enough to pass a vtable sanity check, so the setter ran
+against freed memory.
+
+Rule for the next attempt: **the page pointer is only valid within the process
+that created it** - clear it on every new `SamplePage_Ctor`, and only use it
+when the vtable pointer at `page[0]` is inside the loaded image *and* the page
+was captured in this run. If the page predates the hook, leave the Sample screen
+and re-enter so a fresh constructor call happens.
+
+### 26.4 State of the shipped build
+
+The probe code was reverted to the last known-good source before this round;
+autotrim is back to the verified state:
+
+```
+autotrim: 5197 px | pid unchanged
+commit core done p0=0.0000 p1=0.8268 (want 0.0001/0.8254)
+```
