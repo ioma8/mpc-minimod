@@ -1678,6 +1678,48 @@ static int g_rm_note_state;
 static unsigned char g_rm_note_status;
 static unsigned char g_rm_note;
 static long long g_hpss_guard_until;
+static void hpss_repaint(void);
+
+static unsigned char g_cc_num;
+static char g_midi_probe[24];
+static unsigned char g_wheel_last[128];
+static int g_wheel_seen[128];
+
+/* Move the menu selection by one for one encoder detent.
+ *
+ * The encoder reaches us as a control change, but hardware and emulator do not
+ * agree on how: some send a relative value (1/127 signed, or 0x41/0x3F biased
+ * around 64, repeating the same value for repeated detents), some send the
+ * absolute position (0..127), and the controller number is not fixed either.
+ * So: recognise both relative encodings by value, fall back to the difference
+ * from the previous value for an absolute one, and accept any controller -
+ * while the menu is open we swallow them all anyway. */
+static void hpss_menu_wheel(unsigned char num, unsigned char value)
+{
+    int step;
+    if (value == 0x01 || value == 0x41)
+        step = 1;
+    else if (value == 0x7f || value == 0x3f)
+        step = -1;
+    else if (!g_wheel_seen[num]) {
+        g_wheel_seen[num] = 1;
+        g_wheel_last[num] = value;
+        return;                     /* first value of an absolute wheel: no move */
+    } else {
+        int d = (int)value - (int)g_wheel_last[num];
+        if (d > 64) d -= 128;
+        if (d < -64) d += 128;
+        if (!d) return;
+        step = d > 0 ? 1 : -1;
+    }
+    g_wheel_seen[num] = 1;
+    g_wheel_last[num] = value;
+    if (g_hpss_menu && !g_hpss_busy) {
+        g_hpss_sel = (g_hpss_sel + (step > 0 ? 1 : 2)) % 3;
+        hpss_repaint();
+        mlog("HPSS wheel cc=%u value=%u sel=%d\n", num, value, g_hpss_sel);
+    }
+}
 
 /* The DATA encoder reaches the app as `B0 64 value` on the control-surface
  * rawmidi port.  The app's JUCE hooks do not expose it, so intercept the read
@@ -1707,7 +1749,6 @@ static int fd_is_midi(int fd)
     fd_midi_known[fd] = 1;
     return midi;
 }
-static void hpss_repaint(void);
 
 ssize_t read(int fd, void *buffer, size_t count)
 {
@@ -1725,6 +1766,11 @@ ssize_t read(int fd, void *buffer, size_t count)
         int drop = 0;
         for (ssize_t i = 0; i + 16 < n; i += 32) {
             unsigned char b = p[i + 16];
+            if (g_hpss_menu && !(b & 0x80))
+                snprintf(g_midi_probe, sizeof g_midi_probe, "midi %02x %02x",
+                         (unsigned)(i + 15 < n ? p[i + 15] : 0), (unsigned)b);
+            else if (g_hpss_menu)
+                snprintf(g_midi_probe, sizeof g_midi_probe, "midi %02x --", (unsigned)b);
             if (b & 0x80) {
                 g_hpss_cc_skip = 0;
                 g_hpss_cc_state = 0;
@@ -1735,6 +1781,8 @@ ssize_t read(int fd, void *buffer, size_t count)
                     if (suppress) {
                         drop = 1;
                         g_hpss_guard_until = now + 200;
+                        if (g_hpss_menu)
+                            mlog("HPSS midi cc status\n");
                     }
                 } else if (b == 0x90 || b == 0x80) {
                     g_rm_note_status = b;
@@ -1742,7 +1790,8 @@ ssize_t read(int fd, void *buffer, size_t count)
                 }
             } else if (g_hpss_cc_skip == 1) {
                 g_hpss_cc_skip = 2;
-                g_hpss_cc_state = b == 0x64 ? 2 : 0;
+                g_cc_num = b;               /* any controller: the encoder is not 0x64 everywhere */
+                g_hpss_cc_state = 2;
                 if (suppress) {
                     drop = 1;
                     g_hpss_guard_until = now + 200;
@@ -1752,17 +1801,15 @@ ssize_t read(int fd, void *buffer, size_t count)
                 if (suppress) {
                     drop = 1;
                     g_hpss_guard_until = now + 200;
-                    if (g_hpss_cc_state == 2 && g_hpss_menu && !g_hpss_busy) {
-                        g_hpss_sel = b >= 0x40 ? (g_hpss_sel + 2) % 3
-                                               : (g_hpss_sel + 1) % 3;
-                        hpss_repaint();
-                        mlog("HPSS wheel value=%u sel=%d\n", b, g_hpss_sel);
-                    }
+                    if (g_hpss_cc_state == 2)
+                        hpss_menu_wheel(g_cc_num, b);
                 }
                 g_hpss_cc_state = 0;
             } else if (g_rm_note_state == 1) {
                 g_rm_note = b;
                 g_rm_note_state = 2;
+                if (g_hpss_menu)
+                    mlog("HPSS midi data1 %02x\n", b);
             } else if (g_rm_note_state == 2) {
                 g_rm_note_state = 0;
                 unsigned char status = g_rm_note_status & 0xf0;
@@ -3604,8 +3651,9 @@ static void hpss_draw_menu(void *g)
     }
     if (!g_hpss_busy && !g_hpss_status[0]) {
         draw_colour(g, 0xffb0b0b0);
-        draw_text(g, "TURN: select    DATA: confirm", x + 10, y + h - 20,
-                  w - 20, 16, 11.0f);
+        draw_text(g, g_midi_probe[0] ? g_midi_probe
+                                     : "TURN: select    DATA: confirm",
+                  x + 10, y + h - 20, w - 20, 16, 11.0f);
     }
 }
 
