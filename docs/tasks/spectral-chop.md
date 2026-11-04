@@ -1,15 +1,12 @@
 # Task — Spectral Chop
 
-> **Blocked, not done.** The detector is finished and verified; applying the
-> positions as Manual markers is not. The action reports
-> `Spectral: not applied` and leaves the pad alone. The earlier Threshold
-> version was removed because the firmware sliced at its own positions.
-> Entry point is the shared SAMPLE OPTIONS menu (not `SHIFT+CHOP`). The final
-> behaviour chops the selected pad **in place**; it does not create samples or
-> use free pads.
-> The native slice API, the verified offsets and the exact remaining steps are
-> in [`docs/re/spectral-chop-handoff.md`](../re/spectral-chop-handoff.md);
-> [`docs/SPECTRAL-CHOP.md`](../SPECTRAL-CHOP.md) covers the detector.
+> **Implemented and emulator-verified.** Entry point is the shared SAMPLE
+> OPTIONS menu (not `SHIFT+CHOP`). The action chops the selected pad **in
+> place** at the detected frames, verifies every boundary by reading it back,
+> and does not create samples or use free pads.
+> [`docs/SPECTRAL-CHOP.md`](../SPECTRAL-CHOP.md) covers the detector and the
+> write recipe; [`docs/re/spectral-chop-handoff.md`](../re/spectral-chop-handoff.md)
+> records the model layout and how it was established.
 
 **One action: slice the selected sample at its detected onsets instead of at fixed divisions.**
 

@@ -8,9 +8,42 @@ on that same pad. Do not extract files or assign other pads. Report the number
 of slices, or `no onsets` without changing the pad. Keep HPSS, AutoTrim and
 pitch behavior intact.
 
-**State: not finished.** Detection works; the marker write does not. The action
-reports `Spectral: not applied` and leaves the pad untouched. Everything below
-that is marked *verified* was measured on the emulator, not inferred.
+**State: finished and emulator-verified.** Detection works and the detected
+frames are written into the pad's own chop; every boundary is read back before
+the action reports success. Everything below that is marked *verified* was
+measured on the emulator, not inferred.
+
+## The solve (read this before the history)
+
+The live chop is the sample's slice list, and the boundaries are plain words:
+
+```
+slice list = *(*(sample+0x130)+0x10)      vector<Slice*> at +0x60 / +0x68
+Slice + 0x78    start frame  (mirror at +0x128)
+Slice + 0xd0    end frame
+```
+
+K1/K2 move exactly those words for the slice selected by a pad press. Writing
+them works, but the Chop view caches its layout: repaint and pad presses do not
+rebuild it, while **leaving and re-entering Chop does**, and in Manual mode the
+boundaries survive that rebuild. So the shipped recipe is:
+
+1. enter the Chop view;
+2. grow the slice list to the onset count by synthesising SHIFT+SCREEN 2
+   splits (stock limit 16);
+3. write `+0x78`/`+0x128` (start) and `+0xd0` (end) for each slice;
+4. shrink the vector: `*(list+0x68) = begin + 8*n`;
+5. toggle CHOP off and on so the view rebuilds from the model;
+6. read every `+0xd0` back and only then report.
+
+`mod/src/minimod.c` implements this in `spectral_write_markers()`. Verified:
+`Drums 2s`, 10 detected onsets -> 10 slices, all end frames matched, markers at
+x = 18/54/93/133/172/213/237/252/293 px; a synthetic run with 500/3000/7000/
+11000 landed at x = 23/71/148/225. Release build, `NRestarts=0`.
+
+Everything below is the history of how that was found. The first two passes
+contain conclusions that were later disproved; they are kept because the
+mistakes are instructive, and each is marked.
 
 ## What is verified now
 

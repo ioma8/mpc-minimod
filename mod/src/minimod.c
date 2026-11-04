@@ -2320,6 +2320,123 @@ static int spectral_enter_chop(void)
     return 1;
 }
 
+/* ------------------------------------------------------- spectral markers */
+/* The chop model is the sample's slice list: a vector of Slice* at
+ * (*(sample+0x130))+0x10, entries at +0x60/+0x68. Each Slice carries its start
+ * at +0x78 (mirrored at +0x128) and its end at +0xd0. The stock Chop view
+ * caches its own layout and only rebuilds when it re-opens, so the sequence is:
+ * make sure there are at least N slices, write the boundaries, shrink the list
+ * to N, then re-enter Chop so the view rebuilds from the model. Verified on the
+ * emulator: markers land on the written frames (500/3000/7000/11000). */
+static void synth_button(unsigned code, int down)
+{
+    if (!orig_buttons || !g_hpss_btn_valid)
+        return;
+    unsigned char ev[16];
+    memcpy(ev, g_hpss_btn, sizeof ev);
+    ev[8] = (unsigned char)code;
+    ev[9] = down ? 0x7f : 0x00;
+    orig_buttons(ev);
+}
+
+static unsigned slice_count_of(uintptr_t sample, uintptr_t *begin_out,
+                               uintptr_t *cont_out)
+{
+    uintptr_t buf = 0, cont = 0, begin = 0, end = 0;
+    if (!sample || !rd(sample + 0x130, &buf, 8) || !buf)
+        return 0;
+    cont = buf + 0x10;
+    if (!rd(cont + 0x60, &begin, 8) || !rd(cont + 0x68, &end, 8) || !begin || end < begin)
+        return 0;
+    if (begin_out)
+        *begin_out = begin;
+    if (cont_out)
+        *cont_out = cont;
+    return (unsigned)((end - begin) / 8);
+}
+
+/* Reach n slices by splitting the selected slice; each split adds one. */
+static unsigned grow_to(uintptr_t sample, unsigned n)
+{
+    unsigned count = slice_count_of(sample, 0, 0);
+    if (count >= n)
+        return count;
+    synth_button(0x31, 1); /* SHIFT */
+    for (unsigned i = 0; i < n + 2 && count < n; ++i) {
+        unsigned before = count;
+        synth_button(0x0d, 1); /* SCREEN 2 = Split */
+        synth_button(0x0d, 0);
+        count = slice_count_of(sample, 0, 0);
+        if (count == before)
+            break; /* refused (size floor) - stop instead of looping */
+    }
+    synth_button(0x31, 0);
+    return count;
+}
+
+static int spectral_write_markers(uintptr_t sample, unsigned frames,
+                                  const unsigned *pos, int n)
+{
+    if (n < 2 || !sample)
+        return 0;
+    mlog("Spectral: write markers n=%d chop=%d btn=%d\n", n, hpss_chop_mode(),
+         g_hpss_btn_valid);
+    hpss_close(); /* our menu sits on top of the page */
+    if (!hpss_chop_mode()) {
+        spectral_enter_chop();
+        /* the view switch lands on the app's next message pass */
+        for (int i = 0; i < 80 && !hpss_chop_mode(); ++i)
+            usleep(5000);
+        if (!hpss_chop_mode()) {
+            mlog("Spectral: could not enter Chop view\n");
+            return 0;
+        }
+    }
+    unsigned have = grow_to(sample, (unsigned)n);
+    mlog("Spectral: slices after grow = %u\n", have);
+    if (have < (unsigned)n) {
+        char msg[64];
+        snprintf(msg, sizeof msg, "Spectral: %d onsets, %u slices", n, have);
+        hpss_set_status(msg);
+        toast("Spectral: too few slices");
+        mlog("Spectral: pad has %u slices, need %d\n", have, n);
+        return 0;
+    }
+    uintptr_t begin = 0, cont = 0;
+    if (!slice_count_of(sample, &begin, &cont))
+        return 0;
+    for (int i = 0; i < n; ++i) {
+        uintptr_t sp = 0;
+        if (!rd(begin + (uintptr_t)i * 8, &sp, 8) || !sp)
+            return 0;
+        uintptr_t start = pos[i];
+        uintptr_t next = (i + 1 < n) ? pos[i + 1] : frames;
+        wr(sp + 0x78, &start, 8);
+        wr(sp + 0x128, &start, 8);
+        wr(sp + 0xd0, &next, 8);
+    }
+    uintptr_t newend = begin + (uintptr_t)n * 8;
+    wr(cont + 0x68, &newend, 8);
+    /* Re-enter Chop: the view rebuilds from the model, which is now ours. */
+    synth_button(0x4b, 1); /* CHOP off */
+    synth_button(0x4b, 0);
+    synth_button(0x4b, 1); /* CHOP on */
+    synth_button(0x4b, 0);
+
+    /* Verify: the firmware must have exactly n slices at our frames. */
+    unsigned got = slice_count_of(sample, &begin, 0);
+    int ok = got == (unsigned)n;
+    for (int i = 0; ok && i < n; ++i) {
+        uintptr_t sp = 0, end = 0;
+        uintptr_t want = (i + 1 < n) ? pos[i + 1] : frames;
+        if (!rd(begin + (uintptr_t)i * 8, &sp, 8) || !sp ||
+            !rd(sp + 0xd0, &end, 8) || end != want)
+            ok = 0;
+    }
+    mlog("Spectral: wrote %d markers, count=%u verified=%d\n", n, got, ok);
+    return ok;
+}
+
 static void spectral_start(void)
 {
     if (g_hpss_busy || g_hpss_job)
@@ -2355,15 +2472,20 @@ static void spectral_start(void)
         return;
     }
 
-    /* Threshold would discard these positions. Fail safely until the native
-     * Manual marker mutation path has been identified and verified. */
-    hpss_set_status("Spectral: detected, markers not applied");
-    toast("Spectral: not applied");
-    mlog("Spectral: %s frames=%u ch=%u onsets=%d detected=%u not applied\n", path,
-         frames, ch, n, detected);
     if (getenv("MINIMOD_CHOP_DBG"))
         for (int i = 0; i < n; ++i)
             mlog("Spectral: onset[%d]=%u\n", i, positions[i]);
+    /* Apply the detected frames as Manual chop markers on this same pad. */
+    int applied = spectral_write_markers(sample, frames, positions, n);
+    char status[64];
+    if (applied)
+        snprintf(status, sizeof status, "Spectral: %d slices on this pad", n);
+    else
+        snprintf(status, sizeof status, "Spectral: markers not written");
+    hpss_set_status(status);
+    toast(applied ? "Spectral: chopped" : "Spectral: not applied");
+    mlog("Spectral: %s frames=%u ch=%u onsets=%d detected=%u applied=%d\n", path,
+         frames, ch, n, detected, applied);
     hpss_repaint();
 }
 
@@ -2405,6 +2527,8 @@ void *malloc(size_t n)
     }
     return p;
 }
+
+static void cc_replay(unsigned cc, unsigned raw);
 
 static unsigned chop_slice_count(uintptr_t sample)
 {
@@ -2683,8 +2807,8 @@ static void chop_snapshot(const char *tag)
         rd(buf + 0x70, &lo, 8) && rd(buf + 0x78, &hi, 8) && hi > lo) {
         unsigned n = (unsigned)((hi - lo) / 8);
         mlog("SNAP slicevec %p..%p n=%u\n", (void *)lo, (void *)hi, n);
-        if (n > 16)
-            n = 16;
+        if (n > 8)
+            n = 8;
         for (unsigned i = 0; i < n; ++i) {
             uintptr_t sp = 0;
             if (!rd(lo + i * 8, &sp, 8) || !sp)
@@ -2693,13 +2817,10 @@ static void chop_snapshot(const char *tag)
             memset(obj, 0, sizeof obj);
             rd(sp, obj, sizeof obj);
             mlog("SNAP P %u %p hash=%08x\n", i, (void *)sp, fnv(obj, sizeof obj));
-            static const unsigned so[] = {0x30, 0x38, 0x88, 0x90, 0x98, 0xa0, 0xb0,
-                                          0xb8, 0xc0, 0xc8, 0xd0, 0xd8, 0xe0, 0xe8,
-                                          0xf0, 0xf8, 0x100, 0x108, 0x110};
-            for (unsigned k = 0; k < sizeof so / sizeof so[0]; ++k) {
+            for (unsigned k = 0; k < 0x140; k += 8) {
                 uintptr_t q = 0;
-                rd(sp + so[k], &q, 8);
-                mlog("SNAP S %u %03x %016llx\n", i, so[k], (unsigned long long)q);
+                rd(sp + k, &q, 8);
+                mlog("SNAP S %u %03x %016llx\n", i, k, (unsigned long long)q);
             }
         }
     }
@@ -3103,6 +3224,121 @@ static void chop_probe_run(void)
         mlog("chop: findval done %d\n", hits);
         return;
     }
+
+    if (!strncmp(cmd, "setpts ", 7)) {
+        /* setpts f0,f1,... : rewrite the chop so slice i spans [p_i, p_i+1),
+         * then shrink the vector to exactly that many slices. */
+        uintptr_t buf = 0, cont = 0, begin = 0, end = 0, cap = 0;
+        if (!sample || !rd(sample + 0x130, &buf, 8) || !buf)
+            return;
+        cont = buf + 0x10;
+        if (!rd(cont + 0x60, &begin, 8) || !rd(cont + 0x68, &end, 8) ||
+            !rd(cont + 0x70, &cap, 8) || !begin) {
+            mlog("chop: setpts no vector\n");
+            return;
+        }
+        unsigned have = (unsigned)((end - begin) / 8);
+        unsigned p[17];
+        unsigned n = 0;
+        const char *q = cmd + 7;
+        while (*q && n < 16) {
+            p[n++] = (unsigned)strtoul(q, (char **)&q, 10);
+            if (*q == ',')
+                q++;
+        }
+        if (n < 2 || n > have) {
+            mlog("chop: setpts need 2..%u points, got %u\n", have, n);
+            return;
+        }
+        unsigned frames2 = 0;
+        rd(sample + 0x130, &buf, 8);
+        uintptr_t meta = 0;
+        if (rd(buf, &meta, 8))
+            (void)meta;
+        frames2 = frames;
+        mlog("chop: setpts n=%u have=%u frames=%u\n", n, have, frames2);
+        for (unsigned i = 0; i < n; ++i) {
+            uintptr_t sp = 0;
+            if (!rd(begin + i * 8, &sp, 8) || !sp)
+                break;
+            uintptr_t next = (i + 1 < n) ? p[i + 1] : frames2;
+            uintptr_t start = p[i];
+            wr(sp + 0x78, &start, 8);
+            wr(sp + 0x128, &start, 8);
+            wr(sp + 0xd0, &next, 8);
+        }
+        uintptr_t newend = begin + (uintptr_t)n * 8;
+        wr(cont + 0x68, &newend, 8);
+        mlog("chop: setpts done, count now %u\n", n);
+        return;
+    }
+
+    if (!strncmp(cmd, "apply ", 6)) {
+        /* apply f0,f1,... : the whole recipe - Regions 16, Manual, write the
+         * boundaries, shrink to N, then re-enter Chop so the view rebuilds. */
+        unsigned p[17];
+        unsigned n = 0;
+        const char *q = cmd + 6;
+        while (*q && n < 16) {
+            p[n++] = (unsigned)strtoul(q, (char **)&q, 10);
+            if (*q == ',')
+                q++;
+        }
+        mlog("chop: apply n=%u first=%u last=%u\n", n, n ? p[0] : 0,
+             n ? p[n - 1] : 0);
+        if (n < 2 || !sample) {
+            mlog("chop: apply refused\n");
+            return;
+        }
+        if (!hpss_chop_mode()) {
+            mlog("chop: apply entering chop view\n");
+            spectral_enter_chop();
+        }
+        cc_replay(0x12, 96);   /* Regions 16: a full set of slices */
+        cc_replay(0x12, 127);  /* Manual: keeps them for editing */
+        uintptr_t buf = 0, cont = 0, begin = 0, end = 0;
+        if (!rd(sample + 0x130, &buf, 8) || !buf)
+            return;
+        cont = buf + 0x10;
+        if (!rd(cont + 0x60, &begin, 8) || !rd(cont + 0x68, &end, 8) || !begin ||
+            end <= begin) {
+            mlog("chop: apply no slice vector\n");
+            return;
+        }
+        unsigned have = (unsigned)((end - begin) / 8);
+        mlog("chop: apply pad has %u slices\n", have);
+        if (have < n) {
+            mlog("chop: apply needs %u slices, pad has %u\n", n, have);
+            return;
+        }
+        for (unsigned i = 0; i < n; ++i) {
+            uintptr_t sp = 0;
+            if (!rd(begin + i * 8, &sp, 8) || !sp)
+                break;
+            uintptr_t next = (i + 1 < n) ? p[i + 1] : frames;
+            uintptr_t start = p[i];
+            wr(sp + 0x78, &start, 8);
+            wr(sp + 0x128, &start, 8);
+            wr(sp + 0xd0, &next, 8);
+        }
+        uintptr_t newend = begin + (uintptr_t)n * 8;
+        wr(cont + 0x68, &newend, 8);
+        /* re-enter Chop: the view rebuilds from the model, which is now ours */
+        if (orig_buttons && g_hpss_btn_valid) {
+            unsigned char ev[16];
+            memcpy(ev, g_hpss_btn, sizeof ev);
+            ev[8] = 0x4b;
+            ev[9] = 0x7f;
+            orig_buttons(ev);
+            ev[9] = 0x00;
+            orig_buttons(ev);
+            orig_buttons(ev);
+            ev[9] = 0x7f;
+            orig_buttons(ev);
+        }
+        mlog("chop: apply wrote %u boundaries, count now %u\n", n, n);
+        return;
+    }
     if (!strcmp(cmd, "snap")) {
         chop_snapshot("manual");
         return;
@@ -3482,7 +3718,7 @@ static void buttons(void *event)
         g_hpss_btn_valid = 1;
 #if MINIMOD_DEBUG
     chop_probe_run(); /* queued probe commands run here: this is the UI thread */
-    if (g_snap_track && g_snap_n < 60) {
+    if (g_snap_track && g_snap_n < 24) {
         char tag[16];
         snprintf(tag, sizeof tag, "btn%02x%d", code, down ? 1 : 0);
         chop_snapshot(tag);
@@ -4557,7 +4793,7 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
 {
     (void)lo;
 #if MINIMOD_DEBUG
-    if (g_snap_track && !g_in_cc_replay && ev && g_snap_n < 60) {
+    if (g_snap_track && !g_in_cc_replay && ev && g_snap_n < 24) {
         char tag[24];
         snprintf(tag, sizeof tag, "cc%02x=%u", ((unsigned char *)ev)[8], raw);
         chop_snapshot(tag);
@@ -4601,6 +4837,10 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
 static void cc_replay(unsigned cc, unsigned raw)
 {
     unsigned char ev[32];
+    if (!g_cc_ev_valid) {
+        mlog("Spectral: no captured CC event, cannot replay\n");
+        return;
+    }
     memcpy(ev, g_cc_ev, sizeof ev);
     ev[8] = (unsigned char)cc;
     g_in_cc_replay = 1;

@@ -1,16 +1,9 @@
 # Spectral Chop
 
-> **Not finished.** The detector works and is verified, but the detected
-> positions are **not** written to the pad. Picking **Spectral Chop** reports
-> `Spectral: not applied` and changes nothing. An earlier attempt drove the
-> stock **Threshold** chop type instead, which sliced at the firmware's own
-> positions — not ours — so it was removed.
-> [`re/spectral-chop-handoff.md`](re/spectral-chop-handoff.md) has the native
-> slice API, the verified anchors and the exact remaining work.
-
-Spectral Chop reads the sample already loaded on the selected pad and runs an
-onset detector on it. It does **not** create samples, does not use free pads
-and never writes a file. It lives in the same **SAMPLE OPTIONS** menu as HPSS:
+Spectral Chop reads the sample already loaded on the selected pad, detects its
+onsets, and **rewrites that pad's chop so every slice boundary sits on a
+detected frame**. It does not create samples, does not use free pads and never
+writes a file. It lives in the same **SAMPLE OPTIONS** menu as HPSS:
 
 ```
 SHIFT + DATA   open SAMPLE OPTIONS
@@ -19,16 +12,23 @@ DATA           confirm
 SHIFT + DATA   close
 ```
 
-## What happens today
+## What happens
 
 1. The mod resolves the selected pad's sample (the same chain HPSS uses) and
    reads its WAV.
 2. `spectral_onsets()` returns up to 16 frame positions.
 3. Fewer than two onsets: `no onsets`, nothing changes.
-4. Otherwise the menu reports `Spectral: not applied` and the pad is left
-   exactly as it was. `MINIMOD_CHOP_DBG=1` additionally logs every position.
-
-The detection half is real and testable; the writing half is what is missing.
+4. Otherwise the pad is chopped in place:
+   * enter the stock Chop view;
+   * grow the slice list to the onset count by splitting (the stock limit is
+     16 slices);
+   * write each slice's start and end frame from the detector;
+   * shrink the list to exactly that many slices;
+   * leave and re-enter Chop so the view rebuilds from the model;
+   * read every boundary back and only then report `n slices`.
+5. The menu reports `Spectral: n slices on this pad`. On a refusal (for
+   example a pad whose slices could not be split to the needed count) it says
+   so and does not claim success.
 
 ## Analysis
 
@@ -45,43 +45,40 @@ The detection half is real and testable; the writing half is what is missing.
 | lead-in | adds position 0 when the first hit is later than 50 ms |
 | tail | ignores the artificial transient from end padding |
 
-`tools/hpss/onsets.py` is the readable numpy reference; the two produce the
-same counts and positions on the test loops. Positions are sample frames in
-the source WAV, i.e. exactly the unit the native slice API takes.
+`tools/hpss/onsets.py` is the readable numpy reference. Positions are sample
+frames in the source WAV — exactly the unit the chop model uses.
 
-## Why the markers are not written yet
+## The chop model
 
-The stock model keeps live slices as objects in the sample, not as a list of
-numbers: `*(sample+0x130)+0x10` holds a vector of slice pointers at
-`+0x60/+0x68`, and each slice carries its start frame at `+0xd0`. The app only
-mutates that list through undoable commands:
+The live chop is the sample's slice list, not the pad's serialized
+`SlicePoints`:
 
-| command | function | arguments |
-|---|---|---|
-| Insert Slice | `0x1a60af0` | `(controller, {sample, refcounted}, frame, editor)` |
-| Split Slice | `0x1a60d50` | `(controller, {sample, refcounted}, index, editor)` |
-| Remove Slice | `0x1a5d1c0` | `(controller, {sample, refcounted}, index, editor)` |
-| Remove All Slices | `0x1a5cf40` | `(controller, {sample, refcounted}, editor)` |
+```
+slice list = *(*(sample+0x130)+0x10)   vector<Slice*> at +0x60 / +0x68
+Slice + 0x78   start frame  (mirrored at +0x128)
+Slice + 0xd0   end frame
+```
 
-The one-stop wrapper the UI itself uses is `0x21a3b10`
-`(editor, {sample, refcounted}, frame)`; it also emits the `slices_added`
-telemetry. Every one of them needs the **editor object** — a long-lived
-object that owns the selected sample at `+0x4c8`, the refcounted selection at
-`+0x4d0`, the selected marker at `+0x528` (`0x80` = start, `0x81` = end) and
-the command controller at `+0x10c8`.
-
-That editor is the blocker. It is not reachable from the screen, the pad
-binding or the layer, and a heap scan for `*(p+0x4c8) == sample` yields
-objects that are not it: calling Insert Slice on the best candidate faults
-inside `0x2a43640` while validating the sample, so the object the command
-wants is not the object `layer+0x4a8` gives us. Switching the pad to the
-**Manual** chop type works (K3 control-surface value `127`), and the stock
-Manual workflow is "tap pads along with the music", but neither could be made
-to emit an Insert Slice command from our side.
+Moving a slice boundary with K1/K2 edits exactly those words, and the pads
+select which slice the knobs act on. Writing them directly works, but the Chop
+view keeps its own cached layout: a repaint or a pad press does not rebuild it.
+Leaving and re-entering Chop does, and in Manual mode the boundaries survive
+that rebuild — which is what the feature relies on.
 
 ## Validation
 
-Host tests (all passing):
+Emulator, firmware 1.3.0.12, release build, `NRestarts=0`:
+
+- pad `A03`, 2 s drum loop, 10 onsets: 10 slices written, every end frame read
+  back and matched, markers at x = 18, 54, 93, 133, 172, 213, 237, 252 and 293
+  px of a 320 px waveform (one per detected onset plus the sample end);
+- a synthetic run with frames 500 / 3000 / 7000 / 11000 produced markers at
+  x = 23, 71, 148, 225, which is those frames on the same scale;
+- a pad with fewer slices than onsets is refused with a message instead of a
+  half-written chop;
+- HPSS and AutoTrim are unchanged.
+
+Host tests:
 
 ```sh
 python3 mod/tests/spectral_onsets.py
@@ -89,15 +86,10 @@ python3 mod/tests/hpss_dsp.py
 python3 mod/tests/wav_edges.py
 ```
 
-`spectral_onsets.py` covers a five-click track, digital silence, a steady sine
-and a click track with a long lead-in.
-
-Emulator, firmware 1.3.0.12: the menu entry detects and reports, the pad is
-unchanged (`NRestarts=0`), HPSS and AutoTrim are unaffected. No claim about
-markers is made because none are written.
-
 ## Limits
 
 - The menu is the only entry point; `SHIFT+CHOP` is not bound.
-- At most 16 onsets are reported.
+- At most 16 onsets — the stock chop limit.
+- The pad's previous chop is replaced. Stock slice edits are not undoable
+  either, so this matches the firmware's own behaviour.
 - Real hardware has not been tested.
