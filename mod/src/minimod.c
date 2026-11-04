@@ -1663,6 +1663,7 @@ static int g_hpss_names_ready;
 static volatile int g_hpss_menu;
 static volatile int g_hpss_sel;
 static int g_hpss_cc_state;
+static int g_hpss_cc_skip;
 
 /* The DATA encoder reaches the app as `B0 64 value` on the control-surface
  * rawmidi port.  The app's JUCE hooks do not expose it, so intercept the read
@@ -1702,16 +1703,28 @@ ssize_t read(int fd, void *buffer, size_t count)
         for (ssize_t i = 0; i + 16 < n; i += 32) {
             unsigned char b = p[i + 16];
             if (b & 0x80) {
-                g_hpss_cc_state = b == 0xb0 ? 1 : 0;
-            } else if (g_hpss_cc_state == 1) {
+                g_hpss_cc_skip = 0;
+                if (b == 0xb0) {
+                    /* Swallow the whole CC message while the menu owns DATA. */
+                    g_hpss_cc_state = 1;
+                    g_hpss_cc_skip = 1;
+                    p[i + 16] = 0xfe;
+                } else {
+                    g_hpss_cc_state = 0;
+                }
+            } else if (g_hpss_cc_skip == 1) {
+                g_hpss_cc_skip = 2;
                 g_hpss_cc_state = b == 0x64 ? 2 : 0;
-            } else if (g_hpss_cc_state == 2) {
+                p[i + 16] = 0xfe;
+            } else if (g_hpss_cc_skip == 2) {
+                g_hpss_cc_skip = 0;
+                if (g_hpss_cc_state == 2) {
+                    g_hpss_sel = !g_hpss_sel;
+                    hpss_repaint();
+                    mlog("HPSS wheel value=%u sel=%d\n", b, g_hpss_sel);
+                }
                 g_hpss_cc_state = 0;
-                g_hpss_sel = !g_hpss_sel;
-                hpss_repaint();
-                mlog("HPSS wheel value=%u sel=%d\n", b, g_hpss_sel);
-                /* The app must not also act on the DATA movement. */
-                p[i + 16] = 0;
+                p[i + 16] = 0xfe;
             } else {
                 g_hpss_cc_state = 0;
             }
@@ -2303,6 +2316,7 @@ out:
     g_hpss_menu = 0;
     g_hpss_data_down = 0;
     g_hpss_cc_state = 0;
+    g_hpss_cc_skip = 0;
     g_hpss_finalizing = 0;
     hpss_repaint();
 }
@@ -2314,6 +2328,7 @@ static void hpss_open(void)
     g_hpss_menu = 1;
     g_hpss_sel = 0;
     g_hpss_cc_state = 0;
+    g_hpss_cc_skip = 0;
     g_hpss_data_down = 0;
     hpss_set_status("");
     hpss_repaint();
@@ -2326,6 +2341,7 @@ static void hpss_close(void)
     g_hpss_menu = 0;
     g_hpss_data_down = 0;
     g_hpss_cc_state = 0;
+    g_hpss_cc_skip = 0;
     hpss_repaint();
 }
 
