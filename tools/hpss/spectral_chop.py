@@ -61,112 +61,98 @@ def stft_magnitude(x):
     return mag
 
 
-def band_flux(mag, rate, edges=((0, 250), (250, 2000), (2000, None))):
-    """Spectral novelty: one log-flux curve per band, equally weighted.
+def log_bands(mag, rate, bands=48, lo=40.0, hi=16000.0):
+    """Sum the spectrum into log-spaced bands and take logs.
 
-    A kick lives under 250 Hz, a snare in the mids, a hat above 2 kHz. Working
-    in log magnitude makes a doubling of a quiet band count as much as a
-    doubling of a loud one, and dividing each band by its own mean stops the
-    loudest band from hiding the others. The three curves are summed, so the
-    result is a spectral change measure rather than an amplitude envelope.
+    A hit and a note change look different in a linear spectrum - one adds
+    broadband energy, the other moves energy between partials - but both change
+    the *shape* of the log-band vector, which is what this measures.
     """
     freqs = np.linspace(0, rate / 2, mag.shape[1])
-    bands = []
-    for lo, hi in edges:
-        sel = (freqs >= lo) & (freqs < hi if hi else np.ones_like(freqs, bool))
-        band = mag[:, sel]
-        diff = np.diff(np.log1p(band), axis=0,
-                       prepend=np.zeros((1, band.shape[1]), np.float32))
-        flux = np.maximum(diff, 0).sum(axis=1)
-        bands.append(flux / (flux.mean() + 1e-9))
-    return np.sum(bands, axis=0)
+    edges = np.geomspace(lo, min(hi, rate / 2), bands + 1)
+    out = np.zeros((mag.shape[0], bands), dtype=np.float32)
+    for i in range(bands):
+        sel = (freqs >= edges[i]) & (freqs < edges[i + 1])
+        if sel.any():
+            out[:, i] = mag[:, sel].sum(axis=1)
+    return np.log1p(out)
 
 
-def pick_peaks(strength, rate, sensitivity, min_gap_ms=40.0):
-    """Adaptive threshold with an absolute offset: delta + lambda * local median.
+def spectral_change(bands):
+    """Cosine distance between consecutive log-band spectra."""
+    a, b = bands[:-1], bands[1:]
+    na = np.linalg.norm(a, axis=1) + 1e-9
+    nb = np.linalg.norm(b, axis=1) + 1e-9
+    return np.concatenate(([0.0], 1.0 - (a * b).sum(axis=1) / (na * nb)))
 
-    The offset matters: in a quiet passage the local median collapses to zero,
-    and a purely relative threshold then fires on noise. delta is a tenth of
-    the file's mean novelty, which is high enough to ignore noise everywhere
-    and low enough to keep a quiet hit inside a loud loop.
-    """
+
+def pick_changes(novelty, rate, sensitivity=3.0, min_gap_ms=60.0,
+                 prominence=2.5):
     half = max(1, int(0.5 * rate / HOP))
-    local = np.array([np.median(strength[max(0, i - half):i + half + 1])
-                      for i in range(len(strength))])
-    delta = 0.10 * float(strength.mean())
-    threshold = delta + sensitivity * local
+    local = np.array([np.median(novelty[max(0, i - half):i + half + 1])
+                      for i in range(len(novelty))])
+    threshold = 0.1 * float(novelty.mean()) + sensitivity * local
     gap = max(1, int(min_gap_ms / 1000.0 * rate / HOP))
-    prominence = 0.8 * float(strength.mean())
-    padded = np.concatenate(([-np.inf], strength, [-np.inf]))
-    peaks, last, valley = [], -10 ** 9, np.inf
-    for f in range(len(strength)):          # frame 0 can be the onset
-        v = padded[f + 1]
-        is_peak = v > padded[f] and v > padded[f + 2] and v >= threshold[f]
-        if (is_peak and f - last >= gap
-                and (not peaks or v - valley >= prominence)):
-            peaks.append(f)
+    prom = prominence * float(novelty.mean())
+    out, last, valley = [], -10 ** 9, np.inf
+    for f in range(len(novelty)):
+        v = novelty[f]
+        left = novelty[f - 1] if f else -1.0
+        right = novelty[f + 1] if f + 1 < len(novelty) else -1.0
+        is_peak = v > left and v > right and v >= threshold[f]
+        if is_peak and f - last >= gap and (not out or v - valley >= prom):
+            out.append(f)
             last, valley = f, np.inf
         else:
             valley = min(valley, v)
-    return peaks
+    return out
 
 
-def snap_to_attack(x, rate, frame, fraction=0.15):
-    """Put the boundary on the transient, not in front of it.
+def place(x, rate, frame, fraction=0.15):
+    """Snap onto an attack when there is one, otherwise keep the frame.
 
-    The novelty peak says which analysis frame carries the attack. Inside a
-    +-20 ms window the 1 ms envelope is measured: the loudest cell is the
-    transient and the boundary goes where the rising edge passes `fraction` of
-    that peak, walking back from the peak. The default 0.15 is where the burst
-    becomes visible on screen; cutting lower (at the noise floor, ~0.05) looks
-    early, and cutting at the middle of the attack (0.5) clips its front.
+    A percussive hit has a steep energy step within one hop and the boundary is
+    moved onto it. A legato note change has no step at all - forcing one would
+    put the cut in the wrong place, so the change frame is used as it stands.
     """
     pos = frame * HOP
-    a = max(0, pos - int(0.020 * rate))
-    b = min(len(x), pos + int(0.020 * rate))
+    a = max(0, pos - int(0.012 * rate))
+    b = min(len(x), pos + int(0.012 * rate))
     hop = max(1, int(0.001 * rate))
     if b - a < 4 * hop:
         return pos
     n = (b - a) // hop
     env = np.array([float(np.abs(x[a + i * hop:a + (i + 1) * hop]).max())
                     for i in range(n)], dtype=np.float32)
-    if not float(env.max()) > 0:
-        return None
-    peak = int(np.argmax(env))
-    level = fraction * float(env[peak])
-    onset = peak
+    peak = float(env.max())
+    if peak <= 0:
+        return pos
+    step = np.diff(env, prepend=env[:1])
+    best = int(np.argmax(step))
+    if step[best] < 0.25 * peak:
+        return pos
+    onset = best
+    level = fraction * peak
     while onset > 0 and env[onset - 1] > level:
         onset -= 1
     return max(0, a + onset * hop)
 
 
-def choose(frames, max_slices):
-    """The first `max_slices` onsets, in time order.
-
-    Everything after the last one stays inside the last slice - that is the
-    point: sixteen chops from the start of the sample, the remainder on the
-    sixteenth pad.
-    """
-    return frames[:max_slices]
-
-
-def onsets(x, rate, max_slices=16, sensitivity=2.5, fraction=0.15):
-    strength = band_flux(stft_magnitude(x), rate)
-    detected = pick_peaks(strength, rate, sensitivity)
-    frames = choose(detected, max_slices)
-    ranked = frames
+def onsets(x, rate, max_slices=16, sensitivity=3.0, fraction=0.15):
+    bands = log_bands(stft_magnitude(x), rate)
+    novelty = spectral_change(bands)
+    changes = [f for f in pick_changes(novelty, rate, sensitivity)
+               if f + 2 < len(novelty)]      # zero padding at the end is not a change
     positions = []
-    for f in sorted(ranked):
-        p = snap_to_attack(x, rate, f, fraction)
-        if p is None:
-            continue        # novelty peak without an attack of its own
+    for f in changes[:max_slices]:       # the first N in time order
+        p = place(x, rate, f, fraction)
         if positions and p - positions[-1] < int(0.040 * rate):
-            continue        # snapping can pull two peaks together
+            continue
         positions.append(p)
-    # cover a quiet head, but only when there is a slice to spare
     if positions and positions[0] > int(0.050 * rate) and len(positions) < max_slices:
         positions = [0] + positions
-    return positions, detected, strength
+    return positions, changes, novelty
+
 
 
 def slices_from(positions, frames):
@@ -213,7 +199,7 @@ def main():
         kept = set(positions)
         merged = []
         for f in detected:
-            p = snap_to_attack(x, rate, f, args.cut_fraction)
+            p = place(x, rate, f, args.cut_fraction)
             if p in kept:
                 continue
             for i, a, b in sl:
