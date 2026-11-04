@@ -1,7 +1,11 @@
 # Spectral Chop
 
-Spectral Chop slices the selected sample at detected onsets and puts the slices
-on the next free pads. It lives in the same **SAMPLE OPTIONS** menu as HPSS:
+Spectral Chop detects the onsets in the sample already loaded on the selected
+pad, then opens the stock **Chop** view for that same pad.  It does **not**
+create samples, does not use free pads, and never writes a file.  The pad keeps
+its original sample; the stock Chop page owns the slicing from then on.
+
+It lives in the same **SAMPLE OPTIONS** menu as HPSS:
 
 ```
 SHIFT + DATA   open SAMPLE OPTIONS
@@ -10,8 +14,17 @@ DATA           confirm
 SHIFT + DATA   close
 ```
 
-The source sample is never modified. The slices are normal native samples,
-created and assigned by the stock Extract command.
+## What happens
+
+1. The mod reads the selected pad's WAV and runs the onset detector.
+2. If fewer than two onsets are found, it reports `no onsets` and changes
+   nothing.
+3. Otherwise it closes the menu, puts the same pad into the stock Chop view
+   (the `CHOP` button), selects the stock **Threshold** chop type, and reports
+   `<n> onsets - chopped on this pad`.
+
+The sample, its name, its pad and every other pad stay as they were.  The
+stock Chop page draws the slice markers on the existing waveform.
 
 ## Analysis
 
@@ -28,66 +41,51 @@ created and assigned by the stock Extract command.
 | lead-in | adds position 0 when the first hit is later than 50 ms |
 | tail | ignores the artificial transient from end padding |
 
-`tools/hpss/onsets.py` is the readable numpy reference. The two implementations
-produce the same counts and positions on the emulator test loops.
+`tools/hpss/onsets.py` is the readable numpy reference.  The two
+implementations produce the same counts and positions on the emulator test
+loops.  The detected positions are logged for debugging; the stock Chop page
+performs the actual cut.
 
-## Slicing path
+## Native path
 
-The stock Chop screen already has a **Threshold** chop type, but it exposes only
-a threshold, not a list of positions. Spectral Chop therefore uses the existing
-native Extract mechanism from HPSS:
+The stock Chop page is the only thing that touches the pad.  The mod uses the
+app's own button dispatcher to press `CHOP` if the Chop view is not already
+visible.  If the K3 knob has been seen, its last control-surface event is
+replayed with value 0, which is the **Threshold** chop type.  No `Extract`
+command, no free-pad search, no sample writer and no blocking loop are used.
 
-1. detect the onset positions from the source WAV;
-2. preflight that many free pads through the native occupancy predicate;
-3. for each segment `[onset[i], onset[i+1])`, call stock Extract with that
-   source range and no writer substitution — the native reader copies the
-   original audio into a new sample;
-4. let the stock command choose the pad, write the file and assign it.
-
-The execute hook from HPSS is reused to patch the extraction range
-(`screen+0x9ba0`, `+0x78` start and `+0xd0` end) for the duration of the
-command's copy. The constructor hook supplies `Slice <run>-<n>` names. The run
-token prevents the app's duplicate-name handling from collapsing several
-slices onto one file when an earlier run already used `Slice 1`, `Slice 2`, ....
-
-Slicing runs one command per UI paint, not in a blocking loop. Blocking the UI
-through sixteen back-to-back extracts crashed the app; the state machine in
-`spectral_start` / `spectral_step` / `spectral_finish` keeps the app responsive
-and lets each command finish.
+This also removes the crash/restart that the old Extract-based path caused:
+the app no longer receives sixteen back-to-back extract commands while the
+UI is waiting.
 
 ## Validation
 
-Emulator, release build, firmware 1.3.0.12, `NRestarts=0`:
+Emulator, firmware 1.3.0.12, `NRestarts=0`:
 
-- 2 s drum loop: 10 slices, all ten files written, first pad `Slice 91010-1`;
-- 7 s drum mix: 16 slices in the debug run;
-- guitar loop: 7 slices, not 16 — sustained chords do not fill the pads;
-- very short slice (1 536 frames): `Spectral: no onsets`;
-- waveform-leading silence: first hit later than 50 ms is folded into a slice
-  starting at 0;
-- HPSS still creates its two layers after the range/execute refactor;
-- AutoTrim still works (`SHIFT+B3`), and the encoder menu cycles
+- pad `A03` with a 2 s drum loop: `10 onsets`, stock Chop view opens on A03,
+  slice markers are drawn, no new pads, no new files;
+- the same pad after forcing the Chop Type to a non-Threshold value: running
+  Spectral Chop from the menu returns it to Threshold and the markers;
+- very short slice / silence: `no onsets`, nothing is changed;
+- no files named `Slice ...` are created;
+- `SHIFT + DATA` still opens the same menu, and the encoder cycles
   HPSS → Spectral Chop → Close;
-- slices are native samples on pads, selected pads show images such as
-  `Slice 91010-1`, and the project reloads without a missing-sample dialog.
+- HPSS and AutoTrim are unchanged.
 
-The host tests are:
+Host tests:
 
 ```sh
 python3 mod/tests/spectral_onsets.py
 python3 mod/tests/hpss_dsp.py
 ```
 
-`spectral_onsets.py` covers a five-click track, digital silence, a steady sine,
-and a click track with a long lead-in.
+`spectral_onsets.py` covers a five-click track, digital silence, a steady
+sine, and a click track with a long lead-in.
 
 ## Limits
 
-- The menu is the only entry point; `SHIFT+CHOP` is not bound (the user asked
-  for the shared SAMPLE OPTIONS menu).
-- At most 16 onsets are taken. If fewer pads are free, the operation refuses
-  before writing anything.
-- Tonal material is reduced to the strongest attacks by the floor; it is not
-  classified as “no onsets” unless fewer than two peaks survive.
-- The app writes the slice files; the mod does not create or delete files.
+- The menu is the only entry point; `SHIFT+CHOP` is not bound.
+- At most 16 onsets are reported.
+- The stock Chop page decides the exact slice positions; the detector selects
+  whether the material has usable onsets and reports the count.
 - Real hardware has not been tested yet.

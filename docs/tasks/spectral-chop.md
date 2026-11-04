@@ -1,9 +1,10 @@
 # Task — Spectral Chop
 
 > **Implemented on branch `feature/spectral-chop`.** Entry point is the shared
-> SAMPLE OPTIONS menu (not `SHIFT+CHOP`), as requested. See
-> [`docs/SPECTRAL-CHOP.md`](../SPECTRAL-CHOP.md) for the implementation and
-> validation record.
+> SAMPLE OPTIONS menu (not `SHIFT+CHOP`), as requested. The final behaviour
+> chops the selected pad **in place**; it does not create samples or use free
+> pads. See [`docs/SPECTRAL-CHOP.md`](../SPECTRAL-CHOP.md) for the
+> implementation and validation record.
 
 **One action: slice the selected sample at its detected onsets instead of at fixed divisions.**
 

@@ -116,6 +116,7 @@ static sigjmp_buf g_cc_jmp;
 
 static void mlog(const char *fmt, ...);
 static void toast(const char *text);
+static long long now_ms(void);
 static void *g_screen;
 static void *g_trim_page;
 static int prop_references(uintptr_t P, uintptr_t param);
@@ -375,8 +376,11 @@ static void *install_hook(uintptr_t site, void *hook)
     uint32_t first = 0;
     if (!rd(site, &first, 4))
         return 0;
-    if (first != 0xD503233Fu && first != 0xD503245Fu) {
-        mlog("minimod: site %p has no paciasp/bti (%08x)\n", (void *)site, first);
+    /* paciasp/bti are the usual prologue, but many functions start with a
+     * plain instruction.  Any non-PC-relative instruction can be copied into
+     * the trampoline just as safely. */
+    if (pc_relative(first)) {
+        mlog("minimod: site %p starts PC-relative (%08x)\n", (void *)site, first);
         return 0;
     }
     /* Copy as much of the prologue as is safe: everything up to the first
@@ -1661,9 +1665,8 @@ static volatile int g_hpss_write_ok;
 static void *g_hpss_cmd[4];
 static int g_hpss_cmd_n;
 
-static uint64_t g_hpss_name[18];
+static uint64_t g_hpss_name[2];
 static int g_hpss_names_ready;
-static int g_slice_names_ready;
 static volatile int g_hpss_menu;
 static volatile int g_hpss_busy;
 static volatile int g_hpss_sel;
@@ -1785,36 +1788,13 @@ static void hpss_make_names(void)
     g_hpss_names_ready = 1;
 }
 
-/* Slice names need a per-run token: the app's duplicate-name handling can
- * otherwise collapse several slices onto one file when a previous run already
- * used "Slice 1", "Slice 2", ... . */
-static void spectral_make_names(int n)
-{
-    hpss_make_names();
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    unsigned token = (unsigned)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-    for (int i = 0; i < 16; ++i) {
-        if (g_slice_names_ready)
-            FN(0xf0a290, void (*)(uint64_t *))(&g_hpss_name[2 + i]);
-        if (i < n) {
-            char buf[32];
-            snprintf(buf, sizeof buf, "Slice %u-%d", token % 100000, i + 1);
-            FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[2 + i], buf);
-        }
-    }
-    g_slice_names_ready = 1;
-}
-
 static void hpss_ctor_hook(void *cmd, void *name, int dest, void *settings,
                            void *padstate, void *project, void *s1, void *s2,
                            void *s3)
 {
     if (g_hpss_arm && (uintptr_t)padstate == g_hpss_arm_source) {
         hpss_make_names();
-        int ni = g_hpss_arm_name;
-        if (ni < 0 || ni > 17 || (ni >= 2 && !g_slice_names_ready))
-            ni = 0;
+        int ni = g_hpss_arm_name ? 1 : 0;
         name = (void *)&g_hpss_name[ni];
         if (g_hpss_cmd_n < 4)
             g_hpss_cmd[g_hpss_cmd_n++] = cmd;
@@ -2318,20 +2298,27 @@ static void hpss_start(void)
     hpss_repaint();
 }
 
-struct spectral_job {
-    void *screen;
-    uintptr_t state;
-    unsigned frames;
-    unsigned ch;
-    unsigned positions[16];
-    int n;
-    int index;
-    int made;
-    unsigned detected;
-};
+static void hpss_close(void);
+static void cc_replay_k3(unsigned raw);
 
-static struct spectral_job *g_spectral;
-static int g_spectral_working;
+/* Put the selected pad into the stock Chop view.  The stock page owns the
+ * slicing; it cuts the sample already on this pad, so no samples are created
+ * and no other pads are touched. */
+static int spectral_enter_chop(void)
+{
+    if (hpss_chop_mode())
+        return 1;
+    if (!g_hpss_btn_valid || !orig_buttons || !sample_page_visible())
+        return 0;
+    unsigned char ev[16];
+    memcpy(ev, g_hpss_btn, sizeof ev);
+    ev[8] = 0x4b; /* CHOP */
+    ev[9] = 0x7f;
+    orig_buttons(ev);
+    ev[9] = 0x00;
+    orig_buttons(ev);
+    return 1;
+}
 
 static void spectral_start(void)
 {
@@ -2368,115 +2355,26 @@ static void spectral_start(void)
         return;
     }
 
-    uintptr_t program = 0;
-    if (!rd(state + 0x2310, &program, 8) || !program) {
-        hpss_set_status("Spectral: no program");
-        return;
-    }
-    int free_pads = hpss_free_count((void *)program);
-    if (free_pads < n) {
-        char msg[64];
-        snprintf(msg, sizeof msg, "Spectral: need %d pads", n);
-        hpss_set_status(msg);
-        toast(msg);
-        return;
-    }
-
-    struct spectral_job *job = calloc(1, sizeof *job);
-    if (!job) {
-        hpss_set_status("Spectral: out of memory");
-        return;
-    }
-    job->screen = screen;
-    job->state = state;
-    job->frames = frames;
-    job->ch = ch;
-    job->n = n;
-    job->detected = detected;
-    for (int i = 0; i < n; ++i)
-        job->positions[i] = positions[i];
-
-    spectral_make_names(n);
-    g_spectral = job;
-    g_hpss_busy = 1;
-    g_hpss_chop_before = hpss_chop_mode();
+    /* Close the sample-options overlay first, then let the stock Chop page
+     * show the slices on this same pad.  Nothing is extracted or written. */
+    hpss_close();
+    int chopped = spectral_enter_chop();
+    /* The first Chop Type position is Threshold, which draws the stock slice
+     * markers on the existing sample.  Replay the K3 CC the page uses. */
+    if (chopped)
+        cc_replay_k3(0);
     char status[64];
-    snprintf(status, sizeof status, "Spectral: 0/%d slices", n);
+    if (chopped)
+        snprintf(status, sizeof status, "%d onsets - chopped on this pad", n);
+    else
+        snprintf(status, sizeof status, "%d onsets - open Chop to slice", n);
     hpss_set_status(status);
-    mlog("Spectral: %s frames=%u ch=%u onsets=%d detected=%u\n", path, frames,
-         ch, n, detected);
+    toast(status);
+    mlog("Spectral: %s frames=%u ch=%u onsets=%d detected=%u chop=%d\n", path,
+         frames, ch, n, detected, chopped);
     if (getenv("MINIMOD_CHOP_DBG"))
         for (int i = 0; i < n; ++i)
             mlog("Spectral: onset[%d]=%u\n", i, positions[i]);
-    hpss_repaint();
-}
-
-static void spectral_finish(void)
-{
-    struct spectral_job *job = g_spectral;
-    if (!job)
-        return;
-    g_spectral = NULL;
-    g_hpss_menu = 0;
-    g_hpss_data_down = 0;
-    g_hpss_cc_state = 0;
-    g_hpss_cc_skip = 0;
-    g_hpss_guard_until = 0;
-    hpss_restore_chop();
-    g_hpss_busy = 0;
-    char status[64];
-    if (job->made != job->n)
-        snprintf(status, sizeof status, "Spectral: %d of %d slices", job->made,
-                 job->n);
-    else if (job->detected > (unsigned)job->n)
-        snprintf(status, sizeof status, "%d of %u slices", job->n,
-                 job->detected);
-    else
-        snprintf(status, sizeof status, "%d slices", job->n);
-    hpss_set_status(status);
-    toast(status);
-    free(job);
-    hpss_repaint();
-}
-
-static void spectral_step(void)
-{
-    struct spectral_job *job = g_spectral;
-    if (!job || g_spectral_working)
-        return;
-    if (job->index >= job->n) {
-        spectral_finish();
-        return;
-    }
-    g_spectral_working = 1;
-    int i = job->index;
-    unsigned start = job->positions[i];
-    unsigned end = i + 1 < job->n ? job->positions[i + 1] : job->frames;
-    int ok = 1;
-    if (start < end) {
-        int dest = -1;
-        ok = hpss_extract_ctx(job->screen, job->state, NULL, start, end,
-                              job->ch, 2 + i, &dest);
-    }
-    job->index++;
-    if (ok)
-        job->made++;
-    g_spectral_working = 0;
-    if (!ok) {
-        spectral_finish();
-        return;
-    }
-    if (job->index >= job->n) {
-        /* Give the native writer a moment to finish the last file before the
-         * menu closes; starting the next command used to hide this race. */
-        usleep(500 * 1000);
-        spectral_finish();
-        return;
-    }
-    char status[64];
-    snprintf(status, sizeof status, "Spectral: %d/%d slices", job->made,
-             job->n);
-    hpss_set_status(status);
     hpss_repaint();
 }
 
@@ -2632,7 +2530,7 @@ static void hpss_draw_menu(void *g)
             draw_colour(g, 0xffffffff);
         }
         draw_text(g, "Spectral Chop", x + 12, y + 84, w - 24, 22, 16.0f);
-        draw_text(g, "slice at detected onsets", x + 12, y + 104, w - 24, 16,
+        draw_text(g, "chop this pad in place", x + 12, y + 104, w - 24, 16,
                   12.0f);
         if (g_hpss_sel == 2) {
             draw_colour(g, 0xff3a2a10);
@@ -3714,6 +3612,8 @@ static uintptr_t ctl_obj_for(uintptr_t base)
  * app performs exactly what a knob does. */
 static unsigned char g_cc_ev[32];
 static int g_cc_ev_valid;
+static unsigned char g_cc_k3_ev[32];
+static volatile int g_cc_k3_valid;
 static unsigned g_cc_raw[2];
 static float g_cc_range[2] = {127.0f, 127.0f};
 static int g_cc_seen[2];
@@ -3747,6 +3647,10 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
                 g_cc_range[idx] = range;
             g_cc_seen[idx] = 1;
         }
+        if (cc == 0x12 && !g_cc_k3_valid) {
+            memcpy(g_cc_k3_ev, ev, sizeof g_cc_k3_ev);
+            g_cc_k3_valid = 1;
+        }
     }
     if (orig_cc)
         orig_cc(ev, raw, lo, range);
@@ -3761,6 +3665,20 @@ static void cc_replay(unsigned cc, unsigned raw)
     if (orig_cc)
         orig_cc(ev, raw, 0.0f, 127.0f);
     g_in_cc_replay = 0;
+}
+
+static void cc_replay_k3(unsigned raw)
+{
+    if (!g_cc_k3_valid)
+        return;
+    unsigned char ev[32];
+    memcpy(ev, g_cc_k3_ev, sizeof ev);
+    ev[8] = 0x12;
+    g_in_cc_replay = 1;
+    if (orig_cc)
+        orig_cc(ev, raw, 0.0f, 127.0f);
+    g_in_cc_replay = 0;
+    mlog("Spectral: replayed K3=%u (valid=%d)\n", raw, g_cc_k3_valid);
 }
 
 static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
@@ -4525,8 +4443,6 @@ static void screen_paint(void *p, void *g)
         g_screen = p;
         mlog("minimod: screen=%p\n", p);
     }
-    if (g_spectral)
-        spectral_step();
     if (__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE))
         hpss_finalize();
     if (g_hpss_restore_pending && !g_shift && sample_page_visible()) {

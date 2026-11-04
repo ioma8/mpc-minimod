@@ -13,14 +13,14 @@ original MPC Sample experience, with just small fixes that enhance it for better
 | **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim | `SHIFT` + `B3` |
 | **Octave shift** of pads in 16 Levels mode — by half the grid | `PLUS` / `MINUS` keys (both = reset) |
 | **HPSS** — splits the selected sample into harmonic and percussive copies on two empty pads; the source sample is left untouched | `SHIFT` + `DATA`, choose **HPSS**, `DATA` |
-| **Spectral Chop** — slices the selected sample at detected onsets and fills the next free pads; the source sample is left untouched | `SHIFT` + `DATA`, choose **Spectral Chop**, `DATA` |
+| **Spectral Chop** — detects the onsets in the selected sample and opens the stock Chop view on that same pad; no samples or pads are created | `SHIFT` + `DATA`, choose **Spectral Chop**, `DATA` |
 
 The trim and pitch changes confirm themselves on screen for a second. HPSS and
 Spectral Chop open a small **SAMPLE OPTIONS** menu; turn the DATA encoder to
 choose an action, press DATA to confirm, or press `SHIFT+DATA` to close. HPSS
 needs two empty pads and creates `HPSS Harmonic` and `HPSS Percussive`.
-Spectral Chop needs one empty pad per slice, detects up to 16 onsets, and lets
-the stock Extract command create the slice samples. Details:
+Spectral Chop detects up to 16 onsets and opens the stock Chop view on the
+same pad; it never creates samples or uses free pads. Details:
 [`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md).
 
 Chromatic MIDI from an external keyboard is in progress —
