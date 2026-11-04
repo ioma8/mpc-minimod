@@ -29,3 +29,11 @@ So **the internal trim state is `padblock + 0x1a8` (Start) and `padblock + 0x220
 parameter value, its applied copy, the property cache, the layer frames and the
 slider - is downstream of that state, which is why none of it made the app's own
 view change.
+
+## HPSS investigation
+
+[HPSS research](../HPSS-RE.md) traces the stock Chop Extract command and its
+empty-pad selection. [Captured evidence](hpss/README.md) includes the native
+sample creation and assignment paths, and
+[runtime validation](hpss/runtime-validation.md) covers the shipped
+SAMPLE OPTIONS flow.

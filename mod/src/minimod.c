@@ -74,8 +74,11 @@
 #define A_BROADCAST 0x13bb930      /* value broadcaster (property, float) */
 #define A_TRIM_REG 0x16b6060       /* waveform locator bounds (probe)     */
 #define A_STR_ASSIGN 0xf535c0      /* juce::String assign (dest, text)    */
+#define A_SCREEN_VT 0x6e212a0      /* SampleModeScreen vtable              */
 #define A_OBS_SET 0x14a7580        /* observable setter (float, property) */
 #define A_LABEL_TEXT 0x11bae00     /* Label::getText (returns String&)    */
+
+#include "hpss.h"
 
 #define T_LAYER 0xb0 /* -> context; [ctx+0x60] = instrument */
 #define T_MODEL 0x70
@@ -994,6 +997,120 @@ static int wav_by_frames(unsigned want, char *out, size_t n)
     return found;
 }
 
+/* Decode a whole WAV into interleaved float32.  This is intentionally stricter
+ * than wav_info(): HPSS must read exactly the sample the app has loaded, so the
+ * frame count, channel count and rate all have to match the native metadata.
+ * Supports PCM16/24/32 and IEEE float32/64, including WAVE_FORMAT_EXTENSIBLE. */
+static int wav_read_f32(const char *path, unsigned want_frames, unsigned want_ch,
+                        unsigned want_rate, float **out, unsigned *got_ch,
+                        unsigned *got_rate)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    unsigned char h[12];
+    if (pread(fd, h, 12, 0) != 12 || memcmp(h, "RIFF", 4) ||
+        memcmp(h + 8, "WAVE", 4)) {
+        close(fd);
+        return 0;
+    }
+    unsigned encoding = 0, ch = 0, bits = 0, rate = 0, dof = 0, len = 0;
+    off_t off = 12;
+    for (int guard = 0; guard < 64; ++guard) {
+        unsigned char ck[8];
+        if (pread(fd, ck, 8, off) != 8)
+            break;
+        unsigned sz = (unsigned)ck[4] | ((unsigned)ck[5] << 8) |
+                      ((unsigned)ck[6] << 16) | ((unsigned)ck[7] << 24);
+        if (!memcmp(ck, "fmt ", 4) && sz >= 16 && sz <= 40) {
+            unsigned char f[40] = {0};
+            if (sz > sizeof f || pread(fd, f, sz, off + 8) != (ssize_t)sz)
+                break;
+            encoding = (unsigned)f[0] | ((unsigned)f[1] << 8);
+            ch = (unsigned)f[2] | ((unsigned)f[3] << 8);
+            rate = (unsigned)f[4] | ((unsigned)f[5] << 8) |
+                   ((unsigned)f[6] << 16) | ((unsigned)f[7] << 24);
+            bits = (unsigned)f[14] | ((unsigned)f[15] << 8);
+            if (encoding == 0xfffe && sz >= 40)
+                encoding = (unsigned)f[24] | ((unsigned)f[25] << 8);
+        } else if (!memcmp(ck, "data", 4)) {
+            dof = (unsigned)off + 8;
+            len = sz;
+            if (encoding)
+                break;
+        }
+        off += 8 + (off_t)sz + (off_t)(sz & 1);
+    }
+    if (!dof || !len || !ch || ch > 2 || !rate || !bits)
+        goto bad;
+    if (!((encoding == 1 && (bits == 16 || bits == 24 || bits == 32)) ||
+          (encoding == 3 && (bits == 32 || bits == 64))))
+        goto bad;
+    unsigned bps = bits / 8;
+    unsigned frames = len / (bps * ch);
+    if (frames != want_frames || ch != want_ch || rate != want_rate)
+        goto bad;
+
+    size_t cells = (size_t)frames * ch;
+    if (cells > SIZE_MAX / sizeof(float))
+        goto bad;
+    float *buf = malloc(cells * sizeof(float));
+    if (!buf)
+        goto bad;
+    unsigned char tmp[8192];
+    size_t at = 0;
+    while (at < cells) {
+        size_t want = cells - at;
+        if (want > sizeof tmp / bps)
+            want = sizeof tmp / bps;
+        ssize_t n = pread(fd, tmp, want * bps, (off_t)dof + (off_t)at * bps);
+        if (n <= 0)
+            break;
+        size_t got = (size_t)n / bps;
+        for (size_t i = 0; i < got; ++i) {
+            const unsigned char *p = tmp + i * bps;
+            if (encoding == 3 && bits == 32) {
+                float v;
+                memcpy(&v, p, 4);
+                buf[at + i] = v;
+            } else if (encoding == 3 && bits == 64) {
+                double v;
+                memcpy(&v, p, 8);
+                buf[at + i] = (float)v;
+            } else if (bits == 16) {
+                int16_t v;
+                memcpy(&v, p, 2);
+                buf[at + i] = (float)v / 32768.0f;
+            } else if (bits == 24) {
+                int v = (int)p[0] | ((int)p[1] << 8) |
+                        ((int)(signed char)p[2] << 16);
+                buf[at + i] = (float)v / 8388608.0f;
+            } else {
+                int32_t v;
+                memcpy(&v, p, 4);
+                buf[at + i] = (float)((double)v / 2147483648.0);
+            }
+        }
+        at += got;
+        if (got != want)
+            break;
+    }
+    close(fd);
+    if (at != cells) {
+        free(buf);
+        return 0;
+    }
+    *out = buf;
+    if (got_ch)
+        *got_ch = ch;
+    if (got_rate)
+        *got_rate = rate;
+    return 1;
+bad:
+    close(fd);
+    return 0;
+}
+
 /* The page binds each trim parameter through a small binding object whose
  * vtable is app+0x6e08a10 and which keeps the property pointer at +0x20. */
 #define A_BINDING_VT 0x6e08a10
@@ -1355,6 +1472,7 @@ static void (*orig_repaint)(void *, uint64_t, uint64_t);
 
 static void set_filter_text(const char *t);
 static void do_autotrim(void);
+
 #if MINIMOD_CHROMATIC
 static void play_note(int pitch, int on, float velocity);
 #endif
@@ -1504,11 +1622,716 @@ static uintptr_t g_cc_obj;
 static unsigned g_cc_r0, g_cc_r1;
 static void commit_trim(void);
 
+/* ---------------------------------------------------------- HPSS bridge */
+/* Stock Chop Extract, used as the sample-creation/assignment mechanism.  The
+ * handler finds the first empty pad, copies the source pad settings and submits
+ * an ExtractAndAssign command.  We only replace the audio that command writes
+ * and the name it gives the result; everything else stays native. */
+#define A_HPSS_EXTRACT_HANDLER 0x16580d0
+#define A_HPSS_EXTRACT_CTOR 0x143ed40
+#define A_HPSS_EXTRACT_EXEC 0x143f0b0
+#define A_HPSS_WRITE_CB 0x1d8aff0
+#define A_HPSS_FREE_PAD 0x286dd00
+#define A_HPSS_PAD_BUSY 0x28047b0
+#define HPSS_RANGE_START 0x78
+#define HPSS_RANGE_END 0xd0
+
+static void (*orig_hpss_ctor)(void *, void *, int, void *, void *, void *, void *,
+                              void *, void *);
+static void (*orig_hpss_exec)(void *);
+static void (*orig_hpss_writer)(void *, void *);
+
+/* One armed output.  The constructor hook maps the command it sees to this
+ * buffer, and the writer callback consumes the buffer sequentially. */
+static volatile int g_hpss_arm;
+static uintptr_t g_hpss_arm_source;
+static const float *g_hpss_arm_buf;
+static size_t g_hpss_arm_frames;
+static unsigned g_hpss_arm_ch;
+static int g_hpss_arm_name;
+static volatile int g_hpss_sub_on;
+static const float *g_hpss_sub_buf;
+static volatile size_t g_hpss_sub_pos;
+static size_t g_hpss_sub_frames;
+static unsigned g_hpss_sub_ch;
+static volatile int g_hpss_write_ok;
+static void *g_hpss_cmd[4];
+static int g_hpss_cmd_n;
+
+static uint64_t g_hpss_name[2];
+static int g_hpss_names_ready;
+
+static void hpss_make_names(void)
+{
+    if (g_hpss_names_ready)
+        return;
+    FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[0], "HPSS Harmonic");
+    FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[1], "HPSS Percussive");
+    g_hpss_names_ready = 1;
+}
+
+static void hpss_ctor_hook(void *cmd, void *name, int dest, void *settings,
+                           void *padstate, void *project, void *s1, void *s2,
+                           void *s3)
+{
+    if (g_hpss_arm && (uintptr_t)padstate == g_hpss_arm_source) {
+        hpss_make_names();
+        name = (void *)&g_hpss_name[g_hpss_arm_name ? 1 : 0];
+        if (g_hpss_cmd_n < 4)
+            g_hpss_cmd[g_hpss_cmd_n++] = cmd;
+        mlog("HPSS ctor: cmd=%p dest=%d settings=%p name=%s\n", cmd, dest,
+             settings, g_hpss_arm_name ? "HPSS Percussive" : "HPSS Harmonic");
+    }
+    if (orig_hpss_ctor)
+        orig_hpss_ctor(cmd, name, dest, settings, padstate, project, s1, s2, s3);
+}
+
+static void hpss_exec_hook(void *cmd)
+{
+    int armed = 0;
+    for (int i = 0; i < g_hpss_cmd_n; ++i)
+        if (g_hpss_cmd[i] == cmd)
+            armed = 1;
+    uintptr_t settings = 0;
+    uint64_t old_start = 0, old_end = 0;
+    int patched = 0;
+    if (armed && g_hpss_arm && g_hpss_arm_buf) {
+        g_hpss_sub_buf = g_hpss_arm_buf;
+        g_hpss_sub_frames = g_hpss_arm_frames;
+        g_hpss_sub_ch = g_hpss_arm_ch;
+        g_hpss_sub_pos = 0;
+        g_hpss_sub_on = 1;
+        g_hpss_write_ok = 0;
+        /* The constructor stores the settings object by pointer; the execute
+         * method is what copies its range into the slice command.  Patch it
+         * here, for exactly the duration of that copy. */
+        if (rd((uintptr_t)cmd + 0x60, &settings, 8) && settings &&
+            rd(settings + HPSS_RANGE_START, &old_start, 8) &&
+            rd(settings + HPSS_RANGE_END, &old_end, 8)) {
+            uint64_t start = 0, end = g_hpss_arm_frames;
+            patched = wr(settings + HPSS_RANGE_START, &start, 8) &&
+                      wr(settings + HPSS_RANGE_END, &end, 8);
+            mlog("HPSS exec: cmd=%p settings range %llu..%llu -> 0..%zu\n", cmd,
+                 (unsigned long long)old_start, (unsigned long long)old_end,
+                 g_hpss_arm_frames);
+        }
+        mlog("HPSS exec: cmd=%p armed %zu frames x %u ch\n", cmd,
+             g_hpss_arm_frames, g_hpss_arm_ch);
+    }
+    if (orig_hpss_exec)
+        orig_hpss_exec(cmd);
+    if (patched) {
+        wr(settings + HPSS_RANGE_START, &old_start, 8);
+        wr(settings + HPSS_RANGE_END, &old_end, 8);
+    }
+    if (armed && g_hpss_sub_on) {
+        /* The native writer may run on an executor thread.  Wait for it so the
+         * buffer stays alive and the next extraction starts from a clean state. */
+        int spins = 0;
+        while (g_hpss_sub_pos < g_hpss_sub_frames && spins++ < 3000)
+            usleep(1000);
+        g_hpss_sub_on = 0;
+        g_hpss_write_ok = (g_hpss_sub_pos == g_hpss_sub_frames);
+        mlog("HPSS exec: cmd=%p writer consumed %zu/%zu frames%s\n", cmd,
+             g_hpss_sub_pos, g_hpss_sub_frames,
+             g_hpss_write_ok ? "" : " (INCOMPLETE)");
+    }
+}
+
+static void hpss_writer_hook(void *closure, void *block)
+{
+    if (!g_hpss_sub_on || !block) {
+        if (orig_hpss_writer)
+            orig_hpss_writer(closure, block);
+        return;
+    }
+    unsigned frames = 0;
+    float *ptr = NULL;
+    memcpy(&frames, block, sizeof frames);
+    memcpy(&ptr, (char *)block + 8, sizeof ptr);
+    size_t pos = g_hpss_sub_pos;
+    if (g_hpss_sub_buf && frames &&
+        pos + frames <= g_hpss_sub_frames) {
+        float *replacement =
+            (float *)(g_hpss_sub_buf + pos * (size_t)g_hpss_sub_ch);
+        memcpy((char *)block + 8, &replacement, sizeof replacement);
+        if (orig_hpss_writer)
+            orig_hpss_writer(closure, block);
+        memcpy((char *)block + 8, &ptr, sizeof ptr);
+        g_hpss_sub_pos = pos + frames;
+        mlog("HPSS writer: %u frames at %zu\n", frames, pos);
+    } else {
+        mlog("HPSS writer: refusing block frames=%u pos=%zu total=%zu\n", frames,
+             pos, g_hpss_sub_frames);
+        if (orig_hpss_writer)
+            orig_hpss_writer(closure, block);
+    }
+}
+
+static int hpss_read_sample(void *s, void **screen, uintptr_t *state,
+                            uintptr_t *sample, unsigned *frames, unsigned *ch,
+                            unsigned *rate);
+
+static int hpss_sample_now(void **screen, uintptr_t *state, uintptr_t *sample,
+                           unsigned *frames, unsigned *ch, unsigned *rate)
+{
+    return hpss_read_sample(g_screen, screen, state, sample, frames, ch, rate);
+}
+
+static int hpss_read_sample(void *s, void **screen, uintptr_t *state,
+                            uintptr_t *sample, unsigned *frames, unsigned *ch,
+                            unsigned *rate)
+{
+    if (!s || FIELD(s, 0, uintptr_t) != base + A_SCREEN_VT)
+        return 0;
+    if (!FN(0x112fd50, int (*)(void *))(s))
+        return 0;
+    uintptr_t binding = 0, st = 0, layers = 0, smp = 0, meta = 0;
+    if (!rd((uintptr_t)s + 0x178, &binding, 8) || !binding ||
+        !rd(binding + 0x60, &st, 8) || !st ||
+        !rd(st + 0x22e8, &layers, 8) || !layers ||
+        !rd(layers + 0x4a8, &smp, 8) || !smp ||
+        !rd(smp + 0x130, &meta, 8) || !meta)
+        return 0;
+    unsigned short c = 0;
+    unsigned fr = 0, rt = 0;
+    if (!rd(meta, &c, 2) || !rd(meta + 4, &fr, 4) || !rd(meta + 8, &rt, 4))
+        return 0;
+    if ((c != 1 && c != 2) || !fr || rt < 8000 || rt > 192000)
+        return 0;
+    if (screen)
+        *screen = s;
+    if (state)
+        *state = st;
+    if (sample)
+        *sample = smp;
+    if (frames)
+        *frames = fr;
+    if (ch)
+        *ch = c;
+    if (rate)
+        *rate = rt;
+    return 1;
+}
+
+/* Metadata-only reader used to match a path before decoding.  It accepts the
+ * same formats as wav_read_f32 (including 64-bit float). */
+static int hpss_wav_info(const char *path, unsigned *frames, unsigned *ch,
+                         unsigned *rate)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    unsigned char h[12];
+    if (pread(fd, h, 12, 0) != 12 || memcmp(h, "RIFF", 4) ||
+        memcmp(h + 8, "WAVE", 4)) {
+        close(fd);
+        return 0;
+    }
+    unsigned encoding = 0, channels = 0, bits = 0, rt = 0, dof = 0, len = 0;
+    off_t off = 12;
+    for (int guard = 0; guard < 64; ++guard) {
+        unsigned char ck[8];
+        if (pread(fd, ck, 8, off) != 8)
+            break;
+        unsigned sz = (unsigned)ck[4] | ((unsigned)ck[5] << 8) |
+                      ((unsigned)ck[6] << 16) | ((unsigned)ck[7] << 24);
+        if (!memcmp(ck, "fmt ", 4) && sz >= 16 && sz <= 40) {
+            unsigned char f[40] = {0};
+            if (sz > sizeof f || pread(fd, f, sz, off + 8) != (ssize_t)sz)
+                break;
+            encoding = (unsigned)f[0] | ((unsigned)f[1] << 8);
+            channels = (unsigned)f[2] | ((unsigned)f[3] << 8);
+            rt = (unsigned)f[4] | ((unsigned)f[5] << 8) |
+                 ((unsigned)f[6] << 16) | ((unsigned)f[7] << 24);
+            bits = (unsigned)f[14] | ((unsigned)f[15] << 8);
+            if (encoding == 0xfffe && sz >= 40)
+                encoding = (unsigned)f[24] | ((unsigned)f[25] << 8);
+        } else if (!memcmp(ck, "data", 4)) {
+            dof = (unsigned)off + 8;
+            len = sz;
+            if (encoding)
+                break;
+        }
+        off += 8 + (off_t)sz + (off_t)(sz & 1);
+    }
+    close(fd);
+    if (!dof || !len || !channels || !rt || !bits)
+        return 0;
+    if (!((encoding == 1 && (bits == 16 || bits == 24 || bits == 32)) ||
+          (encoding == 3 && (bits == 32 || bits == 64))))
+        return 0;
+    unsigned bps = bits / 8;
+    *frames = len / (bps * channels);
+    *ch = channels;
+    *rate = rt;
+    return 1;
+}
+
+static int hpss_wav_matches(const char *path, unsigned frames, unsigned ch,
+                            unsigned rate)
+{
+    unsigned fr = 0, c = 0, rt = 0;
+    return hpss_wav_info(path, &fr, &c, &rt) && fr == frames && c == ch &&
+           rt == rate;
+}
+
+/* A fallback for a freshly recorded sample that has no path in its object yet:
+ * accept only a unique file with the same frame count, channel count and rate.
+ * Frame count alone is not a safe identity. */
+static int hpss_wav_unique(unsigned want_frames, unsigned want_ch,
+                           unsigned want_rate, char *path, size_t pathsz)
+{
+    const char *root = "/data/TempProjects";
+    DIR *d = opendir(root);
+    if (!d)
+        return 0;
+    struct dirent *de;
+    char found[512] = {0};
+    int matches = 0;
+    while ((de = readdir(d))) {
+        if (de->d_name[0] == '.')
+            continue;
+        char sub[512];
+        snprintf(sub, sizeof sub, "%s/%s", root, de->d_name);
+        DIR *d2 = opendir(sub);
+        if (!d2)
+            continue;
+        struct dirent *f;
+        while ((f = readdir(d2))) {
+            size_t len = strlen(f->d_name);
+            if (len < 5 || strcasecmp(f->d_name + len - 4, ".wav"))
+                continue;
+            char full[512];
+            snprintf(full, sizeof full, "%s/%s", sub, f->d_name);
+            unsigned fr = 0, rt = 0, ch = 0;
+            if (!hpss_wav_info(full, &fr, &ch, &rt) || fr != want_frames ||
+                rt != want_rate || ch != want_ch)
+                continue;
+            matches++;
+            if (matches == 1)
+                snprintf(found, sizeof found, "%s", full);
+        }
+        closedir(d2);
+    }
+    closedir(d);
+    if (matches != 1)
+        return 0;
+    snprintf(path, pathsz, "%s", found);
+    return 1;
+}
+
+static int hpss_path_for(uintptr_t sample, unsigned frames, unsigned ch,
+                         unsigned rate, char *path, size_t pathsz)
+{
+    char candidate[512];
+    if (path_from_object(sample, frames, candidate, sizeof candidate) &&
+        hpss_wav_matches(candidate, frames, ch, rate)) {
+        snprintf(path, pathsz, "%s", candidate);
+        return 1;
+    }
+    if (wav_path_of(sample, frames, candidate, sizeof candidate) &&
+        hpss_wav_matches(candidate, frames, ch, rate)) {
+        snprintf(path, pathsz, "%s", candidate);
+        return 1;
+    }
+    if (hpss_wav_unique(frames, ch, rate, path, pathsz))
+        return 1;
+    return 0;
+}
+
+static int hpss_free_pad(void *program)
+{
+    if (!program)
+        return -1;
+    return FN(A_HPSS_FREE_PAD, int (*)(void *))(program);
+}
+
+/* Count empty pads with the same two checks the native finder uses: a null pad
+ * state, or a pad state whose layers are all empty. */
+static int hpss_free_count(void *program)
+{
+    uintptr_t lo = 0, hi = 0;
+    if (!program || !rd((uintptr_t)program + 0x2808, &lo, 8) ||
+        !rd((uintptr_t)program + 0x2810, &hi, 8) || !lo || hi < lo)
+        return 0;
+    int count = 0;
+    size_t n = (size_t)((hi - lo) / 8);
+    if (n > 128)
+        n = 128;
+    for (size_t i = 0; i < n; ++i) {
+        uintptr_t st = 0;
+        if (!rd(lo + i * 8, &st, 8))
+            break;
+        if (!st || !FN(A_HPSS_PAD_BUSY, int (*)(void *))((void *)st))
+            count++;
+    }
+    return count;
+}
+
+/* Run one native Extract whose audio comes from `buf` instead of the source
+ * waveform.  The execute hook applies the full-sample range to the settings
+ * object just before the native command copies it. */
+static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
+                            size_t frames, unsigned ch, int name, int *dest)
+{
+    if (dest)
+        *dest = -1;
+    uintptr_t program = 0;
+    if (!screen || !buf || !frames || !ch ||
+        !rd(state + 0x2310, &program, 8) || !program)
+        return 0;
+    int before = hpss_free_pad((void *)program);
+    if (before < 0)
+        return 0;
+    if (dest)
+        *dest = before;
+
+    g_hpss_cmd_n = 0;
+    g_hpss_arm_source = state;
+    g_hpss_arm_buf = buf;
+    g_hpss_arm_frames = frames;
+    g_hpss_arm_ch = ch;
+    g_hpss_arm_name = name;
+    g_hpss_arm = 1;
+    FN(A_HPSS_EXTRACT_HANDLER, void (*)(void *))(screen);
+    g_hpss_arm = 0;
+
+    /* The command may be executed on an executor thread after the handler
+     * returns.  Wait for the pad to change before starting the next one. */
+    int after = before;
+    for (int i = 0; i < 3000 && after == before; ++i) {
+        usleep(1000);
+        after = hpss_free_pad((void *)program);
+    }
+    int ok = after != before && g_hpss_write_ok;
+    mlog("HPSS extract: pad %d -> free %d (%s, write %s)\n", before, after,
+         after != before ? "assigned" : "NO ASSIGNMENT",
+         g_hpss_write_ok ? "complete" : "INCOMPLETE");
+    return ok;
+}
+
+/* ------------------------------------------------------------ HPSS job/menu */
+struct hpss_job {
+    void *screen;
+    uintptr_t state;
+    uintptr_t sample;
+    unsigned frames;
+    unsigned ch;
+    unsigned rate;
+    float *input;
+    float *harmonic;
+    float *percussive;
+    int rc;
+};
+
+static struct hpss_job *volatile g_hpss_job;
+static volatile int g_hpss_busy;
+static volatile int g_hpss_done;
+static volatile int g_hpss_finalizing;
+static volatile int g_hpss_menu;
+static volatile int g_hpss_data_down;
+static char g_hpss_status[96];
+static unsigned char g_hpss_btn[16];
+static int g_hpss_btn_valid;
+static int g_hpss_chop_before;
+static int g_hpss_restore_pending;
+
+static void hpss_repaint(void)
+{
+    void *comp = g_paint_comp ? g_paint_comp : g_screen;
+    if (orig_repaint && comp)
+        orig_repaint(comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
+}
+
+static int sample_page_visible(void)
+{
+    void *s = g_screen;
+    return s && FIELD(s, 0, uintptr_t) == base + A_SCREEN_VT &&
+           FN(0x112fd50, int (*)(void *))(s) != 0;
+}
+
+static int hpss_chop_mode(void)
+{
+    void *s = g_screen;
+    if (!s || FIELD(s, 0, uintptr_t) != base + A_SCREEN_VT)
+        return 0;
+    return FN(0x112fd50, int (*)(void *))((char *)s + 0x1ee0) != 0;
+}
+
+/* Stock Extract can leave the Sample page in Chop mode.  Replay the CHOP
+ * button through the app's own dispatcher so the page returns to the mode the
+ * user had before HPSS. */
+static void hpss_restore_chop(void)
+{
+    if (!g_hpss_btn_valid || !orig_buttons || g_shift || !sample_page_visible()) {
+        g_hpss_restore_pending = 1;
+        return;
+    }
+    if (hpss_chop_mode() == g_hpss_chop_before)
+        return;
+    unsigned char ev[16];
+    memcpy(ev, g_hpss_btn, sizeof ev);
+    ev[8] = 0x4b; /* CHOP */
+    ev[9] = 0x7f;
+    orig_buttons(ev);
+    ev[9] = 0x00;
+    orig_buttons(ev);
+    mlog("HPSS: restored chop mode to %d\n", g_hpss_chop_before);
+}
+
+static void *hpss_worker(void *arg)
+{
+    struct hpss_job *job = arg;
+    int rc = hpss_split(job->input, job->frames, job->ch, job->rate,
+                        &job->harmonic, &job->percussive);
+    job->rc = rc;
+    __atomic_store_n(&g_hpss_done, 1, __ATOMIC_RELEASE);
+    mlog("HPSS worker: rc=%d frames=%u ch=%u\n", rc, job->frames, job->ch);
+    hpss_repaint();
+    return NULL;
+}
+
+static void hpss_free_job(struct hpss_job *job)
+{
+    if (!job)
+        return;
+    free(job->input);
+    free(job->harmonic);
+    free(job->percussive);
+    free(job);
+}
+
+static void hpss_set_status(const char *text)
+{
+    if (!text)
+        text = "";
+    size_t n = strlen(text);
+    if (n >= sizeof g_hpss_status)
+        n = sizeof g_hpss_status - 1;
+    memcpy(g_hpss_status, text, n);
+    g_hpss_status[n] = 0;
+}
+
+static void hpss_start(void)
+{
+    if (g_hpss_busy || g_hpss_job)
+        return;
+    void *screen = 0;
+    uintptr_t state = 0, sample = 0;
+    unsigned frames = 0, ch = 0, rate = 0;
+    if (!hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate)) {
+        hpss_set_status("HPSS: no sample on this pad");
+        toast("HPSS: no sample");
+        return;
+    }
+    char path[512] = {0};
+    if (!hpss_path_for(sample, frames, ch, rate, path, sizeof path)) {
+        hpss_set_status("HPSS: no exact WAV file");
+        toast("HPSS: no WAV");
+        return;
+    }
+    float *input = NULL;
+    if (!wav_read_f32(path, frames, ch, rate, &input, NULL, NULL)) {
+        hpss_set_status("HPSS: cannot decode WAV");
+        toast("HPSS: bad WAV");
+        return;
+    }
+    struct hpss_job *job = calloc(1, sizeof *job);
+    if (!job) {
+        free(input);
+        hpss_set_status("HPSS: out of memory");
+        return;
+    }
+    job->screen = screen;
+    job->state = state;
+    job->sample = sample;
+    job->frames = frames;
+    job->ch = ch;
+    job->rate = rate;
+    job->input = input;
+    job->rc = -1;
+    g_hpss_chop_before = hpss_chop_mode();
+    g_hpss_job = job;
+    g_hpss_busy = 1;
+    __atomic_store_n(&g_hpss_done, 0, __ATOMIC_RELEASE);
+    hpss_set_status("Processing HPSS...");
+    mlog("HPSS start: %s frames=%u ch=%u rate=%u\n", path, frames, ch, rate);
+    pthread_t th;
+    int cr = pthread_create(&th, 0, hpss_worker, job);
+    if (cr != 0) {
+        g_hpss_job = NULL;
+        g_hpss_busy = 0;
+        hpss_free_job(job);
+        hpss_set_status("HPSS: worker failed");
+        toast("HPSS: worker failed");
+        return;
+    }
+    pthread_detach(th);
+    hpss_repaint();
+}
+
+static void hpss_finalize(void)
+{
+    if (g_hpss_finalizing || !__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE))
+        return;
+    g_hpss_finalizing = 1;
+    __atomic_store_n(&g_hpss_done, 0, __ATOMIC_RELEASE);
+    struct hpss_job *job = g_hpss_job;
+    g_hpss_job = NULL;
+    if (!job) {
+        g_hpss_busy = 0;
+        g_hpss_finalizing = 0;
+        return;
+    }
+    if (job->rc != 0 || !job->harmonic || !job->percussive) {
+        hpss_set_status("HPSS: processing failed");
+        toast("HPSS: processing failed");
+        goto out;
+    }
+    if (g_screen != job->screen || !sample_page_visible()) {
+        hpss_set_status("HPSS: cancelled (page changed)");
+        toast("HPSS cancelled");
+        goto out;
+    }
+    {
+        void *s = 0;
+        uintptr_t st = 0, smp = 0;
+        unsigned fr = 0, ch = 0, rt = 0;
+        if (!hpss_read_sample(job->screen, &s, &st, &smp, &fr, &ch, &rt) ||
+            st != job->state || smp != job->sample || fr != job->frames ||
+            ch != job->ch || rt != job->rate) {
+            hpss_set_status("HPSS: cancelled (sample changed)");
+            toast("HPSS cancelled");
+            goto out;
+        }
+    }
+    {
+        uintptr_t program = 0;
+        if (!rd(job->state + 0x2310, &program, 8) || !program ||
+            hpss_free_count((void *)program) < 2) {
+            hpss_set_status("HPSS: need 2 empty pads");
+            toast("HPSS: need 2 pads");
+            goto out;
+        }
+        int first_pad = -1, second_pad = -1;
+        int a = hpss_extract_ctx(job->screen, job->state, job->harmonic,
+                                 job->frames, job->ch, 0, &first_pad);
+        if (!a) {
+            hpss_restore_chop();
+            hpss_set_status("HPSS: first output failed");
+            toast("HPSS: write failed");
+            goto out;
+        }
+        int b = hpss_extract_ctx(job->screen, job->state, job->percussive,
+                                 job->frames, job->ch, 1, &second_pad);
+        hpss_restore_chop();
+        if (!b) {
+            /* Do not attempt a destructive rollback here.  Clearing the first
+             * pad outside the native command/history path made the app delete
+             * the file and then report a missing sample on reload.  Leave the
+             * harmonic output in place and tell the user exactly what happened. */
+            hpss_set_status("HPSS: harmonic only (second failed)");
+            toast("HPSS: 1 of 2");
+            goto out;
+        }
+    }
+    hpss_set_status("HPSS: harmonic + percussive created");
+    toast("HPSS done");
+    g_hpss_menu = 0;
+out:
+    hpss_free_job(job);
+    g_hpss_busy = 0;
+    g_hpss_menu = 0;
+    g_hpss_data_down = 0;
+    g_hpss_finalizing = 0;
+    hpss_repaint();
+}
+
+static void hpss_open(void)
+{
+    if (!sample_page_visible() || g_hpss_busy)
+        return;
+    g_hpss_menu = 1;
+    g_hpss_data_down = 0;
+    hpss_set_status("");
+    hpss_repaint();
+}
+
+static void hpss_close(void)
+{
+    if (g_hpss_busy)
+        return;
+    g_hpss_menu = 0;
+    g_hpss_data_down = 0;
+    hpss_repaint();
+}
+
+static void hpss_activate(void)
+{
+    if (!g_hpss_busy)
+        hpss_start();
+}
+
+static void draw_colour(void *g, uint32_t v);
+static void draw_rect(void *g, int x, int y, int w, int h);
+static void draw_text(void *g, const char *s, int x, int y, int w, int h,
+                      float size);
+
+static void hpss_draw_menu(void *g)
+{
+    int x = 14, y = 26, w = 292, h = 150;
+    draw_colour(g, 0xff101014);
+    draw_rect(g, x, y, w, h);
+    draw_colour(g, 0xffffb43c);
+    draw_rect(g, x, y, w, 2);
+    draw_rect(g, x, y + h - 2, w, 2);
+    draw_colour(g, 0xffffffff);
+    draw_text(g, "SAMPLE OPTIONS", x + 10, y + 8, w - 20, 24, 18.0f);
+    if (g_hpss_busy) {
+        draw_text(g, "Processing HPSS...", x + 10, y + 56, w - 20, 24, 16.0f);
+        draw_text(g, "harmonic + percussive", x + 10, y + 82, w - 20, 20,
+                  12.0f);
+    } else {
+        draw_colour(g, 0xff3a2a10);
+        draw_rect(g, x + 6, y + 44, w - 12, 46);
+        draw_colour(g, 0xffffffff);
+        draw_text(g, "HPSS", x + 12, y + 48, w - 24, 22, 16.0f);
+        draw_text(g, "split into harmonic + percussive", x + 12, y + 68,
+                  w - 24, 18, 12.0f);
+        if (g_hpss_status[0])
+            draw_text(g, g_hpss_status, x + 10, y + 110, w - 20, 18, 12.0f);
+    }
+    draw_colour(g, 0xffb0b0b0);
+    draw_text(g, "DATA: confirm    SHIFT+DATA: close", x + 10, y + h - 22,
+              w - 20, 16, 11.0f);
+}
+
 static void buttons(void *event)
 {
 
     unsigned code = event ? FIELD(event, 8, uint8_t) : 0;
     unsigned down = event ? FIELD(event, 9, uint8_t) : 0;
+    if (event && rd((uintptr_t)event, g_hpss_btn, sizeof g_hpss_btn))
+        g_hpss_btn_valid = 1;
+    if (code == 0x6f) { /* DATA press/turn */
+        int visible = sample_page_visible();
+        if (down && !g_hpss_data_down) {
+            if (g_shift) {
+                if (visible && !g_hpss_busy) {
+                    if (g_hpss_menu)
+                        hpss_close();
+                    else
+                        hpss_open();
+                }
+            } else if (g_hpss_menu) {
+                hpss_activate();
+            }
+        }
+        g_hpss_data_down = !!down;
+        if (g_hpss_menu || (g_shift && visible))
+            return;
+    }
     if (getenv("MINIMOD_VIS") && g_screen)
         mlog("minimod: vis code=0x%02x chopA=%d chopB=%d\n", code,
              FN(0x112fd50, int (*)(void *))((char *)g_screen + 0x15e0),
@@ -1518,12 +2341,18 @@ static void buttons(void *event)
         if (!down) {
             g_trim_step = 0;      /* the cycle only lives while SHIFT is held */
             g_b3_down = 0;
+            if (g_hpss_restore_pending) {
+                g_hpss_restore_pending = 0;
+                hpss_restore_chop();
+            }
         }
         set_filter_text(down ? "AutoTrim" : "Filter");
         if (orig_buttons)
             orig_buttons(event);
         return;
     }
+    if (g_hpss_menu)
+        return;
     if (code == 0x0e && g_shift && !in_chop_mode()) { /* SHIFT + B3: 3 %, 6 %, 9 %, untrimmed */
         /* The button repeats while held, so act on the press edge only. */
         if (down && !g_b3_down) {
@@ -3216,7 +4045,6 @@ static void repaint_hook(void *comp, uint64_t a, uint64_t b)
 /* Overdraw, the way am-mod does it: take the screen's vtable slot 27 (paint),
  * keep the stock function, and paint on top of it with the app's own Graphics
  * calls (setColour / fillRect / Font + drawText). */
-#define A_SCREEN_VT 0x6e212a0
 /* The Trim page is its own class (found by matching its cached percentages);
  * it is not the plain SampleModeScreen. */
 #define A_TRIM_PAGE_VT 0x6e31ee8
@@ -3354,6 +4182,12 @@ static void screen_paint(void *p, void *g)
         g_screen = p;
         mlog("minimod: screen=%p\n", p);
     }
+    if (__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE))
+        hpss_finalize();
+    if (g_hpss_restore_pending && !g_shift && sample_page_visible()) {
+        g_hpss_restore_pending = 0;
+        hpss_restore_chop();
+    }
     {
         static int dumped;
         if (!dumped && getenv("MINIMOD_DUMP")) {
@@ -3434,6 +4268,10 @@ static void screen_paint(void *p, void *g)
         draw_rect(g, (uint64_t)x1, 88, 1, 98);
         draw_rect(g, (uint64_t)x0, 88, 3, 1);
         draw_rect(g, (uint64_t)x1, 88, 3, 1);
+    }
+    if (g_hpss_menu) {
+        hpss_draw_menu(g);
+        return;
     }
     if (!g_shift || in_chop_mode())
         return;
@@ -4323,6 +5161,22 @@ __attribute__((constructor)) static void load(void)
         orig_label_text = (void *(*)(void *))t_lt;
     if (t_dt)
         orig_draw_text = (void (*)(void *, const uint64_t *, int, int, int, int, int, int, float))t_dt;
+    {
+        void *t = 0;
+        t = install_hook(base + A_HPSS_EXTRACT_CTOR, (void *)hpss_ctor_hook);
+        if (t)
+            orig_hpss_ctor = (void (*)(void *, void *, int, void *, void *, void *,
+                                       void *, void *, void *))t;
+        t = install_hook(base + A_HPSS_EXTRACT_EXEC, (void *)hpss_exec_hook);
+        if (t)
+            orig_hpss_exec = (void (*)(void *))t;
+        t = install_hook(base + A_HPSS_WRITE_CB, (void *)hpss_writer_hook);
+        if (t)
+            orig_hpss_writer = (void (*)(void *, void *))t;
+        mlog("HPSS hooks: ctor=%p exec=%p writer=%p\n",
+             (void *)orig_hpss_ctor, (void *)orig_hpss_exec,
+             (void *)orig_hpss_writer);
+    }
     install_screen_paint();
 #if MINIMOD_DEBUG
     {

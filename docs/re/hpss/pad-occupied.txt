@@ -1,0 +1,38 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Program: knob.bin
+Time: Wed Nov 04 00:32:35 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Size: 1410 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x29047b0]
+
+--- SCRIPT OUTPUT ---
+===== 0x29047b0 => FUN_029047b0 @ 029047b0 =====
+
+byte FUN_029047b0(long param_1)
+
+{
+  byte bVar1;
+  long lVar2;
+  long lVar3;
+  
+  lVar3 = *(long *)(param_1 + 0x22f0);
+  lVar2 = *(long *)(param_1 + 0x22e8);
+  do {
+    if (lVar3 == lVar2) {
+      return 0;
+    }
+    bVar1 = FUN_02914930(lVar2);
+    lVar2 = lVar2 + 0xb30;
+  } while ((bVar1 & 1) == 0);
+  return bVar1;
+}
+
+
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+

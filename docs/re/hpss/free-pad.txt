@@ -1,0 +1,50 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Program: knob.bin
+Time: Wed Nov 04 00:30:47 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Size: 1410 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x296dd00]
+
+--- SCRIPT OUTPUT ---
+===== 0x296dd00 => FUN_0296dd00 @ 0296dd00 =====
+
+int FUN_0296dd00(long *param_1)
+
+{
+  ulong uVar1;
+  int iVar2;
+  long lVar3;
+  
+  lVar3 = 0;
+  iVar2 = 0;
+  do {
+    if (*(code **)(*param_1 + 0xd0) == (code *)&LAB_02967600) {
+      if ((int)(param_1[0x502] - param_1[0x501] >> 3) <= iVar2) {
+        return iVar2;
+      }
+      if (*(long *)(param_1[0x501] + lVar3) == 0) {
+        return iVar2;
+      }
+      uVar1 = FUN_029047b0();
+    }
+    else {
+      uVar1 = (**(code **)(*param_1 + 0xd0))(param_1,iVar2);
+    }
+    if ((uVar1 & 1) == 0) {
+      return iVar2;
+    }
+    iVar2 = iVar2 + 1;
+    lVar3 = lVar3 + 8;
+  } while (iVar2 != 0x80);
+  return -1;
+}
+
+
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+

@@ -1,0 +1,62 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Program: knob.bin
+Time: Wed Nov 04 00:26:44 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Size: 1304 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x1a9a290]
+
+--- SCRIPT OUTPUT ---
+===== 0x1a9a290 => FUN_01a9a290 @ 01a9a290 =====
+
+void FUN_01a9a290(long param_1,undefined4 param_2,undefined8 param_3,int param_4)
+
+{
+  undefined4 uVar1;
+  undefined4 uVar2;
+  ulong uVar3;
+  undefined8 uVar4;
+  float fVar5;
+  int local_8;
+  
+  uVar4 = *(undefined8 *)(param_1 + 0x80);
+  uVar1 = *(undefined4 *)(param_1 + 0xa0);
+  local_8 = 0;
+  uVar3 = FUN_02a2eb00(*(undefined8 *)(*(long *)(param_1 + 0x60) + 0x1278),param_3);
+  if ((uVar3 & 0x100000000) != 0) {
+    local_8 = (int)uVar3;
+    local_8 = local_8 + 1;
+  }
+  uVar2 = FUN_0288cd80(0x40d,param_2);
+  FUN_029c6790((float)local_8,uVar4,uVar1,uVar2);
+  uVar1 = *(undefined4 *)(param_1 + 0xa0);
+  uVar4 = *(undefined8 *)(param_1 + 0x80);
+  if (param_4 == 0x80) {
+    fVar5 = 0.007751938;
+  }
+  else {
+    fVar5 = 0.0;
+    if (param_4 != 0x81) {
+      param_4 = param_4 + 1;
+      if (0x80 < param_4) {
+        param_4 = 0x80;
+      }
+      if (param_4 < 0) {
+        param_4 = -1;
+      }
+      fVar5 = ((float)param_4 + 1.0) / 129.0;
+    }
+  }
+  uVar2 = FUN_0288cd80(0x45e,param_2);
+  FUN_029c6790(fVar5,uVar4,uVar1,uVar2);
+  return;
+}
+
+
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+

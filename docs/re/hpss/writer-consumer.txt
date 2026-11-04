@@ -1,0 +1,96 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Program: knob.bin
+Time: Wed Nov 04 00:35:23 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Size: 1410 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x1e8ada0]
+
+--- SCRIPT OUTPUT ---
+===== 0x1e8ada0 => FUN_01e8ada0 @ 01e8ada0 =====
+
+undefined8 * FUN_01e8ada0(undefined8 *param_1,long param_2,undefined8 param_3)
+
+{
+  undefined4 uVar1;
+  long *plVar2;
+  long lVar3;
+  undefined8 uVar4;
+  undefined8 local_a8;
+  undefined1 *puStack_a0;
+  long local_98;
+  undefined1 local_90;
+  undefined7 uStack_8f;
+  undefined8 *local_80;
+  undefined1 **local_78;
+  code *local_70;
+  undefined1 *local_68 [2];
+  long local_58;
+  
+  local_58 = *(long *)PTR___stack_chk_guard_07264398;
+  if ((*(long *)(param_2 + 8) == 0) || (plVar2 = *(long **)(param_2 + 0x10), plVar2 == (long *)0x0))
+  {
+    *param_1 = 0xffffffffffffffff;
+    param_1[1] = param_1 + 3;
+    param_1[2] = 0;
+    *(undefined1 *)(param_1 + 3) = 0;
+  }
+  else {
+    lVar3 = *(long *)(*(long *)(param_2 + 8) + 8);
+    local_90 = 0;
+    local_a8 = 0;
+    local_98 = 0;
+    puStack_a0 = &local_90;
+                    /* try { // try from 01e8ae18 to 01e8ae1b has its CatchHandler @ 01e8afd8 */
+    (**(code **)(*plVar2 + 0x10))(&local_80,plVar2,lVar3,*(code **)(*plVar2 + 0x10),0);
+    if (local_78 != local_68) {
+      operator_delete(local_78,(ulong)(local_68[0] + 1));
+    }
+    uVar1 = *(undefined4 *)(lVar3 + 4);
+    uVar4 = *(undefined8 *)(param_2 + 8);
+    local_80 = (undefined8 *)0x0;
+    local_78 = (undefined1 **)0x0;
+    local_70 = (code *)0x0;
+    local_68[0] = (undefined1 *)0x0;
+                    /* try { // try from 01e8ae4c to 01e8ae4f has its CatchHandler @ 01e8af68 */
+    local_80 = operator_new(0x18);
+    *local_80 = param_3;
+    local_80[1] = &local_a8;
+    local_80[2] = param_2;
+    local_70 = FUN_01e8ac90;
+    local_68[0] = &LAB_01e8aff0;
+                    /* try { // try from 01e8ae8c to 01e8ae8f has its CatchHandler @ 01e8af8c */
+    FUN_021c6e40(uVar4,0,uVar1,&local_80,0xffffffff);
+    if (local_70 != (code *)0x0) {
+      (*local_70)(&local_80,&local_80,3);
+    }
+                    /* try { // try from 01e8aeb4 to 01e8aeb7 has its CatchHandler @ 01e8afd8 */
+    (**(code **)(**(long **)(param_2 + 0x10) + 0x28))();
+    lVar3 = local_98;
+    *param_1 = local_a8;
+    param_1[1] = param_1 + 3;
+    if (puStack_a0 == &local_90) {
+      memcpy(param_1 + 3,&local_90,local_98 + 1);
+    }
+    else {
+      param_1[1] = puStack_a0;
+      param_1[3] = CONCAT71(uStack_8f,local_90);
+    }
+    param_1[2] = lVar3;
+  }
+  if (local_58 - *(long *)PTR___stack_chk_guard_07264398 != 0) {
+                    /* WARNING: Subroutine does not return */
+    __stack_chk_fail(PTR___stack_chk_guard_07264398,0,
+                     local_58 - *(long *)PTR___stack_chk_guard_07264398);
+  }
+  return param_1;
+}
+
+
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+

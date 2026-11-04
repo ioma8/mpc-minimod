@@ -1,0 +1,367 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Program: knob.bin
+Time: Wed Nov 04 00:30:40 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Size: 1410 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x17580d0]
+
+--- SCRIPT OUTPUT ---
+===== 0x17580d0 => FUN_017580d0 @ 017580d0 =====
+
+void FUN_017580d0(long param_1)
+
+{
+  pthread_mutex_t *ppVar1;
+  int iVar2;
+  uint uVar3;
+  int iVar4;
+  long *plVar5;
+  long lVar6;
+  ulong uVar7;
+  undefined8 *puVar8;
+  undefined *puVar9;
+  long lVar10;
+  undefined *puVar11;
+  char *pcVar12;
+  long lVar13;
+  long lVar14;
+  long lVar15;
+  long lVar16;
+  long lVar17;
+  undefined8 uVar18;
+  undefined1 auStack_108 [8];
+  undefined1 auStack_100 [8];
+  undefined1 auStack_f8 [8];
+  undefined1 auStack_f0 [8];
+  undefined1 auStack_e8 [8];
+  undefined1 auStack_e0 [8];
+  undefined1 auStack_d8 [8];
+  long lStack_d0;
+  long lStack_c8;
+  pointer_____offset_0x10___ *ppuStack_c0;
+  undefined8 *puStack_b8;
+  undefined1 auStack_a8 [32];
+  undefined8 uStack_88;
+  undefined8 uStack_80;
+  long lStack_68;
+  
+  lVar14 = *(long *)(*(long *)(param_1 + 0x178) + 0x60);
+  lStack_68 = *(long *)PTR___stack_chk_guard_07264398;
+  if ((lVar14 != 0) && (lVar15 = *(long *)(lVar14 + 0x2310), lVar15 != 0)) {
+    FUN_02903b90(&lStack_d0,lVar14,0,0);
+    if (lStack_d0 != 0) {
+                    /* try { // try from 0175813c to 0175813f has its CatchHandler @ 01758a00 */
+      iVar2 = FUN_0296dd00(lVar15);
+      lVar16 = *(long *)(param_1 + 0x100);
+      ppVar1 = (pthread_mutex_t *)(lVar16 + 0x38);
+      uVar3 = pthread_mutex_lock(ppVar1);
+      puVar9 = (undefined *)(ulong)uVar3;
+      if (uVar3 == 0) {
+        ppuStack_c0 = &PTR_vtable_06f08d30;
+                    /* try { // try from 01758170 to 01758173 has its CatchHandler @ 017589f4 */
+        plVar5 = (long *)FUN_0153ad50(lVar16,&ppuStack_c0);
+        lVar16 = *plVar5;
+        if (lVar16 != 0) {
+          pthread_mutex_unlock(ppVar1);
+          if (iVar2 < 0) {
+                    /* try { // try from 017585a4 to 017585a7 has its CatchHandler @ 01758a00 */
+            FUN_010535c0(auStack_d8,"Extract Failed");
+                    /* try { // try from 017585b4 to 017585b7 has its CatchHandler @ 01758904 */
+            FUN_010535c0(&ppuStack_c0,"No Empty Pads");
+                    /* try { // try from 017585c4 to 017585c7 has its CatchHandler @ 01758910 */
+            FUN_0215c3b0(lVar16,auStack_d8,&ppuStack_c0);
+            FUN_0100a290(&ppuStack_c0);
+            FUN_0100a290(auStack_d8);
+            goto LAB_01758540;
+          }
+          lVar17 = *(long *)(param_1 + 0x100);
+          ppVar1 = (pthread_mutex_t *)(lVar17 + 0x38);
+          uVar3 = pthread_mutex_lock(ppVar1);
+          puVar11 = PTR_PTR_072658b0;
+          puVar9 = (undefined *)(ulong)uVar3;
+          if (uVar3 != 0) {
+            lVar14 = 0;
+            puVar11 = PTR___stack_chk_guard_07264398;
+            if (lStack_68 == *(long *)PTR___stack_chk_guard_07264398) {
+                    /* WARNING: Subroutine does not return */
+              std::__throw_system_error(uVar3);
+            }
+            goto LAB_01758600;
+          }
+          ppuStack_c0 = (pointer_____offset_0x10___ *)PTR_PTR_072658b0;
+                    /* try { // try from 017581b0 to 017581b3 has its CatchHandler @ 01758a0c */
+          plVar5 = (long *)FUN_0153ad50(lVar17,&ppuStack_c0);
+          lVar17 = *plVar5;
+          if (lVar17 == 0) {
+                    /* try { // try from 0175862c to 0175862f has its CatchHandler @ 01758a0c */
+            FUN_01754420(auStack_a8);
+            pcVar12 = *(char **)(puVar11 + 8);
+            if (*pcVar12 == '*') {
+              pcVar12 = pcVar12 + 1;
+            }
+                    /* try { // try from 01758648 to 0175864b has its CatchHandler @ 017589d4 */
+            uVar18 = FUN_014dc9f0(auStack_a8,pcVar12);
+            FUN_014dcba0(&uStack_88,uVar18);
+            lVar14 = lStack_68 - *(long *)PTR___stack_chk_guard_07264398;
+            puVar9 = PTR___stack_chk_guard_07264398;
+            puVar11 = (undefined *)0x0;
+            if (lVar14 != 0) goto LAB_01758600;
+                    /* try { // try from 0175867c to 0175867f has its CatchHandler @ 017589cc */
+            FUN_01754480(uStack_88,uStack_80,0);
+            goto LAB_01758680;
+          }
+          pthread_mutex_unlock(ppVar1);
+          lVar10 = *(long *)(*(long *)(param_1 + 0x188) + 0x60);
+          if (lVar10 == 0) goto LAB_01758540;
+          lVar13 = *(long *)(lVar10 + 0x78);
+          lVar10 = *(long *)(lVar10 + 0xd0);
+                    /* try { // try from 017581ec to 017581ef has its CatchHandler @ 01758a00 */
+          FUN_02a4bca0();
+          uVar18 = *(undefined8 *)(param_1 + 0x150);
+          iVar4 = *(int *)(*(long *)(param_1 + 0x180) + 0x64c);
+          FUN_0101c620(&ppuStack_c0);
+                    /* try { // try from 01758218 to 0175821b has its CatchHandler @ 017589e0 */
+          FUN_016850a0(auStack_d8,uVar18,1,&ppuStack_c0);
+          FUN_0100a290(&ppuStack_c0);
+          FUN_01685050(auStack_d8);
+          if ((*(byte *)(*(long *)(param_1 + 0x118) + 0x53) & 1) == 0) {
+                    /* try { // try from 01758238 to 01758267 has its CatchHandler @ 01758a00 */
+            FUN_0218fb10();
+            lVar6 = *(long *)(param_1 + 0x180);
+            ppuStack_c0 = (pointer_____offset_0x10___ *)CONCAT44(ppuStack_c0._4_4_,iVar4);
+            if (*(int *)(lVar6 + 0x6b0) == 0) {
+              FUN_017680a0(lVar6 + 0x618,&ppuStack_c0);
+            }
+            else {
+                    /* try { // try from 017585e4 to 01758623 has its CatchHandler @ 01758a00 */
+              FUN_01625270(lVar6 + 0x630,iVar4);
+            }
+          }
+          FUN_01d31840(auStack_108);
+                    /* try { // try from 01758278 to 017582a3 has its CatchHandler @ 01758974 */
+          uVar7 = FUN_01eb36f0(lVar17,(lVar10 - lVar13) * 8,auStack_108,0);
+          if ((uVar7 & 1) != 0) {
+            lVar17 = FUN_015b7e50(*(undefined8 *)(param_1 + 0x100));
+            uVar18 = *(undefined8 *)(lVar17 + 0x1278);
+            FUN_02e444e0(auStack_100,*(undefined4 *)(lVar14 + 0x2168));
+                    /* try { // try from 017582bc to 017582bf has its CatchHandler @ 01758968 */
+            FUN_0101e5a0(auStack_f0,iVar4 + 1);
+                    /* try { // try from 017582d4 to 017582d7 has its CatchHandler @ 01758ab8 */
+            FUN_0104ce00(auStack_e8,"Chop ",auStack_f0);
+                    /* try { // try from 017582ec to 017582ef has its CatchHandler @ 01758aa0 */
+            FUN_01022bf0(auStack_e0,auStack_e8,&DAT_0468c4e0);
+                    /* try { // try from 01758300 to 01758303 has its CatchHandler @ 01758a4c */
+            FUN_01022b90(auStack_d8,auStack_e0,lStack_d0 + 0xa8);
+            ppuStack_c0 = (pointer_____offset_0x10___ *)0x0;
+            puStack_b8 = (undefined8 *)0x0;
+                    /* try { // try from 01758320 to 01758323 has its CatchHandler @ 01758a18 */
+            FUN_02a2f0e0(auStack_f8,uVar18,auStack_d8,&ppuStack_c0);
+            if (puStack_b8 != (undefined8 *)0x0) {
+              FUN_0133bca0();
+            }
+            FUN_0100a290(auStack_d8);
+            FUN_0100a290(auStack_e0);
+            FUN_0100a290(auStack_e8);
+            FUN_0100a290(auStack_f0);
+                    /* try { // try from 01758358 to 0175836f has its CatchHandler @ 017588a4 */
+            lVar15 = FUN_0296bbe0(lVar15,iVar2);
+            if (lVar15 != 0) {
+              Page_LoadPad(lVar15,lVar14);
+              uVar18 = FUN_015b7e50(*(undefined8 *)(param_1 + 0x100));
+              lVar15 = *(long *)(param_1 + 0x100);
+              ppVar1 = (pthread_mutex_t *)(lVar15 + 0x38);
+              uVar3 = pthread_mutex_lock(ppVar1);
+              if (uVar3 != 0) {
+                lVar14 = 0;
+                puVar9 = (undefined *)(ulong)uVar3;
+                puVar11 = PTR___stack_chk_guard_07264398;
+                if (lStack_68 == *(long *)PTR___stack_chk_guard_07264398) {
+                    /* WARNING: Subroutine does not return */
+                  std::__throw_system_error(uVar3);
+                }
+                goto LAB_01758600;
+              }
+              ppuStack_c0 = &PTR_vtable_06f09000;
+                    /* try { // try from 0175839c to 0175839f has its CatchHandler @ 0175898c */
+              plVar5 = (long *)FUN_0153ad50(lVar15,&ppuStack_c0);
+              lVar15 = *plVar5;
+              if (lVar15 == 0) {
+LAB_017587bc:
+                    /* try { // try from 017587c4 to 017587c7 has its CatchHandler @ 0175898c */
+                FUN_01754420(auStack_a8);
+                    /* try { // try from 017587d4 to 017587d7 has its CatchHandler @ 017588f8 */
+                uVar18 = FUN_014dc9f0(auStack_a8,"19SampleEditFunctions");
+                FUN_014dcba0(&uStack_88,uVar18);
+                lVar14 = lStack_68 - *(long *)PTR___stack_chk_guard_07264398;
+                puVar9 = PTR___stack_chk_guard_07264398;
+                puVar11 = (undefined *)0x0;
+                if (lVar14 != 0) goto LAB_01758600;
+                    /* try { // try from 01758808 to 0175880b has its CatchHandler @ 017588f0 */
+                puVar9 = (undefined *)FUN_01754480(uStack_88,uStack_80,0);
+              }
+              else {
+                pthread_mutex_unlock(ppVar1);
+                lVar17 = *(long *)(param_1 + 0x100);
+                ppVar1 = (pthread_mutex_t *)(lVar17 + 0x38);
+                uVar3 = pthread_mutex_lock(ppVar1);
+                puVar9 = (undefined *)(ulong)uVar3;
+                if (uVar3 == 0) {
+                  ppuStack_c0 = &PTR_vtable_06f08dd0;
+                    /* try { // try from 017583dc to 017583df has its CatchHandler @ 0175884c */
+                  plVar5 = (long *)FUN_0153ad50(lVar17,&ppuStack_c0);
+                  lVar17 = *plVar5;
+                  if (lVar17 != 0) {
+                    pthread_mutex_unlock(ppVar1);
+                    lVar10 = *(long *)(param_1 + 0x100);
+                    ppVar1 = (pthread_mutex_t *)(lVar10 + 0x38);
+                    uVar3 = pthread_mutex_lock(ppVar1);
+                    puVar11 = PTR_PTR_072657a0;
+                    puVar9 = (undefined *)(ulong)uVar3;
+                    if (uVar3 == 0) {
+                      ppuStack_c0 = (pointer_____offset_0x10___ *)PTR_PTR_072657a0;
+                    /* try { // try from 01758424 to 01758427 has its CatchHandler @ 01758980 */
+                      plVar5 = (long *)FUN_0153ad50(lVar10,&ppuStack_c0);
+                      lVar10 = *plVar5;
+                      if (lVar10 != 0) {
+                        pthread_mutex_unlock(ppVar1);
+                    /* try { // try from 01758440 to 01758443 has its CatchHandler @ 017588a4 */
+                        puVar8 = operator_new(0xc0);
+                        puVar8[1] = 0x100000001;
+                        *puVar8 = &PTR_LAB_06e8fc30;
+                    /* try { // try from 01758480 to 01758483 has its CatchHandler @ 01758950 */
+                        FUN_0153ed40(puVar8 + 2,auStack_f8,iVar2,param_1 + 0x9ba0,lVar14,uVar18,
+                                     lVar15,lVar17,lVar10);
+                        uVar18 = *(undefined8 *)(param_1 + 0x138);
+                        if (*PTR___libc_single_threaded_07265240 == '\0') {
+                          LOAcquire();
+                          *(int *)(puVar8 + 1) = *(int *)(puVar8 + 1) + 1;
+                          LORelease();
+                        }
+                        else {
+                          *(int *)(puVar8 + 1) = *(int *)(puVar8 + 1) + 1;
+                        }
+                        ppuStack_c0 = (pointer_____offset_0x10___ *)(puVar8 + 2);
+                        puStack_b8 = puVar8;
+                    /* try { // try from 017584ac to 017584af has its CatchHandler @ 0175892c */
+                        iVar4 = FUN_01ad0a00(uVar18,&ppuStack_c0);
+                        if (puStack_b8 != (undefined8 *)0x0) {
+                          FUN_0133bca0(puStack_b8);
+                        }
+                        if (iVar4 == 0) {
+                    /* try { // try from 017584d0 to 017584d3 has its CatchHandler @ 01758a94 */
+                          FUN_02e444e0(auStack_e0,iVar2);
+                    /* try { // try from 017584e0 to 017584e3 has its CatchHandler @ 01758a88 */
+                          FUN_010535c0(&ppuStack_c0,"Extracted to:");
+                    /* try { // try from 017584f4 to 017584f7 has its CatchHandler @ 01758a7c */
+                          FUN_0104ce00(auStack_d8,&DAT_0469a750,auStack_e0);
+                    /* try { // try from 01758504 to 01758507 has its CatchHandler @ 01758a58 */
+                          FUN_0215c3b0(lVar16,&ppuStack_c0,auStack_d8);
+                          FUN_0100a290(auStack_d8);
+                          FUN_0100a290(&ppuStack_c0);
+                          FUN_0100a290(auStack_e0);
+                        }
+                        FUN_0133bca0(puVar8);
+                        goto LAB_01758528;
+                      }
+                    /* try { // try from 017586f8 to 017586fb has its CatchHandler @ 01758980 */
+                      FUN_01754420(auStack_a8);
+                      pcVar12 = *(char **)(puVar11 + 8);
+                      if (*pcVar12 == '*') {
+                        pcVar12 = pcVar12 + 1;
+                      }
+                    /* try { // try from 01758714 to 01758717 has its CatchHandler @ 017588e4 */
+                      uVar18 = FUN_014dc9f0(auStack_a8,pcVar12);
+                      FUN_014dcba0(&uStack_88,uVar18);
+                      lVar14 = lStack_68 - *(long *)PTR___stack_chk_guard_07264398;
+                      puVar9 = PTR___stack_chk_guard_07264398;
+                      puVar11 = (undefined *)0x0;
+                      if (lVar14 != 0) goto LAB_01758600;
+                    /* try { // try from 01758748 to 0175874b has its CatchHandler @ 017588dc */
+                      puVar9 = (undefined *)FUN_01754480(uStack_88,uStack_80,0);
+                    }
+                    lVar14 = 0;
+                    puVar11 = PTR___stack_chk_guard_07264398;
+                    if (lStack_68 == *(long *)PTR___stack_chk_guard_07264398) {
+                    /* WARNING: Subroutine does not return */
+                    /* try { // try from 01758768 to 0175876b has its CatchHandler @ 017588a4 */
+                      std::__throw_system_error((int)puVar9);
+                    }
+                    goto LAB_01758600;
+                  }
+                    /* try { // try from 01758774 to 01758777 has its CatchHandler @ 0175884c */
+                  FUN_01754420(auStack_a8);
+                    /* try { // try from 01758784 to 01758787 has its CatchHandler @ 017588d0 */
+                  uVar18 = FUN_014dc9f0(auStack_a8,"12SampleLoader");
+                  FUN_014dcba0(&uStack_88,uVar18);
+                  lVar14 = lStack_68 - *(long *)PTR___stack_chk_guard_07264398;
+                  puVar9 = PTR___stack_chk_guard_07264398;
+                  puVar11 = (undefined *)0x0;
+                  if (lVar14 != 0) goto LAB_01758600;
+                    /* try { // try from 017587b8 to 017587bb has its CatchHandler @ 017588b0 */
+                  FUN_01754480(uStack_88,uStack_80,0);
+                  goto LAB_017587bc;
+                }
+              }
+              lVar14 = 0;
+              puVar11 = PTR___stack_chk_guard_07264398;
+              if (lStack_68 == *(long *)PTR___stack_chk_guard_07264398) {
+                    /* WARNING: Subroutine does not return */
+                    /* try { // try from 01758828 to 0175884b has its CatchHandler @ 017588a4 */
+                std::__throw_system_error((int)puVar9);
+              }
+              goto LAB_01758600;
+            }
+LAB_01758528:
+            FUN_0100a290(auStack_f8);
+            FUN_0100a290(auStack_100);
+          }
+          FUN_0100a290(auStack_108);
+          goto LAB_01758540;
+        }
+LAB_01758680:
+                    /* try { // try from 01758688 to 0175868b has its CatchHandler @ 017589f4 */
+        FUN_01754420(auStack_a8);
+                    /* try { // try from 01758698 to 0175869b has its CatchHandler @ 017589c0 */
+        uVar18 = FUN_014dc9f0(auStack_a8,"8Messages");
+        FUN_014dcba0(&uStack_88,uVar18);
+        lVar14 = lStack_68 - *(long *)PTR___stack_chk_guard_07264398;
+        puVar9 = PTR___stack_chk_guard_07264398;
+        puVar11 = (undefined *)0x0;
+        if (lVar14 != 0) goto LAB_01758600;
+                    /* try { // try from 017586cc to 017586cf has its CatchHandler @ 01758998 */
+        puVar9 = (undefined *)FUN_01754480(uStack_88,uStack_80,0);
+      }
+      lVar14 = 0;
+      puVar11 = PTR___stack_chk_guard_07264398;
+      if (lStack_68 == *(long *)PTR___stack_chk_guard_07264398) {
+                    /* WARNING: Subroutine does not return */
+                    /* try { // try from 017586ec to 017586ef has its CatchHandler @ 01758a00 */
+        std::__throw_system_error((int)puVar9);
+      }
+      goto LAB_01758600;
+    }
+LAB_01758540:
+    if (lStack_c8 != 0) {
+      FUN_0133bca0();
+    }
+  }
+  lVar14 = lStack_68 - *(long *)PTR___stack_chk_guard_07264398;
+  if (lVar14 == 0) {
+    return;
+  }
+  puVar9 = PTR___stack_chk_guard_07264398;
+  puVar11 = (undefined *)0x0;
+LAB_01758600:
+                    /* WARNING: Subroutine does not return */
+  __stack_chk_fail(puVar9,puVar11,lVar14);
+}
+
+
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+

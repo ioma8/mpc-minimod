@@ -11,7 +11,8 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 `autorun` package. Nothing on disk is modified: the library is copied to `/run`
 (tmpfs) and preloaded into the stock app, so a reboot returns to stock.
 
-**Status: all four features verified on real hardware (2026-11-03).**
+**Status: the four original features are verified on real hardware
+(2026-11-03); SAMPLE OPTIONS / HPSS is emulator-verified (2026-11-04).**
 
 | # | feature | control | state |
 | --- | --- | --- | --- |
@@ -19,6 +20,7 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 | 2 | autotrim of the selected pad's sample to its silent edges | `SHIFT` + `B3` | analysis + layer write verified; **on-screen Start/End markers do not refresh** |
 | 3 | chromatic control from an external MIDI controller | always while 16 LEVELS is lit | note path verified with simulated MIDI |
 | 4 | shift overlay label | `SHIFT` held on the Sample page | verified on device |
+| 5 | SAMPLE OPTIONS → HPSS split onto two pads | `SHIFT` + `DATA`, then `DATA` | emulator-verified; see [HPSS-HANDOFF](../HPSS-HANDOFF.md) |
 
 Status history, evidence and open work: [`docs/MINIMOD.md`](../docs/MINIMOD.md).
 The Sample/Trim page itself: [`docs/TRIM-PAGE.md`](../docs/TRIM-PAGE.md).
@@ -51,6 +53,14 @@ released   : Trim        Tune        Filter
   It then writes the trim core, the layer frames and the applied value. The audio state lands; the
   page's cached markers are not refreshed, because the page paints from a model
   object we have not identified yet (full account in `docs/TRIM-PAGE.md`).
+* **SAMPLE OPTIONS / HPSS** — `SHIFT` + `DATA` opens the menu on the Sample
+  page; press `DATA` to confirm **HPSS**, or `SHIFT` + `DATA` to close. HPSS
+  reads the selected sample, runs the split on a worker thread, and creates
+  `HPSS Harmonic` then `HPSS Percussive` on the next two empty pads through the
+  stock Extract command. The source sample and the live trim/chop range are
+  left unchanged. Needs two empty pads; outputs are float32 WAVs on this
+  firmware. Full details and validation:
+  [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md).
 * **Chromatic MIDI** — always on while 16 LEVELS is lit (no toggle). Off with
   `MINIMOD_MIDI=0`: the rawmidi reader takes the control-surface node from the
   app, which stops the stock app from starting.
@@ -118,6 +128,10 @@ the app's own `Graphics` calls. See [`docs/AM-MOD-NOTES.md`](../docs/AM-MOD-NOTE
 | `0x1149880` | component repaint `(p, 0, p[0x28])` |
 | `0x102d5e0` / `0x102e000` | `Graphics::setColour` / `fillRect` |
 | `0x1082810` / `0x102dca0` / `0x10817b0` | `Font` / `setFont` / `drawText` |
+| `0x16580d0` | stock Sample/Chop Extract handler |
+| `0x143ed40` / `0x143f0b0` | `ExtractAndAssignSampleCommand` constructor / execute |
+| `0x1d8aff0` | WAV writer callback (block `+0` frames, `+8` float32 pointer) |
+| `0x286dd00` / `0x28047b0` | native free-pad finder / pad-occupancy predicate |
 | `0xf535c0` | `juce::String::operator=(const char*)` |
 | `0x6e212a0` | `SampleModeScreen` vtable (paint = slot 27) |
 | `0x6e1b240` | `TrimParameter` vtable (`+0x19c` value, `+0x1e8` frames) |

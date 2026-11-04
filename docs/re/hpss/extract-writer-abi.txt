@@ -1,0 +1,118 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/HpssInstructions.java
+Program: knob.bin
+Time: Wed Nov 04 08:17:02 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/HpssInstructions.java
+Size: 397 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x153ed40, 0x1e8aff0]
+
+--- SCRIPT OUTPUT ---
+0x153ed40
+0153ed40 paciasp
+0153ed44 sub sp,sp,#0x70
+0153ed48 adrp x8,0x7264000
+0153ed4c ldr x8,[x8, #0x398]
+0153ed50 stp x29,x30,[sp, #0x10]
+0153ed54 add x29,sp,#0x10
+0153ed58 stp x19,x20,[sp, #0x20]
+0153ed5c mov x19,x0
+0153ed60 mov x20,x5
+0153ed64 stp x21,x22,[sp, #0x30]
+0153ed68 mov x21,sp
+0153ed6c mov x22,x7
+0153ed70 stp x23,x24,[sp, #0x40]
+0153ed74 mov x24,x4
+0153ed78 mov x23,x6
+0153ed7c stp x25,x26,[sp, #0x50]
+0153ed80 mov w26,w2
+0153ed84 mov x25,x3
+0153ed88 stp x27,x28,[sp, #0x60]
+0153ed8c mov x28,x1
+0153ed90 adrp x1,0x469b000
+0153ed94 add x1,x1,#0xff0
+0153ed98 ldr x0,[x8]
+0153ed9c str x0,[sp, #0x8]
+0153eda0 mov x0,#0x0
+0153eda4 ldr x27,[sp, #0x70]
+0153eda8 mov x0,x21
+0153edac bl 0x010535c0
+0153edb0 mov x1,x21
+0153edb4 mov x0,x19
+0153edb8 mov w3,#0x0
+0153edbc mov w2,#0x1
+0153edc0 bl 0x01ac9850
+0153edc4 adrp x0,0x6f07000
+0153edc8 add x0,x0,#0x440
+0153edcc str x0,[x19]
+0153edd0 mov x0,x21
+0153edd4 bl 0x0100a290
+0153edd8 mov x0,x19
+0153eddc adrp x2,0x6f07000
+0153ede0 add x2,x2,#0x640
+0153ede4 mov x1,x28
+0153ede8 str x2,[x0], #0x50
+0153edec bl 0x0101c640
+0153edf0 str w26,[x19, #0x58]
+0153edf4 ldr x1,[x20, #0x1278]
+0153edf8 stp x25,x24,[x19, #0x60]
+0153edfc adrp x0,0x7264000
+0153ee00 ldr x0,[x0, #0x398]
+0153ee04 stp x20,x23,[x19, #0x70]
+0x1e8aff0
+01e8aff0 paciasp
+01e8aff4 sub sp,sp,#0x90
+01e8aff8 adrp x2,0x7264000
+01e8affc ldr x2,[x2, #0x398]
+01e8b000 stp x29,x30,[sp, #0x50]
+01e8b004 add x29,sp,#0x50
+01e8b008 stp x19,x20,[sp, #0x60]
+01e8b00c ldr x19,[x0]
+01e8b010 stp x21,x22,[sp, #0x70]
+01e8b014 mov x22,x1
+01e8b018 ldr x0,[x2]
+01e8b01c str x0,[sp, #0x48]
+01e8b020 mov x0,#0x0
+01e8b024 ldr x0,[x19]
+01e8b028 ldarb w0,[x0]
+01e8b02c tst w0,#0xff
+01e8b030 b.ne 0x01e8b138
+01e8b034 ldr x0,[x19, #0x8]
+01e8b038 ldr x0,[x0]
+01e8b03c cbnz x0,0x01e8b0fc
+01e8b040 ldr x0,[x19, #0x10]
+01e8b044 stp x23,x24,[sp, #0x80]
+01e8b048 ldr w2,[x22]
+01e8b04c ldr x1,[x22, #0x8]
+01e8b050 add x21,sp,#0x10
+01e8b054 ldr x0,[x0, #0x10]
+01e8b058 add x20,sp,#0x38
+01e8b05c ldr x3,[x0]
+01e8b060 ldr x3,[x3, #0x20]
+01e8b064 blr x3
+01e8b068 strb wzr,[sp, #0x10]
+01e8b06c strb wzr,[sp, #0x38]
+01e8b070 and w0,w0,#0xff
+01e8b074 sub w0,w0,#0x1
+01e8b078 add x1,sp,#0x28
+01e8b07c ldr x23,[x19, #0x8]
+01e8b080 sxtw x0,w0
+01e8b084 stp x21,xzr,[sp]
+01e8b088 mov x22,x23
+01e8b08c stp x0,x20,[sp, #0x20]
+01e8b090 str xzr,[sp, #0x30]
+01e8b094 str x0,[x22], #0x8
+01e8b098 cmp x1,x22
+01e8b09c b.eq 0x01e8b20c
+01e8b0a0 ldr x2,[sp, #0x30]
+01e8b0a4 ldr x0,[x23, #0x8]
+01e8b0a8 cbnz x2,0x01e8b1d4
+01e8b0ac str x2,[x22, #0x8]
+01e8b0b0 strb wzr,[x0, x2]
+01e8b0b4 ldr x0,[sp, #0x28]
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+

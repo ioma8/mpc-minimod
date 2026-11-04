@@ -1,0 +1,124 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Program: knob.bin
+Time: Wed Nov 04 00:32:46 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Size: 1410 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x219c5b0]
+
+--- SCRIPT OUTPUT ---
+===== 0x219c5b0 => FUN_0219c5b0 @ 0219c5b0 =====
+
+long * FUN_0219c5b0(long *param_1,long *param_2,undefined8 *param_3,long param_4,ulong param_5,
+                   undefined4 param_6,undefined8 param_7,byte param_8)
+
+{
+  bool bVar1;
+  long *plVar2;
+  uint uVar3;
+  long *plVar4;
+  long *plVar5;
+  ulong uVar6;
+  void *pvVar7;
+  long lVar8;
+  byte local_135;
+  undefined4 local_134;
+  ulong local_130;
+  long local_128 [2];
+  undefined1 local_111;
+  code *local_110;
+  void *local_108;
+  undefined1 *local_100;
+  code *local_f8;
+  long *local_f0;
+  long *plStack_e8;
+  long *local_e0;
+  undefined8 uStack_d8;
+  byte *local_d0;
+  ulong *puStack_c8;
+  long *local_c0;
+  undefined4 *puStack_b8;
+  undefined1 *local_b0;
+  long local_48;
+  
+  local_48 = *(long *)PTR___stack_chk_guard_07264398;
+  local_135 = param_8;
+  local_134 = param_6;
+  local_130 = param_5;
+  local_128[0] = param_4;
+  FUN_02a43250(&local_110,*param_3,PTR___stack_chk_guard_07264398,0);
+  if ((local_135 & 1) != 0) {
+    pvVar7 = operator_new(0x38);
+                    /* try { // try from 0219c778 to 0219c77b has its CatchHandler @ 0219c7ac */
+    FUN_021d9fd0(pvVar7,&local_110,local_128[0],local_130);
+    bVar1 = local_108 != (void *)0x0;
+    local_108 = pvVar7;
+    if (bVar1) {
+      (*local_110)();
+    }
+    local_110 = (code *)PTR_FUN_072662f8;
+  }
+  local_111 = true;
+  if (local_128[0] == 0) {
+                    /* try { // try from 0219c750 to 0219c76b has its CatchHandler @ 0219c820 */
+    uVar6 = FUN_02a41f80(*param_3);
+    local_111 = local_130 != (uVar6 & 0xffffffff);
+  }
+                    /* try { // try from 0219c638 to 0219c63b has its CatchHandler @ 0219c820 */
+  FUN_0219b1f0(param_1,param_2,param_3,&local_110,1);
+  if (*param_1 != 0) {
+    plVar2 = param_2 + 1;
+    LOAcquire();
+    *(int *)plVar2 = (int)*plVar2 + 1;
+    lVar8 = *param_2;
+    plVar4 = pthread_getspecific(*(pthread_key_t *)(lVar8 + 0x1b0));
+    plVar5 = (long *)(lVar8 + 0x30);
+    if (plVar4 != (long *)0x0) {
+      plVar5 = plVar4;
+    }
+    local_d0 = &local_135;
+    local_100 = &LAB_0219e4d0;
+    local_f8 = FUN_02196100;
+    puStack_c8 = &local_130;
+    local_c0 = local_128;
+    puStack_b8 = &local_134;
+    local_b0 = &local_111;
+    local_f0 = param_2;
+    plStack_e8 = param_2;
+    local_e0 = param_1;
+    uStack_d8 = param_7;
+                    /* try { // try from 0219c6b8 to 0219c6bb has its CatchHandler @ 0219c7f4 */
+    uVar3 = (**(code **)(*plVar5 + 0x10))(plVar5,&local_100,(ulong)param_2 & 0xfffffffffffffffc);
+    (*local_f8)(1,&local_f0,0);
+    if ((uVar3 & 1) == 0) {
+      *(int *)plVar2 = (int)*plVar2 + -1;
+      LORelease();
+    }
+    lVar8 = *param_2;
+    plVar5 = pthread_getspecific(*(pthread_key_t *)(lVar8 + 0x1b0));
+    plVar2 = (long *)(lVar8 + 0x30);
+    if (plVar5 != (long *)0x0) {
+      plVar2 = plVar5;
+    }
+                    /* try { // try from 0219c6fc to 0219c6ff has its CatchHandler @ 0219c7e8 */
+    (**(code **)(*plVar2 + 0x20))(plVar2,0);
+  }
+  if (local_108 != (void *)0x0) {
+    (*local_110)();
+  }
+  if (local_48 - *(long *)PTR___stack_chk_guard_07264398 != 0) {
+                    /* WARNING: Subroutine does not return */
+    __stack_chk_fail(PTR___stack_chk_guard_07264398,0,
+                     local_48 - *(long *)PTR___stack_chk_guard_07264398);
+  }
+  return param_1;
+}
+
+
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+

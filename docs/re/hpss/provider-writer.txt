@@ -1,0 +1,625 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Program: knob.bin
+Time: Wed Nov 04 00:34:14 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Size: 1410 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x2199800, 0x21c74f0, 0x21c5f30]
+
+--- SCRIPT OUTPUT ---
+===== 0x2199800 => FUN_02199800 @ 02199800 =====
+
+long * FUN_02199800(long *param_1,_Result_base *param_2,undefined8 param_3)
+
+{
+  long *plVar1;
+  uint *puVar2;
+  long *plVar3;
+  long *plVar4;
+  byte **ppbVar5;
+  byte bVar6;
+  long lVar7;
+  long *plVar8;
+  undefined *puVar9;
+  int iVar10;
+  uint uVar11;
+  uint uVar12;
+  _Result_base *p_Var13;
+  long lVar14;
+  ulong uVar15;
+  long *plVar16;
+  undefined8 uVar17;
+  undefined8 *puVar18;
+  undefined *puVar19;
+  byte *pbVar20;
+  code *pcVar21;
+  undefined *puVar22;
+  long *plVar23;
+  undefined1 *puVar24;
+  byte local_1a9;
+  byte *local_1a8;
+  long ***ppplStack_1a0;
+  long *local_198;
+  long *plStack_190;
+  long *local_188;
+  undefined1 *local_180;
+  undefined8 uStack_178;
+  long *local_170;
+  long *plStack_168;
+  _Result_base *local_160;
+  _Result_base *local_150;
+  long **local_148;
+  long ****pppplStack_140;
+  _Result_base *local_138;
+  _Result_base *local_130;
+  long **local_120;
+  long **local_118;
+  _Result_base *local_110;
+  long *local_108;
+  long *local_100;
+  _Result_base *p_Stack_f8;
+  _Result_base *local_f0;
+  long local_68;
+  
+  local_68 = *(long *)PTR___stack_chk_guard_07264398;
+  local_170 = (long *)0x0;
+  plStack_168 = operator_new(0x30);
+  plStack_168[1] = 0x100000001;
+  local_170 = plStack_168 + 2;
+  *plStack_168 = (long)&PTR_LAB_06e8ab00;
+  plStack_168[2] = (long)&PTR_LAB_06e8aa80;
+  plStack_168[3] = 0;
+  *(undefined4 *)(plStack_168 + 4) = 0;
+  *(undefined1 *)((long)plStack_168 + 0x24) = 0;
+  *(undefined4 *)(plStack_168 + 5) = 0;
+                    /* try { // try from 0219988c to 0219988f has its CatchHandler @ 0219a398 */
+  p_Var13 = operator_new(0x28);
+  std::__future_base::_Result_base::_Result_base(p_Var13);
+  plVar3 = plStack_168;
+  plVar8 = local_170;
+  *(undefined ***)p_Var13 = &PTR_LAB_06ea37b0;
+  p_Var13[0x20] = (_Result_base)0x0;
+  local_160 = p_Var13;
+  if (plStack_168 != (long *)0x0) {
+    if (*PTR___libc_single_threaded_07265240 == '\0') goto LAB_02199ee0;
+    *(int *)(plStack_168 + 1) = (int)plStack_168[1] + 1;
+  }
+  do {
+    if (plVar8 == (long *)0x0) {
+LAB_0219a220:
+      puVar19 = (undefined *)(local_68 - *(long *)PTR___stack_chk_guard_07264398);
+      lVar14 = 0;
+      puVar22 = PTR___stack_chk_guard_07264398;
+      if (puVar19 == (undefined *)0x0) {
+        std::__throw_future_error(3);
+LAB_0219a24c:
+        puVar19 = (undefined *)(local_68 - *(long *)PTR___stack_chk_guard_07264398);
+        lVar14 = 0;
+        puVar22 = PTR___stack_chk_guard_07264398;
+        if (puVar19 == (undefined *)0x0) {
+                    /* try { // try from 0219a274 to 0219a277 has its CatchHandler @ 0219a484 */
+          puVar19 = (undefined *)std::__throw_future_error(3);
+LAB_0219a278:
+          lVar14 = local_68 - *(long *)PTR___stack_chk_guard_07264398;
+          puVar22 = (undefined *)0x0;
+          if (lVar14 == 0) {
+                    /* WARNING: Subroutine does not return */
+                    /* try { // try from 0219a29c to 0219a29f has its CatchHandler @ 0219a384 */
+            std::__throw_system_error((int)puVar19);
+          }
+        }
+      }
+LAB_0219a1f0:
+                    /* WARNING: Subroutine does not return */
+      __stack_chk_fail(puVar19,lVar14,puVar22);
+    }
+    LOAcquire();
+    bVar6 = *(byte *)((long)plVar8 + 0x14);
+    *(byte *)((long)plVar8 + 0x14) = 1;
+    LORelease();
+    if ((bVar6 & 1) != 0) {
+      puVar19 = (undefined *)(local_68 - *(long *)PTR___stack_chk_guard_07264398);
+      lVar14 = 0;
+      puVar22 = PTR___stack_chk_guard_07264398;
+      if (puVar19 != (undefined *)0x0) goto LAB_0219a1f0;
+                    /* try { // try from 0219a21c to 0219a24b has its CatchHandler @ 0219a2a0 */
+      std::__throw_future_error(1);
+      goto LAB_0219a220;
+    }
+    lVar14 = FUN_010efb40();
+    if ((lVar14 == 0) || (uVar15 = FUN_010f0490(), (uVar15 & 1) == 0)) {
+      local_138 = local_160;
+      plVar4 = plStack_168;
+      plVar1 = local_170;
+      p_Var13 = param_2 + 8;
+      LOAcquire();
+      *(int *)p_Var13 = *(int *)p_Var13 + 1;
+      puVar24 = *(undefined1 **)param_2;
+      plStack_168 = (long *)0x0;
+      local_170 = (long *)0x0;
+      local_160 = (_Result_base *)0x0;
+      local_150 = param_2;
+      local_130 = param_2;
+      plVar16 = pthread_getspecific(*(pthread_key_t *)(puVar24 + 0x1b0));
+      p_Stack_f8 = local_138;
+      plVar23 = (long *)(puVar24 + 0x30);
+      if (plVar16 != (long *)0x0) {
+        plVar23 = plVar16;
+      }
+      local_138 = (_Result_base *)0x0;
+      local_120 = (long **)&LAB_02197400;
+      local_118 = (long **)FUN_02199050;
+      local_108 = plVar1;
+      local_100 = plVar4;
+      local_f0 = local_130;
+      pppplStack_140 = (long ****)0x0;
+      local_148 = (long **)0x0;
+      local_110 = param_2;
+                    /* try { // try from 02199984 to 02199987 has its CatchHandler @ 0219a3ec */
+      uVar11 = (**(code **)(*plVar23 + 0x10))
+                         (plVar23,&local_120,(ulong)param_2 & 0xfffffffffffffffc);
+      (*(code *)local_118)(1,&local_110,0);
+      if ((uVar11 & 1) == 0) {
+        *(int *)p_Var13 = *(int *)p_Var13 + -1;
+        LORelease();
+      }
+LAB_021999a4:
+      p_Var13 = local_160;
+      if ((local_170 != (long *)0x0) && ((plStack_168 == (long *)0x0 || ((int)plStack_168[1] != 1)))
+         ) {
+        local_160 = (_Result_base *)0x0;
+        local_150 = p_Var13;
+        FUN_014f6750(local_170,&local_150);
+        if (local_150 != (_Result_base *)0x0) {
+          (*(code *)**(undefined8 **)local_150)();
+        }
+      }
+      p_Var13 = local_160;
+      plVar23 = plStack_168;
+      if (local_160 != (_Result_base *)0x0) {
+        pcVar21 = (code *)**(undefined8 **)local_160;
+        if (pcVar21 == (code *)&LAB_021a00f0) {
+          pcVar21 = (code *)(*(undefined8 **)local_160)[2];
+          if (pcVar21 == (code *)&LAB_021a0020) {
+            *(undefined ***)local_160 = &PTR_LAB_06ea37b0;
+            if ((((byte)local_160[0x20] & 1) != 0) &&
+               (plVar23 = *(long **)(local_160 + 0x18), plVar23 != (long *)0x0)) {
+              plVar1 = plVar23 + 1;
+              if (*plVar1 == 0x100000001) {
+                plVar23[1] = 0;
+                (**(code **)(*plVar23 + 0x10))(plVar23);
+                (**(code **)(*plVar23 + 0x18))(plVar23);
+              }
+              else {
+                if (*PTR___libc_single_threaded_07265240 == '\0') {
+                  LOAcquire();
+                  iVar10 = (int)*plVar1;
+                  *(int *)plVar1 = iVar10 + -1;
+                  LORelease();
+                }
+                else {
+                  iVar10 = (int)plVar23[1];
+                  *(int *)(plVar23 + 1) = iVar10 + -1;
+                }
+                if (iVar10 == 1) {
+                  FUN_0133bc10(plVar23);
+                }
+              }
+            }
+            std::__future_base::_Result_base::~_Result_base(p_Var13);
+            operator_delete(p_Var13,0x28);
+            plVar23 = plStack_168;
+          }
+          else {
+            (*pcVar21)(local_160);
+            plVar23 = plStack_168;
+          }
+        }
+        else {
+          (*pcVar21)(local_160);
+          plVar23 = plStack_168;
+        }
+      }
+      plStack_168 = plVar23;
+      if (plVar23 != (long *)0x0) {
+        plVar1 = plVar23 + 1;
+        if (*plVar1 == 0x100000001) {
+          plVar23[1] = 0;
+          (**(code **)(*plVar23 + 0x10))(plVar23);
+          (**(code **)(*plVar23 + 0x18))(plVar23);
+        }
+        else {
+          if (*PTR___libc_single_threaded_07265240 == '\0') {
+            LOAcquire();
+            iVar10 = (int)*plVar1;
+            *(int *)plVar1 = iVar10 + -1;
+            LORelease();
+          }
+          else {
+            iVar10 = (int)plVar23[1];
+            *(int *)(plVar23 + 1) = iVar10 + -1;
+          }
+          if (iVar10 == 1) {
+            FUN_0133bc10(plVar23);
+          }
+        }
+      }
+                    /* try { // try from 02199ab0 to 02199aef has its CatchHandler @ 0219a3d0 */
+      (**(code **)(*plVar8 + 0x10))(plVar8);
+      puVar2 = (uint *)(plVar8 + 2);
+      uVar11 = *puVar2 & 0x7fffffff;
+      if (uVar11 != 1) {
+        do {
+          *puVar2 = *puVar2 | 0x80000000;
+          uVar12 = std::__atomic_futex_unsigned_base::_M_futex_wait_until
+                             (puVar2,puVar2,uVar11 | 0x80000000,0,0,0);
+          uVar11 = *puVar2 & 0x7fffffff;
+        } while (uVar11 != 1 && ((uVar12 & 0xff ^ 1) & 1) == 0);
+      }
+      lVar14 = plVar8[1];
+      if (*(_Result_base **)(lVar14 + 8) != (_Result_base *)0x0) {
+        local_150 = *(_Result_base **)(lVar14 + 8);
+        std::__exception_ptr::exception_ptr::_M_addref();
+        lVar14 = 0;
+        puVar19 = (undefined *)(local_68 - *(long *)PTR___stack_chk_guard_07264398);
+        puVar22 = PTR___stack_chk_guard_07264398;
+        if ((undefined *)(local_68 - *(long *)PTR___stack_chk_guard_07264398) != (undefined *)0x0)
+        goto LAB_0219a1f0;
+                    /* try { // try from 02199b54 to 02199b57 has its CatchHandler @ 0219a320 */
+        lVar14 = std::rethrow_exception(&local_150,0);
+      }
+      lVar7 = *(long *)(lVar14 + 0x10);
+      plVar8 = *(long **)(lVar14 + 0x18);
+      *(undefined8 *)(lVar14 + 0x18) = 0;
+      *(undefined8 *)(lVar14 + 0x10) = 0;
+      if (plVar3 == (long *)0x0) {
+        if (lVar7 != 0) goto LAB_02199ba4;
+        param_1[1] = 0;
+        *param_1 = 0;
+joined_r0x02199f7c:
+        if (plVar8 != (long *)0x0) {
+          plVar3 = plVar8 + 1;
+          if (*plVar3 == 0x100000001) {
+            plVar8[1] = 0;
+            (**(code **)(*plVar8 + 0x10))(plVar8);
+            (**(code **)(*plVar8 + 0x18))(plVar8);
+          }
+          else {
+            if (*PTR___libc_single_threaded_07265240 == '\0') {
+              LOAcquire();
+              iVar10 = (int)*plVar3;
+              *(int *)plVar3 = iVar10 + -1;
+              LORelease();
+            }
+            else {
+              iVar10 = (int)plVar8[1];
+              *(int *)(plVar8 + 1) = iVar10 + -1;
+            }
+            if (iVar10 == 1) {
+              FUN_0133bc10(plVar8);
+            }
+          }
+        }
+      }
+      else {
+        plVar23 = plVar3 + 1;
+        if (*plVar23 == 0x100000001) {
+          plVar3[1] = 0;
+          (**(code **)(*plVar3 + 0x10))(plVar3);
+          (**(code **)(*plVar3 + 0x18))(plVar3);
+        }
+        else {
+          if (*PTR___libc_single_threaded_07265240 == '\0') {
+            LOAcquire();
+            iVar10 = (int)*plVar23;
+            *(int *)plVar23 = iVar10 + -1;
+            LORelease();
+          }
+          else {
+            iVar10 = (int)plVar3[1];
+            *(int *)(plVar3 + 1) = iVar10 + -1;
+          }
+          if (iVar10 == 1) {
+            FUN_0133bc10(plVar3);
+          }
+        }
+        if (lVar7 == 0) {
+          *param_1 = 0;
+          param_1[1] = 0;
+          goto joined_r0x02199f7c;
+        }
+LAB_02199ba4:
+        local_180 = (undefined1 *)CONCAT71(local_180._1_7_,param_2[0x484]);
+                    /* try { // try from 02199bb0 to 02199bbf has its CatchHandler @ 0219a448 */
+        uVar17 = FUN_01ef2060(lVar7);
+        plVar23 = operator_new(0x460);
+        plVar3 = plVar23 + 1;
+        plVar23[1] = 0x100000001;
+        *plVar23 = (long)&PTR_LAB_06e972e0;
+                    /* try { // try from 02199be8 to 02199beb has its CatchHandler @ 0219a468 */
+        FUN_01e94720(plVar23 + 2,uVar17);
+        puVar19 = PTR___libc_single_threaded_07265240;
+        if (*PTR___libc_single_threaded_07265240 == '\0') {
+          LOAcquire();
+          *(int *)plVar3 = (int)*plVar3 + 1;
+          LORelease();
+        }
+        else {
+          *(int *)(plVar23 + 1) = (int)plVar23[1] + 1;
+        }
+        local_170 = plVar23 + 2;
+        plStack_168 = plVar23;
+                    /* try { // try from 02199c1c to 02199c1f has its CatchHandler @ 0219a42c */
+        FUN_01e8ad40(&local_150,param_3,&local_170);
+        plVar1 = plStack_168;
+        if (plStack_168 != (long *)0x0) {
+          plVar4 = plStack_168 + 1;
+          if (*plVar4 == 0x100000001) {
+            plStack_168[1] = 0;
+            (**(code **)(*plStack_168 + 0x10))(plStack_168);
+            (**(code **)(*plVar1 + 0x18))(plVar1);
+          }
+          else {
+            if (*puVar19 == '\0') {
+              LOAcquire();
+              iVar10 = (int)*plVar4;
+              *(int *)plVar4 = iVar10 + -1;
+              LORelease();
+            }
+            else {
+              iVar10 = (int)plStack_168[1];
+              *(int *)(plStack_168 + 1) = iVar10 + -1;
+            }
+            if (iVar10 == 1) {
+              FUN_0133bc10(plStack_168);
+            }
+          }
+        }
+                    /* try { // try from 02199c64 to 02199c67 has its CatchHandler @ 0219a1b8 */
+        FUN_01e8ada0(&local_120,&local_150,&local_180);
+        p_Var13 = local_138;
+        if (local_138 != (_Result_base *)0x0) {
+          ppbVar5 = (byte **)((long)local_138 + 8);
+          if (*ppbVar5 == (byte *)0x100000001) {
+            pbVar20 = *(byte **)local_138;
+            *(byte **)((long)local_138 + 8) = (byte *)0x0;
+            (**(code **)(pbVar20 + 0x10))(p_Var13);
+            (**(code **)(*(byte **)p_Var13 + 0x18))(p_Var13);
+          }
+          else {
+            if (*puVar19 == '\0') {
+              LOAcquire();
+              iVar10 = *(int *)ppbVar5;
+              *(int *)ppbVar5 = iVar10 + -1;
+              LORelease();
+            }
+            else {
+              iVar10 = *(int *)((long)local_138 + 8);
+              *(int *)((long)local_138 + 8) = iVar10 + -1;
+            }
+            if (iVar10 == 1) {
+              FUN_0133bc10(p_Var13);
+            }
+          }
+        }
+        if (local_148 != (long **)0x0) {
+          (*(code *)local_150)();
+        }
+        if (*plVar3 == 0x100000001) {
+          plVar23[1] = 0;
+          (**(code **)(*plVar23 + 0x10))(plVar23);
+          (**(code **)(*plVar23 + 0x18))(plVar23);
+        }
+        else {
+          if (*puVar19 == '\0') {
+            LOAcquire();
+            iVar10 = (int)*plVar3;
+            *(int *)plVar3 = iVar10 + -1;
+            LORelease();
+          }
+          else {
+            iVar10 = (int)plVar23[1];
+            *(int *)(plVar23 + 1) = iVar10 + -1;
+          }
+          if (iVar10 == 1) {
+            FUN_0133bc10(plVar23);
+          }
+        }
+        if (local_120 != (long **)0x0) {
+          *param_1 = 0;
+          param_1[1] = 0;
+          if (local_118 != &local_108) {
+            operator_delete(local_118,(ulong)((long)local_108 + 1));
+          }
+          goto joined_r0x02199f7c;
+        }
+        *param_1 = lVar7;
+        param_1[1] = (long)plVar8;
+        if (local_118 != &local_108) {
+          operator_delete(local_118,(ulong)((long)local_108 + 1));
+        }
+      }
+      lVar14 = 0;
+      puVar19 = PTR___stack_chk_guard_07264398;
+      puVar22 = (undefined *)(local_68 - *(long *)PTR___stack_chk_guard_07264398);
+      if ((undefined *)(local_68 - *(long *)PTR___stack_chk_guard_07264398) == (undefined *)0x0) {
+        return param_1;
+      }
+      goto LAB_0219a1f0;
+    }
+    puVar24 = *(undefined1 **)(param_2 + 0x78);
+                    /* try { // try from 02199dcc to 02199deb has its CatchHandler @ 0219a360 */
+    puVar18 = (undefined8 *)FUN_01e949f0();
+    FUN_01ef36a0(puVar24,*puVar18);
+    plVar23 = local_170;
+    puVar19 = PTR___once_proxy_072656d8;
+    puVar9 = PTR_072656d0;
+    puVar22 = PTR_072656b0;
+    if (local_170 == (long *)0x0) goto LAB_0219a24c;
+    local_150 = (_Result_base *)&local_180;
+    local_138 = (_Result_base *)&local_1a8;
+    lVar14 = tpidr_el0;
+    local_120 = &local_170;
+    local_180 = &LAB_014ce900;
+    uStack_178 = 0;
+    pppplStack_140 = &ppplStack_1a0;
+    local_1a8 = &local_1a9;
+    local_148 = &local_198;
+    *(undefined1 **)(PTR_072656d0 + lVar14) = &LAB_014ce560;
+    *(_Result_base ***)(puVar22 + lVar14) = &local_150;
+    local_1a9 = 0;
+    local_198 = local_170;
+    local_110 = (_Result_base *)FUN_0219fd30;
+    local_108 = (long *)&LAB_0219fcb0;
+    ppplStack_1a0 = &local_120;
+    local_118 = &plStack_190;
+                    /* try { // try from 02199e9c to 02199e9f has its CatchHandler @ 0219a384 */
+    uVar11 = pthread_once((pthread_once_t *)(local_170 + 3),(__init_routine *)puVar19);
+    puVar19 = (undefined *)(ulong)uVar11;
+    if (uVar11 != 0) goto LAB_0219a278;
+    *(undefined8 *)(puVar22 + lVar14) = 0;
+    *(undefined8 *)(puVar9 + lVar14) = 0;
+    if ((local_1a9 & 1) != 0) {
+      puVar2 = (uint *)(plVar23 + 2);
+      uVar11 = *puVar2;
+      *puVar2 = 1;
+      LORelease();
+      if ((int)uVar11 < 0) {
+                    /* try { // try from 0219a170 to 0219a173 has its CatchHandler @ 0219a2e4 */
+        std::__atomic_futex_unsigned_base::_M_futex_notify_all(puVar2);
+      }
+      if (local_110 != (_Result_base *)0x0) {
+        (*(code *)local_110)(&local_120,&local_120,3);
+      }
+      if (local_188 != (long *)0x0) {
+        plVar23 = local_188 + 1;
+        if (*plVar23 == 0x100000001) {
+          local_188[1] = 0;
+          (**(code **)(*local_188 + 0x10))(local_188);
+          (**(code **)(*local_188 + 0x18))(local_188);
+        }
+        else {
+          if (*PTR___libc_single_threaded_07265240 == '\0') {
+            LOAcquire();
+            iVar10 = (int)*plVar23;
+            *(int *)plVar23 = iVar10 + -1;
+            LORelease();
+          }
+          else {
+            iVar10 = (int)local_188[1];
+            *(int *)(local_188 + 1) = iVar10 + -1;
+          }
+          if (iVar10 == 1) {
+            FUN_0133bc10(local_188);
+          }
+        }
+      }
+      goto LAB_021999a4;
+    }
+    puVar19 = (undefined *)(local_68 - *(long *)PTR___stack_chk_guard_07264398);
+    lVar14 = 0;
+    puVar22 = PTR___stack_chk_guard_07264398;
+    if (puVar19 != (undefined *)0x0) goto LAB_0219a1f0;
+                    /* try { // try from 02199edc to 02199edf has its CatchHandler @ 0219a2e4 */
+    std::__throw_future_error(2);
+LAB_02199ee0:
+    LOAcquire();
+    *(int *)(plVar3 + 1) = (int)plVar3[1] + 1;
+    LORelease();
+  } while( true );
+}
+
+
+===== 0x21c74f0 => FUN_021c74f0 @ 021c74f0 =====
+
+void FUN_021c74f0(undefined8 *param_1,long *param_2)
+
+{
+  long *plVar1;
+  int iVar2;
+  long lVar3;
+  undefined8 *puVar4;
+  long *plVar5;
+  undefined8 *__s;
+  
+  plVar5 = (long *)param_2[1];
+  *param_1 = &DAT_06f7d788;
+  lVar3 = *param_2;
+  *param_2 = 0;
+  param_2[1] = 0;
+  if (lVar3 != 0) {
+    param_1[1] = lVar3;
+    param_1[2] = plVar5;
+LAB_021c7524:
+    param_1[3] = 0;
+    return;
+  }
+                    /* try { // try from 021c7540 to 021c7543 has its CatchHandler @ 021c76ac */
+  puVar4 = operator_new(0x408);
+  puVar4[1] = 0x100000001;
+  __s = puVar4 + 2;
+  *puVar4 = &PTR_LAB_06e9d578;
+  memset(__s,0,0x3f8);
+  *(undefined2 *)(puVar4 + 2) = 1;
+  *(undefined1 *)((long)puVar4 + 0x1c) = 0x10;
+                    /* try { // try from 021c7584 to 021c7587 has its CatchHandler @ 021c7690 */
+  FUN_02a4e580(puVar4 + 4);
+  *(undefined4 *)(puVar4 + 0x7c) = 0;
+  *(undefined1 *)((long)puVar4 + 0x3ec) = 0;
+  *(undefined1 *)(puVar4 + 0x7e) = 0;
+  *(undefined8 *)((long)puVar4 + 0x3f4) = 0x3c;
+  puVar4[0x80] = 0;
+                    /* try { // try from 021c75ac to 021c75bb has its CatchHandler @ 021c766c */
+  FUN_021c56b0(__s,2);
+  FUN_021c56d0(__s,0);
+  param_1[1] = __s;
+  param_1[2] = puVar4;
+  if (plVar5 != (long *)0x0) {
+    plVar1 = plVar5 + 1;
+    if (*plVar1 == 0x100000001) {
+      plVar5[1] = 0;
+      (**(code **)(*plVar5 + 0x10))(plVar5);
+      (**(code **)(*plVar5 + 0x18))(plVar5);
+      param_1[3] = 0;
+      return;
+    }
+    if (*PTR___libc_single_threaded_07265240 == '\0') {
+      LOAcquire();
+      iVar2 = (int)*plVar1;
+      *(int *)plVar1 = iVar2 + -1;
+      LORelease();
+    }
+    else {
+      iVar2 = (int)plVar5[1];
+      *(int *)(plVar5 + 1) = iVar2 + -1;
+    }
+    if (iVar2 == 1) {
+      FUN_0133bc10(plVar5);
+      goto LAB_021c7524;
+    }
+  }
+  param_1[3] = 0;
+  return;
+}
+
+
+===== 0x21c5f30 => FUN_021c5f30 @ 021c5f30 =====
+
+void FUN_021c5f30(long *param_1)
+
+{
+  param_1[3] = 0;
+                    /* WARNING: Could not recover jumptable at 0x021c5f44. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+  (**(code **)(*param_1 + 0x30))();
+  return;
+}
+
+
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+

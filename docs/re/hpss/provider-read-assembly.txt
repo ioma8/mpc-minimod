@@ -1,0 +1,77 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/HpssInstructions.java
+Program: knob.bin
+Time: Wed Nov 04 00:34:56 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/HpssInstructions.java
+Size: 397 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x21c5f60, 0x21d9ab0]
+
+--- SCRIPT OUTPUT ---
+0x21c5f60
+021c5f60 paciasp
+021c5f64 sub sp,sp,#0x30
+021c5f68 adrp x2,0x7264000
+021c5f6c ldr x2,[x2, #0x398]
+021c5f70 stp x29,x30,[sp, #0x10]
+021c5f74 add x29,sp,#0x10
+021c5f78 ldr x3,[x0]
+021c5f7c stp x19,x20,[sp, #0x20]
+021c5f80 mov x20,x8
+021c5f84 ldr x4,[x2]
+021c5f88 str x4,[sp, #0x8]
+021c5f8c mov x4,#0x0
+021c5f90 mov x19,x0
+021c5f94 ldr x2,[x3, #0x28]
+021c5f98 blr x2
+021c5f9c ldr x0,[x20]
+021c5fa0 cbnz x0,0x021c5fb0
+021c5fa4 ldr x0,[x19, #0x18]
+021c5fa8 orr x0,x0,#0x1
+021c5fac str x0,[x19, #0x18]
+021c5fb0 adrp x0,0x7264000
+021c5fb4 ldr x0,[x0, #0x398]
+021c5fb8 ldr x2,[sp, #0x8]
+021c5fbc ldr x1,[x0]
+021c5fc0 subs x2,x2,x1
+021c5fc4 mov x1,#0x0
+021c5fc8 b.ne 0x021c5fe4
+021c5fcc ldp x29,x30,[sp, #0x10]
+021c5fd0 mov x0,x20
+021c5fd4 ldp x19,x20,[sp, #0x20]
+021c5fd8 add sp,sp,#0x30
+021c5fdc autiasp
+021c5fe0 ret
+0x21d9ab0
+021d9ab0 paciasp
+021d9ab4 sub sp,sp,#0x30
+021d9ab8 adrp x2,0x7264000
+021d9abc ldr x2,[x2, #0x398]
+021d9ac0 stp x29,x30,[sp, #0x10]
+021d9ac4 add x29,sp,#0x10
+021d9ac8 ldr x0,[x0, #0x28]
+021d9acc str x19,[sp, #0x20]
+021d9ad0 mov x19,x8
+021d9ad4 ldr x3,[x2]
+021d9ad8 str x3,[sp, #0x8]
+021d9adc mov x3,#0x0
+021d9ae0 bl 0x021c5f60
+021d9ae4 adrp x0,0x7264000
+021d9ae8 ldr x0,[x0, #0x398]
+021d9aec ldr x2,[sp, #0x8]
+021d9af0 ldr x1,[x0]
+021d9af4 subs x2,x2,x1
+021d9af8 mov x1,#0x0
+021d9afc b.ne 0x021d9b18
+021d9b00 ldp x29,x30,[sp, #0x10]
+021d9b04 mov x0,x19
+021d9b08 ldr x19,[sp, #0x20]
+021d9b0c add sp,sp,#0x30
+021d9b10 autiasp
+021d9b14 ret
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+

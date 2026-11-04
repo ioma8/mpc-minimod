@@ -1,0 +1,29 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/HpssCommandTrace.java
+Program: knob.bin
+Time: Wed Nov 04 00:32:38 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/HpssCommandTrace.java
+Size: 792 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x6f42758]
+
+--- SCRIPT OUTPUT ---
+VTABLE 0x6f42758
+slot 0 1aabdf0 
+slot 1 1aabf50 
+slot 2 153cdc0 
+slot 3 1ac9820 
+slot 4 1aaa240 
+slot 5 153cd80 
+slot 6 153cd90 
+slot 7 153cda0 
+slot 8 1aaaae0 FUN_01aaaae0
+slot 9 1aa9820 
+slot 10 1ac9d10 FUN_01ac9d10
+slot 11 0 
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+

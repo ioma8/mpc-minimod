@@ -1,0 +1,436 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Program: knob.bin
+Time: Wed Nov 04 00:26:49 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Size: 1304 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x29c6790, 0x288cd80, 0x2a31210]
+
+--- SCRIPT OUTPUT ---
+===== 0x29c6790 => FUN_029c6790 @ 029c6790 =====
+
+void FUN_029c6790(undefined4 param_1,long param_2,undefined4 param_3,int param_4)
+
+{
+  int *piVar1;
+  pthread_mutex_t *__mutex;
+  uint uVar2;
+  long lVar3;
+  code *local_110;
+  code *local_108;
+  ulong local_100;
+  undefined4 local_f8;
+  int iStack_f4;
+  undefined4 local_f0;
+  long local_e8;
+  long local_58;
+  
+  local_58 = *(long *)PTR___stack_chk_guard_07264398;
+  if (param_4 < 0x426) {
+    uVar2 = param_4 - 0x40d;
+    if (param_4 < 0x40d) goto LAB_029c6858;
+  }
+  else {
+    uVar2 = param_4 - 0xc07;
+    if (0x18 < uVar2) {
+      if (param_4 != 0x44e && param_4 != 0x45c) goto LAB_029c6858;
+      goto LAB_029c67f0;
+    }
+  }
+  if ((0x1010101UL >> ((ulong)uVar2 & 0x3f) & 1) == 0) {
+LAB_029c6858:
+    piVar1 = (int *)(param_2 + 0x88);
+    LOAcquire();
+    *piVar1 = *piVar1 + 1;
+    lVar3 = *(long *)(param_2 + 0x80);
+    __mutex = (pthread_mutex_t *)(lVar3 + 0x220);
+    pthread_mutex_lock(__mutex);
+    local_110 = FUN_029d0360;
+    local_108 = FUN_029c44f0;
+    local_100 = param_2 + 0x80U;
+    local_f8 = param_3;
+    iStack_f4 = param_4;
+    local_f0 = param_1;
+    local_e8 = param_2;
+                    /* try { // try from 029c68b0 to 029c68b3 has its CatchHandler @ 029c6930 */
+    uVar2 = FUN_02c59300(lVar3 + 0x1d8,&local_110,param_2 + 0x80U & 0xfffffffffffffffc);
+    (*local_108)(1,&local_100,0);
+    pthread_mutex_unlock(__mutex);
+    if ((uVar2 & 1) == 0) {
+      *piVar1 = *piVar1 + -1;
+      LORelease();
+    }
+    if (local_58 - *(long *)PTR___stack_chk_guard_07264398 != 0) {
+                    /* WARNING: Subroutine does not return */
+      __stack_chk_fail(PTR___stack_chk_guard_07264398,0,
+                       local_58 - *(long *)PTR___stack_chk_guard_07264398);
+    }
+    return;
+  }
+LAB_029c67f0:
+  if (local_58 - *(long *)PTR___stack_chk_guard_07264398 != 0) {
+                    /* WARNING: Subroutine does not return */
+    __stack_chk_fail(PTR___stack_chk_guard_07264398,0,
+                     local_58 - *(long *)PTR___stack_chk_guard_07264398,
+                     PTR___stack_chk_guard_07264398,0);
+  }
+  FUN_029c65c0(param_1,param_2,param_3,param_4);
+  return;
+}
+
+
+===== 0x288cd80 => FUN_0288cd80 @ 0288cd80 =====
+
+int FUN_0288cd80(int param_1,int param_2)
+
+{
+  int iVar1;
+  int iVar2;
+  
+  if (param_1 == 0xc6f) {
+    return param_2 + 0xc6f;
+  }
+  iVar2 = param_1;
+  if (param_2 < 4) {
+code_r0x0288cdb8:
+    if (param_1 < 0xc60) {
+      if (param_1 < 0xc07) {
+        switch(param_1) {
+        case 0x40d:
+          iVar1 = 0x415;
+          break;
+        case 0x40e:
+          iVar1 = 0x416;
+          break;
+        case 0x40f:
+          iVar1 = 0x417;
+          break;
+        case 0x410:
+          iVar1 = 0x418;
+          break;
+        case 0x411:
+          iVar1 = 0x419;
+          break;
+        case 0x412:
+          iVar1 = 0x41a;
+          break;
+        case 0x413:
+          iVar1 = 0x41b;
+          break;
+        case 0x414:
+          iVar1 = 0x41c;
+          break;
+        default:
+          goto LAB_0288cddc;
+        case 0x45e:
+          iVar1 = 0x45f;
+          break;
+        case 0x462:
+          iVar1 = 0x463;
+          break;
+        case 0x466:
+          iVar1 = 0x467;
+          break;
+        case 0x46a:
+          iVar1 = 0x46b;
+          break;
+        case 0x46e:
+          iVar1 = 0x46f;
+          break;
+        case 0x472:
+          iVar1 = 0x473;
+          break;
+        case 0x476:
+          iVar1 = 0x477;
+          break;
+        case 0x48f:
+          iVar1 = 0x490;
+          break;
+        case 0x493:
+          iVar1 = 0x494;
+          break;
+        case 0x49a:
+          iVar1 = 0x49b;
+          break;
+        case 0x49e:
+          iVar1 = 0x49f;
+          break;
+        case 0x4a2:
+          iVar1 = 0x4a3;
+          break;
+        case 0x4a6:
+          iVar1 = 0x4a7;
+          break;
+        case 0x4aa:
+          iVar1 = 0x4ab;
+          break;
+        case 0x4ae:
+          iVar1 = 0x4af;
+        }
+        goto LAB_0288ce48;
+      }
+LAB_0288cdc8:
+      switch(param_1) {
+      case 0xc07:
+        iVar1 = 0xc0f;
+        iVar2 = param_1;
+        break;
+      default:
+LAB_0288cddc:
+        return 0x7fffffff;
+      case 0xc09:
+        iVar1 = 0xc11;
+        iVar2 = param_1;
+        break;
+      case 0xc0a:
+        iVar1 = 0xc12;
+        iVar2 = param_1;
+        break;
+      case 0xc0b:
+        iVar1 = 0xc13;
+        iVar2 = param_1;
+        break;
+      case 0xc0c:
+        iVar1 = 0xc14;
+        iVar2 = param_1;
+        break;
+      case 0xc0d:
+        iVar1 = 0xc15;
+        iVar2 = param_1;
+        break;
+      case 0xc0e:
+        iVar1 = 0xc16;
+        iVar2 = param_1;
+        break;
+      case 0xc3f:
+        iVar1 = 0xc40;
+        iVar2 = param_1;
+        break;
+      case 0xc53:
+        iVar1 = 0xc54;
+        iVar2 = param_1;
+        break;
+      case 0xc57:
+        iVar1 = 0xc58;
+        iVar2 = param_1;
+        break;
+      case 0xc5b:
+        iVar1 = 0xc5c;
+        iVar2 = param_1;
+        break;
+      case 0xc5f:
+        iVar1 = 0xc60;
+        iVar2 = param_1;
+      }
+      goto LAB_0288ce48;
+    }
+    if (param_1 == 0xd28) {
+      iVar1 = 0xd29;
+      goto LAB_0288ce48;
+    }
+  }
+  else {
+    param_2 = param_2 + -4;
+    if (param_1 < 0x4af) {
+      if (param_1 < 0x40d) {
+        return 0x7fffffff;
+      }
+      switch(param_1) {
+      case 0x40d:
+        iVar1 = 0x415;
+        iVar2 = 0xc07;
+        break;
+      case 0x40e:
+        iVar1 = 0x416;
+        iVar2 = 0xc08;
+        break;
+      case 0x40f:
+        iVar1 = 0x417;
+        iVar2 = 0xc09;
+        break;
+      case 0x410:
+        iVar1 = 0x418;
+        iVar2 = 0xc0a;
+        break;
+      case 0x411:
+        iVar1 = 0x419;
+        iVar2 = 0xc0b;
+        break;
+      case 0x412:
+        iVar1 = 0x41a;
+        iVar2 = 0xc0c;
+        break;
+      case 0x413:
+        iVar1 = 0x41b;
+        iVar2 = 0xc0d;
+        break;
+      case 0x414:
+        iVar1 = 0x41c;
+        iVar2 = 0xc0e;
+        break;
+      default:
+        goto code_r0x0288cdb8;
+      case 0x45e:
+        iVar1 = 0x45f;
+        iVar2 = 0xc27;
+        break;
+      case 0x462:
+        iVar1 = 0x463;
+        iVar2 = 0xc2b;
+        break;
+      case 0x466:
+        iVar1 = 0x467;
+        iVar2 = 0xc2f;
+        break;
+      case 0x46a:
+        iVar1 = 0x46b;
+        iVar2 = 0xc33;
+        break;
+      case 0x46e:
+        iVar1 = 0x46f;
+        iVar2 = 0xc37;
+        break;
+      case 0x472:
+        iVar1 = 0x473;
+        iVar2 = 0xc3b;
+        break;
+      case 0x476:
+        iVar1 = 0x477;
+        iVar2 = 0xc3f;
+        break;
+      case 0x48f:
+        iVar1 = 0x490;
+        iVar2 = 0xc43;
+        break;
+      case 0x493:
+        iVar1 = 0x494;
+        iVar2 = 0xc47;
+        break;
+      case 0x49a:
+        iVar1 = 0x49b;
+        iVar2 = 0xc4b;
+        break;
+      case 0x49e:
+        iVar1 = 0x49f;
+        iVar2 = 0xc4f;
+        break;
+      case 0x4a2:
+        iVar1 = 0x4a3;
+        iVar2 = 0xc53;
+        break;
+      case 0x4a6:
+        iVar1 = 0x4a7;
+        iVar2 = 0xc57;
+        break;
+      case 0x4aa:
+        iVar1 = 0x4ab;
+        iVar2 = 0xc5b;
+        break;
+      case 0x4ae:
+        iVar1 = 0x4af;
+        iVar2 = 0xc5f;
+      }
+      goto LAB_0288ce48;
+    }
+    iVar1 = 0xd29;
+    iVar2 = 0xd2c;
+    if (param_1 == 0xd28) goto LAB_0288ce48;
+    if (param_1 < 0xc60) {
+      if (param_1 < 0xc07) {
+        return 0x7fffffff;
+      }
+      goto LAB_0288cdc8;
+    }
+  }
+  iVar1 = 0xd2c;
+  iVar2 = 0xd2d;
+  if (param_1 != 0xd2c) {
+    return 0x7fffffff;
+  }
+LAB_0288ce48:
+  return iVar2 + (iVar1 - param_1) * param_2;
+}
+
+
+===== 0x2a31210 => FUN_02a31210 @ 02a31210 =====
+
+long * FUN_02a31210(long *param_1,long param_2,long *param_3,undefined8 *param_4,undefined8 *param_5
+                   )
+
+{
+  long lVar1;
+  undefined *puVar2;
+  long lVar3;
+  undefined1 auStack_98 [8];
+  undefined1 auStack_90 [8];
+  undefined1 auStack_88 [8];
+  undefined8 local_80;
+  undefined8 uStack_78;
+  long local_68;
+  
+  local_68 = *(long *)PTR___stack_chk_guard_07264398;
+  lVar3 = 0;
+  if (*param_3 != 0) {
+    pthread_mutex_lock((pthread_mutex_t *)(param_2 + 0x50));
+    local_80 = 0;
+    uStack_78 = 0;
+    if (*(char *)*param_5 == '\0') {
+      param_5 = param_4;
+    }
+                    /* try { // try from 02a31294 to 02a31297 has its CatchHandler @ 02a31428 */
+    FUN_02a2f0e0(auStack_98,param_2,param_5,&local_80);
+    lVar3 = *param_3;
+    FUN_0101c640(auStack_90,auStack_98);
+    if (*(long *)(lVar3 + 0xc0) == 0) {
+      puVar2 = (undefined *)(local_68 - *(long *)PTR___stack_chk_guard_07264398);
+      if (puVar2 == (undefined *)0x0) {
+                    /* WARNING: Subroutine does not return */
+                    /* try { // try from 02a313cc to 02a313cf has its CatchHandler @ 02a313d0 */
+        std::__throw_bad_function_call();
+      }
+      goto LAB_02a313ac;
+    }
+                    /* try { // try from 02a312d4 to 02a312d7 has its CatchHandler @ 02a313d0 */
+    (**(code **)(lVar3 + 200))(auStack_88,lVar3 + 0xb0,auStack_90);
+                    /* try { // try from 02a312e0 to 02a312e3 has its CatchHandler @ 02a3140c */
+    FUN_014bf450(lVar3 + 0x58,auStack_88);
+    FUN_0100a290(auStack_88);
+    FUN_0100a290(auStack_90);
+    FUN_0100a290(auStack_98);
+    if (*param_3 != 0) {
+                    /* try { // try from 02a31310 to 02a31313 has its CatchHandler @ 02a31428 */
+      FUN_02a30880(param_2,param_3,1);
+    }
+    pthread_mutex_unlock((pthread_mutex_t *)(param_2 + 0x50));
+    lVar3 = *param_3;
+  }
+  lVar1 = param_3[1];
+  *param_1 = lVar3;
+  param_1[1] = lVar1;
+  if (lVar1 != 0) {
+    if (*PTR___libc_single_threaded_07265240 == '\0') {
+      LOAcquire();
+      *(int *)(lVar1 + 8) = *(int *)(lVar1 + 8) + 1;
+      LORelease();
+    }
+    else {
+      *(int *)(lVar1 + 8) = *(int *)(lVar1 + 8) + 1;
+    }
+  }
+  if (local_68 == *(long *)PTR___stack_chk_guard_07264398) {
+    return param_1;
+  }
+  puVar2 = PTR___stack_chk_guard_07264398;
+LAB_02a313ac:
+                    /* WARNING: Subroutine does not return */
+  __stack_chk_fail(puVar2,0);
+}
+
+
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+

@@ -1,0 +1,556 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Program: knob.bin
+Time: Wed Nov 04 00:30:21 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Size: 1410 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x153f0b0]
+
+--- SCRIPT OUTPUT ---
+===== 0x153f0b0 => FUN_0153f0b0 @ 0153f0b0 =====
+
+int FUN_0153f0b0(long param_1)
+
+{
+  long *plVar1;
+  int *piVar2;
+  bool bVar3;
+  int iVar4;
+  int iVar5;
+  int iVar6;
+  long lVar7;
+  long *plVar8;
+  long *plVar9;
+  ulong uVar10;
+  undefined8 *puVar11;
+  undefined8 *puVar12;
+  undefined *puVar13;
+  long *plVar14;
+  long lVar15;
+  long *plVar16;
+  long lVar17;
+  undefined8 uVar18;
+  undefined8 uVar19;
+  long *plVar20;
+  char *pcVar21;
+  undefined1 auStack_d0 [8];
+  undefined1 auStack_c8 [8];
+  undefined1 auStack_c0 [8];
+  undefined8 uStack_b8;
+  undefined1 auStack_b0 [8];
+  undefined8 uStack_a8;
+  long lStack_a0;
+  long *plStack_98;
+  long *plStack_90;
+  long *plStack_88;
+  long *plStack_78;
+  long *plStack_70;
+  long lStack_68;
+  
+  lStack_68 = *(long *)PTR___stack_chk_guard_07264398;
+  if ((*(long *)(param_1 + 0x60) == 0) || (lVar7 = *(long *)(param_1 + 0x68), lVar7 == 0)) {
+    iVar6 = 3;
+  }
+  else {
+    lVar15 = *(long *)(lVar7 + 0x2310);
+    if (lVar15 == 0) {
+      iVar6 = 3;
+    }
+    else {
+      FUN_02903b90(&lStack_a0,lVar7,0,0);
+      if (lStack_a0 == 0) {
+        iVar6 = 3;
+      }
+      else {
+        lVar7 = *(long *)(param_1 + 0x78);
+        uVar19 = *(undefined8 *)(param_1 + 0x60);
+        lVar17 = *(long *)(param_1 + 0x88);
+                    /* try { // try from 0153f12c to 0153f12f has its CatchHandler @ 0153fc40 */
+        plVar8 = operator_new(200);
+                    /* try { // try from 0153f144 to 0153f147 has its CatchHandler @ 0153fd10 */
+        FUN_010535c0(&plStack_78,"Extract slice");
+                    /* try { // try from 0153f158 to 0153f15b has its CatchHandler @ 0153fc18 */
+        FUN_01ac9850(plVar8,&plStack_78,1,0);
+        *plVar8 = (long)&DAT_06f07440;
+        FUN_0100a290(&plStack_78);
+        puVar13 = PTR_DAT_072657e0;
+        plVar8[0xb] = (long)plStack_98;
+        plVar8[10] = lStack_a0;
+        *plVar8 = (long)(puVar13 + 0x10);
+        if (plStack_98 != (long *)0x0) {
+          if (*PTR___libc_single_threaded_07265240 == '\0') {
+            LOAcquire();
+            *(int *)(plStack_98 + 1) = (int)plStack_98[1] + 1;
+            LORelease();
+          }
+          else {
+            *(int *)(plStack_98 + 1) = (int)plStack_98[1] + 1;
+          }
+        }
+                    /* try { // try from 0153f1b4 to 0153f1b7 has its CatchHandler @ 0153fd1c */
+        FUN_02a49a80(plVar8 + 0xc,uVar19);
+        FUN_0101c640(plVar8 + 0x13,param_1 + 0x50);
+        plVar8[0x16] = lVar7;
+        plVar8[0x17] = 0;
+        plVar9 = *(long **)(param_1 + 0x98);
+        *(long **)(param_1 + 0x98) = plVar8;
+        plVar8[0x14] = lVar17;
+        plVar8[0x15] = 0x1800000002;
+        plVar8[0x18] = 0;
+        if (plVar9 != (long *)0x0) {
+          (**(code **)(*plVar9 + 8))();
+          plVar8 = *(long **)(param_1 + 0x98);
+        }
+                    /* try { // try from 0153f200 to 0153f203 has its CatchHandler @ 0153fc40 */
+        iVar6 = (**(code **)(*plVar8 + 0x40))(plVar8);
+        if (iVar6 == 0) {
+          plStack_88 = *(long **)(*(long *)(param_1 + 0x98) + 0xc0);
+          plStack_90 = *(long **)(*(long *)(param_1 + 0x98) + 0xb8);
+          if (plStack_88 != (long *)0x0) {
+            if (*PTR___libc_single_threaded_07265240 == '\0') {
+              LOAcquire();
+              *(int *)(plStack_88 + 1) = (int)plStack_88[1] + 1;
+              LORelease();
+            }
+            else {
+              *(int *)(plStack_88 + 1) = (int)plStack_88[1] + 1;
+            }
+          }
+          uVar19 = *(undefined8 *)(param_1 + 0x70);
+          uVar18 = *(undefined8 *)(param_1 + 0x90);
+                    /* try { // try from 0153f248 to 0153f24b has its CatchHandler @ 0153fb24 */
+          plVar8 = operator_new(0x108);
+                    /* try { // try from 0153f268 to 0153f26b has its CatchHandler @ 0153fb38 */
+          FUN_01a95f90(plVar8,uVar19,lVar15,&plStack_90,*(undefined4 *)(param_1 + 0x58),0,uVar18);
+          plVar9 = *(long **)(param_1 + 0xa0);
+          *(long **)(param_1 + 0xa0) = plVar8;
+          if (plVar9 != (long *)0x0) {
+            (**(code **)(*plVar9 + 8))();
+            plVar8 = *(long **)(param_1 + 0xa0);
+          }
+                    /* try { // try from 0153f294 to 0153f2c3 has its CatchHandler @ 0153fb24 */
+          (**(code **)(*plVar8 + 0x40))(plVar8);
+          plVar8 = plStack_88;
+          puVar13 = PTR___libc_single_threaded_07265240;
+          lVar7 = *(long *)(param_1 + 0x70);
+          if (*(int *)(param_1 + 0x58) == *(int *)(lVar7 + 0x5f8)) {
+            if (plStack_88 == (long *)0x0) {
+              plVar9 = *(long **)(lVar7 + 0x260);
+              if (plVar9 == (long *)0x0) goto LAB_0153f2b0;
+              plVar16 = (long *)0x0;
+              plVar20 = (long *)0x0;
+LAB_0153f5fc:
+              plVar1 = plVar9 + 1;
+              iVar4 = (int)*plVar1;
+              do {
+                if (iVar4 == 0) {
+                  plVar14 = (long *)0x0;
+                  goto LAB_0153f668;
+                }
+                iVar5 = iVar4 + 1;
+                bVar3 = (int)*plVar1 != iVar4;
+                iVar4 = (int)*plVar1;
+              } while (bVar3);
+              *(int *)plVar1 = iVar5;
+              plVar14 = (long *)0x0;
+              if ((int)*plVar1 != 0) {
+                plVar14 = *(long **)(lVar7 + 600);
+              }
+              if (*plVar1 == 0x100000001) {
+                plVar9[1] = 0;
+                (**(code **)(*plVar9 + 0x10))(plVar9);
+                (**(code **)(*plVar9 + 0x18))(plVar9);
+              }
+              else {
+                if (*PTR___libc_single_threaded_07265240 == '\0') {
+                  LOAcquire();
+                  iVar4 = (int)*plVar1;
+                  *(int *)plVar1 = iVar4 + -1;
+                  LORelease();
+                }
+                else {
+                  iVar4 = (int)plVar9[1];
+                  *(int *)(plVar9 + 1) = iVar4 + -1;
+                }
+                if (iVar4 == 1) {
+                  FUN_0133bc10(plVar9);
+                }
+              }
+LAB_0153f668:
+              if (plVar16 == plVar14) {
+LAB_0153f778:
+                if (plVar20 != (long *)0x0) goto LAB_0153f854;
+              }
+              else {
+                plVar9 = *(long **)(lVar7 + 0x1f8);
+                puVar11 = (undefined8 *)(lVar7 + 0x200);
+                puVar12 = *(undefined8 **)(lVar7 + 0x200);
+                lVar15 = lVar7 + 0x1f8;
+                *plVar9 = (long)puVar12;
+                if (puVar12 != (undefined8 *)0x0) {
+                  *puVar12 = plVar9;
+                }
+                *(undefined8 **)(lVar7 + 0x1f8) = puVar11;
+                *(long *)(lVar7 + 0x200) = lVar15;
+                *(long **)(lVar7 + 600) = plVar16;
+                pcVar21 = PTR___libc_single_threaded_07265240;
+                plStack_70 = plVar20;
+                if (plVar20 != (long *)0x0) {
+                  if (*PTR___libc_single_threaded_07265240 == '\0') {
+                    LOAcquire();
+                    *(int *)((long)plVar20 + 0xc) = *(int *)((long)plVar20 + 0xc) + 1;
+                    LORelease();
+                    goto LAB_0153f910;
+                  }
+                  plVar9 = *(long **)(lVar7 + 0x260);
+                  *(int *)((long)plVar20 + 0xc) = *(int *)((long)plVar20 + 0xc) + 1;
+                  if (plVar9 != (long *)0x0) goto LAB_0153f6c0;
+                  *(long **)(lVar7 + 0x260) = plVar20;
+                  if (plVar16 != (long *)0x0) {
+                    plVar9 = (long *)*puVar11;
+                    *puVar11 = plVar9;
+                    puVar12 = puVar11;
+                    goto LAB_0153f700;
+                  }
+                  plStack_78 = (long *)0x0;
+LAB_0153f740:
+                  *(int *)((long)plVar20 + 0xc) = *(int *)((long)plVar20 + 0xc) + 1;
+                    /* try { // try from 0153f750 to 0153f9eb has its CatchHandler @ 0153fb58 */
+                  FUN_0153ff50(lVar7 + 0x208,&plStack_78);
+LAB_0153f754:
+                  if (plStack_70 != (long *)0x0) {
+LAB_0153f75c:
+                    if (*pcVar21 == '\0') {
+                      LOAcquire();
+                      iVar4 = *(int *)((long)plStack_70 + 0xc);
+                      *(int *)((long)plStack_70 + 0xc) = iVar4 + -1;
+                      LORelease();
+                    }
+                    else {
+                      iVar4 = *(int *)((long)plStack_70 + 0xc);
+                      *(int *)((long)plStack_70 + 0xc) = iVar4 + -1;
+                    }
+                    if (iVar4 != 1) goto LAB_0153f778;
+                    (**(code **)(*plStack_70 + 0x18))();
+                    if (plVar20 == (long *)0x0) goto LAB_0153f77c;
+                  }
+                  goto LAB_0153f854;
+                }
+LAB_0153f910:
+                plVar9 = *(long **)(lVar7 + 0x260);
+                if (plVar9 != (long *)0x0) {
+                  if (*PTR___libc_single_threaded_07265240 == '\0') {
+                    LOAcquire();
+                    iVar4 = *(int *)((long)plVar9 + 0xc);
+                    *(int *)((long)plVar9 + 0xc) = iVar4 + -1;
+                    LORelease();
+                  }
+                  else {
+LAB_0153f6c0:
+                    iVar4 = *(int *)((long)plVar9 + 0xc);
+                    *(int *)((long)plVar9 + 0xc) = iVar4 + -1;
+                  }
+                  if (iVar4 == 1) {
+                    (**(code **)(*plVar9 + 0x18))();
+                  }
+                }
+                *(long **)(lVar7 + 0x260) = plVar20;
+                if (plVar16 != (long *)0x0) {
+                  puVar12 = *(undefined8 **)(lVar7 + 0x1f8);
+                  plVar9 = *(long **)(lVar7 + 0x200);
+                  *puVar12 = plVar9;
+                  if (plVar9 != (long *)0x0) {
+LAB_0153f700:
+                    *plVar9 = (long)puVar12;
+                  }
+                  *(long *)(lVar7 + 0x200) = lVar15;
+                  *(long **)(lVar7 + 0x1f8) = plVar16 + 8;
+                  plVar9 = (long *)plVar16[8];
+                  *(long **)(lVar7 + 0x200) = plVar9;
+                  if (plVar9 != (long *)0x0) {
+                    *plVar9 = (long)puVar11;
+                  }
+                  plVar16[8] = lVar15;
+                }
+                pcVar21 = PTR___libc_single_threaded_07265240;
+                plStack_78 = plVar16;
+                if (plVar20 != (long *)0x0) {
+                  if (*PTR___libc_single_threaded_07265240 != '\0') goto LAB_0153f740;
+                  LOAcquire();
+                  iVar4 = *(int *)((long)plVar20 + 0xc);
+                  *(int *)((long)plVar20 + 0xc) = iVar4 + 1;
+                  LORelease();
+                  FUN_0153ff50(lVar7 + 0x208,&plStack_78,iVar4);
+                  goto LAB_0153f754;
+                }
+                FUN_0153ff50(lVar7 + 0x208,&plStack_78);
+                if (plStack_70 != (long *)0x0) {
+                  pcVar21 = PTR___libc_single_threaded_07265240;
+                  goto LAB_0153f75c;
+                }
+              }
+            }
+            else {
+              if (*PTR___libc_single_threaded_07265240 == '\0') {
+                piVar2 = (int *)((long)plStack_88 + 0xc);
+                LOAcquire();
+                *piVar2 = *piVar2 + 1;
+                LORelease();
+                lVar7 = *(long *)(param_1 + 0x70);
+                if (*puVar13 != '\0') {
+                  iVar4 = *(int *)((long)plStack_88 + 0xc);
+                  goto LAB_0153f5bc;
+                }
+                LOAcquire();
+                *piVar2 = *piVar2 + 1;
+                LORelease();
+              }
+              else {
+                iVar4 = *(int *)((long)plStack_88 + 0xc) + 1;
+LAB_0153f5bc:
+                *(int *)((long)plStack_88 + 0xc) = iVar4 + 1;
+              }
+              plVar9 = plStack_88 + 1;
+              iVar4 = (int)*plVar9;
+              do {
+                if (iVar4 == 0) {
+                  plVar20 = (long *)0x0;
+                  plVar16 = (long *)0x0;
+                  goto LAB_0153f5f4;
+                }
+                iVar5 = iVar4 + 1;
+                bVar3 = (int)*plVar9 != iVar4;
+                iVar4 = (int)*plVar9;
+              } while (bVar3);
+              *(int *)plVar9 = iVar5;
+              plVar20 = plStack_88;
+              if ((int)*plVar9 != 0) {
+                plVar16 = plStack_90;
+LAB_0153f5f4:
+                plVar9 = *(long **)(lVar7 + 0x260);
+                plVar14 = (long *)0x0;
+                if (plVar9 != (long *)0x0) goto LAB_0153f5fc;
+                goto LAB_0153f668;
+              }
+              plVar9 = *(long **)(lVar7 + 0x260);
+              plVar16 = (long *)0x0;
+              if (plVar9 != (long *)0x0) goto LAB_0153f5fc;
+LAB_0153f854:
+              plVar9 = plVar20 + 1;
+              if (*plVar9 == 0x100000001) {
+                plVar20[1] = 0;
+                (**(code **)(*plVar20 + 0x10))(plVar20);
+                (**(code **)(*plVar20 + 0x18))(plVar20);
+              }
+              else {
+                if (*PTR___libc_single_threaded_07265240 == '\0') {
+                  LOAcquire();
+                  iVar4 = (int)*plVar9;
+                  *(int *)plVar9 = iVar4 + -1;
+                  LORelease();
+                }
+                else {
+                  iVar4 = (int)plVar20[1];
+                  *(int *)(plVar20 + 1) = iVar4 + -1;
+                }
+                if (iVar4 == 1) {
+                  FUN_0133bc10(plVar20);
+                }
+              }
+            }
+LAB_0153f77c:
+            puVar13 = PTR___libc_single_threaded_07265240;
+            if (plVar8 != (long *)0x0) {
+              if (*PTR___libc_single_threaded_07265240 == '\0') {
+                LOAcquire();
+                iVar4 = *(int *)((long)plVar8 + 0xc);
+                *(int *)((long)plVar8 + 0xc) = iVar4 + -1;
+                LORelease();
+                if (iVar4 == 1) goto LAB_0153f9b0;
+LAB_0153f9c0:
+                if (*puVar13 != '\0') {
+                  iVar5 = *(int *)((long)plVar8 + 0xc);
+                  goto LAB_0153f7a8;
+                }
+                LOAcquire();
+                iVar5 = *(int *)((long)plVar8 + 0xc);
+                *(int *)((long)plVar8 + 0xc) = iVar5 + -1;
+                LORelease();
+              }
+              else {
+                iVar4 = *(int *)((long)plVar8 + 0xc);
+                iVar5 = iVar4 + -1;
+                *(int *)((long)plVar8 + 0xc) = iVar5;
+                if (iVar4 == 1) {
+LAB_0153f9b0:
+                  (**(code **)(*plVar8 + 0x18))(plVar8);
+                  goto LAB_0153f9c0;
+                }
+LAB_0153f7a8:
+                *(int *)((long)plVar8 + 0xc) = iVar5 + -1;
+              }
+              if (iVar5 == 1) {
+                (**(code **)(*plVar8 + 0x18))(plVar8);
+              }
+            }
+          }
+LAB_0153f2b0:
+          FUN_01075630(auStack_d0,plStack_90 + 0x24);
+                    /* try { // try from 0153f2c8 to 0153f3bf has its CatchHandler @ 0153fc84 */
+          uVar10 = FUN_01041ac0(auStack_d0);
+          if ((uVar10 & 1) == 0) {
+            iVar6 = 3;
+          }
+          else {
+            FUN_01d31840(&uStack_a8);
+                    /* try { // try from 0153f3d0 to 0153f3d3 has its CatchHandler @ 0153fb9c */
+            FUN_010535c0(&plStack_78,*(undefined8 *)PTR_PTR_072657c8);
+                    /* try { // try from 0153f3e4 to 0153f3e7 has its CatchHandler @ 0153fcb8 */
+            FUN_03c92a00(auStack_c8,&uStack_a8,&plStack_78);
+            FUN_0100a290(&plStack_78);
+            FUN_0100a290(&uStack_a8);
+                    /* try { // try from 0153f404 to 0153f407 has its CatchHandler @ 0153fca4 */
+            FUN_01075630(auStack_c0,auStack_c8);
+            FUN_01029700(&uStack_b8,plStack_90 + 0x15);
+                    /* try { // try from 0153f428 to 0153f42b has its CatchHandler @ 0153fc0c */
+            FUN_01075690(auStack_b0,auStack_c0,uStack_b8);
+                    /* try { // try from 0153f42c to 0153f44f has its CatchHandler @ 0153fba8 */
+            puVar11 = (undefined8 *)FUN_01e949f0();
+            FUN_01029700(&uStack_a8,*puVar11);
+            FUN_01075c70(&plStack_78,auStack_b0,uStack_a8);
+            lVar7 = param_1 + 0xa8;
+            FUN_0100bb00(lVar7,&plStack_78);
+            FUN_0100a290(&plStack_78);
+            FUN_0100a290(auStack_b0);
+            FUN_0100a290(auStack_c0);
+                    /* try { // try from 0153f480 to 0153f493 has its CatchHandler @ 0153fca4 */
+            uVar10 = FUN_0105cd30(auStack_d0,lVar7);
+            if ((uVar10 & 1) == 0) {
+              iVar6 = 3;
+            }
+            else {
+              plStack_78 = (long *)0x0;
+              plVar8 = operator_new(0x38);
+              plVar8[1] = 0x100000001;
+              *plVar8 = (long)&PTR_LAB_06e8b498;
+                    /* try { // try from 0153f4c0 to 0153f4c3 has its CatchHandler @ 0153fcf0 */
+              FUN_01ef1ec0(plVar8 + 2,lVar7,1);
+              plStack_78 = plVar8 + 2;
+              plStack_70 = plVar8;
+                    /* try { // try from 0153f4e0 to 0153f4e3 has its CatchHandler @ 0153fcdc */
+              FUN_01ef5ee0(*(undefined8 *)(param_1 + 0x80),plStack_90,&plStack_78,0,0);
+              plVar8 = plStack_90;
+              FUN_0101c640(auStack_b0,param_1 + 0x50);
+              if (plVar8[0x18] == 0) {
+                puVar13 = (undefined *)(lStack_68 - *(long *)PTR___stack_chk_guard_07264398);
+                if (puVar13 == (undefined *)0x0) {
+                    /* WARNING: Subroutine does not return */
+                    /* try { // try from 0153fb20 to 0153fb23 has its CatchHandler @ 0153fc98 */
+                  std::__throw_bad_function_call();
+                }
+                goto LAB_0153faf8;
+              }
+                    /* try { // try from 0153f518 to 0153f51b has its CatchHandler @ 0153fc98 */
+              (*(code *)plVar8[0x19])(&uStack_a8,plVar8 + 0x16,auStack_b0);
+                    /* try { // try from 0153f524 to 0153f527 has its CatchHandler @ 0153fc54 */
+              FUN_014bf450(plVar8 + 0xb,&uStack_a8);
+              FUN_0100a290(&uStack_a8);
+              FUN_0100a290(auStack_b0);
+                    /* try { // try from 0153f540 to 0153f543 has its CatchHandler @ 0153fcdc */
+              FUN_02a473d0(plStack_90,lVar7);
+              plVar8 = plStack_70;
+              if (plStack_70 != (long *)0x0) {
+                plVar9 = plStack_70 + 1;
+                if (*plVar9 == 0x100000001) {
+                  plStack_70[1] = 0;
+                  (**(code **)(*plStack_70 + 0x10))(plStack_70);
+                  (**(code **)(*plVar8 + 0x18))(plVar8);
+                }
+                else {
+                  if (*PTR___libc_single_threaded_07265240 == '\0') {
+                    LOAcquire();
+                    iVar4 = (int)*plVar9;
+                    *(int *)plVar9 = iVar4 + -1;
+                    LORelease();
+                  }
+                  else {
+                    iVar4 = (int)plStack_70[1];
+                    *(int *)(plStack_70 + 1) = iVar4 + -1;
+                  }
+                  if (iVar4 == 1) {
+                    FUN_0133bc10(plStack_70);
+                  }
+                }
+              }
+            }
+            FUN_0100a290(auStack_c8);
+          }
+          FUN_0100a290(auStack_d0);
+          plVar8 = plStack_88;
+          if (plStack_88 != (long *)0x0) {
+            plVar9 = plStack_88 + 1;
+            if (*plVar9 == 0x100000001) {
+              plStack_88[1] = 0;
+              (**(code **)(*plStack_88 + 0x10))(plStack_88);
+              (**(code **)(*plVar8 + 0x18))(plVar8);
+            }
+            else {
+              if (*PTR___libc_single_threaded_07265240 == '\0') {
+                LOAcquire();
+                iVar4 = (int)*plVar9;
+                *(int *)plVar9 = iVar4 + -1;
+                LORelease();
+              }
+              else {
+                iVar4 = (int)plStack_88[1];
+                *(int *)(plStack_88 + 1) = iVar4 + -1;
+              }
+              if (iVar4 == 1) {
+                FUN_0133bc10(plStack_88);
+              }
+            }
+          }
+        }
+      }
+      if (plStack_98 != (long *)0x0) {
+        plVar8 = plStack_98 + 1;
+        if (*plVar8 == 0x100000001) {
+          plStack_98[1] = 0;
+          (**(code **)(*plStack_98 + 0x10))(plStack_98);
+          (**(code **)(*plStack_98 + 0x18))(plStack_98);
+        }
+        else {
+          if (*PTR___libc_single_threaded_07265240 == '\0') {
+            LOAcquire();
+            iVar4 = (int)*plVar8;
+            *(int *)plVar8 = iVar4 + -1;
+            LORelease();
+          }
+          else {
+            iVar4 = (int)plStack_98[1];
+            *(int *)(plStack_98 + 1) = iVar4 + -1;
+          }
+          if (iVar4 == 1) {
+            FUN_0133bc10(plStack_98);
+          }
+        }
+      }
+    }
+  }
+  if (lStack_68 == *(long *)PTR___stack_chk_guard_07264398) {
+    return iVar6;
+  }
+  puVar13 = PTR___stack_chk_guard_07264398;
+LAB_0153faf8:
+                    /* WARNING: Subroutine does not return */
+  __stack_chk_fail(puVar13,0);
+}
+
+
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+

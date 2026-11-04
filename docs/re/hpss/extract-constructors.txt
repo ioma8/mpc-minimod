@@ -1,0 +1,214 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Program: knob.bin
+Time: Wed Nov 04 00:30:09 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Size: 1304 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x153ed40, 0x1a5ffe0, 0x21a5430]
+
+--- SCRIPT OUTPUT ---
+===== 0x153ed40 => FUN_0153ed40 @ 0153ed40 =====
+
+void FUN_0153ed40(undefined8 *param_1,undefined8 param_2,undefined4 param_3,undefined8 param_4,
+                 undefined8 param_5,long param_6,undefined8 param_7,undefined8 param_8,
+                 undefined8 param_9)
+
+{
+  long lVar1;
+  undefined *puVar2;
+  undefined8 uVar3;
+  undefined1 auStack_70 [8];
+  long local_68;
+  
+  local_68 = *(long *)PTR___stack_chk_guard_07264398;
+  FUN_010535c0(auStack_70,"Extract slice");
+                    /* try { // try from 0153edc0 to 0153edc3 has its CatchHandler @ 0153ee50 */
+  FUN_01ac9850(param_1,auStack_70,1,0);
+  *param_1 = &DAT_06f07440;
+  FUN_0100a290(auStack_70);
+  *param_1 = &PTR_LAB_06f07640;
+  FUN_0101c640(param_1 + 10,param_2);
+  *(undefined4 *)(param_1 + 0xb) = param_3;
+  uVar3 = *(undefined8 *)(param_6 + 0x1278);
+  param_1[0xc] = param_4;
+  param_1[0xd] = param_5;
+  puVar2 = PTR___stack_chk_guard_07264398;
+  param_1[0xe] = param_6;
+  param_1[0xf] = param_7;
+  param_1[0x10] = param_8;
+  param_1[0x11] = uVar3;
+  param_1[0x12] = param_9;
+  param_1[0x13] = 0;
+  param_1[0x14] = 0;
+  lVar1 = local_68 - *(long *)puVar2;
+  if (lVar1 != 0) {
+                    /* WARNING: Subroutine does not return */
+    __stack_chk_fail(puVar2,0,lVar1);
+  }
+  FUN_0101c620(param_1 + 0x15);
+  return;
+}
+
+
+===== 0x1a5ffe0 => FUN_01a5ffe0 @ 01a5ffe0 =====
+
+undefined8 *
+FUN_01a5ffe0(undefined8 *param_1,long param_2,undefined8 *param_3,undefined8 param_4,
+            undefined8 param_5,undefined8 param_6,undefined4 *param_7,undefined4 param_8,
+            undefined8 param_9)
+
+{
+  undefined4 uVar1;
+  char cVar2;
+  undefined *puVar3;
+  int iVar4;
+  undefined8 *puVar5;
+  undefined8 uVar6;
+  long lVar7;
+  undefined8 *local_78;
+  undefined8 *local_70;
+  long local_68;
+  
+  local_68 = *(long *)PTR___stack_chk_guard_07264398;
+  puVar5 = operator_new(0xd8);
+  uVar1 = *param_7;
+  puVar5[1] = 0x100000001;
+  *puVar5 = &PTR_LAB_06e95e70;
+                    /* try { // try from 01a60070 to 01a60073 has its CatchHandler @ 01a60284 */
+  FUN_010535c0(&local_78,"Extract slice");
+                    /* try { // try from 01a60084 to 01a60087 has its CatchHandler @ 01a60270 */
+  FUN_01ac9850(puVar5 + 2,&local_78,1,0);
+  puVar5[2] = &DAT_06f07440;
+  FUN_0100a290(&local_78);
+  puVar3 = PTR_DAT_072657e0;
+  lVar7 = param_3[1];
+  uVar6 = *param_3;
+  puVar5[0xd] = lVar7;
+  puVar5[0xc] = uVar6;
+  puVar5[2] = puVar3 + 0x10;
+  if (lVar7 != 0) {
+    if (*PTR___libc_single_threaded_07265240 == '\0') {
+      LOAcquire();
+      *(int *)(lVar7 + 8) = *(int *)(lVar7 + 8) + 1;
+      LORelease();
+    }
+    else {
+      *(int *)(lVar7 + 8) = *(int *)(lVar7 + 8) + 1;
+    }
+  }
+                    /* try { // try from 01a600e0 to 01a600e3 has its CatchHandler @ 01a601cc */
+  FUN_02a49a80(puVar5 + 0xe,param_4);
+  FUN_0101c640(puVar5 + 0x15,param_5);
+  puVar5[0x16] = param_6;
+  puVar3 = PTR___libc_single_threaded_07265240;
+  *(undefined4 *)(puVar5 + 0x17) = uVar1;
+  *(undefined4 *)((long)puVar5 + 0xbc) = param_8;
+  puVar5[0x18] = param_9;
+  cVar2 = *puVar3;
+  puVar5[0x19] = 0;
+  puVar5[0x1a] = 0;
+  uVar6 = *(undefined8 *)(param_2 + 0x60);
+  if (cVar2 == '\0') {
+    LOAcquire();
+    *(int *)(puVar5 + 1) = *(int *)(puVar5 + 1) + 1;
+    LORelease();
+  }
+  else {
+    *(int *)(puVar5 + 1) = *(int *)(puVar5 + 1) + 1;
+  }
+  local_78 = puVar5 + 2;
+  local_70 = puVar5;
+                    /* try { // try from 01a60128 to 01a6012b has its CatchHandler @ 01a60220 */
+  iVar4 = FUN_01ad0a00(uVar6,&local_78);
+  if (local_70 != (undefined8 *)0x0) {
+    FUN_0133bca0(local_70);
+  }
+  if (iVar4 == 0) {
+    *param_1 = puVar5[0x19];
+    FUN_014b35c0(param_1 + 1,puVar5 + 0x1a);
+  }
+  else {
+    *param_1 = 0;
+    param_1[1] = 0;
+  }
+  FUN_0133bca0(puVar5);
+  if (local_68 - *(long *)PTR___stack_chk_guard_07264398 != 0) {
+                    /* WARNING: Subroutine does not return */
+    __stack_chk_fail(PTR___stack_chk_guard_07264398,0,
+                     local_68 - *(long *)PTR___stack_chk_guard_07264398);
+  }
+  return param_1;
+}
+
+
+===== 0x21a5430 => FUN_021a5430 @ 021a5430 =====
+
+void FUN_021a5430(long param_1,long *param_2)
+
+{
+  ulong uVar1;
+  code *pcVar2;
+  long lVar3;
+  undefined8 uVar4;
+  int local_8c;
+  undefined1 auStack_88 [8];
+  undefined8 local_80;
+  long local_78;
+  undefined1 auStack_70 [24];
+  long local_58;
+  
+  lVar3 = *(long *)(param_1 + 0x618);
+  local_58 = *(long *)PTR___stack_chk_guard_07264398;
+  if (lVar3 != 0) {
+    pcVar2 = *(code **)(**(long **)(param_1 + 0x10d0) + 0x40);
+    if ((pcVar2 == (code *)&LAB_017bd120) ||
+       (uVar1 = (*pcVar2)(*(long **)(param_1 + 0x10d0),param_2,lVar3,
+                          *(undefined1 *)(param_1 + 0xe18)), (uVar1 & 1) != 0)) {
+      uVar4 = *(undefined8 *)(param_1 + 0x10c8);
+      FUN_010535c0(&local_80,"Extract sample slice");
+                    /* try { // try from 021a54c4 to 021a54c7 has its CatchHandler @ 021a562c */
+      FUN_01a4ead0(auStack_70,uVar4,&local_80,*param_2 + 0xa8);
+      FUN_0100a290(&local_80);
+      uVar4 = *(undefined8 *)(*(long *)(param_1 + 0x10b0) + 0x1278);
+      local_80 = 0;
+      local_78 = 0;
+                    /* try { // try from 021a54f4 to 021a54f7 has its CatchHandler @ 021a55d4 */
+      FUN_02a2f0e0(auStack_88,uVar4,*param_2 + 0xa8,&local_80);
+      if (local_78 != 0) {
+        FUN_0133bca0();
+      }
+      local_8c = 0;
+      if ((*(byte *)(param_1 + 0xf20) & 1) != 0) {
+        local_8c = *(byte *)(param_1 + 0xe18) + 1;
+      }
+                    /* try { // try from 021a5540 to 021a5543 has its CatchHandler @ 021a5618 */
+      FUN_01a5ffe0(&local_80,*(undefined8 *)(param_1 + 0x10c8),param_2,lVar3,auStack_88,uVar4,
+                   &local_8c,*(undefined4 *)(param_1 + 0x1488),*(undefined8 *)(param_1 + 0x10b8));
+      if (*(long *)(param_1 + 0xf90) != 0) {
+                    /* try { // try from 021a555c to 021a555f has its CatchHandler @ 021a565c */
+        FUN_01a5e940(*(undefined8 *)(param_1 + 0x10c8),*(long *)(param_1 + 0xf90),&local_80,
+                     *(undefined4 *)(param_1 + 0xfe8),0);
+      }
+      if (local_78 != 0) {
+        FUN_0133bca0();
+      }
+      FUN_0100a290(auStack_88);
+      FUN_01acc6b0(auStack_70);
+    }
+  }
+  if (local_58 - *(long *)PTR___stack_chk_guard_07264398 != 0) {
+                    /* WARNING: Subroutine does not return */
+    __stack_chk_fail(PTR___stack_chk_guard_07264398,0,
+                     local_58 - *(long *)PTR___stack_chk_guard_07264398);
+  }
+  return;
+}
+
+
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+
