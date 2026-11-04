@@ -57,7 +57,12 @@ released   : Trim        Tune        Filter
   object we have not identified yet (full account in `docs/TRIM-PAGE.md`).
 * **SAMPLE OPTIONS / HPSS** — `SHIFT` + `DATA` opens the menu on the Sample
   page. Turn `DATA` to choose **HPSS**, **Spectral Chop** or **Close**, press
-  `DATA` to confirm, or press `SHIFT` + `DATA` to close. HPSS reads the selected
+  `DATA` to confirm, or press `SHIFT` + `DATA` to close. The wheel is read from
+  the firmware's own parameter plumbing (`0x13bb930`): a turn changes the
+  focused property's value, and while the menu is open that change is taken as
+  one detent and the notification is swallowed so the page underneath does not
+  move. Raw MIDI and evdev are kept as fallbacks for the emulator, and go quiet
+  once the property path has been seen so a detent is never two steps. HPSS reads the selected
   sample, runs the split on a worker thread, and creates `HPSS Harmonic` then
   `HPSS Percussive` on the next two empty pads through the stock Extract
   command. The source sample and the live trim/chop range are left unchanged.

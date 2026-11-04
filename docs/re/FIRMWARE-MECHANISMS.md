@@ -171,10 +171,11 @@ Undo labels and telemetry keys are useful anchors for finding them:
 | `read()` interception | the mod's `read()` wrapper sees every event and can drop specific messages (used to suppress input while a menu or an operation is active) | [rt] |
 | button dispatcher | `buttons(event)`; `event+8` = code, `event+9` = `0x7f` down / `0x00` up | [rt] |
 | control-change path | `0x159f230(event, raw, lo, range)`; `event+8` = CC number | [rt] |
-| encoders | relative where noted: `01` = +1 step, `7F` = −1; an unchanged absolute value may issue no event at all | [doc] |
+| encoders | **not** a button and **not** MIDI on hardware: a turn ends in the value broadcaster `0x13bb930` as a changed property value, which is how the focused control learns about it. `A_ROTARY 0x15f5690` is not in that path (zero calls when turning `DATA` in the emulator). The emulator's MIDI `01`/`7F` reaches the same broadcast | [rt] |
 | button codes | `CHOP 0x4b`, `SHIFT 0x31`, screen buttons `0x0c/0x0d/0x0e` (= B1/B2/B3), `B3 0x0e` repeats while held | [rt] |
 | panel feedback | lab HTTP `/state?since=0`: LED 75 = CHOP bright, LED 82 = PLAY | [rt] |
 | input suppression | dropping the three `B0` reads stops the page from seeing a knob while the mod owns the interaction | [rt] |
+| menu wheel | while the mod's menu is open it takes one detent per *changed* property value from `0x13bb930` and swallows the notification; the same value re-broadcast (a repaint) is ignored | [rt] |
 
 ## 10. Sample pool, pad occupancy and Extract
 
