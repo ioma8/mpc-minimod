@@ -2369,6 +2369,9 @@ static void spectral_start(void)
 
 #if MINIMOD_DEBUG
 /* ------------------------------------------------------- chop probe (debug) */
+/* All addresses below are Ghidra VAs minus 0x100000 (the mod's own offset
+ * space). Mixing the two spaces is how the first version of this probe ended
+ * up hooking unrelated functions and calling garbage. */
 /* Stock slice editing, found through the "Insert Slice" undo label at
  * 0x46a80e0 and the telemetry key "slices_added":
  *   FUN_021a3b10(editor, {sample, refcounted}, frame)  add a Manual slice
@@ -2380,6 +2383,28 @@ static void (*orig_add_slice_ph)(void *);
 static void (*orig_insert_cmd)(void *, void *, unsigned, void *);
 static void (*orig_rmall_cmd)(void *, void *, void *);
 static uintptr_t g_chop_editor;
+
+
+/* Slice objects are ~0x350-byte heap allocations, so the chop code that makes
+ * them can be found from the allocation's return address. Debug only; the
+ * logger is off unless the probe enables it. */
+static void *(*g_real_malloc)(size_t);
+static volatile int g_malloc_probe;
+static volatile int g_malloc_n;
+
+void *malloc(size_t n)
+{
+    if (!g_real_malloc)
+        g_real_malloc = (void *(*)(size_t))dlsym(RTLD_NEXT, "malloc");
+    if (!g_real_malloc)
+        return 0;
+    void *p = g_real_malloc(n);
+    if (g_malloc_probe && n >= 0x100 && n <= 0x8000 && p && g_malloc_n < 400) {
+        g_malloc_n++;
+        mlog("chop: malloc %zu -> %p lr=%p\n", n, p, __builtin_return_address(0));
+    }
+    return p;
+}
 
 static unsigned chop_slice_count(uintptr_t sample)
 {
@@ -2410,6 +2435,16 @@ static void chop_dump_layer(uintptr_t lay)
         return;
     rd(lay + 0xa8, &style, 4);
     mlog("chop: layer=%p style=%u (+0xa8)\n", (void *)lay, style);
+    {
+        unsigned char f6e0 = 0;
+        unsigned m418 = 0, n738 = 0, a6e4 = 0;
+        rd(lay + 0x6e0, &f6e0, 1);
+        rd(lay + 0x418, &m418, 4);
+        rd(lay + 0x738, &n738, 4);
+        rd(lay + 0x6e4, &a6e4, 4);
+        mlog("chop:   flags +0x6e0=%u marker +0x418=%u +0x738=%u +0x6e4=%u\n",
+             f6e0, m418, n738, a6e4);
+    }
     for (int i = 0; i < 4; ++i) {
         uintptr_t at = lay + 0xb0 + (uintptr_t)i * 0x18;
         rd(at, &pairs[i][0], 8);
@@ -2579,6 +2614,145 @@ static void rm_slice_hook(void *ctl, void *sel, unsigned v, void *ed)
     mlog("chop: rm_slice after=%u\n", chop_slice_count(sample));
 }
 
+/* The layer's marker resolver is called by every chop UI action. Its caller
+ * identifies the editor-side function; hooking that entry then yields the
+ * editor itself in x0. */
+static int (*orig_marker_at)(void *, unsigned);
+static void marker_at_hook(void *layer, unsigned index)
+{
+    uintptr_t lr = (uintptr_t)__builtin_return_address(0);
+    mlog("chop: marker_at layer=%p index=%u caller=0x%llx\n", layer, index,
+         (unsigned long long)(lr - base));
+    if (orig_marker_at)
+        orig_marker_at(layer, index);
+}
+
+/* Slice-list helper that runs on every edit; its caller is the edit code. */
+static void (*orig_slice_publish)(void *);
+static void slice_publish_hook(void *a)
+{
+    uintptr_t lr = (uintptr_t)__builtin_return_address(0);
+    mlog("chop: slice_publish arg=%p caller=0x%llx\n", a,
+         (unsigned long long)(lr - base));
+    if (orig_slice_publish)
+        orig_slice_publish(a);
+}
+
+
+/* ---- snapshot: what the UI just changed ---------------------------------- */
+static int g_snap_track;
+static int g_snap_n;
+
+static unsigned fnv(const unsigned char *p, size_t n)
+{
+    unsigned h = 2166136261u;
+    for (size_t i = 0; i < n; ++i) {
+        h ^= p[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void chop_snapshot(const char *tag)
+{
+    void *screen = 0;
+    uintptr_t state = 0, sample = 0;
+    unsigned frames = 0, ch = 0, rate = 0;
+    if (!hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate))
+        return;
+    uintptr_t binding = 0, st = 0, lay = 0;
+    if (screen && rd((uintptr_t)screen + 0x178, &binding, 8) && binding &&
+        rd(binding + 0x60, &st, 8) && st && rd(st + 0x22e8, &lay, 8) && lay)
+        (void)lay;
+    unsigned marker = 0, count = chop_slice_count(sample);
+    if (lay)
+        rd(lay + 0x418, &marker, 4);
+    mlog("SNAP %s chop=%d marker=%u count=%u frames=%u sample=%p layer=%p\n", tag,
+         in_chop_mode(), marker, count, frames, (void *)sample, (void *)lay);
+    if (lay) {
+        static const unsigned lo[] = {0xa8, 0xb0, 0xb8, 0xc0, 0xc8, 0xd0, 0xd8, 0xe0,
+                                      0xe8, 0xf0, 0xf8, 0x100, 0x6e0, 0x738};
+        for (unsigned i = 0; i < sizeof lo / sizeof lo[0]; ++i) {
+            uintptr_t q = 0;
+            rd(lay + lo[i], &q, 8);
+            mlog("SNAP L %03x %016llx\n", lo[i], (unsigned long long)q);
+        }
+    }
+    uintptr_t buf = 0, lo = 0, hi = 0;
+    if (sample && rd(sample + 0x130, &buf, 8) && buf &&
+        rd(buf + 0x70, &lo, 8) && rd(buf + 0x78, &hi, 8) && hi > lo) {
+        unsigned n = (unsigned)((hi - lo) / 8);
+        mlog("SNAP slicevec %p..%p n=%u\n", (void *)lo, (void *)hi, n);
+        if (n > 16)
+            n = 16;
+        for (unsigned i = 0; i < n; ++i) {
+            uintptr_t sp = 0;
+            if (!rd(lo + i * 8, &sp, 8) || !sp)
+                break;
+            unsigned char obj[0x340];
+            memset(obj, 0, sizeof obj);
+            rd(sp, obj, sizeof obj);
+            mlog("SNAP P %u %p hash=%08x\n", i, (void *)sp, fnv(obj, sizeof obj));
+            static const unsigned so[] = {0x30, 0x38, 0x88, 0x90, 0x98, 0xa0, 0xb0,
+                                          0xb8, 0xc0, 0xc8, 0xd0, 0xd8, 0xe0, 0xe8,
+                                          0xf0, 0xf8, 0x100, 0x108, 0x110};
+            for (unsigned k = 0; k < sizeof so / sizeof so[0]; ++k) {
+                uintptr_t q = 0;
+                rd(sp + so[k], &q, 8);
+                mlog("SNAP S %u %03x %016llx\n", i, so[k], (unsigned long long)q);
+            }
+        }
+    }
+}
+
+/* Every slice edit asks the sample for its slice list first, so the caller of
+ * this accessor during a merge/erase is the code that mutates it. */
+static void *(*orig_slice_list)(void *);
+static void *slice_list_hook(void *sample)
+{
+    uintptr_t lr = (uintptr_t)__builtin_return_address(0);
+    mlog("chop: slice_list sample=%p caller=0x%llx\n", sample,
+         (unsigned long long)(lr - base));
+    return orig_slice_list ? orig_slice_list(sample) : 0;
+}
+
+/* The UI's slice-action dispatch: (editor, msg, kind). kind 1 means "slice
+ * edit"; the editor reads its selected marker from +0x528. */
+static void (*orig_slice_action)(void *, void *, int);
+static void slice_action_hook(void *ed, void *msg, int kind)
+{
+    uintptr_t sample = 0, ctl = 0, sel = 0;
+    unsigned marker = 0, playhead = 0;
+    rd((uintptr_t)ed + 0x4c8, &sample, 8);
+    rd((uintptr_t)ed + 0x4d0, &sel, 8);
+    rd((uintptr_t)ed + 0x10c8, &ctl, 8);
+    rd((uintptr_t)ed + 0x528, &marker, 4);
+    rd((uintptr_t)ed + 0x848, &playhead, 4);
+    mlog("chop: slice_action ed=%p kind=%d sample=%p marker=%u playhead=%u ctl=%p "
+         "sel=%p\n", ed, kind, (void *)sample, marker, playhead, (void *)ctl,
+         (void *)sel);
+    if (ed)
+        g_chop_editor = (uintptr_t)ed;
+    if (orig_slice_action)
+        orig_slice_action(ed, msg, kind);
+}
+
+/* Split Slice: same shape; its fourth argument is the editor. */
+static void (*orig_split_cmd)(void *, void *, unsigned, void *);
+static void split_cmd_hook(void *ctl, void *sel, unsigned v, void *ed)
+{
+    uintptr_t sample = chop_sample_from_sel(sel);
+    mlog("chop: split_cmd ctl=%p sel=%p val=%u ed=%p sample=%p before=%u\n", ctl, sel, v,
+         ed, (void *)sample, chop_slice_count(sample));
+    if (ed) {
+        g_chop_editor = (uintptr_t)ed;
+        mlog("chop: editor captured from split ed=%p\n", ed);
+    }
+    if (orig_split_cmd)
+        orig_split_cmd(ctl, sel, v, ed);
+    mlog("chop: split_cmd after=%u\n", chop_slice_count(sample));
+}
+
 static void rmall_cmd_hook(void *ctl, void *sel, void *ed)
 {
     mlog("chop: rmall_cmd ctl=%p sel=%p ed=%p\n", ctl, sel, ed);
@@ -2616,6 +2790,66 @@ static void chop_rmall_guarded(uintptr_t ctl, uintptr_t *pair, uintptr_t ed)
     } else {
         g_cc_recover = 0;
     }
+}
+
+/* Stronger signature: the editor holds the *selected marker index* at +0x528,
+ * a Sample pointer at +0x4c8 and the command controller at +0x10c8. The marker
+ * index is small and changes with the UI, so matching it is very selective. */
+static void chop_scan_marker(uintptr_t layer)
+{
+    unsigned marker = 0;
+    if (!layer || !rd(layer + 0x418, &marker, 4)) {
+        mlog("chop: scan2 no marker\n");
+        return;
+    }
+    mlog("chop: scan2 looking for marker=%u\n", marker);
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f)
+        return;
+    size_t chunk = 8u << 20;
+    unsigned char *buf = malloc(chunk);
+    if (!buf) {
+        fclose(f);
+        return;
+    }
+    char line[512];
+    int hits = 0;
+    while (fgets(line, sizeof line, f) && hits < 16) {
+        unsigned long lo = 0, hi = 0;
+        char perms[8] = {0};
+        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || perms[1] != 'w')
+            continue;
+        for (unsigned long a = lo; a < hi && hits < 16; a += chunk) {
+            size_t n = (hi - a) < chunk ? (size_t)(hi - a) : chunk;
+            if (!rd(a, buf, n))
+                continue;
+            for (size_t o = 0; o + 4 <= n && hits < 16; o += 4) {
+                unsigned m;
+                memcpy(&m, buf + o, 4);
+                if (m != marker || a + o < 0x528)
+                    continue;
+                uintptr_t b = a + o - 0x528;
+                uintptr_t smp = 0, sel = 0, ctl = 0, mgr = 0, ph = 0, key = 0;
+                rd(b + 0x4c8, &smp, 8);
+                rd(b + 0x4d0, &sel, 8);
+                rd(b + 0x10c8, &ctl, 8);
+                rd(b + 0x848, &ph, 8);
+                rd(b, &key, 8);
+                if (ctl)
+                    rd(ctl + 0x60, &mgr, 8);
+                if (!ctl || !mgr || (ctl >> 40) != 0xffff || (mgr >> 40) != 0xffff)
+                    continue;
+                mlog("chop: scan2 cand base=%p vt=0x%llx sample=%p sel=%p ctl=%p "
+                     "playhead=%llu\n", (void *)b, (unsigned long long)(key - base),
+                     (void *)smp, (void *)sel, (void *)ctl,
+                     (unsigned long long)(ph & 0xffffffff));
+                hits++;
+            }
+        }
+    }
+    free(buf);
+    fclose(f);
+    mlog("chop: scan2 done, %d\n", hits);
 }
 
 /* The editor is a long-lived object that owns the selected Sample at +0x4c8.
@@ -2667,6 +2901,68 @@ static void chop_probe_run(void)
     int have = hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate);
     mlog("chop: cmd '%s' editor=%p screen=%p sample=%p frames=%u\n", cmd,
          (void *)g_chop_editor, screen, (void *)sample, frames);
+    mlog("chop: view chop=%d sample_page=%d levels=%d last_pad=%d shift=%d\n",
+         in_chop_mode(), sample_page_visible(), levels_active(), g_last_pad,
+         g_shift);
+    if (!strncmp(cmd, "rw ", 3)) {
+        unsigned long addr = 0, len = 0;
+        if (sscanf(cmd + 3, "%lx %lx", &addr, &len) != 2 || !addr || len > 0x400)
+            return;
+        for (unsigned long o = 0; o < len; o += 8) {
+            uintptr_t q = 0;
+            if (!rd((uintptr_t)addr + o, &q, 8))
+                break;
+            mlog("chop: R %03lx %016llx\n", o, (unsigned long long)q);
+        }
+        return;
+    }
+    if (!strncmp(cmd, "sl ", 3)) {
+        unsigned idx = (unsigned)strtoul(cmd + 3, 0, 10);
+        uintptr_t buf = 0, lo = 0, hi = 0;
+        if (!sample || !rd(sample + 0x130, &buf, 8) || !buf)
+            return;
+        lo = buf + 0x10 + 0x60;
+        if (!rd(lo, &lo, 8) || !rd(buf + 0x10 + 0x68, &hi, 8) || hi <= lo)
+            return;
+        if (idx >= (hi - lo) / 8) {
+            mlog("chop: sl idx %u out of range\n", idx);
+            return;
+        }
+        uintptr_t sp = 0;
+        if (!rd(lo + idx * 8, &sp, 8) || !sp)
+            return;
+        mlog("chop: sl idx=%u obj=%p\n", idx, (void *)sp);
+        for (unsigned o = 0; o < 0x140; o += 8) {
+            uintptr_t q = 0;
+            if (!rd(sp + o, &q, 8))
+                break;
+            mlog("chop: S %03x %016llx\n", o, (unsigned long long)q);
+        }
+        return;
+    }
+    if (!strcmp(cmd, "lay")) {
+        uintptr_t binding = 0, st = 0, lay = 0;
+        if (!screen || !rd((uintptr_t)screen + 0x178, &binding, 8) || !binding ||
+            !rd(binding + 0x60, &st, 8) || !st || !rd(st + 0x22e8, &lay, 8) || !lay) {
+            mlog("chop: lay no layer\n");
+            return;
+        }
+        mlog("chop: lay layer=%p\n", (void *)lay);
+        for (unsigned o = 0; o < 0xb30; o += 8) {
+            uintptr_t q = 0;
+            if (!rd(lay + o, &q, 8))
+                break;
+            mlog("chop: L %03x %016llx\n", o, (unsigned long long)q);
+        }
+        return;
+    }
+    if (!strcmp(cmd, "scan2")) {
+        uintptr_t binding = 0, st = 0, lay = 0;
+        if (screen && rd((uintptr_t)screen + 0x178, &binding, 8) && binding &&
+            rd(binding + 0x60, &st, 8) && st && rd(st + 0x22e8, &lay, 8))
+            chop_scan_marker(lay);
+        return;
+    }
     if (!strcmp(cmd, "find")) {
         chop_find(sample);
         return;
@@ -2716,6 +3012,121 @@ static void chop_probe_run(void)
             mlog("chop: editor +0x4c8=%p +0x4d0=%p +0x10c8=%p +0x848=%llu\n",
                  (void *)es, (void *)sel, (void *)ctl, (unsigned long long)(ph & 0xffffffff));
         }
+        return;
+    }
+    if (!strcmp(cmd, "rp")) {
+        if (g_screen)
+            FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(g_screen, 0, 0);
+        mlog("chop: repaint issued\n");
+        return;
+    }
+    if (!strncmp(cmd, "ww ", 3)) {
+        unsigned long addr = 0, val = 0;
+        if (sscanf(cmd + 3, "%lx %lx", &addr, &val) != 2 || !addr)
+            return;
+        uintptr_t old = 0;
+        rd((uintptr_t)addr, &old, 8);
+        int ok = wr((uintptr_t)addr, &val, 8);
+        mlog("chop: ww %p %llu -> %llu ok=%d\n", (void *)addr,
+             (unsigned long long)old, (unsigned long long)val, ok);
+        return;
+    }
+    if (!strncmp(cmd, "findq ", 6)) {
+        unsigned long long want = 0;
+        if (sscanf(cmd + 6, "%llx", &want) != 1)
+            return;
+        FILE *f = fopen("/proc/self/maps", "r");
+        if (!f)
+            return;
+        size_t chunk = 8u << 20;
+        unsigned char *b = malloc(chunk);
+        char line[512];
+        int hits = 0;
+        while (b && fgets(line, sizeof line, f) && hits < 16) {
+            unsigned long lo = 0, hi = 0;
+            char perms[8] = {0};
+            if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || perms[1] != 'w')
+                continue;
+            for (unsigned long a = lo; a < hi && hits < 16; a += chunk) {
+                size_t n = (hi - a) < chunk ? (size_t)(hi - a) : chunk;
+                if (!rd(a, b, n))
+                    continue;
+                for (size_t o = 0; o + 8 <= n && hits < 16; o += 8) {
+                    unsigned long long v;
+                    memcpy(&v, b + o, 8);
+                    if (v == want) {
+                        mlog("chop: findq %llx at %p\n", want, (void *)(a + o));
+                        hits++;
+                    }
+                }
+            }
+        }
+        if (b)
+            free(b);
+        fclose(f);
+        mlog("chop: findq done %d\n", hits);
+        return;
+    }
+    if (!strncmp(cmd, "findval ", 8)) {
+        unsigned long want = 0;
+        if (sscanf(cmd + 8, "%lx", &want) != 1)
+            return;
+        FILE *f = fopen("/proc/self/maps", "r");
+        if (!f)
+            return;
+        size_t chunk = 8u << 20;
+        unsigned char *b = malloc(chunk);
+        char line[512];
+        int hits = 0;
+        while (b && fgets(line, sizeof line, f) && hits < 24) {
+            unsigned long lo = 0, hi = 0;
+            char perms[8] = {0};
+            if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || perms[1] != 'w')
+                continue;
+            for (unsigned long a = lo; a < hi && hits < 24; a += chunk) {
+                size_t n = (hi - a) < chunk ? (size_t)(hi - a) : chunk;
+                if (!rd(a, b, n))
+                    continue;
+                for (size_t o = 0; o + 4 <= n && hits < 24; o += 4) {
+                    unsigned v;
+                    memcpy(&v, b + o, 4);
+                    if (v == (unsigned)want) {
+                        mlog("chop: findval 0x%lx at %p\n", want, (void *)(a + o));
+                        hits++;
+                    }
+                }
+            }
+        }
+        if (b)
+            free(b);
+        fclose(f);
+        mlog("chop: findval done %d\n", hits);
+        return;
+    }
+    if (!strcmp(cmd, "snap")) {
+        chop_snapshot("manual");
+        return;
+    }
+    if (!strcmp(cmd, "snaptrack")) {
+        g_snap_n = 0;
+        g_snap_track = 1;
+        mlog("chop: snapshot tracking on\n");
+        return;
+    }
+    if (!strcmp(cmd, "snapoff")) {
+        g_snap_track = 0;
+        mlog("chop: snapshot tracking off\n");
+        return;
+    }
+    if (!strcmp(cmd, "alloc")) {
+        g_malloc_n = 0;
+        g_malloc_probe = 1;
+        mlog("chop: malloc probe on\n");
+        return;
+    }
+    if (!strcmp(cmd, "allocoff")) {
+        g_malloc_probe = 0;
+        mlog("chop: malloc probe off\n");
         return;
     }
     if (!strncmp(cmd, "add ", 4)) {
@@ -2773,6 +3184,24 @@ static void chop_probe_run(void)
         chop_dump("after-rmall", sample);
         return;
     }
+    if (!strncmp(cmd, "mk ", 3)) {
+        unsigned long off = 0;
+        unsigned n = 16;
+        int got = sscanf(cmd + 3, "%lx %u", &off, &n);
+        if (got < 1 || !off)
+            return;
+        if (n > 64)
+            n = 64;
+        uintptr_t addr = base + (uintptr_t)off;
+        for (unsigned i = 0; i < n; ++i) {
+            uintptr_t q = 0;
+            if (!rd(addr + (uintptr_t)i * 8, &q, 8))
+                break;
+            mlog("chop:   m[0x%lx+%u] = 0x%llx\n", (unsigned long)off, i,
+                 (unsigned long long)(q - base));
+        }
+        return;
+    }
     if (!strncmp(cmd, "vl", 2)) {
         unsigned n = cmd[2] ? (unsigned)strtoul(cmd + 3, 0, 10) : 40;
         uintptr_t buf = 0, cont = 0, vt = 0;
@@ -2792,12 +3221,16 @@ static void chop_probe_run(void)
         return;
     }
     if (!strcmp(cmd, "wvec")) {
-        uintptr_t buf = 0, cont = 0;
+        uintptr_t buf = 0, cont = 0, begin = 0;
         if (sample && rd(sample + 0x130, &buf, 8) && buf) {
             cont = buf + 0x10;
-            mlog("chop: watch slice list end at %p\n", (void *)(cont + 0x68));
+            rd(cont + 0x60, &begin, 8);
+            mlog("chop: watch vector header %p and elements %p\n",
+                 (void *)(cont + 0x68), (void *)begin);
             watch_arm(cont + 0x68, "slicevec");
             watch_arm(cont + 0x60, "slicevec0");
+            if (begin)
+                watch_arm(begin, "sliceelems");
         }
         return;
     }
@@ -2811,7 +3244,7 @@ static void chop_probe_run(void)
         g_chop_ok = 0;
         if (sigsetjmp(g_cc_jmp, 1) == 0) {
             g_cc_recover = 1;
-            unsigned r = FN(0x2a43640, unsigned (*)(void *, unsigned))((void *)sample, 1);
+            unsigned r = FN(0x2943640, unsigned (*)(void *, unsigned))((void *)sample, 1);
             g_cc_recover = 0;
             g_chop_ok = 1;
             mlog("chop: isSampleValid=%u\n", r);
@@ -3049,6 +3482,12 @@ static void buttons(void *event)
         g_hpss_btn_valid = 1;
 #if MINIMOD_DEBUG
     chop_probe_run(); /* queued probe commands run here: this is the UI thread */
+    if (g_snap_track && g_snap_n < 60) {
+        char tag[16];
+        snprintf(tag, sizeof tag, "btn%02x%d", code, down ? 1 : 0);
+        chop_snapshot(tag);
+        g_snap_n++;
+    }
 #endif
     if (code == 0x6f) { /* DATA press/turn */
         int visible = sample_page_visible();
@@ -4117,6 +4556,14 @@ static int g_in_cc_replay;
 static void cc_capture(void *ev, unsigned raw, float lo, float range)
 {
     (void)lo;
+#if MINIMOD_DEBUG
+    if (g_snap_track && !g_in_cc_replay && ev && g_snap_n < 60) {
+        char tag[24];
+        snprintf(tag, sizeof tag, "cc%02x=%u", ((unsigned char *)ev)[8], raw);
+        chop_snapshot(tag);
+        g_snap_n++;
+    }
+#endif
     if (!g_in_cc_replay && ev) {
         unsigned char cc = ((unsigned char *)ev)[8];
         static int allc;
@@ -5886,22 +6333,37 @@ __attribute__((constructor)) static void load(void)
 #if MINIMOD_DEBUG
     {
         void *t = 0;
-        t = install_hook(base + 0x21a3b10, (void *)add_slice_hook);
+        t = install_hook(base + 0x20a3b10, (void *)add_slice_hook);
         if (t)
             orig_add_slice = (void (*)(void *, void *, uint64_t))t;
-        t = install_hook(base + 0x21a9fa0, (void *)add_slice_ph_hook);
+        t = install_hook(base + 0x20a9fa0, (void *)add_slice_ph_hook);
         if (t)
             orig_add_slice_ph = (void (*)(void *))t;
-        t = install_hook(base + 0x1a60af0, (void *)insert_cmd_hook);
+        t = install_hook(base + 0x1960af0, (void *)insert_cmd_hook);
         if (t)
             orig_insert_cmd = (void (*)(void *, void *, unsigned, void *))t;
-        t = install_hook(base + 0x1a5cf40, (void *)rmall_cmd_hook);
+        t = install_hook(base + 0x195cf40, (void *)rmall_cmd_hook);
         if (t)
             orig_rmall_cmd = (void (*)(void *, void *, void *))t;
-        t = install_hook(base + 0x1a5d1c0, (void *)rm_slice_hook);
+        t = install_hook(base + 0x192d040, (void *)slice_publish_hook);
+        if (t)
+            orig_slice_publish = (void (*)(void *))t;
+        t = install_hook(base + 0x2941ff0, (void *)slice_list_hook);
+        if (t)
+            orig_slice_list = (void *(*)(void *))t;
+        t = install_hook(base + 0x20a7140, (void *)slice_action_hook);
+        if (t)
+            orig_slice_action = (void (*)(void *, void *, int))t;
+        t = install_hook(base + 0x1960d50, (void *)split_cmd_hook);
+        if (t)
+            orig_split_cmd = (void (*)(void *, void *, unsigned, void *))t;
+        t = install_hook(base + 0x195d1c0, (void *)rm_slice_hook);
         if (t)
             orig_rm_slice = (void (*)(void *, void *, unsigned, void *))t;
-        t = install_hook(base + 0x21aa9e0, (void *)slice_sel_hook);
+        t = install_hook(base + 0x2814ec0, (void *)marker_at_hook);
+        if (t)
+            orig_marker_at = (int (*)(void *, unsigned))t;
+        t = install_hook(base + 0x20aa9e0, (void *)slice_sel_hook);
         if (t)
             orig_slice_sel = (void (*)(void *, unsigned))t;
         mlog("chop hooks: add=%p ph=%p cmd=%p\n", (void *)orig_add_slice,

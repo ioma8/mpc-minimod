@@ -200,6 +200,211 @@ garbage (`0x6dbd868`, the sample's own vtable). Read vtables at runtime with
 the `vt`/`vl` probe commands instead; do not conclude a class has no methods
 because its vtable looks empty in Ghidra.
 
+
+## 2026-11-04, second pass: the address-space bug (read this first)
+
+Everything in the first pass that said "the hook never fired" or "calling the
+command faults the app" was an artifact of one mistake: **Ghidra VAs are the
+mod's own offsets plus `0x100000`.** `HPSS-HANDOFF.md` states the rule and its
+table proves it (the free-pad finder is `0x296dd00` in Ghidra and
+`A_HPSS_FREE_PAD 0x286dd00` in `minimod.c`). The probe had been installing
+hooks and reading data at `base + <Ghidra VA>`, i.e. 0x100000 past the real
+target, so it patched unrelated code and jumped into garbage.
+
+| Ghidra VA | mod offset | what it is |
+|---|---|---|
+| `0x21a3b10` | `0x20a3b10` | add a Manual slice: `(editor, {sample, refcounted}, frame)` |
+| `0x21a9fa0` | `0x20a9fa0` | add a slice at the playhead (`editor+0x848`) |
+| `0x21a6d20` | `0x20a6d20` | add a slice at a given frame (drag end) |
+| `0x21a7140` | `0x20a7140` | slice-action dispatch: `(editor, msg, kind)` |
+| `0x1a60af0` | `0x1960af0` | Insert Slice command ctor |
+| `0x1a60d50` | `0x1960d50` | Split Slice command ctor |
+| `0x1a5d1c0` | `0x195d1c0` | Remove Slice command ctor |
+| `0x1a5cf40` | `0x195cf40` | Remove All Slices command ctor |
+| `0x2a43640` | `0x2943640` | sample validity predicate |
+| `0x2a41ff0` | `0x2941ff0` | sample -> slice list accessor |
+| `0x2a41f80` | `0x2941f80` | sample -> frame count |
+| `0x1a2d040` | `0x192d040` | slice-cell publisher (runs on every edit) |
+
+With the corrected offsets the hooks fire, and the results below replace the
+guesses of the first pass.
+
+### What actually fires on a slice edit
+
+`Merge` (SHIFT+SCREEN 3) and `Split` (SHIFT+SCREEN 2) both mutate the slice
+list. With every candidate hook installed, only these fired:
+
+| hook | what it sees |
+|---|---|
+| `0x2814ec0` marker resolver | `(layer, index)`; pads and the playback voice call it |
+| `0x2941ff0` slice-list accessor | caller `0x152a91c` during redraws, caller `0x1655024` from the chop-button state refresh |
+| `0x192d040` slice-cell publisher | runs on the edit itself |
+
+`0x1960d50` (Split Slice), `0x1960af0` (Insert Slice), `0x195d1c0` (Remove
+Slice), `0x20a7140` (slice-action dispatch) and `0x20a3b10` (add a slice) did
+**not** fire. So the Chop UI does not go through the command objects at all —
+it edits the `SliceList` directly. The command objects exist and are correct,
+but the UI is not their client.
+
+### The Split button rules (verified)
+
+* Split is greyed when the sample already has **16 slices** — that is the
+  maximum. Merge one away (16 -> 15) and Split turns white; press it and the
+  count goes 15 -> 16.
+* Split is only offered when Chop Type is **Manual**. K3 (control surface
+  CC 18) with an absolute value of `127` selects Manual; the screen then
+  labels K3 `Manual` and Split becomes enabled. `0/32/64/96` give
+  Threshold / Regions 4 / Regions 8 / Regions 16.
+* The screen's chop-button state refresh is `FUN_01754b30` (Ghidra
+  `0x1754b30`): it computes `count = (*(list+0x68) - *(list+0x60)) >> 3` and
+  calls each button's `setEnabled` through vtable slot `0x60`. That is the
+  authoritative enable logic, and it confirms the vector layout.
+
+### The model, re-confirmed
+
+* `slice list = 0x2a41ff0(sample) = *(sample+0x130)+0x10`, vector of
+  `Slice*` at `+0x60/+0x68/+0x70`.
+* `layer + 0x418` = selected marker: `0x80` start marker, `0x81` end marker,
+  otherwise a slice index. Pads move it; entering Chop selects slice 0.
+* `layer + 0x6e0` bit 0 = chop flag; `layer + 0x738` reads 0 here.
+* `state + 0x22e8` is a `vector<Layer>` with stride `0xb30`
+  (`0x2904ae0` walks `+0x22e8..+0x22f0` by 0xb30).
+* A Slice object is ~0x340 bytes. **A diff of slices 0 and 1 of a chopped pad
+  shows `+0xd0 = 15127` (the sample end) in both**, so `+0xd0` is an
+  end/length-like field, not the start. The earlier `0, 945, 1890 ...`
+  reading came from a different pad state and is not proof of a start field.
+  The start field is still unidentified.
+
+### Scans and what they rule out
+
+| scan | predicate | result |
+|---|---|---|
+| `find` | a pointer inside screen / state / binding whose `+0x4c8` is our sample | 0 |
+| `scan` | any heap qword equal to our sample, candidate base = hit-0x4c8 | 8 loose hits, 0 with the editor's own shape (`+0x4d0` heap pointer, `+0x10c8` controller with a command manager) |
+| `scan2` | `u32 at +0x528 == selected marker` plus a controller at `+0x10c8` | 0 |
+| malloc probe | allocations 0x100..0x8000 with LR while changing the chop type | 0 — slices are preallocated/pooled |
+
+So the `editor` object described below has not been observed at all, and the
+`FUN_02a43640(sample,1)` fault that the first pass took as evidence
+("the command wants a different sample") was produced by the wrong address.
+That question is open again and can be settled by re-running the `samp` probe,
+which now calls `0x2943640`.
+
+### Where the next session should start
+
+1. Re-run `samp` (validity predicate at the corrected address) to learn whether
+   `layer+0x4a8` is an acceptable sample for the command path.
+2. Hook `0x192d040`'s **caller** during a Merge to get the screen method that
+   edits the list; its neighbourhood contains the insert/split/merge logic the
+   UI actually uses. That function takes the screen, not an editor, so it is
+   reachable from `g_screen` — a much better lead than the editor.
+3. Failing that, identify the Slice start field by dumping slices 0..3 of a
+   Regions-4 pad (values 0, N/4, N/2, 3N/4 are unmistakable) and then test a
+   single field write plus a repaint.
+
+
+## 2026-11-04, third pass: measured facts with working instrumentation
+
+With the address space fixed, these are measurements, not inferences. The
+probe commands named here exist in `mod/src/minimod.c` under `MINIMOD_DEBUG`.
+
+### The Slice object
+
+A Slice is a ~0x340-byte object; `+0xd0` holds one frame position per slice.
+On a 4-slice pad they read `2465, 4907, 7349, 9794` — evenly spaced, so `+0xd0`
+is the slice boundary the chop produced.
+
+**Writing `+0xd0` does not move the drawn marker.** Verified: slice 1 was
+`4907`, written to `5376`, the write persisted across a repaint issued
+directly through `FN_01149880(screen,0,0)`, and the screen stayed byte
+identical. Toggling CHOP away and back **rebuilt** the list and restored
+`4907`. So the Slice objects are a projection; something else is the source of
+truth for a rebuild.
+
+### K1/K2 do not move boundaries
+
+A snapshot of every slice field was taken on every button press and every knob
+turn while a 4-slice Manual pad was driven from the panel (K1 turned through
+its whole range, then Split, then Merge). Result: `+0xd0` never changed, but
+the Slice objects were **recreated** (new pointers, same positions). K1/K2 are
+range/zoom controls that trigger a full rebuild.
+
+### The chop buttons
+
+`FUN_01754b30` (Ghidra `0x1754b30`) is the button-state refresh. It computes
+`count = (*(list+0x68) - *(list+0x60)) >> 3` and calls each button's
+`setEnabled` through vtable slot `0x60`. Split is enabled only when the chop
+type is Manual **and** `count < 16`; Merge when the selected marker is above
+the first slice. Verified from the panel: at 16 slices Split is refused and
+greyed; merging one away enables it and the next Split takes the count back to
+16.
+
+### The layer is not the chop model
+
+`state+0x22e8` (stride 0xb30) is the runtime Layer: `+0x418` selected marker
+(`0x80` start, `0x81` end, else a slice index), `+0x6e0` bit 0 chop flag,
+`+0x4a8` the Sample. But the `SlicePoints` vectors of the deserializer
+(`0x1e02230`) are **not** at `layer+0xb0/+0xc8/+0xe0/+0xf8`; those words are
+inline `std::string` data (`"fier"`, `"rie"`). That table was wrong; the
+deserializer's class is a different one.
+
+### Allocation
+
+The app does not allocate slices through libc `malloc`: an `LD_PRELOAD`
+`malloc` hook sees nothing in 0x100..0x8000 while the slice list is rebuilt and
+the Slice pointers change. The app has its own allocator, so a slice object
+allocated by the mod could not be freed by the app. **Do not create Slice
+objects from the mod.**
+
+### Transient positions
+
+Scanning the heap for the boundary as a double (`2465/44100 =
+0.05589569160997732`) finds exactly one hit, but the memory is gone a moment
+later. The persistent source of truth for a rebuild is still unidentified.
+
+### The probe toolkit (debug builds only)
+
+`/run/minimod.chop` takes one command; it runs on the **UI thread** from the
+button hook:
+
+| command | purpose |
+|---|---|
+| `dump` | view state, slice count, layer fields, chop-type vectors |
+| `count` | slice count of the displayed sample |
+| `snap` | full snapshot: marker, count, per-slice field values and hashes |
+| `snaptrack` / `snapoff` | snapshot on every button press and every knob turn |
+| `lay` | 0xb30 bytes of the layer |
+| `sl <i>` | 0x140 bytes of slice `i` |
+| `rw <addr> <len>` | arbitrary memory, 8 bytes per line |
+| `ww <addr> <hex>` | write one qword |
+| `rp` | repaint the screen through `FN_01149880` |
+| `vt [n]` / `vl [n]` | runtime vtable of the sample / of the slice container |
+| `mk <off> [n]` | words at `base+off` |
+| `scan` / `scan2` / `find` | heap searches for the editor-shaped object |
+| `samp` | sample validity (`0x2943640`) |
+| `alloc` / `allocoff` | malloc-size logging |
+| `findval <u32>` / `findq <u64>` | value search across writable memory |
+| `wvec` | write watch on the slice vector header and element buffer |
+| `addx <ed> <frame>` / `rmallx <ed>` | guarded Insert / Remove All with an explicit editor |
+
+### What is left
+
+The rebuild's **input** is the missing piece. Two concrete ways to find it:
+
+1. Watch the element buffer (`wvec` now arms it) while pressing Split, and read
+   the writer's caller — the split code is the one function that knows the
+   boundary array. The last attempt caught a libc `memmove` inside the vector
+   assignment, so the caller has to be recovered from a deeper frame
+   (`backtrace()` in the hook, or `__builtin_return_address(1..3)`).
+2. Search for the persistent position array by *shape*: four ascending doubles
+   with `0x18` stride whose values are `frame/rate`, found while the Chop view
+   is open on a freshly chopped pad.
+
+Once the input array or the split function is known, the feature is: set Chop
+Type Manual, obtain N slices, write our N onset frames into that array (or call
+the split function N times with our frames), and verify by reading the Slice
+`+0xd0` values back.
+
 ## Work required to finish
 
 1. **Find how the editor is obtained.** `editor+0x4c8` holds a `Sample*` that
