@@ -92,8 +92,8 @@ def attack_frames(mag, rate):
     half = max(1, int(0.5 * rate / HOP))
     med = np.array([np.median(flux[max(0, i - half):i + half + 1])
                     for i in range(len(flux))])
-    thr = 0.1 * float(flux.mean()) + 2.5 * med
-    prom = 0.8 * float(flux.mean())
+    thr = 0.1 * float(flux.mean()) + 2.0 * med
+    prom = 0.5 * float(flux.mean())
     gap = max(1, int(0.040 * rate / HOP))
     out, last, valley = [], -10 ** 9, np.inf
     for f in range(len(flux)):
@@ -147,24 +147,34 @@ def onsets(x, rate, max_slices=16, region_s=0.0, fraction=0.15):
     hits, flux = attack_frames(mag, rate)
     if region_s <= 0:
         density = len(hits) / max(0.2, len(x) / rate)
-        region_s = float(np.clip(0.9 / max(density, 0.4), 0.22, 0.75))
-    both = np.hstack([chroma(mag, rate), timbre(mag, rate)])
+        region_s = float(np.clip(0.45 / max(density, 0.4), 0.18, 0.75))
+    ch_feat = chroma(mag, rate)
+    tb_feat = timbre(mag, rate)
     min_gap = int(region_s * rate / HOP)
     win = max(2, int(0.2 * rate / HOP))
 
-    def moved_on(prev, cur):
+    def dist(feat, prev, cur):
         lo = max(0, prev - win)
-        if prev - lo < 2 or len(both[cur:cur + win]) < 2:
-            return True
-        a = both[lo:prev].mean(axis=0)
-        b = both[cur:cur + win].mean(axis=0)
+        if prev - lo < 2 or len(feat[cur:cur + win]) < 2:
+            return 1.0
+        a = feat[lo:prev].mean(axis=0)
+        b = feat[cur:cur + win].mean(axis=0)
         na, nb = np.linalg.norm(a), np.linalg.norm(b)
         if na < 1e-9 or nb < 1e-9:
-            return False
-        return float(1.0 - a @ b / (na * nb)) >= 0.02
+            return 0.0
+        return float(1.0 - a @ b / (na * nb))
 
+    def moved_on(prev, cur):
+        # harmony moved (chord/key change) or the sound itself moved a lot
+        # (a different drum, a different instrument). Repeated strums of the
+        # same chord pass neither, which is what keeps them in one slice.
+        return dist(ch_feat, prev, cur) >= 0.05 or dist(tb_feat, prev, cur) >= 0.15
+
+    end_guard = int(0.120 * rate / HOP)      # no slivers at the very end
     kept = []
     for f in hits:
+        if len(mag) - f < end_guard:
+            continue
         if kept and f - kept[-1] < min_gap:
             continue
         if kept and not moved_on(kept[-1], f):
@@ -212,7 +222,7 @@ def main():
     else:
         hits, _ = attack_frames(stft_magnitude(x), rate)
         density = len(hits) / max(0.2, len(x) / rate)
-        region_used = float(np.clip(0.9 / max(density, 0.4), 0.22, 0.75))
+        region_used = float(np.clip(0.45 / max(density, 0.4), 0.18, 0.75))
     sl = slices_from(positions, frames)
     lengths = [b - a for _, a, b in sl]
 
