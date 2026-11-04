@@ -20,11 +20,12 @@ Spectral Chop open a small **SAMPLE OPTIONS** menu; turn the DATA encoder to
 choose an action, press DATA to confirm, or press `SHIFT+DATA` to close. HPSS
 needs two empty pads and creates `HPSS Harmonic` and `HPSS Percussive`.
 Spectral Chop detects up to 16 onsets on the same pad and rewrites that pad's
-chop so every slice boundary sits on a detected frame. It never creates
-samples or uses free pads, and it verifies the result by reading the written
-boundaries back before it reports. Details:
-[`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md); how the chop model is
-reached: [`docs/re/SPECTRAL-CHOP-SOLVED.md`](docs/re/SPECTRAL-CHOP-SOLVED.md).
+chop so every slice boundary sits on a detected frame. It uses the firmware's
+own slice API (reset, insert-at-frame, reconcile), sets the chop type to Manual
+through the binding's model callback, and verifies every boundary by reading it
+back before it reports. It never creates samples or uses free pads. Details:
+[`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md); the model, the mechanisms and
+the evidence: [`docs/re/SPECTRAL-CHOP-SOLVED.md`](docs/re/SPECTRAL-CHOP-SOLVED.md).
 
 Chromatic MIDI from an external keyboard is in progress —
 [`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).

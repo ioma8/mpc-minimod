@@ -1,290 +1,398 @@
-# Spectral Chop — solved: model, recipe, and the path that got there
+# Spectral Chop — solved: mechanisms, implementation, and the path there
 
-Firmware **1.3.0.12** only. Branch `feature/spectral-chop`. Everything marked
-*verified* was measured on the emulator in this lab, not inferred.
+Firmware **1.3.0.12**. Branch `feature/spectral-chop`. Every address is a
+**mod offset**; the matching Ghidra VA is `offset + 0x100000` (see §2.6).
+Everything marked *verified* was measured on the emulator in this lab.
 
 ## 1. The result
 
 **SAMPLE OPTIONS → Spectral Chop** detects the onsets of the sample on the
-selected pad and **rewrites that pad's own chop** so every slice boundary is one
-of the detected frames. It creates no samples, uses no free pads and writes no
-file. Before reporting `n slices` it reads every boundary back from the model.
+selected pad and rewrites that pad's chop so every slice boundary is one of the
+detected frames. It creates no samples, uses no free pads and writes no file.
+It reports `n slices` only after reading every boundary back.
 
-Verified with the release build on the emulator, `NRestarts=0`:
+Verified by `mod/tests/emulator_spectral.py` with the release build, one boot,
+release library digest checked on the device:
 
-| input | onsets | result |
-|---|---|---|
-| `A03` "Drums 2s", 88200 frames | 10 | 10 slices; all end frames matched on read-back; markers at x = 18, 54, 93, 133, 172, 213, 237, 252, 293 px of the 320 px waveform |
-| synthetic frames 500 / 3000 / 7000 / 11000 | 4 | markers at x = 23, 71, 148, 225 px — exactly those frames |
+```
+PASS boot 1: first from Trim; exact 10 boundaries, Manual, pid=13416
+PASS boot 1: repeat;         exact 10 boundaries, Manual, pid=13416
+PASS boot 1: repeat again;   exact 10 boundaries, Manual, pid=13416
+boot 1: regions initial type=0     PASS boot 1: regions
+boot 1: threshold initial type=1   PASS boot 1: threshold
+PASS boot 1: after pad playback
+PASS: menu, model, repeat, modes, playback, re-entry and restart checks
+```
 
-The marker positions are irregular, i.e. they follow the detector, not an even
-division. Pads then play the new slices; playback does not restart the app.
+The test pins the fixture's exact boundaries:
+`[0, 1536, 12288, 24064, 36352, 48128, 60416, 67584, 72192, 84480]` with the
+last slice ending at `88200`. It also asserts the chop type is Manual (`0`),
+that the pid does not change, that `NRestarts` does not change, and that
+re-entering the Chop view keeps the markers.
 
-## 2. The model (all verified at runtime)
+## 2. The model
 
 ### 2.1 Objects
 
 ```
-screen              SampleModeScreen, vtable file offset 0x6e212a0
-screen + 0x178      pad controls
-  + 0x60            pad state
-    + 0x22e8        std::vector<Layer>, stride 0xb30   (0x2904ae0 walks it)
-      + 0x418       selected marker: 0x80 start marker, 0x81 end marker,
-                    otherwise a slice index
-      + 0x4a8       the Sample
-      + 0x6e0 bit0  chop flag (1 while the Chop view owns the page)
-    + 0x60          command manager for slice commands
+screen                 SampleModeScreen; vtable 0x6e212a0 (checked at runtime)
+screen + 0x168         chop parameter binding          (§2.4)
+screen + 0x178         pad controls
+screen + 0x180         selection object; +0x618 = "select slice" input
+screen + 0x1ee0        Chop group visibility; visible <=> chop mode
+                       (FN 0x112fd50 on the sub-object answers "is visible")
+
+controls + 0x60        pad state
+state  + 0x22e8        std::vector<Layer>, stride 0xb30   (0x2904ae0 walks it)
+layer  + 0x418         selected marker: 0x80 start, 0x81 end, else slice index
+layer  + 0x4a8         the Sample
+layer  + 0x6e0 bit 0   chop flag
+state  + 0x60          command manager for the slice commands
 ```
 
-### 2.2 Slices
+### 2.2 The sample and its slice container
 
 ```
-slice list = *(sample + 0x130) + 0x10        // an observable object
-  list + 0x60 / 0x68 / 0x70  std::vector<Slice*> begin / end / capacity
-  Slice + 0x78    start frame     (duplicate at +0x128)
-  Slice + 0xd0    end frame
+sample + 0x130     -> meta
+meta   + 0     u16 channels
+meta   + 4     u32 frames
+meta   + 8     u32 sample rate
+meta   + 0x70 / 0x78 / 0x80   vector<Slice*> begin / end / capacity
+meta   + 0x10  the slice container ("cont") the native API below operates on
 ```
 
-A Slice is about 0x340 bytes. The count is `(end - begin) / 8`; the stock
-maximum is **16**.
+### 2.3 A Slice
 
-`K1`/`K2` move `+0x78`/`+0xd0` of the slice selected by a **pad press**, and
-keep the `+0x78` ↔ previous `+0xd0` mirrors consistent. That was measured
-directly: on a 4-slice pad, turning K1 moved slice 0's `+0xd0` from 2465 to
-4906, and turning K2 moved slice 1's `+0xd0` 4907 → 5143 → 5295 → 6051, each
-time carrying slice 1's `+0x78`/`+0x128` with it.
+```
+Slice + 0x78    start frame        (mirror at +0x128)
+Slice + 0xd0    end frame
+```
 
-### 2.3 The view caches its layout
+~0x340 bytes each, 16 slices maximum. Adjacent slices share the boundary:
+`slice[i].+0xd0 == slice[i+1].+0x78`. The stock K1/K2 knobs edit exactly these
+words for the slice a pad press selects — measured, not inferred: K1 moved
+slice 0's `+0xd0` 2465 → 4906 and K2 moved slice 1's `+0xd0` 4907 → 5143 →
+5295 → 6051, carrying the neighbour's mirrors each time.
 
-Writing the Slice fields is necessary but **not sufficient**:
+### 2.4 The chop parameter binding
 
-| action after a write | markers redrawn? |
+`screen + 0x168` points at the binding that owns the chop type:
+
+```
+binding + 0x80   cached parameter object   (fallback setter lives here)
+binding + 0x9c   chop type, int            Manual == 0
+binding + 0xc0   parameter / target block passed to the callback
+binding + 0xd0   manager
+binding + 0xd8   model callback (invoke)
+binding + 0xe0   owner
+binding + 0xe8   flags; bit 0 selects the fallback path
+```
+
+Setting the type the way the stock UI does:
+
+* flags bit 0 clear and an owner present →
+  `((void(*)(uintptr_t, uintptr_t, const int *))*(binding+0xd8))`
+  `(binding+0xc0, owner, &manual)` with `manual = 0`;
+* otherwise `FN(0x15d2840)(binding + 0x80, 0)`.
+
+This is the path the stock Split handler takes (Ghidra `0x1756728`). Assigning
+the view's cached enum directly does **not** survive: the model callback is what
+preserves the pad's chop type. The type is then read back from `binding + 0x9c`
+and must be `0`.
+
+### 2.5 The native slice API
+
+| purpose | mod | Ghidra | signature |
+|---|---|---|---|
+| reset the list | `0x2950aa0` | `0x2a50aa0` | `void (cont)` |
+| insert a slice at a frame | `0x2950d20` | `0x2a50d20` | `int (cont, frame, flags=1, frames)` → new index |
+| reconcile ends incl. tail | `0x2950bb0` | `0x2a50bb0` | `void (cont, frames)` |
+| select a slice | `0x16680a0` | `0x26680a0` | `void (selection + 0x618, const int *index)` |
+| Manual, fallback path | `0x15d2840` | `0x25d2840` | `void (binding + 0x80, 0)` |
+
+`FUN_02a50d20` (decompiled) constructs the slice, registers its listeners
+(`FUN_02a4b170`, `FUN_02a4a080`), notifies observers (`FUN_0102d0d0`), links it
+into the container (`FUN_0246b140`) and calls `FUN_02a50bb0` to reconcile the
+neighbouring ends. **The firmware owns allocation, destruction, listener wiring,
+selection and the broadcast**, which is why the view updates by itself and why
+no rebuild trick is needed.
+
+### 2.6 Address spaces
+
+Two spaces are in play and mixing them is the single most expensive mistake in
+this investigation:
+
+| space | example | used by |
+|---|---|---|
+| Ghidra VA | `0x2a50d20` | the decompiler, all RE docs |
+| mod offset | `0x2950d20` | `FN()`, `install_hook()`, `mk` |
+
+`Ghidra VA = mod offset + 0x100000`. Runtime address = `base + mod offset`,
+where `base` is the module's load address (`0xaaaaaaaa0000` in the lab, but it
+is a PIE — always read it from `/proc/<pid>/maps`).
+
+## 3. How the action runs
+
+### 3.1 Threads
+
+| thread | who | may touch the model? |
+|---|---|---|
+| input hook | `buttons()`, `cc_capture()` | **no** |
+| UI thread | `screen_paint()`, after the stock paint | **yes** |
+| probe poll | the `/run/minimod.chop` reader | no — it only publishes |
+
+The input hook runs on the control-surface thread. A CHOP press only
+*schedules* a page switch, so it cannot be followed by a sleep, a poll or a
+second toggle in the same callback. Hence a phase machine driven from the paint
+hook.
+
+### 3.2 Phases
+
+`spectral_start()` (input hook) does one thing: CAS `g_spectral_active`
+`0 → -1`, copy the button event, store `1`, request a repaint. Everything else
+happens in `spectral_tick()` (UI thread).
+
+| phase | work |
 |---|---|
-| `FN_01149880(screen,0,0)` (repaint) | no |
-| a pad press (changes the selection) | no |
-| **leave and re-enter Chop** | **yes** |
+| 0 | close our menu, mark busy, resolve the sample, locate its WAV, run the detector, validate the positions, press CHOP if needed, select Manual, `deadline = now + 3000 ms` |
+| 1 | wait until chop mode **and** `type == 0`, then reset + insert + reconcile + select slice 0 + verify, `deadline = now + 150 ms` |
+| 2 | after the settle, verify once more and report |
 
-Re-entering rebuilds the view from the model, and in **Manual** mode the written
-boundaries survive that rebuild. In Threshold/Regions mode a rebuild recomputes
-from the algorithm and discards them — so Manual is part of the recipe.
+Each pass re-resolves the sample and aborts with `sample changed; cancelled` if
+screen, state, sample, frames, channels or rate differ. Failures are explicit:
+`no sample on this pad`, `cannot read sample WAV`, `no onsets`, `invalid onsets`,
+`cannot select Manual chop`, `Manual chop did not open`, `native marker write
+failed`, `marker verification failed`.
 
-### 2.4 The Chop buttons
+### 3.3 Input suppression and state
 
-`FUN_01754b30` (Ghidra `0x1754b30`) is the button-state refresh. It computes
-`count = (*(list+0x68) - *(list+0x60)) >> 3` and calls each button's
-`setEnabled` through vtable slot `0x60`. Split is enabled only when the chop
-type is **Manual** and `count < 16`; Merge when the selected marker is above
-the first slice. That rule is the firmware's, and it is why Split greys out at
-16 slices.
+While `g_spectral_active` is set the `read()` filter drops control-surface
+bytes, the same way the SAMPLE OPTIONS menu does while `g_hpss_menu` is set, so
+a knob turn cannot race the operation. `g_hpss_busy` keeps the menu closed for
+the duration. The flag is atomic (release/acquire) because it crosses threads.
 
-### 2.5 The slice commands exist but the UI does not use them
+### 3.4 Writing and verification
 
-| command | entry (Ghidra) | arguments |
-|---|---|---|
-| Insert Slice | `0x1a60af0` | `(controller, {sample, refcounted}, frame, editor)` |
-| Split Slice | `0x1a60d50` | `(controller, {sample, refcounted}, index, editor)` |
-| Remove Slice | `0x1a5d1c0` | `(controller, {sample, refcounted}, index, editor)` |
-| Remove All Slices | `0x1a5cf40` | `(controller, {sample, refcounted}, editor)` |
-| UI add-slice wrapper | `0x21a3b10` | `(editor, {sample, refcounted}, frame)` |
+```
+FN(0x2950aa0)(cont);                                       /* reset            */
+for i in 0..n-1:
+    index = FN(0x2950d20)(cont, pos[i], 1, frames);         /* insert, in order */
+    if index != i: fail                                     /* order is proof   */
+FN(0x2950bb0)(cont, frames);                               /* ends + tail      */
+FN(0x16680a0)(selection + 0x618, &first);                  /* select slice 0   */
+verify: count == n, slice[i].+0x78 == pos[i],
+        slice[i].+0xd0 == (i+1 < n ? pos[i+1] : frames)
+```
 
-Pressing Split and Merge fires **none** of them: the Chop UI edits the Slice
-objects directly. The commands remain a correct API, but nothing in this view
-calls them, and the "editor" object they need was never observed (see §4).
+The implementation deliberately does **not** shorten the container's vector and
+does **not** write observable Slice fields directly.
 
-## 3. The recipe as implemented
+## 4. Mechanisms catalogue
 
-`mod/src/minimod.c`, `spectral_write_markers()`:
+Everything below was used to get here or is used by the shipped code.
 
-1. **Enter the Chop view.** Reuse the stock button path (CHOP = code `0x4b`)
-   and poll `SampleModeScreen+0x1ee0` visibility until the app has switched
-   (the switch lands on the next message pass, not synchronously).
-2. **Grow to N slices.** While the count is below the onset count, synthesise
-   `SHIFT` + `SCREEN 2` (Split) through the captured button event; each split
-   adds one slice, up to the stock 16.
-3. **Write the boundaries.** For slice `i`: `+0x78 = p[i]`, `+0x128 = p[i]`,
-   `+0xd0 = p[i+1]`, with `p[n] = frames`.
-4. **Shrink the list.** `*(list+0x68) = begin + 8*n`. The surplus Slice objects
-   simply stop being referenced; the vector's capacity is untouched so nothing
-   is reallocated.
-5. **Rebuild the view.** Toggle CHOP off and on.
-6. **Verify.** Re-read the count and every `+0xd0`; report success only if all
-   of them match.
+### 4.1 Chop-model mechanisms
 
-The failure branches are explicit: fewer than two onsets, no WAV, a slice list
-that cannot be grown, or a boundary that did not read back — each is reported
-instead of claiming success.
+| mechanism | how |
+|---|---|
+| find the selected pad's sample | `screen+0x178` → `+0x60` → `+0x22e8` → layer `+0x4a8` |
+| identify the sample's format | `sample+0x130` → `{u16 ch, u32 frames, u32 rate}` |
+| enumerate slices | container vector at `meta+0x70`, stride 8, count `(end-begin)/8` |
+| read/write a boundary | `Slice+0x78` start (mirror `+0x128`), `+0xd0` end |
+| insert a slice properly | native `0x2950d20(cont, frame, 1, frames)` |
+| clear the list | native `0x2950aa0(cont)` |
+| fix adjacent ends and the tail | native `0x2950bb0(cont, frames)` |
+| move the selection | native `0x16680a0(selection+0x618, &index)` |
+| force Manual chop type | binding model callback via `binding+0xd8` |
+| read the chop type | `binding+0x9c` (Manual `0`) |
+| detect chop mode | `FN(0x112fd50)(screen+0x1ee0) != 0` |
+| detect the Sample page | `FN(0x112fd50)(screen) != 0` plus the vtable check |
 
-## 4. The path here (leads, dead ends, and what unlocked it)
+### 4.2 Runtime and instrumentation mechanisms
 
-### 4.1 The wrong turns
+| mechanism | how |
+|---|---|
+| run code inside the firmware | `LD_PRELOAD` an aarch64 `.so` into `/usr/bin/MPC Sample` |
+| resolve the module base | parse `/proc/self/maps`; base is not fixed (PIE) |
+| hook a function | patch a `B <relay>` at the entry; a trampoline copies up to four prologue instructions, stopping before any PC-relative one, and returns the trampoline as `orig_*` |
+| call a function by offset | `FN(offset, signature)(...)` |
+| read/write foreign memory | `pread`/`pwrite` on `/proc/self/mem` (`rd()` / `wr()`) |
+| logging | `mlog()` → `/run/minimod.log` (debug builds), read by line offset from the host |
+| drive the mod at runtime | `/run/minimod.chop` command file, consumed by a poll thread and executed on the UI thread |
+| watch who writes a field | `mprotect`-based page watch: SIGSEGV handler logs address, pc, lr, sp |
+| find who mutates a list | hook the list accessor and log the caller's return address |
+| find a field the UI edits | snapshot **every word** of every object on every button press and knob turn, then diff |
+| catch a rebuild | hook the allocator (`alloc` probe) — which also proved the app does **not** use libc `malloc` for slices |
+| search memory for a value | `findval` (u32) and `findq` (u64/double) over all writable mappings |
+| read runtime vtables | read the object's first qword and print entries as offsets — several `.data.rel.ro` classes read as garbage statically |
+| suppress input safely | drop bytes in the `read()` filter while a flag is set |
+| cross-thread hand-off | atomic CAS + release/acquire flag, one phase per UI pass |
 
-1. **Threshold chop type.** The first implementation opened the stock Chop view
-   and selected its Threshold mode. That slices at *the firmware's* detector
-   positions, so our positions were discarded. It looked like a success because
-   markers appeared.
-2. **Extract-based slicing.** Writing slices through the Extract command caused
-   restarts and was removed.
-3. **Hunting the "editor".** The command objects all need an object carrying
-   `+0x4c8` sample, `+0x4d0` selection, `+0x528` marker and `+0x10c8`
-   controller. Three different heap scans (by sample pointer, by editor shape,
-   by marker value) found nothing usable, and the fault that ended the first
-   attempt was read as "the command wants a different sample object".
+### 4.3 Verification mechanisms
 
-### 4.2 The mistake that hid everything
+| mechanism | how |
+|---|---|
+| drive the UI without a human | lab panel HTTP: `/control`, `/screen.png`, `/state?since=0` (LED 75 = CHOP, 82 = PLAY) |
+| measure drawn markers | scan row `y = 92` of the 320×240 screenshot for grey pixels (`|r-g|<8`, `|g-b|<8`, `90<r<220`), collapse runs, map x → frame through the waveform box |
+| read the model from the host | `dd` from `/proc/<pid>/mem` over ssh |
+| locate a static in a stripped build | `nm` on an unstripped link → `build/minimod.map` (`g_screen`); the shipped object is the same link with `-s` |
+| prove the base is right | assert `*(screen) == stock_load_address + 0x6e212a0` |
+| prove the deployed library is the build | compare `sha256sum` on the device with the local file |
+| prove nothing restarted | `pidof` and `systemctl show ac50 -p NRestarts` before/after |
+| prove the pads still work | press pads after the write and re-read the model |
 
-**Ghidra VAs are mod offsets + `0x100000`.** `HPSS-HANDOFF.md` states the rule
-and its own table proves it (the free-pad finder is `0x296dd00` in Ghidra and
-`A_HPSS_FREE_PAD 0x286dd00` in the mod). The probe had been installing hooks
-and reading data at `base + <Ghidra VA>`, i.e. 0x100000 past the target, so it
-patched unrelated code and jumped into garbage.
+### 4.4 Traps that cost time
 
-Consequences once corrected:
+* **Address space.** A hook installed at `base + GhidraVA` lands 0x100000 past
+  the target; the probe "never fired" for an entire pass because of it.
+* **The input hook is not the UI thread.** Blocking it or touching the model
+  from it is unsafe.
+* **A page switch is asynchronous.** Pressing CHOP and polling in the same
+  callback cannot work.
+* **The Chop view caches its layout.** A repaint or a pad press does not redraw
+  markers after a raw field write; only a rebuild does. The native API avoids
+  the problem entirely by broadcasting.
+* **`meta+0xb0…` of the layer are not `SlicePoints`.** Those words are inline
+  `std::string` data; the deserializer's layout belongs to a different class.
+* **The app has its own allocator.** An `LD_PRELOAD` `malloc` hook never sees
+  slice allocation, so the mod must never allocate a Slice.
 
-* every "the hook never fires" disappeared — the hooks had been on the wrong
-  functions all along;
-* `isSampleValid = 1` on `layer+0x4a8`, so the command path's sample was fine;
-  the earlier fault was the address, not the object;
-* with the hooks live, it became measurable that Split and Merge fire **no**
-  command and no dispatcher — only the marker resolver, the slice-list accessor
-  and a slice-cell publisher. That is what redirected the work from the command
-  API to direct model edits.
+## 5. The path here
 
-### 4.3 The hypothesis loop
+### 5.1 Passes
 
-Every step was written to `HYPOTHESES.csv` before it was tested.
+1. **Threshold chop** — selected the stock Threshold mode, so markers appeared
+   at the firmware's positions and our detector was ignored. Replaced with a
+   fail-safe (`Spectral: not applied`).
+2. **Extract** — writing slices through the Extract command restarted the app.
+   Removed.
+3. **Command API hunt** — found `Insert`/`Split`/`Remove`/`Remove All`
+   (`0x1a60af0`, `0x1a60d50`, `0x1a5d1c0`, `0x1a5cf40`) and the UI wrapper
+   `0x21a3b10`; all need an "editor" object that three heap scans failed to
+   find. No write path.
+4. **Address-space fix** — `HPSS-HANDOFF.md` and `docs/re/README.md` both state
+   the `+0x100000` rule. With hooks finally on the right functions,
+   `isSampleValid` on `layer+0x4a8` returned 1, and Split/Merge were seen to
+   fire **no** command and no dispatcher: the UI edits the list directly. That
+   redirected the work to direct model edits.
+5. **Direct writes** — the boundary layout was pinned by a human-in-the-loop
+   snapshot (§5.2); writing `+0x78`/`+0xd0`, shrinking the vector and toggling
+   CHOP produced the first correct chop. This is what the release build shipped
+   at `9b299b9`.
+6. **Native API** — the container's own `Reset`/`Insert`/`Reconcile` were
+   located, together with the binding callback for the chop type. The direct
+   writes, the synthetic Split presses, the vector shortening and the CHOP
+   toggle were all removed. The action also moved onto the UI thread as a phase
+   machine, input suppression was added, and the emulator acceptance test was
+   written. This is the shipped implementation.
 
-| # | hypothesis | result |
-|---|---|---|
-| H1 | the rebuild lives in the function containing `0x1a601d0` | disproved — an unwind cleanup |
-| H2 | the editor is findable by scanning the heap for `*(p+0x4c8)==sample` plus its shape | disproved — zero shaped candidates |
-| H3 | a pad press in Chop inserts through `0x21a3b10`/`0x1a60af0` | disproved |
-| **H4** | **probe addresses were 0x100000 too high** | **proved — root cause of every earlier failure** |
-| H5 | the UI Split/Merge path does not use the command objects | proved |
-| H6 | Split is refused at 16 slices | proved (also reported by the user) |
-| H7 | K3 (CC 18) absolute value 127 selects Manual | proved — the screen label changes and Split enables |
-| H8 | slices are allocated per edit through libc malloc | disproved — no allocation in 0x100..0x8000 while the pointers changed |
-| H9 | a page watch on the slice vector catches the split writer | inconclusive — the first write is a neighbouring field |
-| H10 | `+0xd0` is a start frame | disproved — it is the **end**; both slices of a 2-slice pad read the sample end |
-| H11 | K1/K2 move a slice boundary | disproved *by my own test* (the selection was the start/end marker, not a slice) |
-| H12 | write `+0xd0` and repaint | disproved — the write persists, the view does not change |
-| H13 | the layer at `state+0x22e8` carries `SlicePoints` at `+0xb0..` | disproved — those words are inline `std::string` data |
-| H14 | the mod could allocate a compatible Slice | disproved — the app has its own allocator |
-| H15 | the boundary times exist as a transient `vector<SlicePoint>` of doubles | inconclusive — one hit, gone on read-back |
-| **H16** | **`+0xd0` is the boundary K1/K2 edit for the pad-selected chop** | **proved — the user's guided run** |
-| **H17** | **re-entering Chop rebuilds the view from the model** | **proved — markers landed on the written frames** |
-| **H18** | **grow → write → shrink → re-enter → verify works from the feature** | **proved — 10 onsets, 10 slices, all read back** |
+### 5.2 The human in the loop
 
-### 4.4 What the human in the loop changed
+Two remarks changed the investigation more than any probe:
 
-Two remarks from the user moved the work more than any single probe:
+> "the knob 1 or 2 move boundaries of selected chop … you select given chop by
+> pressing a pad"
 
-1. *"the knob 1 or 2 move boundaries of selected chop … you select given chop by
-   pressing a pad"* — this corrected my misreading of K1/K2 as zoom controls and
-   pointed at the per-slice boundary.
-2. *"split button works only when chop type is set to manual"* — this explained
-   the greyed Split and identified Manual as a required state.
+> "split button works only when chop type is set to manual"
 
-They were turned into one experiment: snapshot **every word of every slice** on
-every button press and every knob turn, then have the user perform the gesture
-in the panel. The diff of that capture was unambiguous — `+0xd0` and the
-`+0x78`/`+0x128` mirrors — and it is the only reason the field was found.
+They became one experiment: snapshot every word of every slice on every button
+press and every knob turn, then have the user perform the gesture in the panel.
+The diff was unambiguous — `+0xd0` with its `+0x78`/`+0x128` mirrors.
 
-### 4.5 The final jump
+### 5.3 Disproved along the way
 
-With the boundary known, the last unknown was why a direct write did not show
-up. Three writings plus a repaint produced a byte-identical screen; a pad press
-changed the pixels but not the markers. Toggling CHOP changed them to exactly
-the written frames — the view had been cached all along, and re-entering is the
-rebuild trigger. From there the recipe was mechanical.
+* the rebuild lives in the function containing `0x1a601d0` — it is an unwind
+  cleanup;
+* the editor is findable by scanning for `*(p+0x4c8) == sample` — never
+  observed at all;
+* a pad press inserts a slice through `0x21a3b10` — it only moves the selection;
+* slices are allocated per edit through libc `malloc` — the app has its own
+  allocator;
+* `layer+0xb0…+0xf8` hold `SlicePoints` — inline string data;
+* `+0xd0` is a start frame — it is the end;
+* K1/K2 are zoom controls — a false conclusion from a test that selected the
+  start/end marker instead of a slice;
+* writing the fields and rebuilding is the way to apply a chop — it works, but
+  the native API is correct and needs no rebuild.
 
-## 5. Reproducing it
+`HYPOTHESES.csv` holds the numbered record of all of them.
 
-### 5.1 Build and run
+## 6. Reproducing it
+
+### 6.1 Build
 
 ```sh
-./mod/build.sh          # build/minimod.so
-./mod/pack.sh           # build/minimod.zip (SD autorun package)
+./mod/build.sh      # build/minimod.so + build/minimod.map (g_screen offset)
+./mod/pack.sh       # build/minimod.zip (SD autorun package)
+```
 
-cd ../virtual-mpc-sample
+`build.sh` links twice: an unstripped `build/minimod.elf` from which `nm` takes
+`g_screen` into `build/minimod.map`, then the shipped `build/minimod.so` with
+`-s`. The layout of the two links is identical. `zig cc` rejects `-Map` in every
+spelling, which is why the map is produced this way.
+
+Debug build with logging and the probe:
+
+```sh
+zig cc -target aarch64-linux-gnu -shared -fPIC -O2 -fno-omit-frame-pointer \
+  -mbranch-protection=standard -Wall -Wextra -DMINIMOD_LOG=1 -DMINIMOD_DEBUG=1 \
+  -o mod/build/minimod-dbg.so mod/src/minimod.c mod/src/hpss.c mod/src/spectral.c
+```
+
+### 6.2 Run
+
+```sh
+cd ~/projects/customs/virtual-mpc-sample
 python3 lab.py run --headless
 python3 lab.py preload /path/to/mod/build/minimod.so
 ```
 
-Panel: `http://127.0.0.1:8765/`, screen `GET /screen.png`, state
-`GET /state?since=0` (LED 75 is CHOP, 82 is PLAY).
+Put the **Drums 2s** fixture on `A03` (88200 frames) — the test asserts it.
 
-### 5.2 Debug build and the probe
+### 6.3 Test
 
 ```sh
-zig cc -target aarch64-linux-gnu -shared -fPIC -O2 -fno-omit-frame-pointer \
-  -mbranch-protection=standard -DMINIMOD_LOG=1 -DMINIMOD_DEBUG=1 \
-  -o mod/build/minimod-dbg.so mod/src/minimod.c mod/src/hpss.c mod/src/spectral.c
+python3 mod/tests/emulator_spectral.py --lab ~/projects/customs/virtual-mpc-sample --boots 1
 ```
 
-Write one command to `/run/minimod.chop`; it runs on the **UI thread** at the
-next button event (never from a foreign thread). Read `/run/minimod.log`.
+It restarts `ac50`, checks the deployed digest against the local file, derives
+the module base from `/proc/<pid>/maps`, validates `g_screen` through the screen
+vtable, walks to the sample, runs the real menu action, and compares exact
+boundaries across first-run, repeats, Regions, Threshold, pad playback and CHOP
+re-entry.
+
+### 6.4 Probe commands (debug builds)
+
+`/run/minimod.chop`, one command, executed on the UI thread:
 
 | command | purpose |
 |---|---|
 | `dump` | view state, slice count, layer fields |
-| `count` | slice count only |
-| `snap` | marker, count, per-slice field values and hashes |
-| `snaptrack` / `snapoff` | snapshot on every button press and knob turn |
+| `count` | slice count |
+| `snap` / `snaptrack` / `snapoff` | state snapshot; snapshot on every button and knob event |
 | `sl <i>` | 0x140 bytes of slice `i` |
 | `lay` | 0xb30 bytes of the layer |
-| `rw <addr> <len>` | arbitrary memory, 8 bytes per line |
-| `ww <addr> <hex>` | write one qword |
+| `rw <addr> <len>` / `ww <addr> <hex>` | read / write memory |
 | `rp` | repaint the screen |
-| `vt [n]` / `vl [n]` | runtime vtables (sample / slice list) |
-| `mk <off> [n]` | words at `base+off` |
+| `vt [n]` / `vl [n]` | runtime vtables (sample, slice container) |
+| `mk <off> [n]` | words at `base + off` |
 | `scan` / `scan2` / `find` | heap searches for editor-shaped objects |
 | `samp` | sample validity (`0x2943640`) |
 | `alloc` / `allocoff` | malloc-size logging |
 | `findval <u32>` / `findq <u64>` | value search in writable memory |
-| `wvec` | write watch on the slice vector header and element buffer |
-| `setpts f0,f1,…` | write boundaries only (no grow, no rebuild) |
-| `apply f0,f1,…` | the full recipe, for experiments |
+| `wvec` | page watch on the slice vector header and element buffer |
 
-Useful details: `Read /run/minimod.log` by line offset rather than truncating it
-(`tail -n +$((n+1))`) — truncating a file the app holds open can stop its
-logging. Pad presses need a velocity in the panel API
-(`{"name":"PAD 3","action":"press","value":100}`).
+## 7. Limits
 
-### 5.3 Reading markers off the screen
-
-The screen is 320×240. Slice markers are grey vertical lines; scanning row
-`y = 92` for pixels with `|r-g| < 8`, `|g-b| < 8`, `90 < r < 220` and
-collapsing runs gives their x positions, which map to frames through the
-waveform box (x 15…305 → frame 0…frames). That is how every claim above about
-markers was measured, without relying on a screenshot impression.
-
-### 5.4 Ghidra
-
-```sh
-GHIDRA_MCP_ALLOW_SCRIPTS=1 ~/Applications/ghidra_12.2_PUBLIC/ghidraRun ~/mcpsamplebin.gpr
-python3 tools/ghidra/hpss/run_bridge.py ResearchDecompile.java 0x21a3b10
-```
-
-**Subtract `0x100000` from every Ghidra address to get a mod offset.** Some
-`.data.rel.ro` vtables read as garbage in Ghidra (the sample's own vtable does);
-read those at runtime with `vt`/`vl` instead of concluding a class has no
-methods.
-
-## 6. Limits and open questions
-
-- At most **16** slices — the stock chop limit. A sample needing more onsets is
-  truncated by the detector, not by the write.
-- The pad's previous chop is replaced, and stock slice edits are not undoable
+- At most **16** slices — the stock chop limit.
+- The pad's previous chop is replaced; stock slice edits are not undoable
   either.
-- Growing uses synthetic Split presses; if the firmware refuses to split (for
-  example a slice below its minimum length) the action refuses instead of
-  writing a partial chop.
-- The boundary state is not re-validated against the WAV after the write, only
-  against the model; a concurrent user edit during the operation is not
-  guarded.
+- A user edit during the operation is detected only through the sample identity
+  check, not per boundary.
+- Manual type selection depends on the binding's layout
+  (`+0xd8`/`+0xc0`/`+0xe0`/`+0xe8`); a firmware change there turns into an
+  explicit `cannot select Manual chop` rather than a wrong chop.
 - Real hardware has never been tested.
-- Still unexplained: the strings at the top of the file (the deserializer
-  `0x1e02230` and its `SlicePoints`/`ManualSlicePoints` layout) belong to a
-  different class than the runtime layer. The persistent serialization of a
-  manual chop, and where a rebuild takes its positions from in Threshold mode,
-  were not pursued once the write path was found.
+- Not pursued once the native API was found: where Threshold mode takes its
+  positions from, and whether the pad's chop is persisted through the
+  deserializer's `SlicePoints` (a different class from the runtime layer).

@@ -1667,6 +1667,7 @@ static int g_hpss_cmd_n;
 
 static uint64_t g_hpss_name[2];
 static int g_hpss_names_ready;
+static int g_spectral_active;
 static volatile int g_hpss_menu;
 static volatile int g_hpss_busy;
 static volatile int g_hpss_sel;
@@ -1719,7 +1720,8 @@ ssize_t read(int fd, void *buffer, size_t count)
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
         long long now = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-        int suppress = g_hpss_menu || g_hpss_guard_until > now;
+        int suppress = g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE) ||
+                       g_hpss_guard_until > now;
         int drop = 0;
         for (ssize_t i = 0; i + 16 < n; i += 32) {
             unsigned char b = p[i + 16];
@@ -2301,191 +2303,203 @@ static void hpss_start(void)
 static void hpss_close(void);
 static void cc_replay_k3(unsigned raw);
 
-/* Put the selected pad into the stock Chop view.  The stock page owns the
- * slicing; it cuts the sample already on this pad, so no samples are created
- * and no other pads are touched. */
-static int spectral_enter_chop(void)
-{
-    if (hpss_chop_mode())
-        return 1;
-    if (!g_hpss_btn_valid || !orig_buttons || !sample_page_visible())
-        return 0;
-    unsigned char ev[16];
-    memcpy(ev, g_hpss_btn, sizeof ev);
-    ev[8] = 0x4b; /* CHOP */
-    ev[9] = 0x7f;
-    orig_buttons(ev);
-    ev[9] = 0x00;
-    orig_buttons(ev);
-    return 1;
-}
-
 /* ------------------------------------------------------- spectral markers */
-/* The chop model is the sample's slice list: a vector of Slice* at
- * (*(sample+0x130))+0x10, entries at +0x60/+0x68. Each Slice carries its start
- * at +0x78 (mirrored at +0x128) and its end at +0xd0. The stock Chop view
- * caches its own layout and only rebuilds when it re-opens, so the sequence is:
- * make sure there are at least N slices, write the boundaries, shrink the list
- * to N, then re-enter Chop so the view rebuilds from the model. Verified on the
- * emulator: markers land on the written frames (500/3000/7000/11000). */
-static void synth_button(unsigned code, int down)
-{
-    if (!orig_buttons || !g_hpss_btn_valid)
-        return;
-    unsigned char ev[16];
-    memcpy(ev, g_hpss_btn, sizeof ev);
-    ev[8] = (unsigned char)code;
-    ev[9] = down ? 0x7f : 0x00;
-    orig_buttons(ev);
-}
+/* The input hook is NOT the UI thread. Publish only a request there; all
+ * model calls below run from screen_paint, after the stock paint returns. */
+static unsigned char g_spectral_event[16];
+static struct {
+    int phase, n;
+    void *screen;
+    uintptr_t state, sample;
+    unsigned frames, ch, rate, pos[16];
+    long long deadline;
+} g_spectral;
 
 static unsigned slice_count_of(uintptr_t sample, uintptr_t *begin_out,
                                uintptr_t *cont_out)
 {
-    uintptr_t buf = 0, cont = 0, begin = 0, end = 0;
-    if (!sample || !rd(sample + 0x130, &buf, 8) || !buf)
+    uintptr_t buf = 0, begin = 0, end = 0, cap = 0;
+    if (!sample || !rd(sample + 0x130, &buf, 8) || !buf ||
+        !rd(buf + 0x70, &begin, 8) || !rd(buf + 0x78, &end, 8) ||
+        !rd(buf + 0x80, &cap, 8) || end < begin || cap < end ||
+        ((end - begin) & 7) || (end - begin) / 8 > 128)
         return 0;
-    cont = buf + 0x10;
-    if (!rd(cont + 0x60, &begin, 8) || !rd(cont + 0x68, &end, 8) || !begin || end < begin)
-        return 0;
-    if (begin_out)
-        *begin_out = begin;
-    if (cont_out)
-        *cont_out = cont;
+    if (begin_out) *begin_out = begin;
+    if (cont_out) *cont_out = buf + 0x10;
     return (unsigned)((end - begin) / 8);
 }
 
-/* Reach n slices by splitting the selected slice; each split adds one. */
-static unsigned grow_to(uintptr_t sample, unsigned n)
+static void spectral_finish(const char *error)
 {
-    unsigned count = slice_count_of(sample, 0, 0);
-    if (count >= n)
-        return count;
-    synth_button(0x31, 1); /* SHIFT */
-    for (unsigned i = 0; i < n + 2 && count < n; ++i) {
-        unsigned before = count;
-        synth_button(0x0d, 1); /* SCREEN 2 = Split */
-        synth_button(0x0d, 0);
-        count = slice_count_of(sample, 0, 0);
-        if (count == before)
-            break; /* refused (size floor) - stop instead of looping */
-    }
-    synth_button(0x31, 0);
-    return count;
+    char status[96];
+    if (error)
+        snprintf(status, sizeof status, "Spectral: %s", error);
+    else
+        snprintf(status, sizeof status, "Spectral: %d slices on this pad", g_spectral.n);
+    mlog("%s\n", status);
+    hpss_set_status(status);
+    toast(error ? status : "Spectral: chopped");
+    g_spectral.phase = 0;
+    g_hpss_busy = 0;
+    __atomic_store_n(&g_spectral_active, 0, __ATOMIC_RELEASE);
+    hpss_repaint();
 }
 
-static int spectral_write_markers(uintptr_t sample, unsigned frames,
-                                  const unsigned *pos, int n)
+/* Same binding path used by the stock Split handler (Ghidra 0x1756728).
+ * Manual is enum 0. Calling the binding's model callback preserves the pad's
+ * chop type; assigning the view's cached enum alone does not. */
+static int spectral_manual(void)
 {
-    if (n < 2 || !sample)
+    uintptr_t binding = 0, owner = 0, invoke = 0, manager = 0;
+    unsigned char flags = 0;
+    if (!rd((uintptr_t)g_screen + 0x168, &binding, 8) || !binding ||
+        !rd(binding + 0xe8, &flags, 1) || !rd(binding + 0xe0, &owner, 8))
         return 0;
-    mlog("Spectral: write markers n=%d chop=%d btn=%d\n", n, hpss_chop_mode(),
-         g_hpss_btn_valid);
-    hpss_close(); /* our menu sits on top of the page */
-    if (!hpss_chop_mode()) {
-        spectral_enter_chop();
-        /* the view switch lands on the app's next message pass */
-        for (int i = 0; i < 80 && !hpss_chop_mode(); ++i)
-            usleep(5000);
-        if (!hpss_chop_mode()) {
-            mlog("Spectral: could not enter Chop view\n");
+    if (!(flags & 1) && owner) {
+        if (!rd(binding + 0xd0, &manager, 8) || !manager ||
+            !rd(binding + 0xd8, &invoke, 8) || !invoke)
             return 0;
-        }
+        int manual = 0;
+        ((void (*)(uintptr_t, uintptr_t, const int *))invoke)(binding + 0xc0, owner, &manual);
+    } else {
+        FN(0x15d2840, void (*)(uintptr_t, int))(binding + 0x80, 0);
     }
-    unsigned have = grow_to(sample, (unsigned)n);
-    mlog("Spectral: slices after grow = %u\n", have);
-    if (have < (unsigned)n) {
-        char msg[64];
-        snprintf(msg, sizeof msg, "Spectral: %d onsets, %u slices", n, have);
-        hpss_set_status(msg);
-        toast("Spectral: too few slices");
-        mlog("Spectral: pad has %u slices, need %d\n", have, n);
-        return 0;
-    }
-    uintptr_t begin = 0, cont = 0;
-    if (!slice_count_of(sample, &begin, &cont))
-        return 0;
-    for (int i = 0; i < n; ++i) {
-        uintptr_t sp = 0;
-        if (!rd(begin + (uintptr_t)i * 8, &sp, 8) || !sp)
-            return 0;
-        uintptr_t start = pos[i];
-        uintptr_t next = (i + 1 < n) ? pos[i + 1] : frames;
-        wr(sp + 0x78, &start, 8);
-        wr(sp + 0x128, &start, 8);
-        wr(sp + 0xd0, &next, 8);
-    }
-    uintptr_t newend = begin + (uintptr_t)n * 8;
-    wr(cont + 0x68, &newend, 8);
-    /* Re-enter Chop: the view rebuilds from the model, which is now ours. */
-    synth_button(0x4b, 1); /* CHOP off */
-    synth_button(0x4b, 0);
-    synth_button(0x4b, 1); /* CHOP on */
-    synth_button(0x4b, 0);
+    return 1;
+}
 
-    /* Verify: the firmware must have exactly n slices at our frames. */
-    unsigned got = slice_count_of(sample, &begin, 0);
-    int ok = got == (unsigned)n;
-    for (int i = 0; ok && i < n; ++i) {
-        uintptr_t sp = 0, end = 0;
-        uintptr_t want = (i + 1 < n) ? pos[i + 1] : frames;
-        if (!rd(begin + (uintptr_t)i * 8, &sp, 8) || !sp ||
-            !rd(sp + 0xd0, &end, 8) || end != want)
-            ok = 0;
+static int spectral_verify(void)
+{
+    uintptr_t begin = 0;
+    if (slice_count_of(g_spectral.sample, &begin, 0) != (unsigned)g_spectral.n)
+        return 0;
+    for (int i = 0; i < g_spectral.n; ++i) {
+        uintptr_t slice = 0, start = 0, end = 0;
+        unsigned want_end = i + 1 < g_spectral.n ? g_spectral.pos[i + 1] : g_spectral.frames;
+        if (!rd(begin + (uintptr_t)i * 8, &slice, 8) || !slice ||
+            !rd(slice + 0x78, &start, 8) || !rd(slice + 0xd0, &end, 8) ||
+            start != g_spectral.pos[i] || end != want_end)
+            return 0;
     }
-    mlog("Spectral: wrote %d markers, count=%u verified=%d\n", n, got, ok);
-    return ok;
+    return 1;
+}
+
+static int spectral_write_markers(void)
+{
+    uintptr_t cont = 0, selection = 0;
+    slice_count_of(g_spectral.sample, 0, &cont);
+    if (!cont || !rd((uintptr_t)g_screen + 0x180, &selection, 8) || !selection)
+        return 0;
+    /* Native Reset and Insert, as called by the stock Chop UI. These own the
+     * Slice allocation, destruction, listener links, selection and broadcasts.
+     * Never shorten its vector or poke observable Slice fields ourselves. */
+    FN(0x2950aa0, void (*)(uintptr_t))(cont);
+    for (int i = 0; i < g_spectral.n; ++i) {
+        int index = FN(0x2950d20, int (*)(uintptr_t, unsigned, unsigned, unsigned))(
+            cont, g_spectral.pos[i], 1, g_spectral.frames);
+        if (index != i)
+            return 0;
+    }
+    /* Reconcile adjacent ends through the native setters, including the tail. */
+    FN(0x2950bb0, void (*)(uintptr_t, unsigned))(cont, g_spectral.frames);
+    int first = 0;
+    FN(0x16680a0, void (*)(uintptr_t, const int *))(selection + 0x618, &first);
+    return spectral_verify();
 }
 
 static void spectral_start(void)
 {
-    if (g_hpss_busy || g_hpss_job)
+    int expected = 0;
+    if (g_hpss_busy || g_hpss_job ||
+        !__atomic_compare_exchange_n(&g_spectral_active, &expected, -1, 0,
+                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED))
         return;
-    void *screen = 0;
-    uintptr_t state = 0, sample = 0;
-    unsigned frames = 0, ch = 0, rate = 0;
-    if (!hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate)) {
-        hpss_set_status("Spectral: no sample on this pad");
-        toast("Spectral: no sample");
-        return;
-    }
-    char path[512] = {0};
-    if (!hpss_path_for(sample, frames, ch, rate, path, sizeof path)) {
-        hpss_set_status("Spectral: no exact WAV file");
-        toast("Spectral: no WAV");
-        return;
-    }
-    float *input = NULL;
-    if (!wav_read_f32(path, frames, ch, rate, &input, NULL, NULL)) {
-        hpss_set_status("Spectral: cannot decode WAV");
-        toast("Spectral: bad WAV");
-        return;
-    }
+    memcpy(g_spectral_event, g_hpss_btn, sizeof g_spectral_event);
+    __atomic_store_n(&g_spectral_active, 1, __ATOMIC_RELEASE);
+    hpss_repaint();
+}
 
-    unsigned positions[16];
-    unsigned detected = 0;
-    int n = spectral_onsets(input, frames, ch, rate, positions, 16, &detected);
-    free(input);
-    if (n < 2) {
-        hpss_set_status("Spectral: no onsets");
-        toast("no onsets");
+/* One phase per UI pass: a CHOP press schedules a page switch, so it cannot
+ * be followed by a sleep/poll or by another toggle in the same callback. */
+static void spectral_tick(void)
+{
+    if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE) != 1)
         return;
+    if (!g_spectral.phase) {
+        g_hpss_menu = 0;
+        g_hpss_busy = 1;
+        if (!hpss_sample_now(&g_spectral.screen, &g_spectral.state, &g_spectral.sample,
+                             &g_spectral.frames, &g_spectral.ch, &g_spectral.rate)) {
+            spectral_finish("no sample on this pad");
+            return;
+        }
+        char path[512] = {0};
+        float *input = NULL;
+        if (!hpss_path_for(g_spectral.sample, g_spectral.frames, g_spectral.ch,
+                           g_spectral.rate, path, sizeof path) ||
+            !wav_read_f32(path, g_spectral.frames, g_spectral.ch, g_spectral.rate,
+                          &input, NULL, NULL)) {
+            spectral_finish("cannot read sample WAV");
+            return;
+        }
+        unsigned detected = 0;
+        g_spectral.n = spectral_onsets(input, g_spectral.frames, g_spectral.ch,
+                                       g_spectral.rate, g_spectral.pos, 16, &detected);
+        free(input);
+        if (g_spectral.n < 2) {
+            spectral_finish("no onsets");
+            return;
+        }
+        for (int i = 0; i < g_spectral.n; ++i) {
+            if (g_spectral.pos[i] >= g_spectral.frames ||
+                (i && g_spectral.pos[i] <= g_spectral.pos[i - 1])) {
+                spectral_finish("invalid onsets");
+                return;
+            }
+        }
+        mlog("Spectral: source=%p frames=%u onsets=%d detected=%u\n",
+             (void *)g_spectral.sample, g_spectral.frames, g_spectral.n, detected);
+        if (!hpss_chop_mode() && orig_buttons) {
+            g_spectral_event[8] = 0x4b;
+            g_spectral_event[9] = 0x7f;
+            orig_buttons(g_spectral_event);
+            g_spectral_event[9] = 0;
+            orig_buttons(g_spectral_event);
+        }
+        if (!spectral_manual()) {
+            spectral_finish("cannot select Manual chop");
+            return;
+        }
+        g_spectral.phase = 1;
+        g_spectral.deadline = now_ms() + 3000;
+    } else {
+        void *screen = 0;
+        uintptr_t state = 0, sample = 0;
+        unsigned frames = 0, ch = 0, rate = 0;
+        if (!hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate) ||
+            screen != g_spectral.screen || state != g_spectral.state ||
+            sample != g_spectral.sample || frames != g_spectral.frames ||
+            ch != g_spectral.ch || rate != g_spectral.rate) {
+            spectral_finish("sample changed; cancelled");
+            return;
+        }
+        uintptr_t binding = 0;
+        int type = -1;
+        rd((uintptr_t)screen + 0x168, &binding, 8);
+        if (binding) rd(binding + 0x9c, &type, 4);
+        if (!hpss_chop_mode() || type != 0) {
+            if (now_ms() >= g_spectral.deadline)
+                spectral_finish("Manual chop did not open");
+        } else if (g_spectral.phase == 1) {
+            if (!spectral_write_markers()) {
+                spectral_finish("native marker write failed");
+                return;
+            }
+            g_spectral.phase = 2;
+            g_spectral.deadline = now_ms() + 150;
+        } else if (now_ms() >= g_spectral.deadline) {
+            spectral_finish(spectral_verify() ? NULL : "marker verification failed");
+        }
     }
-
-    if (getenv("MINIMOD_CHOP_DBG"))
-        for (int i = 0; i < n; ++i)
-            mlog("Spectral: onset[%d]=%u\n", i, positions[i]);
-    /* Apply the detected frames as Manual chop markers on this same pad. */
-    int applied = spectral_write_markers(sample, frames, positions, n);
-    char status[64];
-    if (applied)
-        snprintf(status, sizeof status, "Spectral: %d slices on this pad", n);
-    else
-        snprintf(status, sizeof status, "Spectral: markers not written");
-    hpss_set_status(status);
-    toast(applied ? "Spectral: chopped" : "Spectral: not applied");
-    mlog("Spectral: %s frames=%u ch=%u onsets=%d detected=%u applied=%d\n", path,
-         frames, ch, n, detected, applied);
     hpss_repaint();
 }
 
@@ -3225,120 +3239,6 @@ static void chop_probe_run(void)
         return;
     }
 
-    if (!strncmp(cmd, "setpts ", 7)) {
-        /* setpts f0,f1,... : rewrite the chop so slice i spans [p_i, p_i+1),
-         * then shrink the vector to exactly that many slices. */
-        uintptr_t buf = 0, cont = 0, begin = 0, end = 0, cap = 0;
-        if (!sample || !rd(sample + 0x130, &buf, 8) || !buf)
-            return;
-        cont = buf + 0x10;
-        if (!rd(cont + 0x60, &begin, 8) || !rd(cont + 0x68, &end, 8) ||
-            !rd(cont + 0x70, &cap, 8) || !begin) {
-            mlog("chop: setpts no vector\n");
-            return;
-        }
-        unsigned have = (unsigned)((end - begin) / 8);
-        unsigned p[17];
-        unsigned n = 0;
-        const char *q = cmd + 7;
-        while (*q && n < 16) {
-            p[n++] = (unsigned)strtoul(q, (char **)&q, 10);
-            if (*q == ',')
-                q++;
-        }
-        if (n < 2 || n > have) {
-            mlog("chop: setpts need 2..%u points, got %u\n", have, n);
-            return;
-        }
-        unsigned frames2 = 0;
-        rd(sample + 0x130, &buf, 8);
-        uintptr_t meta = 0;
-        if (rd(buf, &meta, 8))
-            (void)meta;
-        frames2 = frames;
-        mlog("chop: setpts n=%u have=%u frames=%u\n", n, have, frames2);
-        for (unsigned i = 0; i < n; ++i) {
-            uintptr_t sp = 0;
-            if (!rd(begin + i * 8, &sp, 8) || !sp)
-                break;
-            uintptr_t next = (i + 1 < n) ? p[i + 1] : frames2;
-            uintptr_t start = p[i];
-            wr(sp + 0x78, &start, 8);
-            wr(sp + 0x128, &start, 8);
-            wr(sp + 0xd0, &next, 8);
-        }
-        uintptr_t newend = begin + (uintptr_t)n * 8;
-        wr(cont + 0x68, &newend, 8);
-        mlog("chop: setpts done, count now %u\n", n);
-        return;
-    }
-
-    if (!strncmp(cmd, "apply ", 6)) {
-        /* apply f0,f1,... : the whole recipe - Regions 16, Manual, write the
-         * boundaries, shrink to N, then re-enter Chop so the view rebuilds. */
-        unsigned p[17];
-        unsigned n = 0;
-        const char *q = cmd + 6;
-        while (*q && n < 16) {
-            p[n++] = (unsigned)strtoul(q, (char **)&q, 10);
-            if (*q == ',')
-                q++;
-        }
-        mlog("chop: apply n=%u first=%u last=%u\n", n, n ? p[0] : 0,
-             n ? p[n - 1] : 0);
-        if (n < 2 || !sample) {
-            mlog("chop: apply refused\n");
-            return;
-        }
-        if (!hpss_chop_mode()) {
-            mlog("chop: apply entering chop view\n");
-            spectral_enter_chop();
-        }
-        cc_replay(0x12, 96);   /* Regions 16: a full set of slices */
-        cc_replay(0x12, 127);  /* Manual: keeps them for editing */
-        uintptr_t buf = 0, cont = 0, begin = 0, end = 0;
-        if (!rd(sample + 0x130, &buf, 8) || !buf)
-            return;
-        cont = buf + 0x10;
-        if (!rd(cont + 0x60, &begin, 8) || !rd(cont + 0x68, &end, 8) || !begin ||
-            end <= begin) {
-            mlog("chop: apply no slice vector\n");
-            return;
-        }
-        unsigned have = (unsigned)((end - begin) / 8);
-        mlog("chop: apply pad has %u slices\n", have);
-        if (have < n) {
-            mlog("chop: apply needs %u slices, pad has %u\n", n, have);
-            return;
-        }
-        for (unsigned i = 0; i < n; ++i) {
-            uintptr_t sp = 0;
-            if (!rd(begin + i * 8, &sp, 8) || !sp)
-                break;
-            uintptr_t next = (i + 1 < n) ? p[i + 1] : frames;
-            uintptr_t start = p[i];
-            wr(sp + 0x78, &start, 8);
-            wr(sp + 0x128, &start, 8);
-            wr(sp + 0xd0, &next, 8);
-        }
-        uintptr_t newend = begin + (uintptr_t)n * 8;
-        wr(cont + 0x68, &newend, 8);
-        /* re-enter Chop: the view rebuilds from the model, which is now ours */
-        if (orig_buttons && g_hpss_btn_valid) {
-            unsigned char ev[16];
-            memcpy(ev, g_hpss_btn, sizeof ev);
-            ev[8] = 0x4b;
-            ev[9] = 0x7f;
-            orig_buttons(ev);
-            ev[9] = 0x00;
-            orig_buttons(ev);
-            orig_buttons(ev);
-            ev[9] = 0x7f;
-            orig_buttons(ev);
-        }
-        mlog("chop: apply wrote %u boundaries, count now %u\n", n, n);
-        return;
-    }
     if (!strcmp(cmd, "snap")) {
         chop_snapshot("manual");
         return;
@@ -3690,7 +3590,7 @@ static void hpss_draw_menu(void *g)
             draw_colour(g, 0xffffffff);
         }
         draw_text(g, "Spectral Chop", x + 12, y + 84, w - 24, 22, 16.0f);
-        draw_text(g, "detect onsets (markers still open)", x + 12, y + 104,
+        draw_text(g, "slice this sample at detected onsets", x + 12, y + 104,
                   w - 24, 16,
                   12.0f);
         if (g_hpss_sel == 2) {
@@ -3717,7 +3617,6 @@ static void buttons(void *event)
     if (event && rd((uintptr_t)event, g_hpss_btn, sizeof g_hpss_btn))
         g_hpss_btn_valid = 1;
 #if MINIMOD_DEBUG
-    chop_probe_run(); /* queued probe commands run here: this is the UI thread */
     if (g_snap_track && g_snap_n < 24) {
         char tag[16];
         snprintf(tag, sizeof tag, "btn%02x%d", code, down ? 1 : 0);
@@ -3726,6 +3625,11 @@ static void buttons(void *event)
     }
 #endif
     if (code == 0x6f) { /* DATA press/turn */
+        static int consumed;
+        if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
+            consumed = 1;
+        if (down && (g_hpss_menu || (g_shift && sample_page_visible())))
+            consumed = 1;
         int visible = sample_page_visible();
         if (down && !g_hpss_data_down) {
             if (g_shift) {
@@ -3740,8 +3644,10 @@ static void buttons(void *event)
             }
         }
         g_hpss_data_down = !!down;
-        if (g_hpss_menu || (g_shift && visible))
+        if (consumed || g_hpss_menu || (g_shift && visible)) {
+            if (!down) consumed = 0;
             return;
+        }
     }
     if (getenv("MINIMOD_VIS") && g_screen)
         mlog("minimod: vis code=0x%02x chopA=%d chopB=%d\n", code,
@@ -3762,7 +3668,7 @@ static void buttons(void *event)
             orig_buttons(event);
         return;
     }
-    if (g_hpss_menu)
+    if (g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
         return;
     if (code == 0x0e && g_shift && !in_chop_mode()) { /* SHIFT + B3: 3 %, 6 %, 9 %, untrimmed */
         /* The button repeats while held, so act on the press edge only. */
@@ -3868,6 +3774,8 @@ static struct {
 
 static void note_on(void *input, int src, int pad, void *props, float vel)
 {
+    if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
+        return;
     g_last_pad = pad;
     g_props = props;
 
@@ -5625,6 +5533,10 @@ static void screen_paint(void *p, void *g)
         g_screen = p;
         mlog("minimod: screen=%p\n", p);
     }
+#if MINIMOD_DEBUG
+    chop_probe_run(); /* model probes must also run on the UI thread */
+#endif
+    spectral_tick();
     if (__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE))
         hpss_finalize();
     if (g_hpss_restore_pending && !g_shift && sample_page_visible()) {

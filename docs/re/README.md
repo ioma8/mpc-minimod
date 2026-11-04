@@ -32,11 +32,14 @@ view change.
 
 ## Spectral Chop
 
-[The solve](SPECTRAL-CHOP-SOLVED.md) records the finished write path: the chop
-model, the slice boundary layout (`+0xd0` end, `+0x78`/`+0x128` start), the
-recipe and how it was verified, plus the reproduction method and the probe
-toolkit. [The history](spectral-chop-handoff.md) is the short chronological
-record of the passes and the leads that were disproved.
+[The solve](SPECTRAL-CHOP-SOLVED.md) is the record: the chop model, the native
+slice API (`0x2950aa0` reset, `0x2950d20` insert-at-frame, `0x2950bb0`
+reconcile, `0x16680a0` select), the chop-type binding, the UI-thread phase
+machine, a catalogue of every mechanism used (hooking, `/proc/self/mem`,
+snapshots, page watches, value search, the panel harness, the model read-back
+test) and how each was verified. [The history](spectral-chop-handoff.md) is the
+short chronological record of the six passes and the leads that were disproved.
+The acceptance test is `mod/tests/emulator_spectral.py`.
 
 Note for anyone working here: this index states the address rule below, and the
 Spectral Chop investigation still lost a pass to ignoring it.

@@ -14,21 +14,23 @@ SHIFT + DATA   close
 
 ## What happens
 
-1. The mod resolves the selected pad's sample (the same chain HPSS uses) and
+1. The request is published from the control-surface thread; all model work
+   happens on the UI thread, one phase per paint pass.
+2. The mod resolves the selected pad's sample (the same chain HPSS uses) and
    reads its WAV.
-2. `spectral_onsets()` returns up to 16 frame positions.
-3. Fewer than two onsets: `no onsets`, nothing changes.
-4. Otherwise the pad is chopped in place:
-   * enter the stock Chop view;
-   * grow the slice list to the onset count by splitting (the stock limit is
-     16 slices);
-   * write each slice's start and end frame from the detector;
-   * shrink the list to exactly that many slices;
-   * leave and re-enter Chop so the view rebuilds from the model;
+3. `spectral_onsets()` returns up to 16 frame positions.
+4. Fewer than two onsets: `no onsets`, nothing changes.
+5. Otherwise the pad is chopped in place:
+   * enter the stock Chop view if it is not already active;
+   * select **Manual** through the chop binding's own model callback;
+   * **reset** the slice list, **insert** one slice per detected frame (the
+     native insert allocates, links listeners and broadcasts), **reconcile**
+     the adjacent ends and the tail, and put the selection on slice 0;
    * read every boundary back and only then report `n slices`.
-5. The menu reports `Spectral: n slices on this pad`. On a refusal (for
-   example a pad whose slices could not be split to the needed count) it says
-   so and does not claim success.
+6. The menu reports `Spectral: n slices on this pad`. A refusal says why
+   (`no sample on this pad`, `cannot read sample WAV`, `no onsets`,
+   `cannot select Manual chop`, `native marker write failed`, …) and never
+   claims success.
 
 ## Analysis
 
@@ -50,40 +52,52 @@ frames in the source WAV — exactly the unit the chop model uses.
 
 ## The chop model
 
-The live chop is the sample's slice list, not the pad's serialized
+The live chop is the sample's slice container, not the pad's serialized
 `SlicePoints`:
 
 ```
-slice list = *(*(sample+0x130)+0x10)   vector<Slice*> at +0x60 / +0x68
-Slice + 0x78   start frame  (mirrored at +0x128)
-Slice + 0xd0   end frame
+sample + 0x130  ->  meta { u16 channels, u32 frames, u32 rate }
+meta   + 0x70 / 0x78 / 0x80   vector<Slice*> begin / end / capacity
+meta   + 0x10                 the slice container the native API takes
+
+Slice + 0x78    start frame   (mirror at +0x128)
+Slice + 0xd0    end frame
 ```
 
-Moving a slice boundary with K1/K2 edits exactly those words, and the pads
-select which slice the knobs act on. Writing them directly works, but the Chop
-view keeps its own cached layout: a repaint or a pad press does not rebuild it.
-Leaving and re-entering Chop does, and in Manual mode the boundaries survive
-that rebuild — which is what the feature relies on.
+The firmware's own API does the editing — `0x2950aa0` reset, `0x2950d20`
+insert-at-frame (returns the new index), `0x2950bb0` reconcile ends, `0x16680a0`
+select a slice. Because those own allocation and the observer broadcast, the
+Chop view updates itself: no field pokes and no forced rebuild.
 
-The full model, the recipe step by step, the evidence and the probe toolkit:
+Moving a boundary by hand with K1/K2 edits the same words for the slice a pad
+press selects, which is how the layout was confirmed.
+
+The full model, the mechanisms and the evidence:
 [`docs/re/SPECTRAL-CHOP-SOLVED.md`](re/SPECTRAL-CHOP-SOLVED.md).
 
 ## Validation
 
-Emulator, firmware 1.3.0.12, release build, `NRestarts=0`:
+`mod/tests/emulator_spectral.py` is the acceptance test. It restarts the app,
+checks the deployed library's digest, locates the module base and the
+`SampleScreen` through its vtable, reads the chop model straight out of
+`/proc/<pid>/mem`, then runs the real menu action and compares **exact**
+boundaries:
 
-- pad `A03`, 2 s drum loop, 10 onsets: 10 slices written, every end frame read
-  back and matched, markers at x = 18, 54, 93, 133, 172, 213, 237, 252 and 293
-  px of a 320 px waveform (one per detected onset plus the sample end);
-- a synthetic run with frames 500 / 3000 / 7000 / 11000 produced markers at
-  x = 23, 71, 148, 225, which is those frames on the same scale;
-- a pad with fewer slices than onsets is refused with a message instead of a
-  half-written chop;
-- HPSS and AutoTrim are unchanged.
+```
+PASS boot 1: first from Trim; exact 10 boundaries, Manual, pid=13416
+PASS boot 1: repeat / repeat again
+PASS boot 1: regions / threshold / after pad playback
+PASS: menu, model, repeat, modes, playback, re-entry and restart checks
+```
 
-Host tests:
+The fixture (`A03`, `Drums 2s`, 88200 frames) must produce
+`[0, 1536, 12288, 24064, 36352, 48128, 60416, 67584, 72192, 84480]` with the
+last slice ending at 88200.
 
 ```sh
+./mod/build.sh
+./mod/pack.sh
+python3 mod/tests/emulator_spectral.py --lab ~/projects/customs/virtual-mpc-sample --boots 1
 python3 mod/tests/spectral_onsets.py
 python3 mod/tests/hpss_dsp.py
 python3 mod/tests/wav_edges.py
