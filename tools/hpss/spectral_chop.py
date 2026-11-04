@@ -15,10 +15,10 @@ The whole algorithm is four steps:
   3. Peaks: a frame is an onset when its flux is the local maximum and exceeds
      `sensitivity` times the median flux of +-0.5 s around it. No absolute
      threshold, so it adapts to the material instead of to its loudest hit.
-  4. Position: inside the frame that carries the attack, the boundary goes on
-     the biggest single step up of the 1 ms envelope within +-12 ms. That step
-     is the attack itself, so the slice starts on the transient with neither
-     silence before it nor a clipped attack.
+  4. Position: inside the frame that carries the attack, the 1 ms envelope is
+     measured over +-20 ms and the boundary goes where the rising edge passes
+     15% of the transient's peak - the first moment the hit is visible, so the
+     slice starts on the attack with no silence in front and no clipped front.
 
 Slices are what the firmware builds: slice i spans [pos[i], pos[i+1]) and the
 last runs to the end of the sample. At most 16 slices are made: the first 16
@@ -111,18 +111,19 @@ def pick_peaks(strength, rate, sensitivity, min_gap_ms=40.0):
     return peaks
 
 
-def snap_to_attack(x, rate, frame):
-    """Cut where the waveform jumps the most.
+def snap_to_attack(x, rate, frame, fraction=0.15):
+    """Put the boundary on the transient, not in front of it.
 
-    The novelty peak tells which analysis frame carries the attack; inside a
-    +-12 ms window around it the 1 ms envelope is scanned and the boundary goes
-    on the biggest single step up. That step *is* the attack, so the slice
-    starts on the transient and keeps all of it - neither early (silence before
-    the hit) nor late (a clipped attack).
+    The novelty peak says which analysis frame carries the attack. Inside a
+    +-20 ms window the 1 ms envelope is measured: the loudest cell is the
+    transient and the boundary goes where the rising edge passes `fraction` of
+    that peak, walking back from the peak. The default 0.15 is where the burst
+    becomes visible on screen; cutting lower (at the noise floor, ~0.05) looks
+    early, and cutting at the middle of the attack (0.5) clips its front.
     """
     pos = frame * HOP
-    a = max(0, pos - int(0.012 * rate))
-    b = min(len(x), pos + int(0.012 * rate))
+    a = max(0, pos - int(0.020 * rate))
+    b = min(len(x), pos + int(0.020 * rate))
     hop = max(1, int(0.001 * rate))
     if b - a < 4 * hop:
         return pos
@@ -131,8 +132,12 @@ def snap_to_attack(x, rate, frame):
                     for i in range(n)], dtype=np.float32)
     if not float(env.max()) > 0:
         return None
-    step = np.diff(env, prepend=env[:1])
-    return max(0, a + int(np.argmax(step)) * hop)
+    peak = int(np.argmax(env))
+    level = fraction * float(env[peak])
+    onset = peak
+    while onset > 0 and env[onset - 1] > level:
+        onset -= 1
+    return max(0, a + onset * hop)
 
 
 def choose(frames, max_slices):
@@ -145,14 +150,14 @@ def choose(frames, max_slices):
     return frames[:max_slices]
 
 
-def onsets(x, rate, max_slices=16, sensitivity=2.5):
+def onsets(x, rate, max_slices=16, sensitivity=2.5, fraction=0.15):
     strength = band_flux(stft_magnitude(x), rate)
     detected = pick_peaks(strength, rate, sensitivity)
     frames = choose(detected, max_slices)
     ranked = frames
     positions = []
     for f in sorted(ranked):
-        p = snap_to_attack(x, rate, f)
+        p = snap_to_attack(x, rate, f, fraction)
         if p is None:
             continue        # novelty peak without an attack of its own
         if positions and p - positions[-1] < int(0.040 * rate):
@@ -175,13 +180,18 @@ def main():
     ap.add_argument("input")
     ap.add_argument("--max", type=int, default=16)
     ap.add_argument("--sensitivity", type=float, default=2.5)
+    ap.add_argument("--cut-fraction", type=float, default=0.15,
+                    help="where on the rising edge to cut: 0.15 sits where the "
+                         "burst becomes visible on screen, 0.5 in the middle of "
+                         "the attack, 0.05 at the noise floor")
     ap.add_argument("--png", default="")
     args = ap.parse_args()
 
     data, rate, ch = read_wav(args.input)
     x = np.asarray(data, dtype=np.float32).reshape(-1, ch).mean(axis=1)
     frames = len(x)
-    positions, detected, strength = onsets(x, rate, args.max, args.sensitivity)
+    positions, detected, strength = onsets(
+        x, rate, args.max, args.sensitivity, args.cut_fraction)
     sl = slices_from(positions, frames)
     lengths = [b - a for _, a, b in sl]
 
@@ -203,7 +213,7 @@ def main():
         kept = set(positions)
         merged = []
         for f in detected:
-            p = snap_to_attack(x, rate, f)
+            p = snap_to_attack(x, rate, f, fraction)
             if p in kept:
                 continue
             for i, a, b in sl:
@@ -226,10 +236,12 @@ def draw(path, x, frames, rate, positions, strength):
     wave_top, wave_h = 20, 250
     bar_top, bar_h = wave_top + wave_h + 32, 100
 
-    per = max(1, frames // (right - left))
+    # exact column mapping: a rounded `per` stretched the waveform against the
+    # frame-based boundary lines and made every line look early
+    per = frames / float(right - left)
     env = np.zeros(right - left, dtype=np.float32)
     for i in range(right - left):
-        seg = x[i * per:(i + 1) * per]
+        seg = x[int(i * per):max(int(i * per) + 1, int((i + 1) * per))]
         if len(seg):
             env[i] = np.abs(seg).max()
     env /= max(1e-9, env.max())
