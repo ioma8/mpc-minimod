@@ -61,13 +61,27 @@ def stft_magnitude(x):
     return mag
 
 
-def log_bands(mag, rate, bands=48, lo=40.0, hi=16000.0):
-    """Sum the spectrum into log-spaced bands and take logs.
+def hit_novelty(mag, rate):
+    """Positive log-magnitude flux per band, each band normalised by its mean.
 
-    A hit and a note change look different in a linear spectrum - one adds
-    broadband energy, the other moves energy between partials - but both change
-    the *shape* of the log-band vector, which is what this measures.
+    Bands are split at 250 Hz and 2 kHz so a kick, a snare and a hat count the
+    same, and a quiet hit counts as much as a loud one.
     """
+    edges = sorted({0, max(1, min(mag.shape[1] - 1, int(250 * N / rate))),
+                    max(1, min(mag.shape[1] - 1, int(2000 * N / rate))),
+                    mag.shape[1]})
+    out = np.zeros(mag.shape[0], dtype=np.float32)
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        band = mag[:, lo:hi]
+        diff = np.diff(np.log1p(band), axis=0,
+                       prepend=np.zeros((1, band.shape[1]), np.float32))
+        flux = np.maximum(diff, 0).sum(axis=1)
+        out += flux / (flux.mean() + 1e-9)
+    return out
+
+
+def log_bands(mag, rate, bands=48, lo=40.0, hi=16000.0):
+    """Sum the spectrum into log-spaced bands and take logs."""
     freqs = np.linspace(0, rate / 2, mag.shape[1])
     edges = np.geomspace(lo, min(hi, rate / 2), bands + 1)
     out = np.zeros((mag.shape[0], bands), dtype=np.float32)
@@ -78,29 +92,40 @@ def log_bands(mag, rate, bands=48, lo=40.0, hi=16000.0):
     return np.log1p(out)
 
 
-def spectral_change(bands):
-    """Cosine distance between consecutive log-band spectra."""
+def change_novelty(mag, rate):
+    """Cosine distance between consecutive log-band spectra.
+
+    A drum hit changes the band vector by adding broadband energy; a legato
+    note changes it by moving energy between partials. One measure, both kinds.
+    """
+    bands = log_bands(mag, rate)
     a, b = bands[:-1], bands[1:]
     na = np.linalg.norm(a, axis=1) + 1e-9
     nb = np.linalg.norm(b, axis=1) + 1e-9
-    return np.concatenate(([0.0], 1.0 - (a * b).sum(axis=1) / (na * nb)))
+    nov = np.concatenate(([0.0], 1.0 - (a * b).sum(axis=1) / (na * nb)))
+    k = 3
+    pad = np.pad(nov, (k // 2, k // 2), mode='edge')
+    return np.convolve(pad, np.ones(k) / k, mode='valid')[:len(nov)]
 
 
-def pick_changes(novelty, rate, sensitivity=3.0, min_gap_ms=60.0,
-                 prominence=2.5):
+def pick(novelty, rate, gate, min_gap_ms, prominence, lam):
     half = max(1, int(0.5 * rate / HOP))
-    local = np.array([np.median(novelty[max(0, i - half):i + half + 1])
-                      for i in range(len(novelty))])
-    threshold = 0.1 * float(novelty.mean()) + sensitivity * local
     gap = max(1, int(min_gap_ms / 1000.0 * rate / HOP))
     prom = prominence * float(novelty.mean())
     out, last, valley = [], -10 ** 9, np.inf
     for f in range(len(novelty)):
+        lo, hi = max(0, f - half), min(len(novelty), f + half + 1)
+        win = novelty[lo:hi]
+        med = float(np.median(win))
+        if gate == 'mean':
+            threshold = 0.1 * float(novelty.mean()) + lam * med
+        else:                       # robust: stands out of the local spread
+            threshold = med + lam * 1.4826 * float(np.median(np.abs(win - med)))
         v = novelty[f]
         left = novelty[f - 1] if f else -1.0
         right = novelty[f + 1] if f + 1 < len(novelty) else -1.0
-        is_peak = v > left and v > right and v >= threshold[f]
-        if is_peak and f - last >= gap and (not out or v - valley >= prom):
+        if (v > left and v > right and v >= threshold
+                and f - last >= gap and (not out or v - valley >= prom)):
             out.append(f)
             last, valley = f, np.inf
         else:
@@ -109,12 +134,7 @@ def pick_changes(novelty, rate, sensitivity=3.0, min_gap_ms=60.0,
 
 
 def place(x, rate, frame, fraction=0.15):
-    """Snap onto an attack when there is one, otherwise keep the frame.
-
-    A percussive hit has a steep energy step within one hop and the boundary is
-    moved onto it. A legato note change has no step at all - forcing one would
-    put the cut in the wrong place, so the change frame is used as it stands.
-    """
+    """Snap onto an attack when there is one, otherwise keep the frame."""
     pos = frame * HOP
     a = max(0, pos - int(0.012 * rate))
     b = min(len(x), pos + int(0.012 * rate))
@@ -138,21 +158,29 @@ def place(x, rate, frame, fraction=0.15):
     return max(0, a + onset * hop)
 
 
-def onsets(x, rate, max_slices=16, sensitivity=3.0, fraction=0.15):
-    bands = log_bands(stft_magnitude(x), rate)
-    novelty = spectral_change(bands)
-    changes = [f for f in pick_changes(novelty, rate, sensitivity)
-               if f + 2 < len(novelty)]      # zero padding at the end is not a change
+def onsets(x, rate, max_slices=16, sensitivity=0.8, fraction=0.15):
+    """Every boundary is an energy attack or a spectral change that is not one.
+
+    Percussive material is carried by the attack detector, melodic material by
+    the change detector; a change within 60 ms of an attack is the same event
+    and is dropped.
+    """
+    mag = stft_magnitude(x)
+    frames = len(mag)
+    hits = pick(hit_novelty(mag, rate), rate, 'mean', 40.0, sensitivity, 2.5)
+    changes = pick(change_novelty(mag, rate), rate, 'robust', 150.0, 2.5, 3.0)
+    keep = [c for c in changes
+            if c + 2 < frames and all(abs(c - h) * HOP > 0.060 * rate for h in hits)]
+    merged = sorted(hits + keep)[:max_slices]
     positions = []
-    for f in changes[:max_slices]:       # the first N in time order
+    for f in merged:
         p = place(x, rate, f, fraction)
         if positions and p - positions[-1] < int(0.040 * rate):
             continue
         positions.append(p)
     if positions and positions[0] > int(0.050 * rate) and len(positions) < max_slices:
         positions = [0] + positions
-    return positions, changes, novelty
-
+    return positions, merged, hit_novelty(mag, rate)
 
 
 def slices_from(positions, frames):
