@@ -46,4 +46,5 @@ That writes `mod/build/minimod.zip` — the same package as the release.
 - [`AUTOTRIM-HANDOFF.md`](AUTOTRIM-HANDOFF.md) — how AutoTrim works
 - [`HPSS-HANDOFF.md`](HPSS-HANDOFF.md) — how SAMPLE OPTIONS / HPSS works and what was validated
 - [`docs/`](docs/) — device notes, emulator, reverse-engineering writeups
+- [`tools/hpss/`](tools/hpss/) — Python reference, algorithm notes and WAV helper scripts
 - [`converter/`](converter/) — separate tool: project → per-pad stems

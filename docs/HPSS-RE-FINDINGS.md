@@ -191,10 +191,37 @@ the lab's SSH/panel APIs were the practical observation tools.
 
 - `mod/tests/hpss_dsp.py` compiles the production DSP and checks reconstruction,
   silence, stereo and invalid arguments.
-- The Python prototype (`tools/hpss/hpss.py` in the original checkout) was used
-  as the reference for sample-by-sample parity, not as the device code.
-- WAV comparison was done with pure Python `struct`/`wave` on the host because
-  the guest has no numpy.
+- `tools/hpss/hpss.py` is the Python reference used for sample-by-sample parity;
+  it is not the device code.
+- `tools/hpss/wavdiff.py` compares two WAVs (max/RMS error).
+- `tools/hpss/excerpt.py` and `tools/hpss/mix.py` built the manual demo pads;
+  `tools/hpss/wavio.py` is their stdlib WAV layer.
+- WAV comparison and demo building were done on the host because the guest has
+  no Python.
+
+### 2.4 What is in the repository vs external
+
+In this repository:
+
+- `mod/src/hpss.c` / `hpss.h` — shipped DSP.
+- `mod/src/minimod.c` — bindings, SAMPLE OPTIONS UI, read interposer.
+- `mod/tests/hpss_dsp.py` — DSP regression.
+- `tools/hpss/` — Python reference, algorithms, WAV helper scripts.
+- `tools/ghidra/hpss/` — the Java scripts and the MCP runner used here.
+- `tools/emulator/` — the older in-repo lab; the final manual runs used the
+  external `virtual-mpc-sample` checkout.
+- `docs/re/hpss/` — captured decompilation and runtime evidence.
+
+External, intentionally not copied into the repository:
+
+- the Ghidra project `mcpsamplebin` and the firmware binary (large, local
+  analysis artefacts; `.gitignore` excludes `analysis/`);
+- `bridge-mcp-ghidra` and Ghidra itself;
+- the `virtual-mpc-sample` emulator/lab and its `lab.py`;
+- host tools used for observation: `ssh`, `scp`, `sha256sum`, `dd`/`od`,
+  `tesseract` and a temporary numpy venv.
+
+The reproduction commands in §4 assume those external pieces are installed.
 
 ## 3. Blind paths and rejected hypotheses
 
