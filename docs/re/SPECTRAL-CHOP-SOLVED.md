@@ -32,6 +32,11 @@ re-entering the Chop view keeps the markers.
 
 ## 2. The model
 
+The firmware-wide reference (loader, screen/paint, layers, properties, commands,
+input, sample pool, persistence, threading) is
+[FIRMWARE-MECHANISMS.md](FIRMWARE-MECHANISMS.md). This section is only what the
+Chop action needs.
+
 ### 2.1 Objects
 
 ```

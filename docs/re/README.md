@@ -30,6 +30,16 @@ parameter value, its applied copy, the property cache, the layer frames and the
 slider - is downstream of that state, which is why none of it made the app's own
 view change.
 
+## Firmware mechanisms
+
+[FIRMWARE-MECHANISMS.md](FIRMWARE-MECHANISMS.md) is the reference for what we
+learned about the firmware itself: loader and address spaces, the screen/page
+and paint model, pad state and the layer array, the sample, the slice container
+and its native API, the chop-type binding, the observable property system, the
+slice command/undo API, the control-surface input path, the sample pool and
+Extract, persistence, threading rules and the limits. Every entry carries its
+address, an evidence marker and a pointer to the deeper write-up.
+
 ## Spectral Chop
 
 [The solve](SPECTRAL-CHOP-SOLVED.md) is the record: the chop model, the native

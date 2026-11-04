@@ -55,6 +55,7 @@ That writes `mod/build/minimod.zip` — the same package as the release.
 - [`HPSS-HANDOFF.md`](HPSS-HANDOFF.md) — how SAMPLE OPTIONS / HPSS works and what was validated
 - [`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md) — onset detector and the in-place chop write
 - [`docs/re/SPECTRAL-CHOP-SOLVED.md`](docs/re/SPECTRAL-CHOP-SOLVED.md) — the chop model, the write recipe, the path there and the probe toolkit
+- [`docs/re/FIRMWARE-MECHANISMS.md`](docs/re/FIRMWARE-MECHANISMS.md) — the firmware internals we mapped: loader, screen/paint, layers, properties, commands, input, sample pool, threading
 - [`docs/`](docs/) — device notes, emulator, reverse-engineering writeups
 - [`tools/hpss/`](tools/hpss/) — Python reference, algorithm notes and WAV helper scripts
 - [`converter/`](converter/) — separate tool: project → per-pad stems
