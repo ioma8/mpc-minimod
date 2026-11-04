@@ -94,11 +94,14 @@ It is **not** reachable from the objects the mod already holds:
 
 - scanning the screen object, the pad binding and the state (0x12000 bytes
   each) for a pointer `p` with `*(p+0x4c8) == sample` finds nothing;
-- a full heap scan for the same predicate finds 8 objects; the most plausible
-  one (`+0x528 == 0x81`, plausible controller and command manager) faults
-  inside `0x2a43640` when Insert Slice is called on it — the fault is at
-  `0x21a3b20` with a corrupt frame, i.e. the object is not the editor the
-  commands expect;
+- a full heap scan for `*(p+0x4c8) == sample` finds 8 objects. Adding the
+  editor's own shape to the predicate (`+0x4d0` a heap pointer, `+0x10c8` and
+  its command manager non-null) leaves **zero** candidates. The one loose
+  candidate that looked right (`+0x528 == 0x81`) has a string where the
+  selection should be (`0x4c6c696154222020` = `"  Tail l"`) and faults inside
+  `0x2a43640` when Insert Slice is called on it. So no live object outside the
+  editor holds this sample — which also means the sample pointer the commands
+  want is not simply `layer+0x4a8`;
 - `0x2a43640(sample, 1)` on the sample from `layer+0x4a8` itself faults
   (`+0x170`/`+0x178` do not look like the expected shared_ptr pair), so the
   command path wants a sample object that is bound to the audio engine, which

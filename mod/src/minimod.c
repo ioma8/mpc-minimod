@@ -2455,16 +2455,16 @@ static void chop_scan(uintptr_t sample)
     }
     char line[512];
     int hits = 0;
-    while (fgets(line, sizeof line, f) && hits < 8) {
+    while (fgets(line, sizeof line, f) && hits < 32) {
         unsigned long lo = 0, hi = 0;
         char perms[8] = {0};
         if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || perms[1] != 'w')
             continue;
-        for (unsigned long a = lo; a < hi && hits < 8; a += chunk) {
+        for (unsigned long a = lo; a < hi && hits < 32; a += chunk) {
             size_t n = (hi - a) < chunk ? (size_t)(hi - a) : chunk;
             if (!rd(a, buf, n))
                 continue;
-            for (size_t o = 0; o + 8 <= n && hits < 8; o += 8) {
+            for (size_t o = 0; o + 8 <= n && hits < 32; o += 8) {
                 uintptr_t q;
                 memcpy(&q, buf + o, 8);
                 if (q != sample || a + o < 0x4c8)
@@ -2479,6 +2479,12 @@ static void chop_scan(uintptr_t sample)
                 rd(base + 0x528, &mode, 8);
                 if (sel)
                     rd(sel + 8, &ref, 4);
+                /* The editor's selection is a heap pointer and its controller
+                 * has a command manager; that rejects the text and table
+                 * objects whose +0x4c8 happens to equal the sample. */
+                int shapecand = (sel >> 40) == 0xffff && ctl && mgr;
+                if (!shapecand)
+                    continue;
                 mlog("chop: scan cand editor=%p ctl=%p mgr=%p sel=%p ref=%u mode=%llu\n",
                      (void *)base, (void *)ctl, (void *)mgr, (void *)sel, ref,
                      (unsigned long long)(mode & 0xffffffff));
