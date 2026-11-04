@@ -213,7 +213,7 @@ def main():
         kept = set(positions)
         merged = []
         for f in detected:
-            p = snap_to_attack(x, rate, f, fraction)
+            p = snap_to_attack(x, rate, f, args.cut_fraction)
             if p in kept:
                 continue
             for i, a, b in sl:
