@@ -2368,7 +2368,8 @@ static void spectral_start(void)
 }
 
 #if MINIMOD_DEBUG
-/* ------------------------------------------------------- chop probe (debug) *//* Stock slice editing, found through the "Insert Slice" undo label at
+/* ------------------------------------------------------- chop probe (debug) */
+/* Stock slice editing, found through the "Insert Slice" undo label at
  * 0x46a80e0 and the telemetry key "slices_added":
  *   FUN_021a3b10(editor, {sample, refcounted}, frame)  add a Manual slice
  *   FUN_021a9fa0(editor)                              add at the playhead
