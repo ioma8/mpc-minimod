@@ -27,8 +27,14 @@ onsets are used and everything after the sixteenth stays on the last pad.
 is the tuning bed for its replacement.
 
 On the B3 break (4.03 s, 177706 frames) it produces 16 slices: fifteen between
-139 and 390 ms with the boundary on the attack, and a last one carrying
+83 and 390 ms with the boundary on the attack, and a last one carrying
 everything that follows the sixteenth onset, exactly as the pad layout wants.
+
+Two rules keep it honest: the threshold is `delta + lambda * local median`
+with `delta` a tenth of the file's mean novelty, which stops a quiet passage
+from firing on noise; and a peak must stand out from the valley since the
+previous onset by 0.8x the mean novelty, which stops the decaying tail of a
+loud hit from counting as a new one.
 """
 import argparse
 import sys
@@ -55,39 +61,52 @@ def stft_magnitude(x):
 
 
 def band_flux(mag, rate, edges=((0, 250), (250, 2000), (2000, None))):
-    """One flux curve per band, each normalised by its own magnitude.
+    """Spectral novelty: one log-flux curve per band, equally weighted.
 
-    A kick lives under 250 Hz, a snare in the mids, a hat above 2 kHz. Summing
-    raw magnitudes lets the loudest band hide the others, so each band is
-    normalised separately and then averaged.
+    A kick lives under 250 Hz, a snare in the mids, a hat above 2 kHz. Working
+    in log magnitude makes a doubling of a quiet band count as much as a
+    doubling of a loud one, and dividing each band by its own mean stops the
+    loudest band from hiding the others. The three curves are summed, so the
+    result is a spectral change measure rather than an amplitude envelope.
     """
     freqs = np.linspace(0, rate / 2, mag.shape[1])
-    out = []
+    bands = []
     for lo, hi in edges:
         sel = (freqs >= lo) & (freqs < hi if hi else np.ones_like(freqs, bool))
         band = mag[:, sel]
-        diff = np.diff(band, axis=0, prepend=np.zeros((1, band.shape[1]), np.float32))
-        out.append(np.maximum(diff, 0).sum(axis=1) / (band.sum(axis=1) + 1e-9))
-    return np.mean(out, axis=0)
+        diff = np.diff(np.log1p(band), axis=0,
+                       prepend=np.zeros((1, band.shape[1]), np.float32))
+        flux = np.maximum(diff, 0).sum(axis=1)
+        bands.append(flux / (flux.mean() + 1e-9))
+    return np.sum(bands, axis=0)
 
 
 def pick_peaks(strength, rate, sensitivity, min_gap_ms=40.0):
+    """Adaptive threshold with an absolute offset: delta + lambda * local median.
+
+    The offset matters: in a quiet passage the local median collapses to zero,
+    and a purely relative threshold then fires on noise. delta is a tenth of
+    the file's mean novelty, which is high enough to ignore noise everywhere
+    and low enough to keep a quiet hit inside a loud loop.
+    """
     half = max(1, int(0.5 * rate / HOP))
     local = np.array([np.median(strength[max(0, i - half):i + half + 1])
                       for i in range(len(strength))])
+    delta = 0.10 * float(strength.mean())
+    threshold = delta + sensitivity * local
     gap = max(1, int(min_gap_ms / 1000.0 * rate / HOP))
+    prominence = 0.8 * float(strength.mean())
     padded = np.concatenate(([-np.inf], strength, [-np.inf]))
-    peaks, last = [], -10 ** 9
+    peaks, last, valley = [], -10 ** 9, np.inf
     for f in range(len(strength)):          # frame 0 can be the onset
         v = padded[f + 1]
-        if v <= padded[f] or v <= padded[f + 2]:
-            continue
-        if v < sensitivity * local[f]:
-            continue
-        if f - last < gap:
-            continue
-        peaks.append(f)
-        last = f
+        is_peak = v > padded[f] and v > padded[f + 2] and v >= threshold[f]
+        if (is_peak and f - last >= gap
+                and (not peaks or v - valley >= prominence)):
+            peaks.append(f)
+            last, valley = f, np.inf
+        else:
+            valley = min(valley, v)
     return peaks
 
 
@@ -101,8 +120,8 @@ def snap_to_attack(x, rate, frame):
     decaying tail of the previous hit.
     """
     pos = frame * HOP
-    a = max(0, pos - int(0.030 * rate))
-    b = min(len(x), pos + int(0.030 * rate))
+    a = max(0, pos - int(0.012 * rate))
+    b = min(len(x), pos + int(0.012 * rate))
     if b - a < 8:
         return pos
     hop = max(1, int(0.001 * rate))
