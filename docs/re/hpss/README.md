@@ -1,7 +1,8 @@
 # HPSS static evidence
 
-See [investigation notes](../../HPSS-RE.md). The `.txt` captures are Ghidra Java
-script output, not runtime verification. Runtime evidence is in
+See [investigation notes](../../HPSS-RE.md) and
+[RE findings and method](../../HPSS-RE-FINDINGS.md). The `.txt` captures are
+Ghidra Java script output, not runtime verification. Runtime evidence is in
 [runtime-validation.md](runtime-validation.md).
 
 - [assign-layer.txt](assign-layer.txt)

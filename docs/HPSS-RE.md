@@ -1,8 +1,9 @@
 # HPSS firmware investigation
 
 > **Status 2026-11-04:** the SAMPLE OPTIONS flow is implemented in the mod and
-> validated in the emulator. See [HPSS-HANDOFF.md](../HPSS-HANDOFF.md) and
-> [runtime validation](re/hpss/runtime-validation.md). The sections below are
+> validated in the emulator. See [HPSS-HANDOFF.md](../HPSS-HANDOFF.md),
+> [runtime validation](re/hpss/runtime-validation.md) and
+> [RE findings and method](HPSS-RE-FINDINGS.md). The sections below are
 > the chronological investigation that led to the shipped hooks; statements
 > such as "no UI" or "unresolved" describe the state at the time of that
 > capture, not the current implementation.

@@ -2,7 +2,9 @@
 
 These Java scripts run through GhidraMCP, using the setup in
 [RE-GHIDRA.md](../../../docs/RE-GHIDRA.md). The runner preserves a single MCP
-session for initialization, instance connection and script execution.
+session for initialization, instance connection and script execution. What
+these scripts found, and which static paths were blind, is recorded in
+[HPSS-RE-FINDINGS.md](../../../docs/HPSS-RE-FINDINGS.md).
 
 Copy the Java files to Ghidra's script directory (`~/ghidra_scripts` in this
 session). Start Ghidra with `GHIDRA_MCP_ALLOW_SCRIPTS=1`, open project

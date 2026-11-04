@@ -34,6 +34,8 @@ view change.
 
 [HPSS research](../HPSS-RE.md) traces the stock Chop Extract command and its
 empty-pad selection. [Captured evidence](hpss/README.md) includes the native
-sample creation and assignment paths, and
+sample creation and assignment paths,
 [runtime validation](hpss/runtime-validation.md) covers the shipped
-SAMPLE OPTIONS flow.
+SAMPLE OPTIONS flow, and
+[findings and method](../HPSS-RE-FINDINGS.md) records the encoder discovery,
+the useful tooling and the blind paths.

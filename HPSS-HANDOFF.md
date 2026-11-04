@@ -127,5 +127,7 @@ The stopped-app project state is in `/data/TempProjects`; the emulator's
 [`docs/HPSS-RE.md`](docs/HPSS-RE.md) is the chronological investigation.
 Earlier sections describe the rejected provider/loader approach and the probe
 milestones; the final shipped hooks are summarised there under "Shipped
-integration". Raw decompilation is indexed in
+integration". [`docs/HPSS-RE-FINDINGS.md`](docs/HPSS-RE-FINDINGS.md) records the
+new findings from the final pass, the tooling that paid off and the blind paths.
+Raw decompilation is indexed in
 [`docs/re/hpss/README.md`](docs/re/hpss/README.md).
