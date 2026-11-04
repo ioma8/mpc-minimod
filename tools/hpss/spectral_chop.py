@@ -49,12 +49,7 @@ def stft_magnitude(x):
     return mag
 
 def chroma(mag, rate, lo=55.0, hi=2000.0):
-    """12 pitch classes from the spectrum, L2-normalised.
-
-    A chord change moves energy between pitch classes even when the loudness
-    and the timbre stay put, which is exactly the evidence a region boundary
-    needs on tonal material.
-    """
+    """12 pitch classes, L2-normalised: what the harmony is doing."""
     freqs = np.linspace(0, rate / 2, mag.shape[1])
     sel = (freqs >= lo) & (freqs <= hi)
     f = freqs[sel]
@@ -70,7 +65,7 @@ def chroma(mag, rate, lo=55.0, hi=2000.0):
 
 
 def timbre(mag, rate, bands=48, lo=60.0, hi=12000.0):
-    """48 log-spaced bands, L2-normalised - the sound's colour."""
+    """48 log bands, L2-normalised: what the sound is."""
     freqs = np.linspace(0, rate / 2, mag.shape[1])
     edges = np.geomspace(lo, min(hi, rate / 2), bands + 1)
     out = np.zeros((mag.shape[0], bands), dtype=np.float32)
@@ -82,62 +77,43 @@ def timbre(mag, rate, bands=48, lo=60.0, hi=12000.0):
     return out / (np.linalg.norm(out, axis=1, keepdims=True) + 1e-9)
 
 
-def foote_novelty(feat, half):
-    """Checkerboard kernel on the self-similarity of `feat`.
-
-    For every frame it compares "what the music sounds like just after" with
-    "just before", and subtracts the similarity inside each side. A drum hit
-    changes the colour, a new chord changes the pitch classes, and a sustained
-    note inside a region changes neither - so the same kernel gives one-pad-per-
-    hit on drums and phrase-level slices on tonal material.
-    """
-    n = len(feat)
-    half = max(1, min(half, max(1, n // 2 - 1)))
-    width = 2 * half + 1
-    sim = np.zeros((n, width), dtype=np.float32)
-    for d in range(-half, half + 1):
-        lo, hi = max(0, -d), n - max(0, d)
-        sim[lo:hi, d + half] = (feat[lo:hi] * feat[lo + d:hi + d]).sum(axis=1)
-    idx = np.arange(-half, half + 1)
-    before, after = idx < 0, idx > 0
-    nov = np.zeros(n, dtype=np.float32)
-    for i in range(half, n - half):
-        blk = sim[i - half:i + half + 1]
-        within = (blk[np.ix_(before, before)].mean() +
-                  blk[np.ix_(after, after)].mean()) / 2
-        across = (blk[np.ix_(before, after)].mean() +
-                  blk[np.ix_(after, before)].mean()) / 2
-        nov[i] = across - within
-    return nov
-
-
-def pick_regions(novelty, half, min_gap, rate, k=0.6):
-    """Peaks of the Foote novelty, at least `min_gap` apart."""
-    v = novelty.astype(np.float64)
-    win = max(1, half)
-    out = []
-    last = -10 ** 9
-    for f in range(1, len(v) - 1):
-        if not (v[f] > v[f - 1] and v[f] > v[f + 1]):
-            continue
-        lo, hi = max(0, f - win), min(len(v), f + win + 1)
-        local = v[lo:hi]
-        med = float(np.median(local))
-        sigma = 1.4826 * float(np.median(np.abs(local - med)))
-        if v[f] < med + k * max(sigma, 1e-6):
-            continue
-        if f - last < min_gap:
-            continue
-        out.append(f)
-        last = f
-    return out
+def attack_frames(mag, rate):
+    """Frames carrying an attack: per-band log flux, local median threshold."""
+    edges = sorted({0, max(1, min(mag.shape[1] - 1, int(250 * N / rate))),
+                    max(1, min(mag.shape[1] - 1, int(2000 * N / rate))),
+                    mag.shape[1]})
+    flux = np.zeros(mag.shape[0], dtype=np.float32)
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        band = mag[:, lo:hi]
+        diff = np.diff(np.log1p(band), axis=0,
+                       prepend=np.zeros((1, band.shape[1]), np.float32))
+        f = np.maximum(diff, 0).sum(axis=1)
+        flux += f / (f.mean() + 1e-9)
+    half = max(1, int(0.5 * rate / HOP))
+    med = np.array([np.median(flux[max(0, i - half):i + half + 1])
+                    for i in range(len(flux))])
+    thr = 0.1 * float(flux.mean()) + 2.5 * med
+    prom = 0.8 * float(flux.mean())
+    gap = max(1, int(0.040 * rate / HOP))
+    out, last, valley = [], -10 ** 9, np.inf
+    for f in range(len(flux)):
+        v = flux[f]
+        left = flux[f - 1] if f else -1.0
+        right = flux[f + 1] if f + 1 < len(flux) else -1.0
+        if (v > left and v > right and v >= thr[f] and f - last >= gap
+                and (not out or v - valley >= prom)):
+            out.append(f)
+            last, valley = f, np.inf
+        else:
+            valley = min(valley, v)
+    return out, flux
 
 
-def place(x, rate, frame, fraction=0.15):
-    """Snap onto an attack when there is one, otherwise keep the frame."""
+def place(x, rate, frame, fraction=0.15, search_s=0.015):
+    """Put the boundary on the attack itself."""
     pos = frame * HOP
-    a = max(0, pos - int(0.012 * rate))
-    b = min(len(x), pos + int(0.012 * rate))
+    a = max(0, pos - int(search_s * rate))
+    b = min(len(x), pos + int(search_s * rate))
     hop = max(1, int(0.001 * rate))
     if b - a < 4 * hop:
         return pos
@@ -158,73 +134,53 @@ def place(x, rate, frame, fraction=0.15):
     return max(0, a + onset * hop)
 
 
-def onset_density(x, rate):
-    """Onsets per second - tells dense material from sustained material."""
-    mag = stft_magnitude(x)
-    diff = np.diff(np.log1p(mag), axis=0,
-                   prepend=np.zeros((1, mag.shape[1]), np.float32))
-    flux = np.maximum(diff, 0).sum(axis=1)
-    half = max(1, int(0.5 * rate / HOP))
-    med = np.array([np.median(flux[max(0, i - half):i + half + 1])
-                    for i in range(len(flux))])
-    thr = 0.1 * float(flux.mean()) + 2.5 * med
-    peaks, last = [], -10 ** 9
-    gap = max(1, int(0.040 * rate / HOP))
-    for f in range(1, len(flux) - 1):
-        if not (flux[f] > flux[f - 1] and flux[f] > flux[f + 1]):
-            continue
-        if flux[f] < thr[f] or f - last < gap:
-            continue
-        peaks.append(f)
-        last = f
-    return float(len(peaks)) / max(0.2, len(x) / rate)
-
-
 def onsets(x, rate, max_slices=16, region_s=0.0, fraction=0.15):
-    """Slices are regions: cut where the music changes identity.
+    """A boundary is an attack, kept only when the music has moved on.
 
-    `region_s` is the shortest region the detector can see - the one knob. It
-    is the checkerboard width, so the slice count follows from the material
-    instead of from a target.
+    The attack detector decides *where* a cut can go - always a real transient -
+    and the region rule decides *whether*: the slice must be at least
+    `region_s` long, and the sound after it must differ from the sound at the
+    last cut (chroma or timbre). That keeps every cut on a hit for drums while
+    a sustained phrase only yields a few slices, with no mode switch.
     """
     mag = stft_magnitude(x)
+    hits, flux = attack_frames(mag, rate)
     if region_s <= 0:
-        # dense material (drums) gets a shorter region, sustained material
-        # (a vocal phrase) a longer one: one rule, no mode switch
-        density = onset_density(x, rate)
+        density = len(hits) / max(0.2, len(x) / rate)
         region_s = float(np.clip(0.9 / max(density, 0.4), 0.22, 0.75))
-    feat = np.hstack([0.6 * chroma(mag, rate), 0.4 * timbre(mag, rate)])
-    half = max(2, int(region_s * rate / HOP) // 2)
-    novelty = foote_novelty(feat, half)
-    frames = pick_regions(novelty, half, half, rate)
-    frames = [f for f in frames if f + 2 < len(novelty)]
+    both = np.hstack([chroma(mag, rate), timbre(mag, rate)])
+    min_gap = int(region_s * rate / HOP)
+    win = max(2, int(0.2 * rate / HOP))
 
-    # a boundary must separate two audible regions: without this the fade-out
-    # of a vocal or a reverb tail gets sliced into silence
-    win = max(1, int(0.050 * rate))
-    hop = win
-    nwin = max(1, len(x) // hop)
-    loud = np.array([float(np.sqrt(np.mean(x[i * hop:(i + 1) * hop] ** 2)))
-                     for i in range(nwin)], dtype=np.float32)
-    floor = 0.08 * float(loud.max())
-    span = max(1, int(0.15 * rate / hop))
+    def moved_on(prev, cur):
+        lo = max(0, prev - win)
+        if prev - lo < 2 or len(both[cur:cur + win]) < 2:
+            return True
+        a = both[lo:prev].mean(axis=0)
+        b = both[cur:cur + win].mean(axis=0)
+        na, nb = np.linalg.norm(a), np.linalg.norm(b)
+        if na < 1e-9 or nb < 1e-9:
+            return False
+        return float(1.0 - a @ b / (na * nb)) >= 0.02
 
-    def audible(frame):
-        """something must actually start here - not a fade, not a reverb tail"""
-        i = min(nwin - 1, max(0, frame * HOP // hop))
-        return float(loud[i:i + span].max()) >= floor
-
-    frames = [f for f in frames if audible(f)][:max_slices]
+    kept = []
+    for f in hits:
+        if kept and f - kept[-1] < min_gap:
+            continue
+        if kept and not moved_on(kept[-1], f):
+            continue
+        kept.append(f)
+        if len(kept) >= max_slices:
+            break
     positions = []
-    for f in frames:
+    for f in kept:
         p = place(x, rate, f, fraction)
         if positions and p - positions[-1] < int(0.040 * rate):
             continue
         positions.append(p)
     if positions and positions[0] > int(0.050 * rate) and len(positions) < max_slices:
         positions = [0] + positions
-    return positions, frames, novelty
-
+    return positions, kept, flux
 
 
 def slices_from(positions, frames):
@@ -249,11 +205,14 @@ def main():
     data, rate, ch = read_wav(args.input)
     x = np.asarray(data, dtype=np.float32).reshape(-1, ch).mean(axis=1)
     frames = len(x)
-    density = 0.0 if args.region > 0 else None
     positions, detected, strength = onsets(
         x, rate, args.max, args.region, args.cut_fraction)
-    region_used = args.region if args.region > 0 else float(
-        np.clip(0.9 / max(onset_density(x, rate), 0.4), 0.22, 0.75))
+    if args.region > 0:
+        region_used = args.region
+    else:
+        hits, _ = attack_frames(stft_magnitude(x), rate)
+        density = len(hits) / max(0.2, len(x) / rate)
+        region_used = float(np.clip(0.9 / max(density, 0.4), 0.22, 0.75))
     sl = slices_from(positions, frames)
     lengths = [b - a for _, a, b in sl]
 
