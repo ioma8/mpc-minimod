@@ -1,41 +1,29 @@
 #!/usr/bin/env python3
-"""Spectral Chop, simple and precise.
+"""Spectral Chop: regions, not note chops.
 
-    python3 tools/hpss/spectral_chop.py IN.wav [--max 16] [--sensitivity 2.5]
-                                            [--png out.png]
+    python3 tools/hpss/spectral_chop.py IN.wav [--region 0] [--max 16] [--png out.png]
 
-The whole algorithm is four steps:
+A chop has to be recombable, so a slice is a region - a self-contained musical
+fragment - not a note. The boundary is where the music changes identity: a new
+chord, a new phrase, a new texture.
 
-  1. STFT: 1024-sample Hann frames, hop 512.
-  2. Onset strength: spectral flux per band. The bins are split into
-     low (<250 Hz), mid (250-2000 Hz) and high (>2 kHz); each band's positive
-     change is divided by that band's own magnitude and the three curves are
-     averaged. A kick, a snare and a hat therefore count the same, and a quiet
-     hit counts as much as a loud one, with no scale constants.
-  3. Peaks: a frame is an onset when its flux is the local maximum and exceeds
-     `sensitivity` times the median flux of +-0.5 s around it. No absolute
-     threshold, so it adapts to the material instead of to its loudest hit.
-  4. Position: inside the frame that carries the attack, the 1 ms envelope is
-     measured over +-20 ms and the boundary goes where the rising edge passes
-     15% of the transient's peak - the first moment the hit is visible, so the
-     slice starts on the attack with no silence in front and no clipped front.
+  1. Features: 12-bin chroma (0.6) and 48 log-spaced bands (0.4) from a
+     1024/512 STFT, each normalised per frame.
+  2. Self-similarity: cosine similarity between every pair of frames.
+  3. Foote novelty: a checkerboard kernel over that matrix compares "after"
+     with "before" and removes the similarity inside each side, so a repeated
+     note or a held chord makes no peak while a chord change does.
+  4. Scale: the shortest region is set from the material's onset density -
+     dense material (drums) gets short regions and one pad per hit, sustained
+     material (a vocal phrase) gets long ones and a few phrase slices. That is
+     one rule, not two modes; `--region` overrides it in seconds.
+  5. Position: the boundary is refined onto the attack when the 1 ms envelope
+     has a step, otherwise it stays on the change frame.
+  6. A 50 ms RMS gate drops boundaries that would slice a fade or reverb tail,
+     and at most 16 onsets are used, the first in time order.
 
-Slices are what the firmware builds: slice i spans [pos[i], pos[i+1]) and the
-last runs to the end of the sample. At most 16 slices are made: the first 16
-onsets are used and everything after the sixteenth stays on the last pad.
-
-`tools/hpss/onsets.py` is the reference for the *shipped* detector; this file
-is the tuning bed for its replacement.
-
-On the B3 break (4.03 s, 177706 frames) it produces 16 slices: fifteen between
-83 and 390 ms with the boundary on the attack, and a last one carrying
-everything that follows the sixteenth onset, exactly as the pad layout wants.
-
-Two rules keep it honest: the threshold is `delta + lambda * local median`
-with `delta` a tenth of the file's mean novelty, which stops a quiet passage
-from firing on noise; and a peak must stand out from the valley since the
-previous onset by 0.8x the mean novelty, which stops the decaying tail of a
-loud hit from counting as a new one.
+`--region 0` (default) follows the material. Slices are [pos[i], pos[i+1]) and
+the last runs to the end of the sample.
 """
 import argparse
 import sys
@@ -170,7 +158,29 @@ def place(x, rate, frame, fraction=0.15):
     return max(0, a + onset * hop)
 
 
-def onsets(x, rate, max_slices=16, region_s=0.7, fraction=0.15):
+def onset_density(x, rate):
+    """Onsets per second - tells dense material from sustained material."""
+    mag = stft_magnitude(x)
+    diff = np.diff(np.log1p(mag), axis=0,
+                   prepend=np.zeros((1, mag.shape[1]), np.float32))
+    flux = np.maximum(diff, 0).sum(axis=1)
+    half = max(1, int(0.5 * rate / HOP))
+    med = np.array([np.median(flux[max(0, i - half):i + half + 1])
+                    for i in range(len(flux))])
+    thr = 0.1 * float(flux.mean()) + 2.5 * med
+    peaks, last = [], -10 ** 9
+    gap = max(1, int(0.040 * rate / HOP))
+    for f in range(1, len(flux) - 1):
+        if not (flux[f] > flux[f - 1] and flux[f] > flux[f + 1]):
+            continue
+        if flux[f] < thr[f] or f - last < gap:
+            continue
+        peaks.append(f)
+        last = f
+    return float(len(peaks)) / max(0.2, len(x) / rate)
+
+
+def onsets(x, rate, max_slices=16, region_s=0.0, fraction=0.15):
     """Slices are regions: cut where the music changes identity.
 
     `region_s` is the shortest region the detector can see - the one knob. It
@@ -178,6 +188,11 @@ def onsets(x, rate, max_slices=16, region_s=0.7, fraction=0.15):
     instead of from a target.
     """
     mag = stft_magnitude(x)
+    if region_s <= 0:
+        # dense material (drums) gets a shorter region, sustained material
+        # (a vocal phrase) a longer one: one rule, no mode switch
+        density = onset_density(x, rate)
+        region_s = float(np.clip(0.9 / max(density, 0.4), 0.22, 0.75))
     feat = np.hstack([0.6 * chroma(mag, rate), 0.4 * timbre(mag, rate)])
     half = max(2, int(region_s * rate / HOP) // 2)
     novelty = foote_novelty(feat, half)
@@ -222,8 +237,8 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input")
     ap.add_argument("--max", type=int, default=16)
-    ap.add_argument("--region", type=float, default=0.7,
-                    help="shortest region in seconds - the one knob")
+    ap.add_argument("--region", type=float, default=0.0,
+                    help="shortest region in seconds; 0 = follow the material")
     ap.add_argument("--cut-fraction", type=float, default=0.15,
                     help="where on the rising edge to cut: 0.15 sits where the "
                          "burst becomes visible on screen, 0.5 in the middle of "
@@ -234,15 +249,19 @@ def main():
     data, rate, ch = read_wav(args.input)
     x = np.asarray(data, dtype=np.float32).reshape(-1, ch).mean(axis=1)
     frames = len(x)
+    density = 0.0 if args.region > 0 else None
     positions, detected, strength = onsets(
         x, rate, args.max, args.region, args.cut_fraction)
+    region_used = args.region if args.region > 0 else float(
+        np.clip(0.9 / max(onset_density(x, rate), 0.4), 0.22, 0.75))
     sl = slices_from(positions, frames)
     lengths = [b - a for _, a, b in sl]
 
     print(f"file        {args.input}")
     print(f"format      {rate} Hz, {ch} ch, {frames} frames, {frames / rate:.3f} s")
-    print(f"analysis    Foote novelty on chroma+timbre, shortest region "
-          f"{args.region:.2f} s")
+    print("analysis    Foote novelty on chroma+timbre, "
+          f"shortest region {region_used:.2f} s"
+          + (" (auto)" if args.region <= 0 else ""))
     print(f"onsets      {len(detected)} found, {len(positions)} slices (cap {args.max})")
     print()
     print(f"{'#':>2} {'start':>7} {'end':>7} {'frames':>7} {'ms':>7}")
