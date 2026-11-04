@@ -114,5 +114,6 @@ Helper scripts in this directory:
 | `excerpt.py` | cut, fade and normalise a WAV excerpt |
 | `mix.py` | sum several aligned WAVs into one 24-bit mix |
 | `onsets.py` | reference onset detector for Spectral Chop |
+| `spectral_chop.py` | the mod's detector, ported exactly, plus the slice it builds and a diagnostic report (and a PNG) |
 
 `hpss.py` needs numpy; the three helper scripts use only the standard library.
