@@ -54,12 +54,12 @@ released   : Trim        Tune        Filter
   page's cached markers are not refreshed, because the page paints from a model
   object we have not identified yet (full account in `docs/TRIM-PAGE.md`).
 * **SAMPLE OPTIONS / HPSS** — `SHIFT` + `DATA` opens the menu on the Sample
-  page; press `DATA` to confirm **HPSS**, or `SHIFT` + `DATA` to close. HPSS
-  reads the selected sample, runs the split on a worker thread, and creates
-  `HPSS Harmonic` then `HPSS Percussive` on the next two empty pads through the
-  stock Extract command. The source sample and the live trim/chop range are
-  left unchanged. Needs two empty pads; outputs are float32 WAVs on this
-  firmware. Full details and validation:
+  page. Turn `DATA` to choose **HPSS** or **Close**, press `DATA` to confirm,
+  or press `SHIFT` + `DATA` to close. HPSS reads the selected sample, runs the
+  split on a worker thread, and creates `HPSS Harmonic` then `HPSS Percussive`
+  on the next two empty pads through the stock Extract command. The source
+  sample and the live trim/chop range are left unchanged. Needs two empty pads;
+  outputs are float32 WAVs on this firmware. Full details and validation:
   [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md).
 * **Chromatic MIDI** — always on while 16 LEVELS is lit (no toggle). Off with
   `MINIMOD_MIDI=0`: the rawmidi reader takes the control-surface node from the

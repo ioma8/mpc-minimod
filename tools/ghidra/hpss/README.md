@@ -12,6 +12,8 @@ session). Start Ghidra with `GHIDRA_MCP_ALLOW_SCRIPTS=1`, open project
 python3 run_bridge.py ResearchDecompile.java 0x17580d0 0x153f0b0
 python3 run_bridge.py ResearchDecompile.java 0x1aaaae0 0x219c5b0
 python3 run_bridge.py HpssRefs.java 0x153ed40
+python3 run_bridge.py FindConst.java 100 3000
+python3 run_bridge.py DumpVtable.java 0x6f212a0 70
 ```
 
 The runner currently contains this workstation's absolute bridge path and

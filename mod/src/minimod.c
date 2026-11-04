@@ -1660,6 +1660,65 @@ static int g_hpss_cmd_n;
 
 static uint64_t g_hpss_name[2];
 static int g_hpss_names_ready;
+static volatile int g_hpss_menu;
+static volatile int g_hpss_sel;
+static int g_hpss_cc_state;
+
+/* The DATA encoder reaches the app as `B0 64 value` on the control-surface
+ * rawmidi port.  The app's JUCE hooks do not expose it, so intercept the read
+ * that delivers it.  Each 32-byte control-surface event carries one MIDI byte
+ * at offset 16. */
+typedef ssize_t (*read_fn)(int, void *, size_t);
+static int fd_midi_cache[1024];
+static int fd_midi_known[1024];
+static int fd_is_midi(int fd)
+{
+    if (fd < 0 || fd >= 1024)
+        return 0;
+    if (fd_midi_known[fd])
+        return fd_midi_cache[fd];
+    char link[128], path[256];
+    int n = snprintf(link, sizeof link, "/proc/self/fd/%d", fd);
+    ssize_t k = n > 0 && n < (int)sizeof link ? readlink(link, path, sizeof path - 1) : -1;
+    int midi = 0;
+    if (k > 0) {
+        path[k] = 0;
+        midi = !!strstr(path, "midi") || !!strstr(path, "snd/seq");
+    }
+    fd_midi_cache[fd] = midi;
+    fd_midi_known[fd] = 1;
+    return midi;
+}
+static void hpss_repaint(void);
+
+ssize_t read(int fd, void *buffer, size_t count)
+{
+    static read_fn real;
+    if (!real)
+        real = (read_fn)dlsym(RTLD_NEXT, "read");
+    ssize_t n = real ? real(fd, buffer, count) : -1;
+    if (n > 0 && g_hpss_menu && fd_is_midi(fd)) {
+        unsigned char *p = buffer;
+        for (ssize_t i = 0; i + 16 < n; i += 32) {
+            unsigned char b = p[i + 16];
+            if (b & 0x80) {
+                g_hpss_cc_state = b == 0xb0 ? 1 : 0;
+            } else if (g_hpss_cc_state == 1) {
+                g_hpss_cc_state = b == 0x64 ? 2 : 0;
+            } else if (g_hpss_cc_state == 2) {
+                g_hpss_cc_state = 0;
+                g_hpss_sel = !g_hpss_sel;
+                hpss_repaint();
+                mlog("HPSS wheel value=%u sel=%d\n", b, g_hpss_sel);
+                /* The app must not also act on the DATA movement. */
+                p[i + 16] = 0;
+            } else {
+                g_hpss_cc_state = 0;
+            }
+        }
+    }
+    return n;
+}
 
 static void hpss_make_names(void)
 {
@@ -2029,7 +2088,6 @@ static struct hpss_job *volatile g_hpss_job;
 static volatile int g_hpss_busy;
 static volatile int g_hpss_done;
 static volatile int g_hpss_finalizing;
-static volatile int g_hpss_menu;
 static volatile int g_hpss_data_down;
 static char g_hpss_status[96];
 static unsigned char g_hpss_btn[16];
@@ -2244,6 +2302,7 @@ out:
     g_hpss_busy = 0;
     g_hpss_menu = 0;
     g_hpss_data_down = 0;
+    g_hpss_cc_state = 0;
     g_hpss_finalizing = 0;
     hpss_repaint();
 }
@@ -2253,6 +2312,8 @@ static void hpss_open(void)
     if (!sample_page_visible() || g_hpss_busy)
         return;
     g_hpss_menu = 1;
+    g_hpss_sel = 0;
+    g_hpss_cc_state = 0;
     g_hpss_data_down = 0;
     hpss_set_status("");
     hpss_repaint();
@@ -2264,13 +2325,18 @@ static void hpss_close(void)
         return;
     g_hpss_menu = 0;
     g_hpss_data_down = 0;
+    g_hpss_cc_state = 0;
     hpss_repaint();
 }
 
 static void hpss_activate(void)
 {
-    if (!g_hpss_busy)
+    if (g_hpss_busy)
+        return;
+    if (g_hpss_sel == 0)
         hpss_start();
+    else
+        hpss_close();
 }
 
 static void draw_colour(void *g, uint32_t v);
@@ -2293,17 +2359,25 @@ static void hpss_draw_menu(void *g)
         draw_text(g, "harmonic + percussive", x + 10, y + 82, w - 20, 20,
                   12.0f);
     } else {
-        draw_colour(g, 0xff3a2a10);
-        draw_rect(g, x + 6, y + 44, w - 12, 46);
-        draw_colour(g, 0xffffffff);
+        if (g_hpss_sel == 0) {
+            draw_colour(g, 0xff3a2a10);
+            draw_rect(g, x + 6, y + 44, w - 12, 46);
+            draw_colour(g, 0xffffffff);
+        }
         draw_text(g, "HPSS", x + 12, y + 48, w - 24, 22, 16.0f);
         draw_text(g, "split into harmonic + percussive", x + 12, y + 68,
                   w - 24, 18, 12.0f);
+        if (g_hpss_sel == 1) {
+            draw_colour(g, 0xff3a2a10);
+            draw_rect(g, x + 6, y + 94, w - 12, 28);
+            draw_colour(g, 0xffffffff);
+        }
+        draw_text(g, "Close", x + 12, y + 96, w - 24, 22, 16.0f);
         if (g_hpss_status[0])
-            draw_text(g, g_hpss_status, x + 10, y + 110, w - 20, 18, 12.0f);
+            draw_text(g, g_hpss_status, x + 10, y + 124, w - 20, 18, 12.0f);
     }
     draw_colour(g, 0xffb0b0b0);
-    draw_text(g, "DATA: confirm    SHIFT+DATA: close", x + 10, y + h - 22,
+    draw_text(g, "TURN: select    DATA: confirm", x + 10, y + h - 22,
               w - 20, 16, 11.0f);
 }
 

@@ -39,6 +39,10 @@ missing energy.
 
 - Both outputs are playable: the pads show `HPSS Harmonic` and
   `HPSS Percussive` and select/play normally.
+- DATA-wheel selection: turning the encoder moved the SAMPLE OPTIONS highlight
+  between **HPSS** and **Close**; DATA on Close dismissed the menu without
+  starting a split. The value byte is neutralised only while the menu is open,
+  so the app's own wheel action is not also applied.
 - The original object is untouched: `/data/UserContent/Samples/User/Sample
   002.wav` kept SHA-256
   `2028b9087ab1892a9b7116ec89d471065424b6953183a8e39636cc921f408124`.

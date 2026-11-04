@@ -14,9 +14,12 @@ Branch: `feature/sample-options-hpss`. **Changes are uncommitted.**
 
 Implemented and validated in the emulator:
 
-- `SHIFT+DATA` opens SAMPLE OPTIONS only on the visible Sample page. DATA
-  confirms **HPSS**; `SHIFT+DATA` closes. DATA repeats and the underlying DATA
-  action are suppressed while open.
+- `SHIFT+DATA` opens SAMPLE OPTIONS only on the visible Sample page. The DATA
+  wheel selects **HPSS** or **Close**; DATA confirms; `SHIFT+DATA` closes.
+  DATA repeats and the underlying DATA action are suppressed while open. The
+  encoder is read from the control-surface rawmidi stream (`/dev/snd/midiC1D0`)
+  because it does not reach the app's JUCE callbacks; each firmware event is 32
+  bytes with the MIDI byte at offset 16.
 - HPSS runs on a worker thread. The source is read exactly as the app has it
   (PCM16/24/32, float32/64, extensible WAVs; unsaved recordings through a unique
   `TempProjects` match). Source/project identity is checked again before commit.

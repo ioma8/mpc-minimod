@@ -341,9 +341,16 @@ trim/chop range is restored immediately afterwards.
   frame-count-only match;
 - an HPSS worker thread, project/source identity checks on completion, two-pad
   preflight through the native occupancy predicate, and failure feedback;
-- SAMPLE OPTIONS by `SHIFT+DATA`, DATA confirmation, `SHIFT+DATA` close,
-  DATA-repeat suppression and page visibility gating;
+- SAMPLE OPTIONS by `SHIFT+DATA`, DATA-wheel selection, DATA confirmation,
+  `SHIFT+DATA` close, DATA-repeat suppression and page visibility gating;
 - restoration of the Sample page's Chop/Full mode after the native handler.
+
+The DATA encoder is not visible through the app's JUCE/button hooks. It arrives
+on `/dev/snd/midiC1D0` as a rawmidi stream; this firmware's control-surface
+reader returns 32-byte events with one MIDI byte at offset 16. A `read`
+interposer tracks `B0 64 value` while the menu is open, uses the value for menu
+selection, and neutralises the value byte before the app sees it so the
+underlying page does not also move.
 
 Deliberate limits: the app emits float32 WAVs on this firmware; the working
 project copy may be re-saved with 24-bit dither (±2 LSB). If the second native
