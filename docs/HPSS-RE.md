@@ -349,8 +349,10 @@ The DATA encoder is not visible through the app's JUCE/button hooks. It arrives
 on `/dev/snd/midiC1D0` as a rawmidi stream; this firmware's control-surface
 reader returns 32-byte events with one MIDI byte at offset 16. A `read`
 interposer tracks `B0 64 value` while the menu is open, uses the value for menu
-selection, and replaces the whole `B0` message with active-sensing bytes before
-the app sees it so the underlying page does not also move.
+selection, and drops the three reads that form the `B0` message (the read
+returns 0) so the app never sees the CC. Rewriting the payload was not enough:
+the app still moved the page underneath. Note messages still pass through, and
+a short guard covers the gap between SHIFT+DATA and the menu becoming visible.
 
 Deliberate limits: the app emits float32 WAVs on this firmware; the working
 project copy may be re-saved with 24-bit dither (±2 LSB). If the second native

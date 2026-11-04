@@ -1664,11 +1664,19 @@ static volatile int g_hpss_menu;
 static volatile int g_hpss_sel;
 static int g_hpss_cc_state;
 static int g_hpss_cc_skip;
+static int g_rm_shift;
+static int g_rm_note_state;
+static unsigned char g_rm_note_status;
+static unsigned char g_rm_note;
+static long long g_hpss_guard_until;
 
 /* The DATA encoder reaches the app as `B0 64 value` on the control-surface
  * rawmidi port.  The app's JUCE hooks do not expose it, so intercept the read
  * that delivers it.  Each 32-byte control-surface event carries one MIDI byte
- * at offset 16. */
+ * at offset 16.  While the menu owns input, the three CC reads are dropped
+ * entirely (read returns 0); rewording the bytes was not enough because the
+ * app still acted on the modified CC.  Note messages pass through so DATA
+ * still confirms/closes. */
 typedef ssize_t (*read_fn)(int, void *, size_t);
 static int fd_midi_cache[1024];
 static int fd_midi_known[1024];
@@ -1698,37 +1706,66 @@ ssize_t read(int fd, void *buffer, size_t count)
     if (!real)
         real = (read_fn)dlsym(RTLD_NEXT, "read");
     ssize_t n = real ? real(fd, buffer, count) : -1;
-    if (n > 0 && g_hpss_menu && fd_is_midi(fd)) {
+    if (n > 0 && fd_is_midi(fd)) {
         unsigned char *p = buffer;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        long long now = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+        int suppress = g_hpss_menu || g_hpss_guard_until > now;
+        int drop = 0;
         for (ssize_t i = 0; i + 16 < n; i += 32) {
             unsigned char b = p[i + 16];
             if (b & 0x80) {
                 g_hpss_cc_skip = 0;
+                g_hpss_cc_state = 0;
+                g_rm_note_state = 0;
                 if (b == 0xb0) {
-                    /* Swallow the whole CC message while the menu owns DATA. */
                     g_hpss_cc_state = 1;
                     g_hpss_cc_skip = 1;
-                    p[i + 16] = 0xfe;
-                } else {
-                    g_hpss_cc_state = 0;
+                    if (suppress) {
+                        drop = 1;
+                        g_hpss_guard_until = now + 200;
+                    }
+                } else if (b == 0x90 || b == 0x80) {
+                    g_rm_note_status = b;
+                    g_rm_note_state = 1;
                 }
             } else if (g_hpss_cc_skip == 1) {
                 g_hpss_cc_skip = 2;
                 g_hpss_cc_state = b == 0x64 ? 2 : 0;
-                p[i + 16] = 0xfe;
+                if (suppress) {
+                    drop = 1;
+                    g_hpss_guard_until = now + 200;
+                }
             } else if (g_hpss_cc_skip == 2) {
                 g_hpss_cc_skip = 0;
-                if (g_hpss_cc_state == 2) {
-                    g_hpss_sel = !g_hpss_sel;
-                    hpss_repaint();
-                    mlog("HPSS wheel value=%u sel=%d\n", b, g_hpss_sel);
+                if (suppress) {
+                    drop = 1;
+                    g_hpss_guard_until = now + 200;
+                    if (g_hpss_cc_state == 2 && g_hpss_menu) {
+                        g_hpss_sel = !g_hpss_sel;
+                        hpss_repaint();
+                        mlog("HPSS wheel value=%u sel=%d\n", b, g_hpss_sel);
+                    }
                 }
                 g_hpss_cc_state = 0;
-                p[i + 16] = 0xfe;
-            } else {
-                g_hpss_cc_state = 0;
+            } else if (g_rm_note_state == 1) {
+                g_rm_note = b;
+                g_rm_note_state = 2;
+            } else if (g_rm_note_state == 2) {
+                g_rm_note_state = 0;
+                unsigned char status = g_rm_note_status & 0xf0;
+                if (status == 0x90 && g_rm_note == 0x31 && b)
+                    g_rm_shift = 1;
+                else if (status == 0x80 && g_rm_note == 0x31)
+                    g_rm_shift = 0;
+                else if (status == 0x90 && g_rm_note == 0x6f && b &&
+                         g_rm_shift && !g_hpss_menu)
+                    g_hpss_guard_until = now + 1000;
             }
         }
+        if (drop)
+            return 0;
     }
     return n;
 }
@@ -2317,6 +2354,7 @@ out:
     g_hpss_data_down = 0;
     g_hpss_cc_state = 0;
     g_hpss_cc_skip = 0;
+    g_hpss_guard_until = 0;
     g_hpss_finalizing = 0;
     hpss_repaint();
 }
@@ -2329,6 +2367,7 @@ static void hpss_open(void)
     g_hpss_sel = 0;
     g_hpss_cc_state = 0;
     g_hpss_cc_skip = 0;
+    g_hpss_guard_until = 0;
     g_hpss_data_down = 0;
     hpss_set_status("");
     hpss_repaint();
@@ -2342,6 +2381,7 @@ static void hpss_close(void)
     g_hpss_data_down = 0;
     g_hpss_cc_state = 0;
     g_hpss_cc_skip = 0;
+    g_hpss_guard_until = 0;
     hpss_repaint();
 }
 

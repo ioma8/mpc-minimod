@@ -19,9 +19,11 @@ Implemented and validated in the emulator:
   DATA repeats and the underlying DATA action are suppressed while open. The
   encoder is read from the control-surface rawmidi stream (`/dev/snd/midiC1D0`)
   because it does not reach the app's JUCE callbacks; each firmware event is 32
-  bytes with the MIDI byte at offset 16. While the menu is open, every `B0`
-  control-change message is replaced with harmless active-sensing bytes so the
-  page underneath does not see the wheel, knobs, or fader.
+  bytes with the MIDI byte at offset 16. While the menu is open, the three
+  reads that make up a `B0` control-change message are dropped entirely
+  (`read` returns 0), so the page underneath never sees the wheel, knobs or
+  fader; note messages still pass through for DATA confirm/close. A short
+  guard also covers the gap between SHIFT+DATA and the menu becoming visible.
 - HPSS runs on a worker thread. The source is read exactly as the app has it
   (PCM16/24/32, float32/64, extensible WAVs; unsaved recordings through a unique
   `TempProjects` match). Source/project identity is checked again before commit.

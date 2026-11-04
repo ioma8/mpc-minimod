@@ -41,11 +41,12 @@ missing energy.
   `HPSS Percussive` and select/play normally.
 - DATA-wheel selection: turning the encoder moved the SAMPLE OPTIONS highlight
   between **HPSS** and **Close**; DATA on Close dismissed the menu without
-  starting a split. While the menu is open the whole `B0` CC message is replaced
-  with active-sensing bytes, so the app's own wheel action is not also applied.
-  Multiple turns with the menu opened and closed left the underlying screen
-  screenshot byte-for-byte identical; with the menu closed the same wheel turn
-  still changed it.
+  starting a split. While the menu is open the three reads that make up a `B0`
+  CC message are dropped (read returns 0), so the app's own wheel action is not
+  applied. Twenty open/turn/close cycles, including a turn sent immediately
+  after SHIFT+DATA, left the underlying screen screenshot byte-for-byte
+  identical; with the menu closed the same wheel turn still changed it, and
+  pads/buttons still responded after the stress run.
 - The original object is untouched: `/data/UserContent/Samples/User/Sample
   002.wav` kept SHA-256
   `2028b9087ab1892a9b7116ec89d471065424b6953183a8e39636cc921f408124`.
