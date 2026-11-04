@@ -12,7 +12,8 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 (tmpfs) and preloaded into the stock app, so a reboot returns to stock.
 
 **Status: the four original features are verified on real hardware
-(2026-11-03); SAMPLE OPTIONS / HPSS is emulator-verified (2026-11-04).**
+(2026-11-03); SAMPLE OPTIONS / HPSS and Spectral Chop are emulator-verified
+(2026-11-04).**
 
 | # | feature | control | state |
 | --- | --- | --- | --- |
@@ -21,6 +22,7 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 | 3 | chromatic control from an external MIDI controller | always while 16 LEVELS is lit | note path verified with simulated MIDI |
 | 4 | shift overlay label | `SHIFT` held on the Sample page | verified on device |
 | 5 | SAMPLE OPTIONS → HPSS split onto two pads | `SHIFT` + `DATA`, then `DATA` | emulator-verified; see [HPSS-HANDOFF](../HPSS-HANDOFF.md) |
+| 6 | SAMPLE OPTIONS → Spectral Chop fills pads at onsets | `SHIFT` + `DATA`, choose Spectral Chop, `DATA` | emulator-verified; see [SPECTRAL-CHOP](../docs/SPECTRAL-CHOP.md) |
 
 Status history, evidence and open work: [`docs/MINIMOD.md`](../docs/MINIMOD.md).
 The Sample/Trim page itself: [`docs/TRIM-PAGE.md`](../docs/TRIM-PAGE.md).
@@ -54,13 +56,17 @@ released   : Trim        Tune        Filter
   page's cached markers are not refreshed, because the page paints from a model
   object we have not identified yet (full account in `docs/TRIM-PAGE.md`).
 * **SAMPLE OPTIONS / HPSS** — `SHIFT` + `DATA` opens the menu on the Sample
-  page. Turn `DATA` to choose **HPSS** or **Close**, press `DATA` to confirm,
-  or press `SHIFT` + `DATA` to close. HPSS reads the selected sample, runs the
-  split on a worker thread, and creates `HPSS Harmonic` then `HPSS Percussive`
-  on the next two empty pads through the stock Extract command. The source
-  sample and the live trim/chop range are left unchanged. Needs two empty pads;
-  outputs are float32 WAVs on this firmware. Full details and validation:
-  [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md).
+  page. Turn `DATA` to choose **HPSS**, **Spectral Chop** or **Close**, press
+  `DATA` to confirm, or press `SHIFT` + `DATA` to close. HPSS reads the selected
+  sample, runs the split on a worker thread, and creates `HPSS Harmonic` then
+  `HPSS Percussive` on the next two empty pads through the stock Extract
+  command. The source sample and the live trim/chop range are left unchanged.
+  Needs two empty pads; outputs are float32 WAVs on this firmware. Full details
+  and validation: [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md).
+* **Spectral Chop** — from the same menu. Detects up to 16 spectral-flux
+  onsets, then creates one native Extract slice per onset on the next free
+  pads. Needs one pad per slice. The source is unchanged. Algorithm and
+  validation: [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md).
 * **Chromatic MIDI** — always on while 16 LEVELS is lit (no toggle). Off with
   `MINIMOD_MIDI=0`: the rawmidi reader takes the control-surface node from the
   app, which stops the stock app from starting.
