@@ -1679,7 +1679,6 @@ static unsigned char g_rm_note_status;
 static unsigned char g_rm_note;
 static long long g_hpss_guard_until;
 static void hpss_repaint(void);
-static void wheel_forget(void);
 static void selftest_wheel(void);
 
 static unsigned char g_cc_num;
@@ -3630,7 +3629,7 @@ out:
 
 static void hpss_open(void)
 {
-    wheel_forget();   /* seed the property values, the first broadcast must not move */
+
     if (!sample_page_visible() || g_hpss_busy)
         return;
     g_hpss_menu = 1;
@@ -4000,8 +3999,30 @@ static void *prog_inst(void *a, int b)
     return orig_prog_inst ? orig_prog_inst(a, b) : 0;
 }
 
+/* The encoder is a rotary: the firmware calls the rotary core with the new
+ * value. Nothing else in the app sees the turn unless we let it, so this is
+ * the place a modal menu can take the detent. */
 static void rotary(void *a, float v)
 {
+    static void *last_obj;
+    static float last_v;
+    static int have;
+    if (g_hpss_menu && !g_hpss_busy) {
+        if (have && last_obj == a && fabsf(v - last_v) > 1e-6f) {
+            int step = v > last_v ? 1 : -1;
+            g_hpss_sel = (g_hpss_sel + (step > 0 ? 1 : 2)) % 3;
+            hpss_repaint();
+            mlog("rotary %.4f -> %.4f sel=%d\n", (double)last_v, (double)v,
+                 g_hpss_sel);
+            last_v = v;
+            return;                 /* swallow: the page must not act on it */
+        }
+        last_obj = a;
+        last_v = v;
+        have = 1;
+        return;
+    }
+    have = 0;
     if (orig_rotary)
         orig_rotary(a, v);
 }
@@ -4224,54 +4245,8 @@ static void trim_probe(void *self, float v)
         orig_trim(self, v);
 }
 
-/* Menu input from the firmware's own parameter plumbing.
- *
- * Every knob and rotary ends in the value broadcaster (0x13bb930): the control
- * writes its new value and the property notifies its listeners. The stock
- * hardware encoder is a rotary, so its turn shows up here as a value change on
- * whatever property the page has focused - no MIDI, no evdev, no knowledge of
- * the transport. While our menu is open we take that change as one detent and
- * swallow the notification so the page underneath does not act on it.
- *
- * Only a *changed* value counts: repaints re-broadcast the same value and must
- * not scroll the menu.
- */
-static struct { uintptr_t prop; float value; } g_wheel[8];
-static int g_wheel_n;
-
-static void wheel_forget(void) { g_wheel_n = 0; }
-
-static int wheel_from_bcast(void *self, float v)
-{
-    if (!g_hpss_menu || g_hpss_busy || g_own_call || !self)
-        return 0;
-    uintptr_t P = (uintptr_t)self;
-    for (int i = 0; i < g_wheel_n; ++i) {
-        if (g_wheel[i].prop != P)
-            continue;
-        float prev = g_wheel[i].value;
-        if (fabsf(v - prev) < 1e-6f)
-            return 0;                     /* same value: a repaint, not a turn */
-        int step = v > prev ? 1 : -1;
-        g_wheel[i].value = v;
-        g_hpss_sel = (g_hpss_sel + (step > 0 ? 1 : 2)) % 3;
-        hpss_repaint();
-        mlog("wheel bcast prop=%p %.4f->%.4f sel=%d\n", self, (double)prev,
-             (double)v, g_hpss_sel);
-        return 1;                         /* swallow: the page must not act */
-    }
-    if (g_wheel_n < 8) {
-        g_wheel[g_wheel_n].prop = P;
-        g_wheel[g_wheel_n].value = v;
-        g_wheel_n++;
-    }
-    return 0;
-}
-
 static void bcast_hook(void *self, float v)
 {
-    if (wheel_from_bcast(self, v))
-        return;
     int i = g_nbc;
     g_bc[i & 255].p = (uintptr_t)self;
     g_bc[i & 255].v = v;
@@ -6688,6 +6663,7 @@ __attribute__((constructor)) static void load(void)
     void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)note_on) : 0;
     void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)cs_event) : 0;
     void *t_off = (hook_mask & 128) ? install_hook(base + A_NOTE_OFF, (void *)note_off) : 0;
+    void *t_rot = install_hook(base + A_ROTARY, (void *)rotary);
     void *t_sc = install_hook(base + 0x1968020, (void *)setctl_probe);
     if (t_sc)
         orig_setctl = (void (*)(void *, void *, int, int, float))t_sc;
@@ -6769,6 +6745,8 @@ __attribute__((constructor)) static void load(void)
         orig_note_on = (void (*)(void *, int, int, void *, float))t_note;
     if (t_cs)
         orig_cs = (void (*)(void *, int, void *))t_cs;
+    if (t_rot)
+        orig_rotary = (void (*)(void *, float))t_rot;
     if (t_off)
         orig_note_off = (void (*)(void *, int, int))t_off;
     if (t_trim)
