@@ -70,7 +70,7 @@ released   : Trim        Tune        Filter
   from the model, and verifies every boundary before reporting. No samples,
   files or other pads are created. Algorithm and the model layout:
   [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md) and
-  [`docs/re/spectral-chop-handoff.md`](../docs/re/spectral-chop-handoff.md).
+  [`docs/re/SPECTRAL-CHOP-SOLVED.md`](../docs/re/SPECTRAL-CHOP-SOLVED.md).
 * **Chromatic MIDI** — always on while 16 LEVELS is lit (no toggle). Off with
   `MINIMOD_MIDI=0`: the rawmidi reader takes the control-surface node from the
   app, which stops the stock app from starting.

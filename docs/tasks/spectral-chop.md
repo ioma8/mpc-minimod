@@ -5,8 +5,8 @@
 > place** at the detected frames, verifies every boundary by reading it back,
 > and does not create samples or use free pads.
 > [`docs/SPECTRAL-CHOP.md`](../SPECTRAL-CHOP.md) covers the detector and the
-> write recipe; [`docs/re/spectral-chop-handoff.md`](../re/spectral-chop-handoff.md)
-> records the model layout and how it was established.
+> write recipe; [`docs/re/SPECTRAL-CHOP-SOLVED.md`](../re/SPECTRAL-CHOP-SOLVED.md)
+> records the model, the recipe and how it was established.
 
 **One action: slice the selected sample at its detected onsets instead of at fixed divisions.**
 

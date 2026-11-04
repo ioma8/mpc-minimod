@@ -30,6 +30,17 @@ parameter value, its applied copy, the property cache, the layer frames and the
 slider - is downstream of that state, which is why none of it made the app's own
 view change.
 
+## Spectral Chop
+
+[The solve](SPECTRAL-CHOP-SOLVED.md) records the finished write path: the chop
+model, the slice boundary layout (`+0xd0` end, `+0x78`/`+0x128` start), the
+recipe and how it was verified, plus the reproduction method and the probe
+toolkit. [The history](spectral-chop-handoff.md) is the short chronological
+record of the passes and the leads that were disproved.
+
+Note for anyone working here: this index states the address rule below, and the
+Spectral Chop investigation still lost a pass to ignoring it.
+
 ## HPSS investigation
 
 [HPSS research](../HPSS-RE.md) traces the stock Chop Extract command and its

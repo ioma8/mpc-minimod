@@ -65,6 +65,9 @@ view keeps its own cached layout: a repaint or a pad press does not rebuild it.
 Leaving and re-entering Chop does, and in Manual mode the boundaries survive
 that rebuild — which is what the feature relies on.
 
+The full model, the recipe step by step, the evidence and the probe toolkit:
+[`docs/re/SPECTRAL-CHOP-SOLVED.md`](re/SPECTRAL-CHOP-SOLVED.md).
+
 ## Validation
 
 Emulator, firmware 1.3.0.12, release build, `NRestarts=0`:

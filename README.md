@@ -24,7 +24,7 @@ chop so every slice boundary sits on a detected frame. It never creates
 samples or uses free pads, and it verifies the result by reading the written
 boundaries back before it reports. Details:
 [`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md); how the chop model is
-reached: [`docs/re/spectral-chop-handoff.md`](docs/re/spectral-chop-handoff.md).
+reached: [`docs/re/SPECTRAL-CHOP-SOLVED.md`](docs/re/SPECTRAL-CHOP-SOLVED.md).
 
 Chromatic MIDI from an external keyboard is in progress —
 [`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).
@@ -53,7 +53,7 @@ That writes `mod/build/minimod.zip` — the same package as the release.
 - [`AUTOTRIM-HANDOFF.md`](AUTOTRIM-HANDOFF.md) — how AutoTrim works
 - [`HPSS-HANDOFF.md`](HPSS-HANDOFF.md) — how SAMPLE OPTIONS / HPSS works and what was validated
 - [`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md) — onset detector and the in-place chop write
-- [`docs/re/spectral-chop-handoff.md`](docs/re/spectral-chop-handoff.md) — native slice API and the exact remaining steps
+- [`docs/re/SPECTRAL-CHOP-SOLVED.md`](docs/re/SPECTRAL-CHOP-SOLVED.md) — the chop model, the write recipe, the path there and the probe toolkit
 - [`docs/`](docs/) — device notes, emulator, reverse-engineering writeups
 - [`tools/hpss/`](tools/hpss/) — Python reference, algorithm notes and WAV helper scripts
 - [`converter/`](converter/) — separate tool: project → per-pad stems
