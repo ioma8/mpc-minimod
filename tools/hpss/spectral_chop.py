@@ -7,23 +7,28 @@
 The whole algorithm is four steps:
 
   1. STFT: 1024-sample Hann frames, hop 512.
-  2. Onset strength: normalised spectral flux - the positive change of every
-     bin, summed, divided by the frame's total magnitude. Dividing by the
-     frame's own magnitude makes a quiet hit count as much as a loud one, and
-     needs no constant.
+  2. Onset strength: spectral flux per band. The bins are split into
+     low (<250 Hz), mid (250-2000 Hz) and high (>2 kHz); each band's positive
+     change is divided by that band's own magnitude and the three curves are
+     averaged. A kick, a snare and a hat therefore count the same, and a quiet
+     hit counts as much as a loud one, with no scale constants.
   3. Peaks: a frame is an onset when its flux is the local maximum and exceeds
      `sensitivity` times the median flux of +-0.5 s around it. No absolute
      threshold, so it adapts to the material instead of to its loudest hit.
-  4. Position: the flux frame is snapped back to the attack - the first sample
-     in the preceding 30 ms above 25% of the local peak - and 3 ms earlier, so
-     a slice starts just before the hit rather than at the analysis frame.
+  4. Position: the largest energy jump in a 1 ms envelope within +-30 ms of the
+     flux frame, minus a 2 ms pre-roll, so the boundary sits on the attack
+     instead of on the analysis frame (which is up to 11 ms late).
 
 Slices are what the firmware builds: slice i spans [pos[i], pos[i+1]) and the
-last runs to the end of the sample. When more onsets are found than the chop
-allows, the weakest are dropped, and the report says where they ended up.
+last runs to the end of the sample. At most 16 slices are made: the first 16
+onsets are used and everything after the sixteenth stays on the last pad.
 
 `tools/hpss/onsets.py` is the reference for the *shipped* detector; this file
 is the tuning bed for its replacement.
+
+On the B3 break (4.03 s, 177706 frames) it produces 16 slices: fifteen between
+139 and 390 ms with the boundary on the attack, and a last one carrying
+everything that follows the sixteenth onset, exactly as the pad layout wants.
 """
 import argparse
 import sys
@@ -49,10 +54,21 @@ def stft_magnitude(x):
     return mag
 
 
-def onset_strength(mag):
-    # the first frame rises from silence, so a hit at sample 0 is an onset too
-    diff = np.diff(mag, axis=0, prepend=np.zeros((1, mag.shape[1]), np.float32))
-    return np.maximum(diff, 0).sum(axis=1) / (mag.sum(axis=1) + 1e-9)
+def band_flux(mag, rate, edges=((0, 250), (250, 2000), (2000, None))):
+    """One flux curve per band, each normalised by its own magnitude.
+
+    A kick lives under 250 Hz, a snare in the mids, a hat above 2 kHz. Summing
+    raw magnitudes lets the loudest band hide the others, so each band is
+    normalised separately and then averaged.
+    """
+    freqs = np.linspace(0, rate / 2, mag.shape[1])
+    out = []
+    for lo, hi in edges:
+        sel = (freqs >= lo) & (freqs < hi if hi else np.ones_like(freqs, bool))
+        band = mag[:, sel]
+        diff = np.diff(band, axis=0, prepend=np.zeros((1, band.shape[1]), np.float32))
+        out.append(np.maximum(diff, 0).sum(axis=1) / (band.sum(axis=1) + 1e-9))
+    return np.mean(out, axis=0)
 
 
 def pick_peaks(strength, rate, sensitivity, min_gap_ms=40.0):
@@ -76,41 +92,50 @@ def pick_peaks(strength, rate, sensitivity, min_gap_ms=40.0):
 
 
 def snap_to_attack(x, rate, frame):
-    """First sample above 25% of the local peak, minus a 3 ms pre-roll."""
+    """Put the boundary at the steepest energy rise near the flux peak.
+
+    The ODF peak sits inside the first frame that contains the attack, so the
+    exact sample is found from a 1 ms envelope: the largest jump in a +-30 ms
+    window, minus a 2 ms pre-roll so the slice keeps the whole transient. A
+    plain "first sample above a threshold" rule was jumping back onto the
+    decaying tail of the previous hit.
+    """
     pos = frame * HOP
     a = max(0, pos - int(0.030 * rate))
-    b = min(len(x), pos + int(0.010 * rate))
-    if b <= a:
+    b = min(len(x), pos + int(0.030 * rate))
+    if b - a < 8:
         return pos
-    seg = np.abs(x[a:b])
-    peak = float(seg.max())
-    if peak <= 0:
+    hop = max(1, int(0.001 * rate))
+    n = (b - a) // hop
+    if n < 4:
         return pos
-    above = np.nonzero(seg > 0.25 * peak)[0]
-    if not len(above):
-        return pos
-    return max(0, a + int(above[0]) - int(0.003 * rate))
+    env = np.array([float(np.abs(x[a + i * hop:a + (i + 1) * hop]).max())
+                    for i in range(n)], dtype=np.float32)
+    # rise over ~3 ms minus the preceding ~6 ms
+    k = max(1, int(0.003 * rate / hop))
+    m = max(1, int(0.006 * rate / hop))
+    best, best_i = -1.0, 0
+    for i in range(m, n):
+        rise = env[i:i + k].max() - env[max(0, i - m):i].min()
+        if rise > best:
+            best, best_i = rise, i
+    return max(0, a + best_i * hop - int(0.002 * rate))
 
 
-def choose(frames, max_slices, frames_total, rate):
-    """More onsets than slices: keep the one nearest each equal division."""
-    if len(frames) <= max_slices:
-        return frames
-    step = frames_total / max_slices
-    chosen, used = [], set()
-    for k in range(max_slices):
-        target = k * step
-        best = min((f for f in frames if f not in used),
-                   key=lambda f: abs(f * HOP - target))
-        used.add(best)
-        chosen.append(best)
-    return sorted(chosen)
+def choose(frames, max_slices):
+    """The first `max_slices` onsets, in time order.
+
+    Everything after the last one stays inside the last slice - that is the
+    point: sixteen chops from the start of the sample, the remainder on the
+    sixteenth pad.
+    """
+    return frames[:max_slices]
 
 
 def onsets(x, rate, max_slices=16, sensitivity=2.5):
-    strength = onset_strength(stft_magnitude(x))
+    strength = band_flux(stft_magnitude(x), rate)
     detected = pick_peaks(strength, rate, sensitivity)
-    frames = choose(detected, max_slices, len(x), rate)
+    frames = choose(detected, max_slices)
     ranked = frames
     positions = []
     for f in sorted(ranked):
@@ -170,8 +195,8 @@ def main():
                 if a <= p < b:
                     merged.append(round((p - a) / rate, 3))
                     break
-        print(f"dropped       {len(detected) - len(positions)} onset(s) over the cap, "
-              f"at these offsets into their slice: {merged}")
+        print(f"after the cap {len(detected) - len(positions)} more onset(s) stay inside "
+              f"the last slice(s); offsets into their slice: {merged[:8]}")
         if lengths and merged and max(merged) > (max(lengths) / rate) * 0.9:
             print("              the dropped onset sits near a slice end")
     if args.png:
