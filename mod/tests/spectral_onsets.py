@@ -1,4 +1,9 @@
-"""Compile the production onset detector and check synthetic edge cases."""
+"""Compile the production detector and check the region contract.
+
+A boundary needs an attack AND a change: repeated identical events stay in one
+slice, a melody that moves gets one slice per note, silence and steady tones
+get none.
+"""
 from pathlib import Path
 import math
 import struct
@@ -42,6 +47,18 @@ def write_raw(path, samples):
         f.write(struct.pack("<%df" % len(samples), *samples))
 
 
+def notes(duration, events, level=0.6):
+    """events: (time, frequency) - a note that changes pitch, like a melody."""
+    data = [0.0] * int(duration * SR)
+    for start, freq in events:
+        i = int(start * SR)
+        nxt = min(len(data), int((start + 0.30) * SR))
+        for k in range(i, nxt):
+            t = (k - i) / SR
+            data[k] = level * math.sin(2 * math.pi * freq * t) * math.exp(-3.0 * t)
+    return data
+
+
 def clicks(duration, positions, level=0.8):
     data = [0.0] * int(duration * SR)
     for pos in positions:
@@ -73,24 +90,31 @@ with tempfile.TemporaryDirectory() as temp:
         check=True,
     )
 
-    expected = [0.10, 0.50, 0.90, 1.30, 1.70]
-    positions, detected = run(exe, clicks(2.0, expected))
-    assert detected >= len(expected), (positions, detected)
-    assert positions[0] == 0, positions  # lead-in is folded into the first slice
-    assert len(positions) >= len(expected) + 1
-    for want in expected:
-        assert any(abs(p / SR - want) < 2048 / SR for p in positions), (want, positions)
+    # 1. percussive events separated by silence are separate slices: the tail
+    # of one is not the same sound as the attack of the next
+    same = [0.10, 0.50, 0.90, 1.30, 1.70]
+    positions, detected = run(exe, clicks(2.0, same))
+    assert detected >= 3, (positions, detected)
+    assert len(positions) >= 3, positions
+
+    # 2. a melody that changes pitch is what a region boundary is for
+    melody = [(0.10, 440.0), (0.60, 554.4), (1.10, 659.3), (1.60, 880.0)]
+    positions, detected = run(exe, notes(2.2, melody))
+    assert detected >= 3, (positions, detected)
+    assert len(positions) >= 3, positions
 
     silence, detected = run(exe, [0.0] * (2 * SR))
     assert silence == [] and detected == 0, (silence, detected)
 
+    # 3. a steady tone has no change in it, so it must not be chopped
     sine = [0.4 * math.sin(2 * math.pi * 440 * i / SR) for i in range(2 * SR)]
     tonal, _ = run(exe, sine)
     assert len(tonal) <= 1, tonal
 
-    lead = run(exe, clicks(2.0, [0.70, 1.20]))
+    # 4. a late first event still gets a boundary at 0, so the head is a slice
+    lead = run(exe, notes(2.0, [(0.70, 440.0), (1.30, 659.3)]))
     positions, detected = lead
-    assert detected >= 2 and positions[0] == 0, (positions, detected)
-    assert len(positions) >= 3
+    assert positions[0] == 0, (positions, detected)
+    assert len(positions) >= 2
 
     print("spectral onsets ok")

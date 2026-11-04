@@ -161,7 +161,9 @@ def onsets(x, rate, max_slices=16, region_s=0.0, fraction=0.15):
         b = feat[cur:cur + win].mean(axis=0)
         na, nb = np.linalg.norm(a), np.linalg.norm(b)
         if na < 1e-9 or nb < 1e-9:
-            return 0.0
+            # silence on one side is a change, not a match: without this the
+            # first region after a quiet start swallowed everything after it
+            return 1.0
         return float(1.0 - a @ b / (na * nb))
 
     def moved_on(prev, cur):

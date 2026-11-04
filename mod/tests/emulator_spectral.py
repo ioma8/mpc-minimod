@@ -60,11 +60,11 @@ def main():
         control('DATA', 'turn', 1)
         tap('DATA')
         time.sleep(.8)
-    expected = [264, 13966, 29838, 46474, 54414]
+    expected = [264, 14187, 30059, 45419, 54635]
     expected_pairs = list(zip(expected, expected[1:] + [62259]))
     for boot in range(args.boots):
         ssh('systemctl restart ac50')
-        time.sleep(4)
+        time.sleep(5)
         pid = int(ssh('pidof "MPC Sample"'))
         baseline_restarts = ssh('systemctl show ac50 -p NRestarts')
         maps = ssh(f'cat /proc/{pid}/maps').decode().splitlines()
@@ -109,7 +109,7 @@ def main():
         for case in ['first from Trim', 'repeat', 'repeat again', 'regions', 'threshold', 'after pad playback']:
             if case in ('regions', 'threshold'):
                 control('K3', 'set', 64 if case == 'regions' else 0)
-                time.sleep(.4)
+                time.sleep(.9)
                 print(f'boot {boot + 1}: {case} initial type={model()[1]}', flush=True)
             if case == 'after pad playback':
                 for pad in (1, 5, 10, 16):

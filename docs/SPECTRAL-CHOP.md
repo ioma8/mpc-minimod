@@ -40,12 +40,12 @@ SHIFT + DATA   close
 |---|---|
 | input | mono sum of the source channels, analysis only |
 | STFT | 1024 samples, hop 512, symmetric Hann |
-| onset function | spectral novelty: the spectrum is split at 250 Hz and 2 kHz, each band's positive log-magnitude flux is divided by that band's mean, and the three are summed |
-| threshold | `delta + 2.5 × median(±0.5 s)`, with `delta = 0.1 × mean novelty` so a quiet passage cannot fire on noise |
-| peak pick | local maximum, at least 40 ms between onsets, and at least 0.8 × mean novelty above the valley since the previous onset (so a loud hit's tail is not a second hit) |
-| limit | the **first 16** onsets in time order; everything later stays inside the last slice |
-| position | the boundary goes where the 1 ms envelope passes 15% of the local transient peak — on the attack, not in the silence before it |
-| tail | ignores the last analysis frames, whose zero padding looks like a transient |
+| candidates | every frame carrying an attack: per-band log flux (bands split at 250 Hz and 2 kHz), threshold `0.1 × mean + 2.0 × local median(±0.5 s)`, prominence `0.5 × mean` above the valley since the previous one, 40 ms apart |
+| region length | `0.45 / onsets-per-second`, clamped to 0.18–0.75 s — dense material gets short regions, sustained material long ones, one rule, no mode switch |
+| keep | a candidate survives when the slice is long enough **and** the sound moved on since the last cut: cosine distance of 12-bin chroma ≥ 0.05 (chord change) **or** of 48 log bands ≥ 0.15 (different sound). Silence on one side counts as a change |
+| position | the steepest 1 ms step within ±15 ms, backed off to 15% of the transient peak |
+| limits | no cuts in the last 120 ms, 16 slices at most, the first in time order |
+| tail | the last analysis frames are ignored: their zero padding looks like a transient |
 
 `tools/hpss/spectral_chop.py` is the readable reference and the tuning bed;
 `tools/hpss/onsets.py` still describes the previous (shipped-before) detector.
