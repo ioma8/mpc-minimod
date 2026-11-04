@@ -1679,6 +1679,8 @@ static unsigned char g_rm_note_status;
 static unsigned char g_rm_note;
 static long long g_hpss_guard_until;
 static void hpss_repaint(void);
+static void wheel_forget(void);
+static void selftest_wheel(void);
 
 static unsigned char g_cc_num;
 static char g_probe[24];
@@ -3628,6 +3630,7 @@ out:
 
 static void hpss_open(void)
 {
+    wheel_forget();   /* seed the property values, the first broadcast must not move */
     if (!sample_page_visible() || g_hpss_busy)
         return;
     g_hpss_menu = 1;
@@ -3750,6 +3753,10 @@ static void buttons(void *event)
         chop_snapshot(tag);
         g_snap_n++;
     }
+#endif
+#if MINIMOD_DEBUG
+    if (g_hpss_menu && down && code == 0x06)
+        selftest_wheel();
 #endif
     if (g_hpss_menu) {
         /* every event the firmware routes to this dispatcher, whatever its code:
@@ -4217,8 +4224,54 @@ static void trim_probe(void *self, float v)
         orig_trim(self, v);
 }
 
+/* Menu input from the firmware's own parameter plumbing.
+ *
+ * Every knob and rotary ends in the value broadcaster (0x13bb930): the control
+ * writes its new value and the property notifies its listeners. The stock
+ * hardware encoder is a rotary, so its turn shows up here as a value change on
+ * whatever property the page has focused - no MIDI, no evdev, no knowledge of
+ * the transport. While our menu is open we take that change as one detent and
+ * swallow the notification so the page underneath does not act on it.
+ *
+ * Only a *changed* value counts: repaints re-broadcast the same value and must
+ * not scroll the menu.
+ */
+static struct { uintptr_t prop; float value; } g_wheel[8];
+static int g_wheel_n;
+
+static void wheel_forget(void) { g_wheel_n = 0; }
+
+static int wheel_from_bcast(void *self, float v)
+{
+    if (!g_hpss_menu || g_hpss_busy || g_own_call || !self)
+        return 0;
+    uintptr_t P = (uintptr_t)self;
+    for (int i = 0; i < g_wheel_n; ++i) {
+        if (g_wheel[i].prop != P)
+            continue;
+        float prev = g_wheel[i].value;
+        if (fabsf(v - prev) < 1e-6f)
+            return 0;                     /* same value: a repaint, not a turn */
+        int step = v > prev ? 1 : -1;
+        g_wheel[i].value = v;
+        g_hpss_sel = (g_hpss_sel + (step > 0 ? 1 : 2)) % 3;
+        hpss_repaint();
+        mlog("wheel bcast prop=%p %.4f->%.4f sel=%d\n", self, (double)prev,
+             (double)v, g_hpss_sel);
+        return 1;                         /* swallow: the page must not act */
+    }
+    if (g_wheel_n < 8) {
+        g_wheel[g_wheel_n].prop = P;
+        g_wheel[g_wheel_n].value = v;
+        g_wheel_n++;
+    }
+    return 0;
+}
+
 static void bcast_hook(void *self, float v)
 {
+    if (wheel_from_bcast(self, v))
+        return;
     int i = g_nbc;
     g_bc[i & 255].p = (uintptr_t)self;
     g_bc[i & 255].v = v;
@@ -4255,6 +4308,23 @@ static void bcast_hook(void *self, float v)
     if (orig_bcast)
         orig_bcast(self, v);
 }
+
+#if MINIMOD_DEBUG
+static void selftest_wheel(void)
+{
+    if (g_nbp <= 0)
+        return;
+    static int tog;
+    float v = (tog ^= 1) ? 0.35f : 0.45f;
+    int save = g_own_call;
+    g_own_call = 0;
+    FN(A_BROADCAST, void (*)(void *, float))((void *)g_bp[0], v);
+    g_own_call = save;
+    mlog("selftest wheel injected %.2f sel=%d\n", (double)v, g_hpss_sel);
+}
+#else
+static void selftest_wheel(void) {}
+#endif
 
 /* ------------------------------------------------------- message-thread pump */
 static volatile int g_trim_pending;
