@@ -13,15 +13,19 @@ original MPC Sample experience, with just small fixes that enhance it for better
 | **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim | `SHIFT` + `B3` |
 | **Octave shift** of pads in 16 Levels mode — by half the grid | `PLUS` / `MINUS` keys (both = reset) |
 | **HPSS** — splits the selected sample into harmonic and percussive copies on two empty pads; the source sample is left untouched | `SHIFT` + `DATA`, choose **HPSS**, `DATA` |
-| **Spectral Chop** — detects the onsets in the selected sample and opens the stock Chop view on that same pad; no samples or pads are created | `SHIFT` + `DATA`, choose **Spectral Chop**, `DATA` |
+| **Spectral Chop** — detects the onsets in the selected sample and reports how many it found; **the markers are not written yet** (see below) | `SHIFT` + `DATA`, choose **Spectral Chop**, `DATA` |
 
 The trim and pitch changes confirm themselves on screen for a second. HPSS and
 Spectral Chop open a small **SAMPLE OPTIONS** menu; turn the DATA encoder to
 choose an action, press DATA to confirm, or press `SHIFT+DATA` to close. HPSS
 needs two empty pads and creates `HPSS Harmonic` and `HPSS Percussive`.
-Spectral Chop detects up to 16 onsets and opens the stock Chop view on the
-same pad; it never creates samples or uses free pads. Details:
-[`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md).
+Spectral Chop detects up to 16 onsets on the same pad and never creates
+samples or uses free pads, but it **does not yet apply them**: the native
+"insert Manual slice" call needs a live editor object that has not been
+located safely, so the action reports `Spectral: not applied` and leaves the
+pad untouched. Details and the remaining work:
+[`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md) and
+[`docs/re/spectral-chop-handoff.md`](docs/re/spectral-chop-handoff.md).
 
 Chromatic MIDI from an external keyboard is in progress —
 [`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).
@@ -49,7 +53,8 @@ That writes `mod/build/minimod.zip` — the same package as the release.
 - [`mod/README.md`](mod/README.md) — details, controls, hooks
 - [`AUTOTRIM-HANDOFF.md`](AUTOTRIM-HANDOFF.md) — how AutoTrim works
 - [`HPSS-HANDOFF.md`](HPSS-HANDOFF.md) — how SAMPLE OPTIONS / HPSS works and what was validated
-- [`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md) — onset detector, native slicing path and validation
+- [`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md) — onset detector, why the marker write is still open
+- [`docs/re/spectral-chop-handoff.md`](docs/re/spectral-chop-handoff.md) — native slice API and the exact remaining steps
 - [`docs/`](docs/) — device notes, emulator, reverse-engineering writeups
 - [`tools/hpss/`](tools/hpss/) — Python reference, algorithm notes and WAV helper scripts
 - [`converter/`](converter/) — separate tool: project → per-pad stems

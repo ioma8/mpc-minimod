@@ -1,10 +1,15 @@
 # Task — Spectral Chop
 
-> **Implemented on branch `feature/spectral-chop`.** Entry point is the shared
-> SAMPLE OPTIONS menu (not `SHIFT+CHOP`), as requested. The final behaviour
-> chops the selected pad **in place**; it does not create samples or use free
-> pads. See [`docs/SPECTRAL-CHOP.md`](../SPECTRAL-CHOP.md) for the
-> implementation and validation record.
+> **Blocked, not done.** The detector is finished and verified; applying the
+> positions as Manual markers is not. The action reports
+> `Spectral: not applied` and leaves the pad alone. The earlier Threshold
+> version was removed because the firmware sliced at its own positions.
+> Entry point is the shared SAMPLE OPTIONS menu (not `SHIFT+CHOP`). The final
+> behaviour chops the selected pad **in place**; it does not create samples or
+> use free pads.
+> The native slice API, the verified offsets and the exact remaining steps are
+> in [`docs/re/spectral-chop-handoff.md`](../re/spectral-chop-handoff.md);
+> [`docs/SPECTRAL-CHOP.md`](../SPECTRAL-CHOP.md) covers the detector.
 
 **One action: slice the selected sample at its detected onsets instead of at fixed divisions.**
 
@@ -16,7 +21,8 @@ as they do today.
 
 ## The button
 
-Proposed: **`SHIFT` + `CHOP`**.
+Proposed: **`SHIFT` + `CHOP`**. *(Today the entry point is
+`SHIFT`+`DATA` → Spectral Chop; this section is the original proposal.)*
 
 Before building, verify it is free — press it in stock Chop and see whether the app
 already reacts (the `CHOP` key is `0x4b`; `SHIFT` is `0x31`). If it is taken, the

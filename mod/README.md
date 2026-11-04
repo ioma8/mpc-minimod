@@ -12,8 +12,9 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 (tmpfs) and preloaded into the stock app, so a reboot returns to stock.
 
 **Status: the four original features are verified on real hardware
-(2026-11-03); SAMPLE OPTIONS / HPSS and Spectral Chop are emulator-verified
-(2026-11-04).**
+(2026-11-03); SAMPLE OPTIONS and HPSS are emulator-verified (2026-11-04).
+Spectral Chop detects onsets but is not finished: it does not write markers
+and says so.**
 
 | # | feature | control | state |
 | --- | --- | --- | --- |
@@ -22,7 +23,7 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 | 3 | chromatic control from an external MIDI controller | always while 16 LEVELS is lit | note path verified with simulated MIDI |
 | 4 | shift overlay label | `SHIFT` held on the Sample page | verified on device |
 | 5 | SAMPLE OPTIONS → HPSS split onto two pads | `SHIFT` + `DATA`, then `DATA` | emulator-verified; see [HPSS-HANDOFF](../HPSS-HANDOFF.md) |
-| 6 | SAMPLE OPTIONS → Spectral Chop chops the selected pad in place | `SHIFT` + `DATA`, choose Spectral Chop, `DATA` | emulator-verified; see [SPECTRAL-CHOP](../docs/SPECTRAL-CHOP.md) |
+| 6 | SAMPLE OPTIONS → Spectral Chop detects onsets on the selected pad | `SHIFT` + `DATA`, choose Spectral Chop, `DATA` | detector verified on the host; **markers not applied**; see [SPECTRAL-CHOP](../docs/SPECTRAL-CHOP.md) |
 
 Status history, evidence and open work: [`docs/MINIMOD.md`](../docs/MINIMOD.md).
 The Sample/Trim page itself: [`docs/TRIM-PAGE.md`](../docs/TRIM-PAGE.md).
@@ -64,9 +65,12 @@ released   : Trim        Tune        Filter
   Needs two empty pads; outputs are float32 WAVs on this firmware. Full details
   and validation: [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md).
 * **Spectral Chop** — from the same menu. Detects up to 16 spectral-flux
-  onsets, then opens the stock Chop view on the selected pad and selects the
-  Threshold chop type. No samples, files or other pads are created. Algorithm
-  and validation: [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md).
+  onsets on the selected pad's sample and reports the count. It does **not**
+  write Manual slice markers yet: the pad is left untouched and the menu says
+  `Spectral: not applied`. No samples, files or other pads are created.
+  Algorithm: [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md); the native
+  slice API and what is left to do:
+  [`docs/re/spectral-chop-handoff.md`](../docs/re/spectral-chop-handoff.md).
 * **Chromatic MIDI** — always on while 16 LEVELS is lit (no toggle). Off with
   `MINIMOD_MIDI=0`: the rawmidi reader takes the control-surface node from the
   app, which stops the stock app from starting.
