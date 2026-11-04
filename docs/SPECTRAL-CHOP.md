@@ -40,15 +40,18 @@ SHIFT + DATA   close
 |---|---|
 | input | mono sum of the source channels, analysis only |
 | STFT | 1024 samples, hop 512, symmetric Hann |
-| onset function | normalised spectral flux, `sum(max(0, \|X[f]\| - \|X[f-1]\|))` |
-| threshold | median of a ±0.5 s flux window × 1.8, floor 0.35 |
-| peak pick | local maximum, at least 60 ms between onsets |
-| limit | 16 strongest onsets, then sorted by position |
-| lead-in | adds position 0 when the first hit is later than 50 ms |
-| tail | ignores the artificial transient from end padding |
+| onset function | spectral novelty: the spectrum is split at 250 Hz and 2 kHz, each band's positive log-magnitude flux is divided by that band's mean, and the three are summed |
+| threshold | `delta + 2.5 × median(±0.5 s)`, with `delta = 0.1 × mean novelty` so a quiet passage cannot fire on noise |
+| peak pick | local maximum, at least 40 ms between onsets, and at least 0.8 × mean novelty above the valley since the previous onset (so a loud hit's tail is not a second hit) |
+| limit | the **first 16** onsets in time order; everything later stays inside the last slice |
+| position | the boundary goes where the 1 ms envelope passes 15% of the local transient peak — on the attack, not in the silence before it |
+| tail | ignores the last analysis frames, whose zero padding looks like a transient |
 
-`tools/hpss/onsets.py` is the readable numpy reference. Positions are sample
-frames in the source WAV — exactly the unit the chop model uses.
+`tools/hpss/spectral_chop.py` is the readable reference and the tuning bed;
+`tools/hpss/onsets.py` still describes the previous (shipped-before) detector.
+Positions are sample frames in the source WAV — exactly the unit the chop model
+uses. On a 4 s break this is 16 slices with a 180 ms median, most of them
+within 1.4 ms of the visible start of a hit.
 
 ## The chop model
 
