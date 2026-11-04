@@ -1681,7 +1681,7 @@ static long long g_hpss_guard_until;
 static void hpss_repaint(void);
 
 static unsigned char g_cc_num;
-static char g_midi_probe[24];
+static char g_probe[24];
 static unsigned char g_wheel_last[128];
 static int g_wheel_seen[128];
 
@@ -1731,23 +1731,61 @@ static void hpss_menu_wheel(unsigned char num, unsigned char value)
 typedef ssize_t (*read_fn)(int, void *, size_t);
 static int fd_midi_cache[1024];
 static int fd_midi_known[1024];
-static int fd_is_midi(int fd)
+#define FD_OTHER 0
+#define FD_MIDI 1
+#define FD_INPUT 2
+static int fd_kind(int fd)
 {
     if (fd < 0 || fd >= 1024)
-        return 0;
+        return FD_OTHER;
     if (fd_midi_known[fd])
         return fd_midi_cache[fd];
     char link[128], path[256];
     int n = snprintf(link, sizeof link, "/proc/self/fd/%d", fd);
     ssize_t k = n > 0 && n < (int)sizeof link ? readlink(link, path, sizeof path - 1) : -1;
-    int midi = 0;
+    int kind = FD_OTHER;
     if (k > 0) {
         path[k] = 0;
-        midi = !!strstr(path, "midi") || !!strstr(path, "snd/seq");
+        if (strstr(path, "midi") || strstr(path, "snd/seq"))
+            kind = FD_MIDI;
+        else if (strstr(path, "/dev/input/event"))
+            kind = FD_INPUT;
     }
-    fd_midi_cache[fd] = midi;
+    fd_midi_cache[fd] = kind;
     fd_midi_known[fd] = 1;
-    return midi;
+    return kind;
+}
+static int fd_is_midi(int fd) { return fd_kind(fd) == FD_MIDI; }
+
+/* A rotary encoder can reach the app as an evdev device instead of a MIDI
+ * control change - on hardware the DATA wheel may be wired to the input
+ * subsystem. Handle both: EV_REL is a delta, EV_ABS an absolute position. */
+struct mm_input_event {
+    long long sec, usec;
+    unsigned short type, code;
+    int value;
+};
+static int g_abs_valid[64];
+static int g_abs_last[64];
+static int input_wheel(const struct mm_input_event *e)
+{
+    if (e->type == 0x02) {              /* EV_REL: relative, value is the delta */
+        if (!e->value) return 0;
+        return e->value > 0 ? 1 : -1;
+    }
+    if (e->type == 0x03) {              /* EV_ABS: absolute position */
+        int code = e->code & 63, d;
+        if (!g_abs_valid[code]) {
+            g_abs_valid[code] = 1;
+            g_abs_last[code] = e->value;
+            return 0;
+        }
+        d = e->value - g_abs_last[code];
+        g_abs_last[code] = e->value;
+        if (!d) return 0;
+        return d > 0 ? 1 : -1;
+    }
+    return 0;                           /* EV_SYN / EV_KEY / EV_MSC: not a turn */
 }
 
 ssize_t read(int fd, void *buffer, size_t count)
@@ -1756,7 +1794,30 @@ ssize_t read(int fd, void *buffer, size_t count)
     if (!real)
         real = (read_fn)dlsym(RTLD_NEXT, "read");
     ssize_t n = real ? real(fd, buffer, count) : -1;
-    if (n > 0 && fd_is_midi(fd)) {
+    int kind = n > 0 ? fd_kind(fd) : FD_OTHER;
+    if (kind == FD_INPUT) {
+        int suppress_in = g_hpss_menu;
+        int step = 0;
+        for (ssize_t i = 0; i + (ssize_t)sizeof(struct mm_input_event) <= n;
+             i += sizeof(struct mm_input_event)) {
+            struct mm_input_event e;
+            memcpy(&e, (char *)buffer + i, sizeof e);
+            int s2 = input_wheel(&e);
+            if (s2)
+                step = s2;
+            if (suppress_in)
+                snprintf(g_probe, sizeof g_probe, "v %02x %02x %d",
+                         e.type, e.code, e.value);
+        }
+        if (suppress_in && step && g_hpss_menu && !g_hpss_busy) {
+            g_hpss_sel = (g_hpss_sel + (step > 0 ? 1 : 2)) % 3;
+            hpss_repaint();
+            mlog("HPSS wheel evdev step=%d sel=%d\n", step, g_hpss_sel);
+            return 0;
+        }
+        return n;
+    }
+    if (n > 0 && kind == FD_MIDI) {
         unsigned char *p = buffer;
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1767,10 +1828,10 @@ ssize_t read(int fd, void *buffer, size_t count)
         for (ssize_t i = 0; i + 16 < n; i += 32) {
             unsigned char b = p[i + 16];
             if (g_hpss_menu && !(b & 0x80))
-                snprintf(g_midi_probe, sizeof g_midi_probe, "midi %02x %02x",
+                snprintf(g_probe, sizeof g_probe, "m %02x %02x",
                          (unsigned)(i + 15 < n ? p[i + 15] : 0), (unsigned)b);
             else if (g_hpss_menu)
-                snprintf(g_midi_probe, sizeof g_midi_probe, "midi %02x --", (unsigned)b);
+                snprintf(g_probe, sizeof g_probe, "m %02x --", (unsigned)b);
             if (b & 0x80) {
                 g_hpss_cc_skip = 0;
                 g_hpss_cc_state = 0;
@@ -3651,9 +3712,9 @@ static void hpss_draw_menu(void *g)
     }
     if (!g_hpss_busy && !g_hpss_status[0]) {
         draw_colour(g, 0xffb0b0b0);
-        draw_text(g, g_midi_probe[0] ? g_midi_probe
-                                     : "TURN: select    DATA: confirm",
-                  x + 10, y + h - 20, w - 20, 16, 11.0f);
+        const char *hint = g_probe[0] ? g_probe
+                                      : "TURN: select    DATA: confirm";
+        draw_text(g, hint, x + 10, y + h - 20, w - 20, 16, 11.0f);
     }
 }
 
@@ -3662,6 +3723,24 @@ static void buttons(void *event)
 
     unsigned code = event ? FIELD(event, 8, uint8_t) : 0;
     unsigned down = event ? FIELD(event, 9, uint8_t) : 0;
+#if MINIMOD_LOG
+    /* temporary: dump every input event so an encoder turn can be identified */
+    {
+        static int n;
+        if (n < 200) {
+            unsigned char raw[24];
+            if (event && rd((uintptr_t)event, raw, sizeof raw)) {
+                n++;
+                mlog("evt %02x %02x | %02x%02x%02x%02x %02x%02x%02x%02x "
+                     "%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                     code, down,
+                     raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                     raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14],
+                     raw[15]);
+            }
+        }
+    }
+#endif
     if (event && rd((uintptr_t)event, g_hpss_btn, sizeof g_hpss_btn))
         g_hpss_btn_valid = 1;
 #if MINIMOD_DEBUG
@@ -3672,6 +3751,12 @@ static void buttons(void *event)
         g_snap_n++;
     }
 #endif
+    if (g_hpss_menu) {
+        /* every event the firmware routes to this dispatcher, whatever its code:
+         * if the encoder turn produces one, it shows up here */
+        snprintf(g_probe, sizeof g_probe, "e %02x %u", code, down);
+        hpss_repaint();
+    }
     if (code == 0x6f) { /* DATA press/turn */
         static int consumed;
         if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
@@ -3854,6 +3939,21 @@ static void *g_cs_self;
 
 static void cs_event(void *self, int code, void *payload)
 {
+#if MINIMOD_LOG
+    {
+        static int n;
+        if (n < 200) {
+            unsigned char raw[16];
+            memset(raw, 0, sizeof raw);
+            if (payload && rd((uintptr_t)payload, raw, sizeof raw)) {
+                n++;
+                mlog("cs %02x | %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                     code & 0xff, raw[0], raw[1], raw[2], raw[3],
+                     raw[4], raw[5], raw[6], raw[7]);
+            }
+        }
+    }
+#endif
     if (self)
         g_cs_self = self;
     if (debug_mode && g_dbg < 160) {
@@ -4125,6 +4225,11 @@ static void bcast_hook(void *self, float v)
     g_nbc = i + 1;
     if (probe_mode && i < 64)
         mlog("minimod: bcast %p v=%.4f\n", self, (double)v);
+#if MINIMOD_LOG
+    {
+        mlog("bc %p %.4f\n", self, (double)v);
+    }
+#endif
     /* Record the property a *native* broadcast uses: that is the object the
      * page listens to. Our own broadcasts are flagged. */
     if (!g_own_call) {
