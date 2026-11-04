@@ -15,9 +15,10 @@ The whole algorithm is four steps:
   3. Peaks: a frame is an onset when its flux is the local maximum and exceeds
      `sensitivity` times the median flux of +-0.5 s around it. No absolute
      threshold, so it adapts to the material instead of to its loudest hit.
-  4. Position: the largest energy jump in a 1 ms envelope within +-30 ms of the
-     flux frame, minus a 2 ms pre-roll, so the boundary sits on the attack
-     instead of on the analysis frame (which is up to 11 ms late).
+  4. Position: inside the frame that carries the attack, the boundary goes on
+     the biggest single step up of the 1 ms envelope within +-12 ms. That step
+     is the attack itself, so the slice starts on the transient with neither
+     silence before it nor a clipped attack.
 
 Slices are what the firmware builds: slice i spans [pos[i], pos[i+1]) and the
 last runs to the end of the sample. At most 16 slices are made: the first 16
@@ -111,34 +112,27 @@ def pick_peaks(strength, rate, sensitivity, min_gap_ms=40.0):
 
 
 def snap_to_attack(x, rate, frame):
-    """Put the boundary at the steepest energy rise near the flux peak.
+    """Cut where the waveform jumps the most.
 
-    The ODF peak sits inside the first frame that contains the attack, so the
-    exact sample is found from a 1 ms envelope: the largest jump in a +-30 ms
-    window, minus a 2 ms pre-roll so the slice keeps the whole transient. A
-    plain "first sample above a threshold" rule was jumping back onto the
-    decaying tail of the previous hit.
+    The novelty peak tells which analysis frame carries the attack; inside a
+    +-12 ms window around it the 1 ms envelope is scanned and the boundary goes
+    on the biggest single step up. That step *is* the attack, so the slice
+    starts on the transient and keeps all of it - neither early (silence before
+    the hit) nor late (a clipped attack).
     """
     pos = frame * HOP
     a = max(0, pos - int(0.012 * rate))
     b = min(len(x), pos + int(0.012 * rate))
-    if b - a < 8:
-        return pos
     hop = max(1, int(0.001 * rate))
-    n = (b - a) // hop
-    if n < 4:
+    if b - a < 4 * hop:
         return pos
+    n = (b - a) // hop
     env = np.array([float(np.abs(x[a + i * hop:a + (i + 1) * hop]).max())
                     for i in range(n)], dtype=np.float32)
-    # rise over ~3 ms minus the preceding ~6 ms
-    k = max(1, int(0.003 * rate / hop))
-    m = max(1, int(0.006 * rate / hop))
-    best, best_i = -1.0, 0
-    for i in range(m, n):
-        rise = env[i:i + k].max() - env[max(0, i - m):i].min()
-        if rise > best:
-            best, best_i = rise, i
-    return max(0, a + best_i * hop - int(0.002 * rate))
+    if not float(env.max()) > 0:
+        return None
+    step = np.diff(env, prepend=env[:1])
+    return max(0, a + int(np.argmax(step)) * hop)
 
 
 def choose(frames, max_slices):
@@ -159,6 +153,8 @@ def onsets(x, rate, max_slices=16, sensitivity=2.5):
     positions = []
     for f in sorted(ranked):
         p = snap_to_attack(x, rate, f)
+        if p is None:
+            continue        # novelty peak without an attack of its own
         if positions and p - positions[-1] < int(0.040 * rate):
             continue        # snapping can pull two peaks together
         positions.append(p)
