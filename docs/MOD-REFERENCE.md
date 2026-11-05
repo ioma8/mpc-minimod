@@ -9,120 +9,81 @@ sha256 b6584cba76e416e432ad202509099d34373dc2c3d6a8fb625f5678bf0193b508
 aarch64 PIE ELF, ~119 MB, stripped
 ```
 
-Anything not measured is marked as such. Sections 1–3 describe what ships;
-sections 4–7 describe how it was found and what does *not* work.
+Current release behavior and anchors are in sections 1–3. Section 4 is
+historical research from before native AutoTrim; use
+[`AUTOTRIM-NATIVE.md`](AUTOTRIM-NATIVE.md) for current AutoTrim behavior.
+Anything not measured is marked as such.
 
 ---
 
 ## 1. What the mod is
 
-An `LD_PRELOAD` shared library (`minimod.so`) that is loaded into the stock app by
-an SD-card `autorun` script. It never modifies the firmware on disk — it patches
-a handful of instructions in the app's memory at load time, the same technique
-`am-mod` uses.
+An `LD_PRELOAD` shared object (`minimod.so`) for the stock MPC Sample app. The
+release build currently ships pitch shifting in 16 Levels, native-command
+AutoTrim, and the temporary AutoTrim soft-key caption. External chromatic MIDI
+is not included in the release build.
 
-Features as shipped:
-
-| feature | trigger | state |
+| feature | trigger | current state |
 |---|---|---|
-| AutoTrim | SHIFT + B3 on the Sample/Trim page | **works**, verified in the emulator |
-| Pitch shift | `+` / `-` in 16 Levels, PLUS+MINUS resets | works |
-| Chromatic control | external MIDI | **not working** — see [MIDI-CHROMATIC.md](MIDI-CHROMATIC.md) |
+| Pitch shift | PLUS / MINUS in 16 Levels; both reset | verified on hardware; keys are swallowed only in 16 Levels |
+| AutoTrim | SHIFT + B3 on the Sample page | native control path and marker refresh verified in emulator |
+| AutoTrim caption | hold SHIFT on the Sample page | drawn in the paint hook; hidden in Chop mode |
 
-The trim is computed, written into the app's own trim parameters *and* into its
-property model (through the app's own setter, so listeners fire), and drawn on
-the Trim page by the mod's overlay.
-
----
+AutoTrim uses the most recently triggered pad index (A01 before the first pad
+note). Real hardware, save/reload, non-first layers, selection by other routes,
+and sequence playback still need validation. See
+[`AUTOTRIM-NATIVE.md`](AUTOTRIM-NATIVE.md).
 
 ## 2. How it works
 
 ### 2.1 Loading and hooking
 
-1. The SD autorun script sets `LD_PRELOAD=/path/minimod.so` for the app and
-   restarts it.
-2. On load, the library walks `dl_iterate_phdr` to find the app's load base
-   (the `PT_LOAD` containing file offset `0xb55b00`). Runtime address of any
-   symbol = `base + file_va`, with `base` typically `0xaaaaaaaa0000`.
-3. Each hook site gets two anonymous pages: a **relay** (the patched entry
-   jumps here) and a **trampoline** (the original first instruction plus a jump
-   back). The entry instruction is replaced with `B <slot>`.
-4. **The site must begin with `paciasp` or `bti`** — the installer refuses
-   otherwise and logs `site %p has no paciasp/bti`. This is a hard constraint:
-   functions with a plain prologue cannot be hooked with this scheme.
-5. The library refuses to install anything if the binary digest does not match,
-   so a wrong firmware means "no mod" rather than "crash".
+1. The SD autorun script sets `LD_PRELOAD` for the app.
+2. `dl_iterate_phdr` finds the app base; runtime addresses are `base + file_va`.
+3. A relay and trampoline are allocated for each hook. The installer checks the
+   target's PAC/BTI prologue, branch range, memory protection, and instruction
+   cache before patching.
+4. The autorun package checks the target app version. Do not manually preload
+   this build against a different firmware.
 
-### 2.2 The hook table (file VAs, 1.3.0.12)
+### 2.2 Relevant firmware anchors (file VAs, 1.3.0.12)
 
-| constant | file VA | what it is |
-|---|---|---|
-| `A_BUTTONS` | `0x159f2f0` | physical button dispatch — where SHIFT+B3 is detected |
-| `A_TRIM_CORE` | `0x15e70c0` | `TrimParam_SetValue(value, param)` — writes the applied trim |
-| `A_BROADCAST` | `0x13bb930` | `Property_Broadcast(prop, value)` — stores + notifies listeners |
-| `A_REPAINT` | `0x1149880` | `Component::repaint(comp, x, y)` |
-| `A_SAMPLE_FRAMES` | `0x2941f80` | sample frame-count getter |
-| — | `0x102e000` | `fillRect(g, x, y, w, h)` (used by the overlay) |
-| — | `0x102d5e0` | `setColour(g, rgba)` (used by the overlay) |
+| address | purpose |
+|---|---|
+| `0x159f2f0` | panel button dispatch; SHIFT, B3, 16 Levels, PLUS/MINUS |
+| `0x1968020` | native control dispatcher used to write trim positions |
+| `0x28100c0` | Sample page constructor probe (debug) |
+| `0x2941f80` | sample frame-count getter |
+| `0x1149880` | component repaint, used for toast clearing |
+| `0x102e000` / `0x102d5e0` | Graphics fillRect / setColour |
+| `0x10817b0` | Graphics drawText, used for the caption and toast |
+| `0x21472f0` / `0x27e4400` | 16-Levels render / pitch-offset setter |
 
-`A_BROADCAST` and `A_TRIM_CORE` are used both as hooks (to learn object
-addresses) and as call targets.
+The native trim command uses a live dispatcher context and frame positions.
+It sets Start to zero, End to `last + 1`, then Start to `first`. It does not
+call `TrimParam_SetValue`, broadcast a guessed property, or draw trim edges.
 
-### 2.3 AutoTrim pipeline
+### 2.3 AutoTrim analysis
 
-1. **Key detection.** The button dispatcher hook reads `code` at `event+8` and
-   `down` at `event+9`. **SHIFT is code `0x31`, B3 is code `0x0e`.**
-   SHIFT press/release sets `g_shift`; SHIFT + B3 calls `do_autotrim`.
-   While SHIFT is held, the mod also rewrites the app's own **Filter tab label to
-   "AutoTrim"** (`set_filter_text`) and restores it to `"Filter"` on release —
-   that is the "AutoTrim" label the mod shows, using the app's own label widget
-   rather than drawing text.
-2. **Find the displayed sample.** `find_displayed_sample()` scans the Sample
-   screen's child pointers (offsets `0..0x800`, step 8) for a child whose
-   `+0x130` points at an info struct holding `frames` (`info+4`) and `rate`
-   (`info+8`), then scans that child for a holder that yields a `.wav` path.
-   The path is logged as `sample obj=… info=… frames=… path='…'`.
-3. **Analyse the WAV.** `wav_info()` parses the RIFF header; `wav_edges()` scans
-   the PCM data for the first and last frame above a threshold.
-   The threshold is **peak-relative** (`MINIMOD_TRIM_DB`, default **−40 dB**,
-   clamped to −90…−6) with an absolute fallback of `328` (−40 dBFS) — this is
-   what makes low-level noise at the edges get trimmed, not just digital
-   silence.
-4. **Convert to normalised positions.** `v0 = first/frames`, `v1 = last/frames`.
-5. **Write the app's parameters.** The values are pushed through
-   `TrimParam_SetValue(value, param)` for both the Start and End parameters,
-   so the audio side uses exactly what the knobs would produce.
-6. **Write the app's model and notify.** `Property_Broadcast(prop, value)` is
-   called for both properties. **It must be called instead of pre-writing
-   `prop+0x50`** — see 4.4; the broadcaster early-outs when the stored value
-   already equals the new one, which silently suppresses the notification.
-7. **Draw it.** The overlay paints during the app's own paint pass.
+The button hook detects a fresh B3 press while SHIFT is held and while Chop is
+off. The sample is resolved from the last triggered pad through the surface pad
+vector (`+0x2808/+0x2810`), pad state (`+0x22e8`), layer array, and sample
+(`+0x4a8`). The WAV path is read from the sample object first, then located by a
+pointer scan or by matching frame count in TempProjects.
 
-Measured result on a real pad:
+The RIFF parser handles PCM 16/24/32-bit and IEEE float32, including extensible
+headers. The default first-step threshold is 3% of peak (about −30.46 dB) with a
+90-count absolute floor. `MINIMOD_TRIM_DB` overrides the relative threshold for
+the first step. Successive B3 presses while SHIFT stays down use 3%, 6%, 9%,
+then clear trim. Releasing SHIFT resets the cycle. Each step raises a one-second
+toast. B3 repeats while held, so only its down edge is processed.
 
-```
-commit core done p0=0.0000 p1=0.8268 (want 0.0001/0.8254)
-```
+### 2.4 Paint hook
 
-and the property read back through the debugger afterwards: `0x388a9e36` = `0.0001`.
-
-### 2.4 The overlay
-
-The mod takes the screen vtable's paint slot, keeps the original, and draws on
-top of it with the app's own `setColour`/`fillRect`:
-
-* grey `(27,27,30)` shading over the trimmed-away regions,
-* white edge lines at `x = 10 + v * 295`, `y = 88`, height `98` (i.e. 88…186),
-  plus a 3×1 tick at the top of each edge,
-* the app's Filter tab label reading **"AutoTrim"** while SHIFT is held.
-
-Because it draws **inside** the app's paint pass, it uses the real `Graphics`
-object. That matters: the Graphics is a **stack temporary** — caching it and
-trying to paint later is a dangling pointer, which is why every "force a
-repaint from a hook" attempt failed (measured: 0 px, and the cached pointer was
-`0xfffffffff648`, i.e. a stack address).
-
----
+The SampleModeScreen paint hook calls the stock paint and draws the temporary
+AutoTrim caption while SHIFT is held, plus the confirmation toast. It does not
+draw trim edges; the native command updates the app's own waveform markers and
+controls. The caption is hidden when the Chop group is visible.
 
 ## 3. Build and deploy
 
@@ -158,7 +119,11 @@ Ports: panel `8865`, ssh `2122`, QMP `5654`, VNC `6010`.
 
 ---
 
-## 4. Reverse-engineering findings
+## 4. Historical reverse-engineering findings (pre-native AutoTrim)
+
+The property, trim-core, heap-scan, and overlay conclusions in this section
+document the superseded implementation. They remain useful as investigation
+history, but are not the current AutoTrim write or render path.
 
 Address convention: **Ghidra VA = file VA + 0x100000**;
 **runtime = 0xaaaaaaaa0000 + file VA**.
@@ -243,7 +208,7 @@ So the app's own trim widgets (waveform edges and the bottom Start/End bars) do
 
 ---
 
-## 5. The renderer limitation (honest statement)
+## 5. Superseded renderer findings (pre-native AutoTrim)
 
 The mod's overlay draws the trim; the **app's own** widgets do not move.
 
@@ -339,7 +304,7 @@ Operational lessons (all learned the hard way):
 
 ---
 
-## 7. Verified measurements
+## 7. Historical verified measurements (pre-native AutoTrim)
 
 | what | value |
 |---|---|

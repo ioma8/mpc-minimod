@@ -1,5 +1,11 @@
 # Code review — `mod/src/minimod.c`
 
+> Historical review of the pre-native AutoTrim implementation. The native
+> control path replaced its property writes and trim-edge overlay, and later
+> changes addressed the release-hardening items listed here. Treat findings
+> below as review history, not as a current list of open defects. Current status
+> is in [`AUTOTRIM-HANDOFF.md`](../AUTOTRIM-HANDOFF.md).
+
 Scope: the whole shipped module (~3 900 lines), reviewed against the binary it
 targets (firmware 1.3.0.12, sha256 `b6584cba…3b508`).
 

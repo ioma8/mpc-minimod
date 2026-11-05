@@ -1,10 +1,39 @@
 # TouchPreferences wiring investigation
 
+> **Updated RE finding:** the earlier constructor/caller conclusion below was
+> superseded. The actual `TouchPreferencesOverlay` constructor is
+> `FUN_03804fe0`; a parent factory path is present in `FUN_03519cb0`. This is
+> decompilation evidence, not confirmation that a live instance can safely be
+> reopened from the mod. SHIFT+DATA activation and the compact host remain
+> unimplemented.
+
+## Current decompilation update
+
+The class named `TouchPreferencesOverlay` has RTTI at Ghidra VA `0x070f1470`
+and primary vtable address point `0x070f14e8`. Its constructor is
+`FUN_03804fe0`. The older `FUN_03337be0` note below describes a different
+component and must not be treated as the overlay constructor.
+
+`FUN_03519cb0` contains a factory path that allocates `0x5e8` bytes, constructs
+the title `Preferences`, and calls `FUN_03804fe0` with the app's existing
+service/model objects. The call receives `param_1`, values derived from
+`param_3` (including `param_3[0x3a]` and `param_3[0x13b]`), and other dependencies
+resolved from the surrounding application state. Reuse of that dependency
+graph is important: the older note correctly warns that null or invented
+dependency pointers are unsafe.
+
+The factory call is one step forward, but not yet a working entry point. The
+remaining work is to establish where the constructed overlay is owned and
+attached, which code path presents it, whether that path is live in the
+emulator, and how to invoke it without creating a second instance or breaking
+native close behavior. Do not infer safe runtime activation solely from the
+constructor or the presence of a factory call.
+
 All addresses in this note are Ghidra addresses for `knob.bin`, firmware
 1.3.0.12. Subtract 0x100000 for the mod's file-VA constants. Findings here are
 static decompilation evidence, not a successful runtime activation.
 
-## Constructor and dependencies
+## Earlier component notes (not the overlay constructor)
 
 `03337be0(self, dependency2, dependency3)` constructs the component, sets the
 name Preferences, and calls the base constructor `02f90170`. It stores:

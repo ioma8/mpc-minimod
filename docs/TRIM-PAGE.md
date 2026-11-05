@@ -1,5 +1,10 @@
 # The Sample / Trim page — verified layout and behaviour
 
+> Historical investigation log. The later native-control AutoTrim path in
+> [`AUTOTRIM-NATIVE.md`](AUTOTRIM-NATIVE.md) supersedes the older property,
+> heap-scan, marker-overlay, and emulator-pad conclusions recorded below. Use
+> [`AUTOTRIM-HANDOFF.md`](../AUTOTRIM-HANDOFF.md) for current behavior.
+
 > **Firmware 1.3.0.12 only.** Everything below was measured on
 > `/usr/bin/MPC Sample` `b6584cba76e416e432ad202509099d34373dc2c3d6a8fb625f5678bf0193b508`
 > (`1.3.0.12`). All addresses are **file offsets**; runtime addresses are

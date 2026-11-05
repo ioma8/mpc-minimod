@@ -11,16 +11,19 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 `autorun` package. Nothing on disk is modified: the library is copied to `/run`
 (tmpfs) and preloaded into the stock app, so a reboot returns to stock.
 
-**Status: the four original features are verified on real hardware
-(2026-11-03); SAMPLE OPTIONS / HPSS is emulator-verified (2026-11-04).**
+**Current status:** pitch shift is verified on hardware. AutoTrim's native
+command and UI updates are verified in the emulator. SAMPLE OPTIONS / HPSS is
+verified in the emulator. See [`docs/AUTOTRIM-NATIVE.md`](../docs/AUTOTRIM-NATIVE.md)
+and [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md) for validation details.
 
 | # | feature | control | state |
 | --- | --- | --- | --- |
 | 1 | pitch shift in 16 Levels, ±8 semitones (half the pad grid) | `PLUS` / `MINUS` | verified on device |
-| 2 | autotrim of the selected pad's sample to its silent edges | `SHIFT` + `B3` | analysis + layer write verified; **on-screen Start/End markers do not refresh** |
-| 3 | chromatic control from an external MIDI controller | always while 16 LEVELS is lit | note path verified with simulated MIDI |
-| 4 | shift overlay label | `SHIFT` held on the Sample page | verified on device |
-| 5 | SAMPLE OPTIONS → HPSS split onto two pads | `SHIFT` + `DATA`, then `DATA` | emulator-verified; see [HPSS-HANDOFF](../HPSS-HANDOFF.md) |
+| 2 | AutoTrim of the selected pad's sample | `SHIFT` + `B3` | native command path and marker refresh verified in emulator |
+| 3 | AutoTrim soft-key caption | `SHIFT` held on the Sample page | verified; hidden in Chop mode |
+| 4 | SAMPLE OPTIONS → HPSS split onto two pads | `SHIFT` + `DATA`, then `DATA` | emulator-verified; see [HPSS-HANDOFF](../HPSS-HANDOFF.md) |
+
+Chromatic MIDI from an external controller is not included in the release build.
 
 Status history, evidence and open work: [`docs/MINIMOD.md`](../docs/MINIMOD.md).
 The Sample/Trim page itself: [`docs/TRIM-PAGE.md`](../docs/TRIM-PAGE.md).
@@ -41,18 +44,13 @@ released   : Trim        Tune        Filter
   not also run. The shift is applied in
   `0x27e4400(ctx, ?, ?, semitoneOffset)` — the function the 16-Levels renderer
   calls with `(pad & 0xf) - originalPad`.
-* **Autotrim** — `SHIFT` + **B3**. The two resulting edges are drawn on the
-  waveform (the page itself only re-reads its trim when the pad is re-selected,
-  so without this the result would be invisible); any knob move or leaving the
-  page removes them. Computes the first/last non-silent frame of
-  the pad's sample from the app's own WAV copy (24-bit aware). The silence
-  threshold is **relative to the file's peak** (default −40 dB, so low-level
-  noise at the ends is trimmed as well, not only digital silence) with an
-  absolute floor so a near-silent file is not trimmed away; `MINIMOD_TRIM_DB`
-  overrides it (e.g. `-30` to trim more aggressively, `-60` to keep more).
-  It then writes the trim core, the layer frames and the applied value. The audio state lands; the
-  page's cached markers are not refreshed, because the page paints from a model
-  object we have not identified yet (full account in `docs/TRIM-PAGE.md`).
+* **AutoTrim** — `SHIFT` + **B3**. The app's native control dispatcher updates
+  Start, End, the model, and waveform markers. While SHIFT stays held, presses
+  use 3%, 6%, 9%, then clear trim; release SHIFT to reset the cycle. The default
+  threshold is 3% of peak (about −30.46 dB), with a 90-count floor.
+  `MINIMOD_TRIM_DB` overrides the relative threshold for the first step. PCM
+  16/24/32-bit and float32 WAV files are supported. AutoTrim is suppressed in
+  Chop mode, where SHIFT+B3 is the stock Split command.
 * **SAMPLE OPTIONS / HPSS** — `SHIFT` + `DATA` opens the menu on the Sample
   page. Turn `DATA` to choose **HPSS** or **Close**, press `DATA` to confirm,
   or press `SHIFT` + `DATA` to close. HPSS reads the selected sample, runs the
@@ -61,9 +59,8 @@ released   : Trim        Tune        Filter
   sample and the live trim/chop range are left unchanged. Needs two empty pads;
   outputs are float32 WAVs on this firmware. Full details and validation:
   [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md).
-* **Chromatic MIDI** — always on while 16 LEVELS is lit (no toggle). Off with
-  `MINIMOD_MIDI=0`: the rawmidi reader takes the control-surface node from the
-  app, which stops the stock app from starting.
+* **Chromatic MIDI** — not included in the release build; see
+  [`MIDI-CHROMATIC.md`](../docs/MIDI-CHROMATIC.md) for the investigation.
 
 ## Install (device)
 
@@ -113,10 +110,9 @@ and returns to the hook. Both pages are `mprotect`ed executable — a missing
 `mprotect` on the trampoline page makes every hook die with SIGSEGV at the
 trampoline address.
 
-The overlay is a second mechanism: the `SampleModeScreen` vtable slot 27
-(`Component::paint`) is replaced, the stock paint is called first, and while
-SHIFT is held the third soft-key cell is filled black and `AutoTrim` drawn with
-the app's own `Graphics` calls. See [`docs/AM-MOD-NOTES.md`](../docs/AM-MOD-NOTES.md).
+The paint hook draws the temporary AutoTrim soft-key caption and confirmation
+toast. It no longer draws trim edges: those are updated by the native command.
+The earlier overlay investigation is in [`docs/AM-MOD-NOTES.md`](../docs/AM-MOD-NOTES.md).
 
 ## Anchors (1.3.0.12)
 

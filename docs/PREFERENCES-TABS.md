@@ -2,13 +2,22 @@
 > verified constructor, layout, tab-switch and close routines. The touchscreen
 > entry-point claims below are historical inferences, not runtime evidence.
 
-# How the Preferences tabs are (not) reachable
+# Preferences tab research and reachability
 
-The ten tabs observed in the binary — `WiFiTab`, `EthernetTab`, `BluetoothTab`,
-`AudioTab`, `InfoTab`, `LegalTab`, `BackupRestoreTab`, `SoftwareUnlockTab`,
-`CrashReportsTab`, `NotImplementedTab` — all belong to one screen,
-`TouchPreferences`. This document records how that screen can be opened, and why
-it is undocumented anywhere.
+> **Scope correction:** the class-name inventory below came from an earlier
+> Preferences component and is not confirmed as the tab set built by the newer
+> `TouchPreferencesOverlay` constructor. The factory path in
+> [`TOUCH-PREFERENCES-WIRING.md`](TOUCH-PREFERENCES-WIRING.md) builds categories
+> named Info, WiFi, Ethernet, Sequencer, MIDI/Sync, Hardware, AutoLoadSave,
+> Other, RecordingExport, Project, and Crash Reports. Which concrete child
+> classes and controls those categories contain still needs to be established.
+
+Earlier binary string/class inspection found `WiFiTab`, `EthernetTab`,
+`BluetoothTab`, `AudioTab`, `InfoTab`, `LegalTab`, `BackupRestoreTab`,
+`SoftwareUnlockTab`, `CrashReportsTab`, and `NotImplementedTab`. Their runtime
+relationship to the overlay's current category list is unverified. This
+document records the older entry-point investigation and the current evidence
+is summarized in the wiring note linked above.
 
 ## 1. There is no panel button for it
 
@@ -42,9 +51,9 @@ digitizer — so the entry point is a touch target on the LCD.
 That is also why the tabs are documented nowhere: the panel-only documentation
 paths (the lab map, and the vendor's own button guide) never see them.
 
-**And it cannot be reached in the emulator**: the app ignores pointer input. The
-lab states it in `panel/server.py:414` (*"the app ignores tablet/touch input"*),
-and it was verified by injecting an absolute pointer tap over QMP
+**The touchscreen route is unavailable in the emulator**: the app ignores
+pointer input. The lab states it in `panel/server.py:414` (*"the app ignores
+tablet/touch input"*), and it was verified by injecting an absolute pointer tap over QMP
 `input-send-event` onto the `virtio-tablet` — 0 px change on screen and no state
 change. The app opens `/dev/input/event0..2` (tablet, keyboard, gpio-keys) but
 acts on none of the tablet events.
@@ -71,12 +80,12 @@ which tabs a given model builds is decided in code, not by a string.
 2. **In the emulator** — impossible as shipped: no touch delivery reaches the app.
    Would need the lab to emulate the device's touch controller (the virtio-tablet
    is ignored).
-3. **Programmatically (mod)** — call the `TouchPreferences` root component and
-   make it visible, then select a tab index. This is the only way to see the tabs
-   *in the lab*. What is still missing: the address of the code that creates /
-   shows that component, and its "add/select tab" virtual. Finding it needs the
-   Ghidra session restarted (it was stopped) or a deeper local xref pass on the
-   tab constructors (`TouchPreferences::*Tab`).
+3. **Programmatically (mod)** — the later RE pass found the actual overlay
+   constructor (`FUN_03804fe0`) and a factory path in `FUN_03519cb0` that supplies
+   existing app dependencies. That identifies a construction path, but does not
+   yet establish safe ownership, presentation, or a runtime call site. See
+   [`TOUCH-PREFERENCES-WIRING.md`](TOUCH-PREFERENCES-WIRING.md). SHIFT+DATA
+   activation is not implemented.
 
 ## 5. What this means for the earlier findings
 

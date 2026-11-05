@@ -41,7 +41,8 @@ A07 and A09 use IEEE float32 WAV data, not integer PCM32. The earlier decoder
 ignored the WAV format tag and interpreted float bit patterns as integer audio,
 which made quiet tails appear loud. The decoder now distinguishes PCM and float,
 rejects unsupported encodings, and handles full-scale negative PCM without a
-16-bit absolute-value overflow. The default threshold remains -40 dB.
+16-bit absolute-value overflow. At this stage the default was still -40 dB; it
+was later raised to 3% of peak (about -30.46 dB), as recorded below.
 
 Verified in the emulator after this fix:
 - A07: 81..60816 of 90197 frames (0.666 seconds removed from the tail).
