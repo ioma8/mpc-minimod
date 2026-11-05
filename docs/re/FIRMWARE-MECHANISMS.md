@@ -165,17 +165,24 @@ Undo labels and telemetry keys are useful anchors for finding them:
 
 ## 9. The control surface and input path
 
+The current, Ghidra-traced menu path is documented in
+[SAMPLE-OPTIONS-INPUT.md](SAMPLE-OPTIONS-INPUT.md). The November 4 claim that a
+changed float property is a DATA detent was wrong and caused ignored turns.
+
 | mechanism | detail | evidence |
 |---|---|---|
-| raw stream | the controller's events are 32-byte records on `/dev/snd/midiC1D0` with the MIDI byte at `+16` | [doc] |
-| `read()` interception | the mod's `read()` wrapper sees every event and can drop specific messages (used to suppress input while a menu or an operation is active) | [rt] |
-| button dispatcher | `buttons(event)`; `event+8` = code, `event+9` = `0x7f` down / `0x00` up | [rt] |
-| control-change path | `0x159f230(event, raw, lo, range)`; `event+8` = CC number | [rt] |
-| encoders | **not** a button and **not** MIDI on hardware: a turn ends in the value broadcaster `0x13bb930` as a changed property value, which is how the focused control learns about it. `A_ROTARY 0x15f5690` is not in that path (zero calls when turning `DATA` in the emulator). The emulator's MIDI `01`/`7F` reaches the same broadcast | [rt] |
-| button codes | `CHOP 0x4b`, `SHIFT 0x31`, screen buttons `0x0c/0x0d/0x0e` (= B1/B2/B3), `B3 0x0e` repeats while held | [rt] |
-| panel feedback | lab HTTP `/state?since=0`: LED 75 = CHOP bright, LED 82 = PLAY | [rt] |
-| input suppression | dropping the three `B0` reads stops the page from seeing a knob while the mod owns the interaction | [rt] |
-| menu wheel | while the mod's menu is open it takes one detent per *changed* property value from `0x13bb930` and swallows the notification; the same value re-broadcast (a repaint) is ignored | [rt] |
+| button dispatcher | mod `0x159f2f0`; `event+8` code, `event+9` down/up; `*(*(event)+0x10)` is the surface | [static] + [rt] |
+| decoded controls | mod `0x159f230(event, raw, lo, range)`; controller at `event+8` | [static] + [rt] |
+| DATA decoding | controller `0x64`; delta = `raw > 64 ? raw-128 : raw` | [static] |
+| DATA signal | mod `0x140dbc0(surface+0x2da8, delta)` emits every integer event, including repeated identical deltas | [static] + [rt] |
+| menu ownership | match that signal object, move by sign, consume while open/busy; forward all other signal objects | [rt] |
+| knob suppression | native decoded-control hook blocks non-DATA controls while the menu owns input; no read interception | [rt] |
+| button codes | CHOP `0x4b`, SHIFT `0x31`, DATA push `0x6f`, screen buttons `0x0c/0x0d/0x0e` | [rt] |
+| panel feedback | `/state?since=0`: LED 75 CHOP, LED 82 PLAY | [rt] |
+
+The float broadcaster `0x13bb930` is still used by absolute knobs and the
+existing AutoTrim instrumentation. It is not the menu's encoder source.
+There are no transport or property-change fallbacks for menu navigation.
 
 ## 10. Sample pool, pad occupancy and Extract
 
@@ -211,7 +218,7 @@ firmware keep ownership of files, history and pad assignment.** Details:
 
 | thread | what runs there | rule |
 |---|---|---|
-| control-surface / input | `buttons()`, `cc_capture()`, `read()` wrapper | must not touch the model; publish a request only |
+| control-surface / input | `buttons()`, `cc_capture()`, `data_signal()` | must not touch the model; publish a request only |
 | UI / paint | `screen_paint()`, after the stock paint | the only place model calls are safe |
 | worker | HPSS DSP and file I/O | never touches the model; commits through the native command on the UI thread |
 | audio | playback; calls the marker resolver for the slice it plays | observe only |

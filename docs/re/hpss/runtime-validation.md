@@ -1,5 +1,10 @@
 # HPSS runtime validation (emulator)
 
+> Historical input experiments: the raw-read suppression described below was
+> replaced on 2026-11-05 by a single native signed DATA-event hook.
+> See [current input mechanism and validation](../SAMPLE-OPTIONS-INPUT.md).
+
+
 Date: 2026-11-04. Firmware 1.3.0.12. Emulator `virtual-mpc-sample`, ac50
 `NRestarts=0` throughout. The release build is `mod/build/minimod.so`; the
 logging build is `mod/build/minimod-hpss.so` with `MINIMOD_LOG=1`.

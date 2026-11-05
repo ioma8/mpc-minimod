@@ -1,5 +1,10 @@
 # HPSS reverse-engineering findings and method (2026-11-04)
 
+> Historical input experiments: the raw-read suppression described below was
+> replaced on 2026-11-05 by a single native signed DATA-event hook.
+> See [current input mechanism and validation](re/SAMPLE-OPTIONS-INPUT.md).
+
+
 This is the "what we learned and how we learned it" companion to
 [HPSS-RE.md](HPSS-RE.md) and
 [the runtime validation](re/hpss/runtime-validation.md). It records the

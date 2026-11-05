@@ -9,6 +9,12 @@ computes as `base + offset`).
 | `FUN_02902e60__pad_sync_loop.c` | `0x2902e60` | `0x2802e60` | loops over the 8 pad-state blocks and applies each |
 | `FUN_0290dca0__pad_dispatch.c` | `0x290dca0` | `0x280dca0` | per-pad dispatch; `param_2 == 0` resets the page |
 
+## SAMPLE OPTIONS input
+
+[Native DATA-event trace](SAMPLE-OPTIONS-INPUT.md): the signed integer emitter,
+control-surface identity, modal ownership, why float-property inference lost
+turns, and the host/emulator regression checks.
+
 ## The pad-state blocks
 
 `FUN_02902e60` is the clearest statement of where the per-pad state lives:

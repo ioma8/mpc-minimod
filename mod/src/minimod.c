@@ -68,7 +68,7 @@
 #define A_SCREEN_RESIZED 0x1660370 /* screen resize notification          */
 #define A_SAMPLE_FRAMES 0x2941f80  /* sample frame count getter           */
 #define A_PROG_INST 0x286bbe0      /* program -> instrument accessor      */
-#define A_ROTARY 0x15f5690         /* rotary connection core              */
+#define A_DATA_SIGNAL 0x140dbc0    /* signed integer event emitter, Ghidra 0x150dbc0 */
 #define A_REPAINT 0x1149880        /* component repaint (comp, x, y)      */
 #define A_TRIM_CORE 0x15e70c0      /* trim core (float value, param)      */
 #define A_BROADCAST 0x13bb930      /* value broadcaster (property, float) */
@@ -1317,7 +1317,6 @@ static void (*orig_trim)(void *, float);
 static void (*orig_resized)(void *, long, long, long);
 static void (*orig_reg)(void *, void *);
 static void *(*orig_prog_inst)(void *, int);
-static void (*orig_rotary)(void *, float);
 /* The Sample page (0x2468 bytes) captured from SamplePage_Ctor; it owns the
  * Start/End widgets and is what must be repainted after a property change. */
 static void *g_page;
@@ -1671,214 +1670,27 @@ static int g_spectral_active;
 static volatile int g_hpss_menu;
 static volatile int g_hpss_busy;
 static volatile int g_hpss_sel;
-static int g_hpss_cc_state;
-static int g_hpss_cc_skip;
-static int g_rm_shift;
-static int g_rm_note_state;
-static unsigned char g_rm_note_status;
-static unsigned char g_rm_note;
-static long long g_hpss_guard_until;
+/* Native DATA input: the decoded control surface emits signed deltas through
+ * Ghidra FUN_0150dbc0(surface + 0x2da8, delta). Unlike the float broadcaster,
+ * this is an event: repeated identical deltas must each move the selection.
+ * Learn the surface from the same native event that opens SAMPLE OPTIONS. */
+static uintptr_t g_data_signal;
+static void (*orig_data_signal)(void *, int);
 static void hpss_repaint(void);
-static void wheel_forget(void);
-static int g_wheel_native;
-static void selftest_wheel(void);
 
-static unsigned char g_cc_num;
-static unsigned char g_wheel_last[128];
-static int g_wheel_seen[128];
-
-/* Move the menu selection by one for one encoder detent.
- *
- * The encoder reaches us as a control change, but hardware and emulator do not
- * agree on how: some send a relative value (1/127 signed, or 0x41/0x3F biased
- * around 64, repeating the same value for repeated detents), some send the
- * absolute position (0..127), and the controller number is not fixed either.
- * So: recognise both relative encodings by value, fall back to the difference
- * from the previous value for an absolute one, and accept any controller -
- * while the menu is open we swallow them all anyway. */
-static void hpss_menu_wheel(unsigned char num, unsigned char value)
+static void data_signal(void *self, int delta)
 {
-    int step;
-    if (g_wheel_native)
-        return;                 /* the property path already drives the menu */
-    if (value == 0x01 || value == 0x41)
-        step = 1;
-    else if (value == 0x7f || value == 0x3f)
-        step = -1;
-    else if (!g_wheel_seen[num]) {
-        g_wheel_seen[num] = 1;
-        g_wheel_last[num] = value;
-        return;                     /* first value of an absolute wheel: no move */
-    } else {
-        int d = (int)value - (int)g_wheel_last[num];
-        if (d > 64) d -= 128;
-        if (d < -64) d += 128;
-        if (!d) return;
-        step = d > 0 ? 1 : -1;
-    }
-    g_wheel_seen[num] = 1;
-    g_wheel_last[num] = value;
-    if (g_hpss_menu && !g_hpss_busy) {
-        g_hpss_sel = (g_hpss_sel + (step > 0 ? 1 : 2)) % 3;
-        hpss_repaint();
-        mlog("HPSS wheel cc=%u value=%u sel=%d\n", num, value, g_hpss_sel);
-    }
-}
-
-/* The DATA encoder reaches the app as `B0 64 value` on the control-surface
- * rawmidi port.  The app's JUCE hooks do not expose it, so intercept the read
- * that delivers it.  Each 32-byte control-surface event carries one MIDI byte
- * at offset 16.  While the menu owns input, the three CC reads are dropped
- * entirely (read returns 0); rewording the bytes was not enough because the
- * app still acted on the modified CC.  Note messages pass through so DATA
- * still confirms/closes. */
-typedef ssize_t (*read_fn)(int, void *, size_t);
-static int fd_midi_cache[1024];
-static int fd_midi_known[1024];
-#define FD_OTHER 0
-#define FD_MIDI 1
-#define FD_INPUT 2
-static int fd_kind(int fd)
-{
-    if (fd < 0 || fd >= 1024)
-        return FD_OTHER;
-    if (fd_midi_known[fd])
-        return fd_midi_cache[fd];
-    char link[128], path[256];
-    int n = snprintf(link, sizeof link, "/proc/self/fd/%d", fd);
-    ssize_t k = n > 0 && n < (int)sizeof link ? readlink(link, path, sizeof path - 1) : -1;
-    int kind = FD_OTHER;
-    if (k > 0) {
-        path[k] = 0;
-        if (strstr(path, "midi") || strstr(path, "snd/seq"))
-            kind = FD_MIDI;
-        else if (strstr(path, "/dev/input/event"))
-            kind = FD_INPUT;
-    }
-    fd_midi_cache[fd] = kind;
-    fd_midi_known[fd] = 1;
-    return kind;
-}
-static int fd_is_midi(int fd) { return fd_kind(fd) == FD_MIDI; }
-
-/* A rotary encoder can reach the app as an evdev device instead of a MIDI
- * control change - on hardware the DATA wheel may be wired to the input
- * subsystem. Handle both: EV_REL is a delta, EV_ABS an absolute position. */
-struct mm_input_event {
-    long long sec, usec;
-    unsigned short type, code;
-    int value;
-};
-static int g_abs_valid[64];
-static int g_abs_last[64];
-static int input_wheel(const struct mm_input_event *e)
-{
-    if (e->type == 0x02) {              /* EV_REL: relative, value is the delta */
-        if (!e->value) return 0;
-        return e->value > 0 ? 1 : -1;
-    }
-    if (e->type == 0x03) {              /* EV_ABS: absolute position */
-        int code = e->code & 63, d;
-        if (!g_abs_valid[code]) {
-            g_abs_valid[code] = 1;
-            g_abs_last[code] = e->value;
-            return 0;
-        }
-        d = e->value - g_abs_last[code];
-        g_abs_last[code] = e->value;
-        if (!d) return 0;
-        return d > 0 ? 1 : -1;
-    }
-    return 0;                           /* EV_SYN / EV_KEY / EV_MSC: not a turn */
-}
-
-ssize_t read(int fd, void *buffer, size_t count)
-{
-    static read_fn real;
-    if (!real)
-        real = (read_fn)dlsym(RTLD_NEXT, "read");
-    ssize_t n = real ? real(fd, buffer, count) : -1;
-    int kind = n > 0 ? fd_kind(fd) : FD_OTHER;
-    if (kind == FD_INPUT) {
-        int suppress_in = g_hpss_menu;
-        int step = 0;
-        for (ssize_t i = 0; i + (ssize_t)sizeof(struct mm_input_event) <= n;
-             i += sizeof(struct mm_input_event)) {
-            struct mm_input_event e;
-            memcpy(&e, (char *)buffer + i, sizeof e);
-            int s2 = input_wheel(&e);
-            if (s2)
-                step = s2;
-        }
-        if (suppress_in && step && g_hpss_menu && !g_hpss_busy) {
-            g_hpss_sel = (g_hpss_sel + (step > 0 ? 1 : 2)) % 3;
+    if ((uintptr_t)self == __atomic_load_n(&g_data_signal, __ATOMIC_ACQUIRE) &&
+        (g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))) {
+        if (g_hpss_menu && !g_hpss_busy && delta) {
+            g_hpss_sel = (g_hpss_sel + (delta > 0 ? 1 : 2)) % 3;
             hpss_repaint();
-            mlog("HPSS wheel evdev step=%d sel=%d\n", step, g_hpss_sel);
-            return 0;
+            mlog("menu DATA delta=%d sel=%d\n", delta, g_hpss_sel);
         }
-        return n;
+        return; /* consume only this surface's DATA event, including busy */
     }
-    if (n > 0 && kind == FD_MIDI) {
-        unsigned char *p = buffer;
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        long long now = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-        int suppress = g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE) ||
-                       g_hpss_guard_until > now;
-        int drop = 0;
-        for (ssize_t i = 0; i + 16 < n; i += 32) {
-            unsigned char b = p[i + 16];
-            if (b & 0x80) {
-                g_hpss_cc_skip = 0;
-                g_hpss_cc_state = 0;
-                g_rm_note_state = 0;
-                if (b == 0xb0) {
-                    g_hpss_cc_state = 1;
-                    g_hpss_cc_skip = 1;
-                    if (suppress) {
-                        drop = 1;
-                        g_hpss_guard_until = now + 200;
-                    }
-                } else if (b == 0x90 || b == 0x80) {
-                    g_rm_note_status = b;
-                    g_rm_note_state = 1;
-                }
-            } else if (g_hpss_cc_skip == 1) {
-                g_hpss_cc_skip = 2;
-                g_cc_num = b;               /* any controller: the encoder is not 0x64 everywhere */
-                g_hpss_cc_state = 2;
-                if (suppress) {
-                    drop = 1;
-                    g_hpss_guard_until = now + 200;
-                }
-            } else if (g_hpss_cc_skip == 2) {
-                g_hpss_cc_skip = 0;
-                if (suppress) {
-                    drop = 1;
-                    g_hpss_guard_until = now + 200;
-                    if (g_hpss_cc_state == 2)
-                        hpss_menu_wheel(g_cc_num, b);
-                }
-                g_hpss_cc_state = 0;
-            } else if (g_rm_note_state == 1) {
-                g_rm_note = b;
-                g_rm_note_state = 2;
-            } else if (g_rm_note_state == 2) {
-                g_rm_note_state = 0;
-                unsigned char status = g_rm_note_status & 0xf0;
-                if (status == 0x90 && g_rm_note == 0x31 && b)
-                    g_rm_shift = 1;
-                else if (status == 0x80 && g_rm_note == 0x31)
-                    g_rm_shift = 0;
-                else if (status == 0x90 && g_rm_note == 0x6f && b &&
-                         g_rm_shift && !g_hpss_menu)
-                    g_hpss_guard_until = now + 1000;
-            }
-        }
-        if (drop)
-            return 0;
-    }
-    return n;
+    if (orig_data_signal)
+        orig_data_signal(self, delta);
 }
 
 static void hpss_make_names(void)
@@ -3611,24 +3423,16 @@ out:
     g_hpss_busy = 0;
     g_hpss_menu = 0;
     g_hpss_data_down = 0;
-    g_hpss_cc_state = 0;
-    g_hpss_cc_skip = 0;
-    g_hpss_guard_until = 0;
     g_hpss_finalizing = 0;
     hpss_repaint();
 }
 
 static void hpss_open(void)
 {
-    wheel_forget();   /* seed values: the first broadcast must not move */
-
     if (!sample_page_visible() || g_hpss_busy)
         return;
     g_hpss_menu = 1;
     g_hpss_sel = 0;
-    g_hpss_cc_state = 0;
-    g_hpss_cc_skip = 0;
-    g_hpss_guard_until = 0;
     g_hpss_data_down = 0;
     hpss_set_status("");
     hpss_repaint();
@@ -3640,9 +3444,6 @@ static void hpss_close(void)
         return;
     g_hpss_menu = 0;
     g_hpss_data_down = 0;
-    g_hpss_cc_state = 0;
-    g_hpss_cc_skip = 0;
-    g_hpss_guard_until = 0;
     hpss_repaint();
 }
 
@@ -3716,26 +3517,13 @@ static void buttons(void *event)
 
     unsigned code = event ? FIELD(event, 8, uint8_t) : 0;
     unsigned down = event ? FIELD(event, 9, uint8_t) : 0;
-#if MINIMOD_LOG
-    /* temporary: dump every input event so an encoder turn can be identified */
-    {
-        static int n;
-        if (n < 200) {
-            unsigned char raw[24];
-            if (event && rd((uintptr_t)event, raw, sizeof raw)) {
-                n++;
-                mlog("evt %02x %02x | %02x%02x%02x%02x %02x%02x%02x%02x "
-                     "%02x%02x%02x%02x %02x%02x%02x%02x\n",
-                     code, down,
-                     raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-                     raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14],
-                     raw[15]);
-            }
-        }
-    }
-#endif
-    if (event && rd((uintptr_t)event, g_hpss_btn, sizeof g_hpss_btn))
+    if (event && rd((uintptr_t)event, g_hpss_btn, sizeof g_hpss_btn)) {
         g_hpss_btn_valid = 1;
+        uintptr_t context = 0, surface = 0;
+        memcpy(&context, g_hpss_btn, sizeof context);
+        if (context && rd(context + 0x10, &surface, sizeof surface) && surface)
+            __atomic_store_n(&g_data_signal, surface + 0x2da8, __ATOMIC_RELEASE);
+    }
 #if MINIMOD_DEBUG
     if (g_snap_track && g_snap_n < 24) {
         char tag[16];
@@ -3743,10 +3531,6 @@ static void buttons(void *event)
         chop_snapshot(tag);
         g_snap_n++;
     }
-#endif
-#if MINIMOD_DEBUG
-    if (g_hpss_menu && down && code == 0x06)
-        selftest_wheel();
 #endif
     if (code == 0x6f) { /* DATA press/turn */
         static int consumed;
@@ -3984,12 +3768,6 @@ static void *prog_inst(void *a, int b)
     return orig_prog_inst ? orig_prog_inst(a, b) : 0;
 }
 
-static void rotary(void *a, float v)
-{
-    if (orig_rotary)
-        orig_rotary(a, v);
-}
-
 /* The trim core is called by the broadcaster's listener loop, which keeps the
  * property in x20: learning that pair is what lets autotrim drive the page. */
 static volatile int g_own_call;
@@ -4208,69 +3986,15 @@ static void trim_probe(void *self, float v)
         orig_trim(self, v);
 }
 
-/* Menu input from the firmware's own parameter plumbing.
- *
- * Every knob and rotary ends in the value broadcaster (0x13bb930): the control
- * writes its new value and the property notifies its listeners. The stock
- * hardware encoder is a rotary, so its turn shows up here as a value change on
- * whatever property the page has focused - no MIDI, no evdev, no knowledge of
- * the transport. While our menu is open we take that change as one detent and
- * swallow the notification so the page underneath does not act on it.
- *
- * Only a *changed* value counts: repaints re-broadcast the same value and must
- * not scroll the menu.
- */
-static struct { uintptr_t prop; float value; } g_wheel[8];
-static int g_wheel_n;
-/* Set once the firmware's own plumbing has moved the menu: from then on the
- * MIDI/evdev handlers stay quiet, so one detent is one step, not two. */
-static int g_wheel_native;
-
-static void wheel_forget(void) { g_wheel_n = 0; g_wheel_native = 0; }
-
-static int wheel_from_bcast(void *self, float v)
-{
-    if (!g_hpss_menu || g_hpss_busy || g_own_call || !self)
-        return 0;
-    uintptr_t P = (uintptr_t)self;
-    for (int i = 0; i < g_wheel_n; ++i) {
-        if (g_wheel[i].prop != P)
-            continue;
-        float prev = g_wheel[i].value;
-        if (fabsf(v - prev) < 1e-6f)
-            return 0;                     /* same value: a repaint, not a turn */
-        int step = v > prev ? 1 : -1;
-        g_wheel_native = 1;
-        g_wheel[i].value = v;
-        g_hpss_sel = (g_hpss_sel + (step > 0 ? 1 : 2)) % 3;
-        hpss_repaint();
-        mlog("wheel bcast prop=%p %.4f->%.4f sel=%d\n", self, (double)prev,
-             (double)v, g_hpss_sel);
-        return 1;                         /* swallow: the page must not act */
-    }
-    if (g_wheel_n < 8) {
-        g_wheel[g_wheel_n].prop = P;
-        g_wheel[g_wheel_n].value = v;
-        g_wheel_n++;
-    }
-    return 0;
-}
-
 static void bcast_hook(void *self, float v)
 {
-    if (wheel_from_bcast(self, v))
-        return;
     int i = g_nbc;
     g_bc[i & 255].p = (uintptr_t)self;
     g_bc[i & 255].v = v;
     g_nbc = i + 1;
     if (probe_mode && i < 64)
         mlog("minimod: bcast %p v=%.4f\n", self, (double)v);
-#if MINIMOD_LOG
-    {
-        mlog("bc %p %.4f\n", self, (double)v);
-    }
-#endif
+
     /* Record the property a *native* broadcast uses: that is the object the
      * page listens to. Our own broadcasts are flagged. */
     if (!g_own_call) {
@@ -4296,23 +4020,6 @@ static void bcast_hook(void *self, float v)
     if (orig_bcast)
         orig_bcast(self, v);
 }
-
-#if MINIMOD_DEBUG
-static void selftest_wheel(void)
-{
-    if (g_nbp <= 0)
-        return;
-    static int tog;
-    float v = (tog ^= 1) ? 0.35f : 0.45f;
-    int save = g_own_call;
-    g_own_call = 0;
-    FN(A_BROADCAST, void (*)(void *, float))((void *)g_bp[0], v);
-    g_own_call = save;
-    mlog("selftest wheel injected %.2f sel=%d\n", (double)v, g_hpss_sel);
-}
-#else
-static void selftest_wheel(void) {}
-#endif
 
 /* ------------------------------------------------------- message-thread pump */
 static volatile int g_trim_pending;
@@ -4910,7 +4617,13 @@ static int g_in_cc_replay;
 
 static void cc_capture(void *ev, unsigned raw, float lo, float range)
 {
-    (void)lo;
+    /* Keep the stock decoder/transport intact. Only DATA reaches the native
+     * integer signal while our modal menu owns controls; knobs must not edit
+     * the sample behind it. Replayed internal commands are not user input. */
+    if (!g_in_cc_replay && ev &&
+        (g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE)) &&
+        ((unsigned char *)ev)[8] != 0x64)
+        return;
 #if MINIMOD_DEBUG
     if (g_snap_track && !g_in_cc_replay && ev && g_snap_n < 24) {
         char tag[24];
@@ -6663,6 +6376,9 @@ __attribute__((constructor)) static void load(void)
     void *t_sync = install_hook(base + 0x2822260, (void *)sync_probe);
     if (t_sync)
         orig_sync = (void (*)(void *, void *, void *, void *))t_sync;
+    void *t_data = install_hook(base + A_DATA_SIGNAL, (void *)data_signal);
+    if (t_data)
+        orig_data_signal = (void (*)(void *, int))t_data;
     void *t_cc = install_hook(base + 0x159f230, (void *)cc_capture);
     if (t_cc)
         orig_cc = (void (*)(void *, unsigned, float, float))t_cc;
