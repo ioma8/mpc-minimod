@@ -69,3 +69,6 @@ sample creation and assignment paths,
 SAMPLE OPTIONS flow, and
 [findings and method](../HPSS-RE-FINDINGS.md) records the encoder discovery,
 the useful tooling and the blind paths.
+
+The HPSS Extract writer boundary also supports Add Reverb's appended tail:
+[writer-tail mechanism and emulator evidence](../REVERB-HANDOFF.md).

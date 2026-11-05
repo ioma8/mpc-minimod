@@ -1,0 +1,109 @@
+=== GHIDRA SCRIPT EXECUTION ===
+Script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Program: knob.bin
+Time: Thu Nov 05 10:27:11 CET 2026
+
+Found script: /Users/jakubkolcar/ghidra_scripts/ResearchDecompile.java
+Size: 1410 bytes
+
+Script provider: JavaScriptProvider
+Script args: [0x2a41f80, 0x21c6e40]
+
+--- SCRIPT OUTPUT ---
+===== 0x2a41f80 => FUN_02a41f80 @ 02a41f80 =====
+
+undefined4 FUN_02a41f80(long param_1)
+
+{
+  return *(undefined4 *)(*(long *)(param_1 + 0x130) + 4);
+}
+
+
+===== 0x21c6e40 => FUN_021c6e40 @ 021c6e40 =====
+
+void FUN_021c6e40(long *param_1,int param_2,uint param_3,long param_4,uint param_5)
+
+{
+  uint uVar1;
+  long lVar2;
+  ulong uVar3;
+  undefined *puVar4;
+  code *pcVar5;
+  int local_d4;
+  long local_d0 [2];
+  code *local_c0;
+  code *local_b8;
+  undefined1 auStack_b0 [72];
+  long local_68;
+  
+  pcVar5 = *(code **)(*param_1 + 0x30);
+  local_68 = *(long *)PTR___stack_chk_guard_07264398;
+  param_1[3] = 0;
+  (*pcVar5)(param_1,param_2);
+  if (param_3 != 0) {
+    do {
+      while( true ) {
+        pcVar5 = *(code **)(*param_1 + 0x20);
+        if (pcVar5 == FUN_021c58f0) {
+          if (((param_1[3] & 1U) != 0) ||
+             (lVar2 = (**(code **)(*param_1 + 0x18))(param_1),
+             (long)(ulong)*(uint *)(param_1[1] + 4) <= lVar2)) goto LAB_021c6efc;
+        }
+        else {
+          uVar3 = (*pcVar5)(param_1);
+          if ((uVar3 & 1) != 0) goto LAB_021c6efc;
+        }
+        uVar1 = param_5;
+        if (param_3 < param_5) {
+          uVar1 = param_3;
+        }
+        (**(code **)(*param_1 + 0x28))(local_d0,param_1,uVar1);
+        if (local_d0[0] == 0) {
+          param_1[3] = param_1[3] | 1;
+        }
+        local_d4 = param_2;
+        if (*(long *)(param_4 + 0x10) == 0) {
+          puVar4 = (undefined *)(local_68 - *(long *)PTR___stack_chk_guard_07264398);
+          if (puVar4 == (undefined *)0x0) {
+                    /* WARNING: Subroutine does not return */
+                    /* try { // try from 021c706c to 021c706f has its CatchHandler @ 021c707c */
+            std::__throw_bad_function_call();
+          }
+          goto LAB_021c7078;
+        }
+                    /* try { // try from 021c6f90 to 021c6f93 has its CatchHandler @ 021c707c */
+        uVar3 = (**(code **)(param_4 + 0x18))(param_4,local_d0,&local_d4);
+        if ((uVar3 & 1) == 0) {
+          uVar3 = (*local_b8)(2,0,0);
+          if ((uVar3 & 1) != 0) {
+            (*local_c0)(auStack_b0);
+          }
+          (*local_b8)(1,auStack_b0,0);
+          goto LAB_021c6efc;
+        }
+        param_2 = param_2 + (int)local_d0[0];
+        param_3 = param_3 - (int)local_d0[0];
+        uVar3 = (*local_b8)(2,0,0);
+        if ((uVar3 & 1) == 0) break;
+        (*local_c0)(auStack_b0);
+        (*local_b8)(1,auStack_b0,0);
+        if (param_3 == 0) goto LAB_021c6efc;
+      }
+      (*local_b8)(1,auStack_b0,0);
+    } while (param_3 != 0);
+  }
+LAB_021c6efc:
+  if (local_68 == *(long *)PTR___stack_chk_guard_07264398) {
+    return;
+  }
+  puVar4 = PTR___stack_chk_guard_07264398;
+LAB_021c7078:
+                    /* WARNING: Subroutine does not return */
+  __stack_chk_fail(puVar4,0);
+}
+
+
+
+
+=== SCRIPT COMPLETED SUCCESSFULLY ===
+

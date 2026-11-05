@@ -192,13 +192,43 @@ There are no transport or property-change fallbacks for menu navigation.
 | pad occupancy predicate | `0x29047b0` | [doc] |
 | stock Sample/Chop Extract handler | `0x17580d0`, argument is the Sample screen | [doc] |
 | `ExtractAndAssignSampleCommand` ctor / execute | `0x153ed40` / `0x153f0b0` | [doc] |
-| extraction writer callback / concrete writer | `0x1e8aff0` / `0x1e93570` | [doc] |
+| sample frame-count getter / reader loop | `0x2a41f80` / `0x21c6e40` | [Ghidra](hpss/reverb-reader-boundary.txt) |
+| extraction writer callback / concrete writer | `0x1e8aff0` / `0x1e93570` | [Ghidra](hpss/read-loop.txt), [Ghidra](hpss/wav-write-block.txt) |
 | extraction settings object | `screen + 0x9ba0`; range start `+0x78`, end `+0xd0` (exclusive) | [doc] |
 
 The pattern that works there, and the reason HPSS needs no guessed model writes:
 **capture the native command, patch only the values it is about to copy, let the
 firmware keep ownership of files, history and pad assignment.** Details:
 [HPSS-HANDOFF.md](../../HPSS-HANDOFF.md).
+
+Add Reverb also uses this path. The native reader streams only source frames,
+but its final writer callback accepts a mutable frame count. Add Reverb replaces
+that final block with the remaining processed buffer and extends the block
+count, letting the native WAV writer include the reverb tail without reading
+beyond the source. Static trace and run-time validation are detailed in
+[REVERB-HANDOFF.md](../REVERB-HANDOFF.md).
+
+### Extending an Extract output at the writer boundary
+
+The exact firmware path (Ghidra VAs; subtract `0x100000` for mod offsets):
+
+| Function | Finding |
+|---|---|
+| `0x2a41f80` | Reads the source sample frame count from `sample+0x130+4`. |
+| `0x21c6e40` | Streams provider blocks and stops when its current position reaches the reader length at `reader+8+4`; this is why requesting an end beyond the source did not produce extra blocks. |
+| `0x1e8aff0` | Extract writer callback reads block frame count at `+0`, audio pointer at `+8`, then calls the concrete writer. |
+| `0x1e93570` | Concrete WAV writer consumes `frames × channels` float samples and advances the output by the supplied frame count. |
+
+The output can therefore be longer without fabricating source-reader frames:
+substitute the final source block's audio pointer with the processed buffer at
+the current output offset, raise that block's frame count to the remaining
+rendered frame count, call the original writer synchronously, then restore the
+original pointer and count before returning to native reader cleanup. The mod
+marks the full processed buffer consumed only after this final writer call.
+The emulator confirmed the concrete writer finalizes the WAV at the increased
+length and native Extract still registers and assigns it to a free pad. Other
+Extract calls pass through unchanged. Runtime acceptance is
+`mod/tests/emulator_reverb.py`.
 
 ## 11. Persistence and serialization
 

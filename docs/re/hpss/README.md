@@ -5,6 +5,10 @@ See [investigation notes](../../HPSS-RE.md) and
 Ghidra Java script output, not runtime verification. Runtime evidence is in
 [runtime-validation.md](runtime-validation.md).
 
+The Add Reverb writer-tail discovery is documented in
+[REVERB-HANDOFF.md](../../REVERB-HANDOFF.md) and the current firmware reference
+[FIRMWARE-MECHANISMS.md](../FIRMWARE-MECHANISMS.md).
+
 - [assign-layer.txt](assign-layer.txt)
 - [audio-provider.txt](audio-provider.txt)
 - [command-execution.txt](command-execution.txt)
@@ -21,6 +25,7 @@ Ghidra Java script output, not runtime verification. Runtime evidence is in
 - [provider-read.txt](provider-read.txt)
 - [provider-writer.txt](provider-writer.txt)
 - [read-loop.txt](read-loop.txt)
+- [reverb-reader-boundary.txt](reverb-reader-boundary.txt)
 - [slice-create.txt](slice-create.txt)
 - [slice-execute.txt](slice-execute.txt)
 - [slice-vtable.txt](slice-vtable.txt)

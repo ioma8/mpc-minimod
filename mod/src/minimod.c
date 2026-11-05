@@ -80,6 +80,7 @@
 
 #include "hpss.h"
 #include "spectral.h"
+#include "reverb.h"
 
 #define T_LAYER 0xb0 /* -> context; [ctx+0x60] = instrument */
 #define T_MODEL 0x70
@@ -1651,6 +1652,7 @@ static volatile int g_hpss_arm;
 static uintptr_t g_hpss_arm_source;
 static const float *g_hpss_arm_buf;
 static size_t g_hpss_arm_frames;
+static size_t g_hpss_arm_source_frames;
 static unsigned g_hpss_arm_start;
 static unsigned g_hpss_arm_end;
 static unsigned g_hpss_arm_ch;
@@ -1659,12 +1661,13 @@ static volatile int g_hpss_sub_on;
 static const float *g_hpss_sub_buf;
 static volatile size_t g_hpss_sub_pos;
 static size_t g_hpss_sub_frames;
+static size_t g_hpss_sub_source_frames;
 static unsigned g_hpss_sub_ch;
 static volatile int g_hpss_write_ok;
 static void *g_hpss_cmd[4];
 static int g_hpss_cmd_n;
 
-static uint64_t g_hpss_name[2];
+static uint64_t g_hpss_name[3];
 static int g_hpss_names_ready;
 static int g_spectral_active;
 static volatile int g_hpss_menu;
@@ -1683,7 +1686,7 @@ static void data_signal(void *self, int delta)
     if ((uintptr_t)self == __atomic_load_n(&g_data_signal, __ATOMIC_ACQUIRE) &&
         (g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))) {
         if (g_hpss_menu && !g_hpss_busy && delta) {
-            g_hpss_sel = (g_hpss_sel + (delta > 0 ? 1 : 2)) % 3;
+            g_hpss_sel = (g_hpss_sel + (delta > 0 ? 1 : 3)) % 4;
             hpss_repaint();
             mlog("menu DATA delta=%d sel=%d\n", delta, g_hpss_sel);
         }
@@ -1699,6 +1702,7 @@ static void hpss_make_names(void)
         return;
     FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[0], "HPSS Harmonic");
     FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[1], "HPSS Percussive");
+    FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[2], "Reverb");
     g_hpss_names_ready = 1;
 }
 
@@ -1708,7 +1712,9 @@ static void hpss_ctor_hook(void *cmd, void *name, int dest, void *settings,
 {
     if (g_hpss_arm && (uintptr_t)padstate == g_hpss_arm_source) {
         hpss_make_names();
-        int ni = g_hpss_arm_name ? 1 : 0;
+        int ni = g_hpss_arm_name;
+        if (ni < 0 || ni >= 3)
+            ni = 0;
         name = (void *)&g_hpss_name[ni];
         if (g_hpss_cmd_n < 4)
             g_hpss_cmd[g_hpss_cmd_n++] = cmd;
@@ -1734,6 +1740,7 @@ static void hpss_exec_hook(void *cmd)
         if (g_hpss_arm_buf) {
             g_hpss_sub_buf = g_hpss_arm_buf;
             g_hpss_sub_frames = g_hpss_arm_frames;
+            g_hpss_sub_source_frames = g_hpss_arm_source_frames;
             g_hpss_sub_ch = g_hpss_arm_ch;
             g_hpss_sub_pos = 0;
             g_hpss_sub_on = 1;
@@ -1789,16 +1796,31 @@ static void hpss_writer_hook(void *closure, void *block)
     memcpy(&frames, block, sizeof frames);
     memcpy(&ptr, (char *)block + 8, sizeof ptr);
     size_t pos = g_hpss_sub_pos;
-    if (g_hpss_sub_buf && frames &&
-        pos + frames <= g_hpss_sub_frames) {
+    if (g_hpss_sub_buf && frames && pos + frames <= g_hpss_sub_source_frames) {
         float *replacement =
             (float *)(g_hpss_sub_buf + pos * (size_t)g_hpss_sub_ch);
+        unsigned write_frames = frames;
+        int append_tail = pos + frames == g_hpss_sub_source_frames &&
+                          g_hpss_sub_frames > g_hpss_sub_source_frames;
+        if (append_tail) {
+            size_t remaining = g_hpss_sub_frames - pos;
+            if (remaining > UINT32_MAX) {
+                if (orig_hpss_writer)
+                    orig_hpss_writer(closure, block);
+                return;
+            }
+            write_frames = (unsigned)remaining;
+            memcpy(block, &write_frames, sizeof write_frames);
+        }
         memcpy((char *)block + 8, &replacement, sizeof replacement);
         if (orig_hpss_writer)
             orig_hpss_writer(closure, block);
+        if (append_tail)
+            memcpy(block, &frames, sizeof frames);
         memcpy((char *)block + 8, &ptr, sizeof ptr);
-        g_hpss_sub_pos = pos + frames;
-        mlog("HPSS writer: %u frames at %zu\n", frames, pos);
+        g_hpss_sub_pos = append_tail ? g_hpss_sub_frames : pos + frames;
+        mlog("HPSS writer: %u frames at %zu%s\n", write_frames, pos,
+             append_tail ? " (tail appended)" : "");
     } else {
         mlog("HPSS writer: refusing block frames=%u pos=%zu total=%zu\n", frames,
              pos, g_hpss_sub_frames);
@@ -2012,7 +2034,8 @@ static int hpss_free_count(void *program)
  * the writer callback substitutes it; otherwise the native reader copies the
  * source range itself (used by Spectral Chop). */
 static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
-                            unsigned start, unsigned end, unsigned ch, int name,
+                            unsigned start, unsigned end, unsigned source_frames,
+                            unsigned ch, int name,
                             int *dest)
 {
     if (dest)
@@ -2031,6 +2054,7 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
     g_hpss_arm_source = state;
     g_hpss_arm_buf = buf;
     g_hpss_arm_frames = end - start;
+    g_hpss_arm_source_frames = source_frames;
     g_hpss_arm_start = start;
     g_hpss_arm_end = end;
     g_hpss_arm_ch = ch;
@@ -2065,6 +2089,9 @@ struct hpss_job {
     float *input;
     float *harmonic;
     float *percussive;
+    float *rendered;
+    size_t rendered_frames;
+    int reverb;
     int rc;
 };
 
@@ -2124,11 +2151,18 @@ static void hpss_restore_chop(void)
 static void *hpss_worker(void *arg)
 {
     struct hpss_job *job = arg;
-    int rc = hpss_split(job->input, job->frames, job->ch, job->rate,
+    int rc;
+    if (job->reverb)
+        rc = reverb_render(job->input, job->frames, job->ch, job->rate,
+                           &job->rendered, &job->rendered_frames);
+    else
+        rc = hpss_split(job->input, job->frames, job->ch, job->rate,
                         &job->harmonic, &job->percussive);
     job->rc = rc;
     __atomic_store_n(&g_hpss_done, 1, __ATOMIC_RELEASE);
-    mlog("HPSS worker: rc=%d frames=%u ch=%u\n", rc, job->frames, job->ch);
+    mlog("%s worker: rc=%d frames=%u ch=%u output=%zu\n",
+         job->reverb ? "Reverb" : "HPSS", rc, job->frames, job->ch,
+         job->rendered_frames);
     hpss_repaint();
     return NULL;
 }
@@ -2140,6 +2174,7 @@ static void hpss_free_job(struct hpss_job *job)
     free(job->input);
     free(job->harmonic);
     free(job->percussive);
+    free(job->rendered);
     free(job);
 }
 
@@ -2154,7 +2189,7 @@ static void hpss_set_status(const char *text)
     g_hpss_status[n] = 0;
 }
 
-static void hpss_start(void)
+static void sample_transform_start(int reverb)
 {
     if (g_hpss_busy || g_hpss_job)
         return;
@@ -2162,26 +2197,26 @@ static void hpss_start(void)
     uintptr_t state = 0, sample = 0;
     unsigned frames = 0, ch = 0, rate = 0;
     if (!hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate)) {
-        hpss_set_status("HPSS: no sample on this pad");
-        toast("HPSS: no sample");
+        hpss_set_status(reverb ? "Reverb: no sample on this pad" : "HPSS: no sample on this pad");
+        toast(reverb ? "Reverb: no sample" : "HPSS: no sample");
         return;
     }
     char path[512] = {0};
     if (!hpss_path_for(sample, frames, ch, rate, path, sizeof path)) {
-        hpss_set_status("HPSS: no exact WAV file");
-        toast("HPSS: no WAV");
+        hpss_set_status(reverb ? "Reverb: no exact WAV file" : "HPSS: no exact WAV file");
+        toast(reverb ? "Reverb: no WAV" : "HPSS: no WAV");
         return;
     }
     float *input = NULL;
     if (!wav_read_f32(path, frames, ch, rate, &input, NULL, NULL)) {
-        hpss_set_status("HPSS: cannot decode WAV");
-        toast("HPSS: bad WAV");
+        hpss_set_status(reverb ? "Reverb: cannot decode WAV" : "HPSS: cannot decode WAV");
+        toast(reverb ? "Reverb: bad WAV" : "HPSS: bad WAV");
         return;
     }
     struct hpss_job *job = calloc(1, sizeof *job);
     if (!job) {
         free(input);
-        hpss_set_status("HPSS: out of memory");
+        hpss_set_status(reverb ? "Reverb: out of memory" : "HPSS: out of memory");
         return;
     }
     job->screen = screen;
@@ -2191,26 +2226,31 @@ static void hpss_start(void)
     job->ch = ch;
     job->rate = rate;
     job->input = input;
+    job->reverb = reverb;
     job->rc = -1;
     g_hpss_chop_before = hpss_chop_mode();
     g_hpss_job = job;
     g_hpss_busy = 1;
     __atomic_store_n(&g_hpss_done, 0, __ATOMIC_RELEASE);
-    hpss_set_status("Processing HPSS...");
-    mlog("HPSS start: %s frames=%u ch=%u rate=%u\n", path, frames, ch, rate);
+    hpss_set_status(reverb ? "Processing reverb..." : "Processing HPSS...");
+    mlog("%s start: %s frames=%u ch=%u rate=%u\n",
+         reverb ? "Reverb" : "HPSS", path, frames, ch, rate);
     pthread_t th;
     int cr = pthread_create(&th, 0, hpss_worker, job);
     if (cr != 0) {
         g_hpss_job = NULL;
         g_hpss_busy = 0;
         hpss_free_job(job);
-        hpss_set_status("HPSS: worker failed");
-        toast("HPSS: worker failed");
+        hpss_set_status(reverb ? "Reverb: worker failed" : "HPSS: worker failed");
+        toast(reverb ? "Reverb: worker failed" : "HPSS: worker failed");
         return;
     }
     pthread_detach(th);
     hpss_repaint();
 }
+
+static void hpss_start(void) { sample_transform_start(0); }
+static void reverb_start(void) { sample_transform_start(1); }
 
 static void hpss_close(void);
 static void cc_replay_k3(unsigned raw);
@@ -3363,14 +3403,16 @@ static void hpss_finalize(void)
         g_hpss_finalizing = 0;
         return;
     }
-    if (job->rc != 0 || !job->harmonic || !job->percussive) {
-        hpss_set_status("HPSS: processing failed");
-        toast("HPSS: processing failed");
+    if (job->rc != 0 ||
+        (job->reverb ? (!job->rendered || job->rendered_frames > UINT32_MAX)
+                     : (!job->harmonic || !job->percussive))) {
+        hpss_set_status(job->reverb ? "Reverb: processing failed" : "HPSS: processing failed");
+        toast(job->reverb ? "Reverb: processing failed" : "HPSS: processing failed");
         goto out;
     }
     if (g_screen != job->screen || !sample_page_visible()) {
-        hpss_set_status("HPSS: cancelled (page changed)");
-        toast("HPSS cancelled");
+        hpss_set_status(job->reverb ? "Reverb: cancelled (page changed)" : "HPSS: cancelled (page changed)");
+        toast(job->reverb ? "Reverb cancelled" : "HPSS cancelled");
         goto out;
     }
     {
@@ -3380,43 +3422,59 @@ static void hpss_finalize(void)
         if (!hpss_read_sample(job->screen, &s, &st, &smp, &fr, &ch, &rt) ||
             st != job->state || smp != job->sample || fr != job->frames ||
             ch != job->ch || rt != job->rate) {
-            hpss_set_status("HPSS: cancelled (sample changed)");
-            toast("HPSS cancelled");
+            hpss_set_status(job->reverb ? "Reverb: cancelled (sample changed)" : "HPSS: cancelled (sample changed)");
+            toast(job->reverb ? "Reverb cancelled" : "HPSS cancelled");
             goto out;
         }
     }
     {
         uintptr_t program = 0;
+        int required = job->reverb ? 1 : 2;
         if (!rd(job->state + 0x2310, &program, 8) || !program ||
-            hpss_free_count((void *)program) < 2) {
-            hpss_set_status("HPSS: need 2 empty pads");
-            toast("HPSS: need 2 pads");
+            hpss_free_count((void *)program) < required) {
+            hpss_set_status(job->reverb ? "Reverb: need 1 empty pad" : "HPSS: need 2 empty pads");
+            toast(job->reverb ? "Reverb: need 1 pad" : "HPSS: need 2 pads");
             goto out;
         }
-        int first_pad = -1, second_pad = -1;
-        int a = hpss_extract_ctx(job->screen, job->state, job->harmonic, 0,
-                                 job->frames, job->ch, 0, &first_pad);
-        if (!a) {
+        if (job->reverb) {
+            int pad = -1;
+            int ok = hpss_extract_ctx(job->screen, job->state, job->rendered, 0,
+                                      (unsigned)job->rendered_frames, job->frames,
+                                      job->ch, 2, &pad);
             hpss_restore_chop();
-            hpss_set_status("HPSS: first output failed");
-            toast("HPSS: write failed");
-            goto out;
-        }
-        int b = hpss_extract_ctx(job->screen, job->state, job->percussive, 0,
-                                 job->frames, job->ch, 1, &second_pad);
-        hpss_restore_chop();
-        if (!b) {
-            /* Do not attempt a destructive rollback here.  Clearing the first
-             * pad outside the native command/history path made the app delete
-             * the file and then report a missing sample on reload.  Leave the
-             * harmonic output in place and tell the user exactly what happened. */
-            hpss_set_status("HPSS: harmonic only (second failed)");
-            toast("HPSS: 1 of 2");
-            goto out;
+            if (!ok) {
+                hpss_set_status("Reverb: output failed");
+                toast("Reverb: write failed");
+                goto out;
+            }
+        } else {
+            int first_pad = -1, second_pad = -1;
+            int a = hpss_extract_ctx(job->screen, job->state, job->harmonic, 0,
+                                     job->frames, job->frames, job->ch, 0, &first_pad);
+            if (!a) {
+                hpss_restore_chop();
+                hpss_set_status("HPSS: first output failed");
+                toast("HPSS: write failed");
+                goto out;
+            }
+            int b = hpss_extract_ctx(job->screen, job->state, job->percussive, 0,
+                                     job->frames, job->frames, job->ch, 1, &second_pad);
+            hpss_restore_chop();
+            if (!b) {
+                /* Do not attempt a destructive rollback outside the native command. */
+                hpss_set_status("HPSS: harmonic only (second failed)");
+                toast("HPSS: 1 of 2");
+                goto out;
+            }
         }
     }
-    hpss_set_status("HPSS: harmonic + percussive created");
-    toast("HPSS done");
+    if (job->reverb) {
+        hpss_set_status("Reverb: copy created");
+        toast("Reverb done");
+    } else {
+        hpss_set_status("HPSS: harmonic + percussive created");
+        toast("HPSS done");
+    }
     g_hpss_menu = 0;
 out:
     hpss_free_job(job);
@@ -3455,6 +3513,8 @@ static void hpss_activate(void)
         hpss_start();
     else if (g_hpss_sel == 1)
         spectral_start();
+    else if (g_hpss_sel == 2)
+        reverb_start();
     else
         hpss_close();
 }
@@ -3466,7 +3526,7 @@ static void draw_text(void *g, const char *s, int x, int y, int w, int h,
 
 static void hpss_draw_menu(void *g)
 {
-    int x = 14, y = 18, w = 292, h = 174;
+    int x = 14, y = 8, w = 292, h = 224;
     draw_colour(g, 0xff101014);
     draw_rect(g, x, y, w, h);
     draw_colour(g, 0xffffb43c);
@@ -3475,40 +3535,34 @@ static void hpss_draw_menu(void *g)
     draw_colour(g, 0xffffffff);
     draw_text(g, "SAMPLE OPTIONS", x + 10, y + 6, w - 20, 22, 18.0f);
     if (g_hpss_busy) {
-        draw_text(g, "Processing...", x + 10, y + 56, w - 20, 24, 16.0f);
+        draw_text(g, "Processing...", x + 10, y + 70, w - 20, 24, 16.0f);
         if (g_hpss_status[0])
-            draw_text(g, g_hpss_status, x + 10, y + 84, w - 20, 20, 12.0f);
+            draw_text(g, g_hpss_status, x + 10, y + 98, w - 20, 20, 12.0f);
     } else {
-        if (g_hpss_sel == 0) {
-            draw_colour(g, 0xff3a2a10);
-            draw_rect(g, x + 6, y + 36, w - 12, 42);
-            draw_colour(g, 0xffffffff);
+        static const char *titles[] = {"HPSS", "Spectral Chop", "Add Reverb", "Close"};
+        static const char *details[] = {
+            "split into harmonic + percussive",
+            "slice at detected onsets",
+            "save a reverbed copy to a new pad",
+            ""};
+        for (int i = 0; i < 4; ++i) {
+            int row_y = y + 34 + i * 38;
+            if (g_hpss_sel == i) {
+                draw_colour(g, 0xff3a2a10);
+                draw_rect(g, x + 6, row_y, w - 12, 34);
+                draw_colour(g, 0xffffffff);
+            }
+            draw_text(g, titles[i], x + 12, row_y + 1, w - 24, 18, 15.0f);
+            if (details[i][0])
+                draw_text(g, details[i], x + 12, row_y + 18, w - 24, 14, 10.0f);
         }
-        draw_text(g, "HPSS", x + 12, y + 38, w - 24, 22, 16.0f);
-        draw_text(g, "split into harmonic + percussive", x + 12, y + 58,
-                  w - 24, 16, 12.0f);
-        if (g_hpss_sel == 1) {
-            draw_colour(g, 0xff3a2a10);
-            draw_rect(g, x + 6, y + 82, w - 12, 42);
-            draw_colour(g, 0xffffffff);
-        }
-        draw_text(g, "Spectral Chop", x + 12, y + 84, w - 24, 22, 16.0f);
-        draw_text(g, "slice this sample at detected onsets", x + 12, y + 104,
-                  w - 24, 16,
-                  12.0f);
-        if (g_hpss_sel == 2) {
-            draw_colour(g, 0xff3a2a10);
-            draw_rect(g, x + 6, y + 128, w - 12, 26);
-            draw_colour(g, 0xffffffff);
-        }
-        draw_text(g, "Close", x + 12, y + 130, w - 24, 22, 16.0f);
         if (g_hpss_status[0])
-            draw_text(g, g_hpss_status, x + 10, y + 150, w - 20, 16, 11.0f);
+            draw_text(g, g_hpss_status, x + 10, y + 196, w - 20, 14, 10.0f);
     }
     if (!g_hpss_busy && !g_hpss_status[0]) {
         draw_colour(g, 0xffb0b0b0);
-        draw_text(g, "TURN: select    DATA: confirm", x + 10, y + h - 20,
-                  w - 20, 16, 11.0f);
+        draw_text(g, "TURN: select    DATA: confirm", x + 10, y + h - 17,
+                  w - 20, 14, 10.0f);
     }
 }
 

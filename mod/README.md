@@ -11,7 +11,7 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 `autorun` package. Nothing on disk is modified: the library is copied to `/run`
 (tmpfs) and preloaded into the stock app, so a reboot returns to stock.
 
-**Current status:** pitch shift is verified on hardware. AutoTrim's native command and UI updates are verified in the emulator. SAMPLE OPTIONS, HPSS and Spectral Chop are emulator-verified. See [`docs/AUTOTRIM-NATIVE.md`](../docs/AUTOTRIM-NATIVE.md), [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md), and [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md) for details.
+**Current status:** pitch shift is verified on hardware. AutoTrim's native command and UI updates are verified in the emulator. SAMPLE OPTIONS, HPSS and Spectral Chop are emulator-verified. Add Reverb appends an RT60-length tail through the native Extract writer; see [`docs/REVERB-HANDOFF.md`](../docs/REVERB-HANDOFF.md). See also [`docs/AUTOTRIM-NATIVE.md`](../docs/AUTOTRIM-NATIVE.md), [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md), and [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md).
 
 | # | feature | control | state |
 | --- | --- | --- | --- |
@@ -20,6 +20,7 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 | 3 | AutoTrim soft-key caption | `SHIFT` held on the Sample page | verified; hidden in Chop mode |
 | 4 | SAMPLE OPTIONS → HPSS split onto two pads | `SHIFT` + `DATA`, then `DATA` | emulator-verified; see [HPSS-HANDOFF](../HPSS-HANDOFF.md) |
 | 5 | SAMPLE OPTIONS → Spectral Chop slices the selected pad at detected onsets | `SHIFT` + `DATA`, choose Spectral Chop, `DATA` | emulator-verified by `mod/tests/emulator_spectral.py`; see [SPECTRAL-CHOP](../docs/SPECTRAL-CHOP.md) |
+| 6 | SAMPLE OPTIONS → Add Reverb creates a reverbed copy with a tail on a free pad | `SHIFT` + `DATA`, choose Add Reverb, `DATA` | longer WAV and non-silent tail checked in emulator |
 
 Chromatic MIDI from an external controller is not included in the release build.
 
@@ -49,8 +50,8 @@ released   : Trim        Tune        Filter
   `MINIMOD_TRIM_DB` overrides the relative threshold for the first step. PCM
   16/24/32-bit and float32 WAV files are supported. AutoTrim is suppressed in
   Chop mode, where SHIFT+B3 is the stock Split command.
-* **SAMPLE OPTIONS / HPSS** — `SHIFT` + `DATA` opens the menu on the Sample
-  page. Turn `DATA` to choose **HPSS**, **Spectral Chop** or **Close**, press
+* **SAMPLE OPTIONS** — `SHIFT` + `DATA` opens the menu on the Sample
+  page. Turn `DATA` to choose **HPSS**, **Spectral Chop**, **Add Reverb** or **Close**, press
   `DATA` to confirm, or press `SHIFT` + `DATA` to close. The wheel uses the
   firmware's native signed DATA event (`0x140dbc0`), filtered to the control
   surface signal at `+0x2da8`. Repeated identical deltas still move. The native
@@ -69,6 +70,11 @@ released   : Trim        Tune        Filter
   files or other pads. Algorithm: [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md);
   mechanisms and evidence: [`docs/re/SPECTRAL-CHOP-SOLVED.md`](../docs/re/SPECTRAL-CHOP-SOLVED.md).
   Acceptance test: `mod/tests/emulator_spectral.py`.
+* **Add Reverb** — from the same menu. Reads the selected sample, renders a
+  dry-plus-room copy with an appended RT60-length tail, then submits the float
+  audio through stock Extract so the firmware assigns it to the next empty pad.
+  The source is unchanged. DSP details and the writer hook are
+  in [`docs/REVERB-HANDOFF.md`](../docs/REVERB-HANDOFF.md).
 * **Chromatic MIDI** — not included in the release build; see
   [`MIDI-CHROMATIC.md`](../docs/MIDI-CHROMATIC.md) for the investigation.
 

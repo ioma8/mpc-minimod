@@ -7,15 +7,16 @@ In **Sample mode**, SHIFT + DATA opens **SAMPLE OPTIONS**. DATA confirms
 two empty pads, without modifying the source. **The flow reuses stock Chop
 Extract's creation, free-pad selection and assignment mechanism.**
 
-Worktree: `/Users/jakubkolcar/projects/customs/sample-converter-hpss`  
-Branch: `feature/sample-options-hpss`. **Changes are uncommitted.**
+The implementation is merged into `main` and released as `v0.5.4`.
 
 ## Current status
 
 Implemented and validated in the emulator:
 
 - `SHIFT+DATA` opens SAMPLE OPTIONS on the visible Sample page. DATA selects
-  **HPSS**, **Spectral Chop** or **Close** and confirms; `SHIFT+DATA` closes.
+  **HPSS**, **Spectral Chop**, **Add Reverb** or **Close** and confirms;
+  `SHIFT+DATA` closes. Add Reverb's implementation and writer-tail extension
+  are recorded in [REVERB-HANDOFF.md](docs/REVERB-HANDOFF.md).
   As of 2026-11-05 the menu uses one native signed DATA-event hook, mod
   `0x140dbc0`, filtered to the surface's signal at `+0x2da8`. Repeated deltas
   are events, not value changes. The old rawmidi/evdev and float-property
@@ -67,6 +68,10 @@ an ac50 restart; ordinary Extract and AutoTrim still work.
   working copy with ±2 LSB dither; the user-content source is untouched.
 - Very large samples are bounded by `hpss_split`'s allocation checks; memory
   pressure on device was not measured.
+
+Add Reverb was added to SAMPLE OPTIONS after the HPSS release. Its DSP and the
+native Extract writer-tail extension are documented in
+[`docs/REVERB-HANDOFF.md`](docs/REVERB-HANDOFF.md).
 
 ## Native integration facts
 

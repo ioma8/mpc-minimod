@@ -125,9 +125,36 @@ not clear pads or delete files.
 ### 1.8 Names and duplicate runs
 
 The stock command names outputs from the constructor argument. The mod replaces
-that argument with `HPSS Harmonic` / `HPSS Percussive`. When the same name
-already exists the app appends `1`, `2`, ... to the file and sample name, just
-like stock Extract.
+that argument with `HPSS Harmonic`, `HPSS Percussive`, or `Reverb`, depending on
+the transform. When the same name already exists the app appends `1`, `2`, ...
+to the file and sample name, just like stock Extract.
+
+### 1.9 Extending output with the final writer block
+
+Add Reverb needs space after the source for its decay. Increasing Extract's
+requested end frame does not extend the source reader: Ghidra's
+`FUN_021c6e40` stops at the reader's own frame count (`reader+0xc`). The source
+frame getter is `FUN_02a41f80`, which reads `sample+0x134`.
+
+The writer boundary can extend the result safely. `FUN_01e8aff0` passes a block
+frame count (`+0`) and interleaved float32 pointer (`+8`) to the concrete writer
+`FUN_01e93570`; that writer consumes the supplied count and emits the matching
+number of frames. For the armed Reverb extraction only, `hpss_writer_hook()`
+points the final source block at the remainder of the processed buffer and
+temporarily changes its frame count to include the tail. It restores both block
+fields after the synchronous writer call and lets normal reader cleanup run.
+The native reader never reads past the source. The WAV file ends up longer,
+while native Extract still registers and assigns it to a free pad.
+
+The emulator produced 21,526 frames from the 10,501-frame A01 sample: 11,025
+tail frames (250 ms) with RMS `0.002719`. The native command reported assignment
+success and the firmware had no restart. The regression path is
+`mod/tests/emulator_reverb.py`; full implementation and validation notes are in
+[REVERB-HANDOFF.md](REVERB-HANDOFF.md).
+Ghidra output for the getter and reader stop is
+[`reverb-reader-boundary.txt`](re/hpss/reverb-reader-boundary.txt); the existing
+writer captures are [read-loop.txt](re/hpss/read-loop.txt) and
+[wav-write-block.txt](re/hpss/wav-write-block.txt).
 
 ## 2. Tooling that proved useful
 
@@ -251,6 +278,7 @@ The reproduction commands in §4 assume those external pieces are installed.
 ```sh
 # Ghidra scripts (from this repository)
 python3 tools/ghidra/hpss/run_bridge.py ResearchDecompile.java 0x17580d0 0x153f0b0
+python3 tools/ghidra/hpss/run_bridge.py ResearchDecompile.java 0x2a41f80 0x21c6e40 0x1e8aff0 0x1e93570
 python3 tools/ghidra/hpss/run_bridge.py DumpVtable.java 0x6f212a0 70
 python3 tools/ghidra/hpss/run_bridge.py FindConst.java 100 3000
 
@@ -265,6 +293,9 @@ cd ../virtual-mpc-sample
 python3 lab.py preload /path/to/mod/build/minimod-hpss.so
 python3 lab.py panel
 python3 lab.py ssh 'tail -f /run/minimod.log'
+
+# Add Reverb tail: use a project with A01 loaded and an empty destination pad
+python3 mod/tests/emulator_reverb.py --lab /path/to/virtual-mpc-sample
 ```
 
 For a clean UI test, use `POST /screen.png` hashes before and after a sequence;
