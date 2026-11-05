@@ -113,5 +113,7 @@ Helper scripts in this directory:
 | `wavdiff.py` | compare two WAVs (parity/quantisation checks) |
 | `excerpt.py` | cut, fade and normalise a WAV excerpt |
 | `mix.py` | sum several aligned WAVs into one 24-bit mix |
+| `onsets.py` | reference onset detector for Spectral Chop |
+| `spectral_chop.py` | the simple onset detector being tuned for Spectral Chop: normalised flux, local median threshold, attack snapping, slice report and a PNG |
 
 `hpss.py` needs numpy; the three helper scripts use only the standard library.

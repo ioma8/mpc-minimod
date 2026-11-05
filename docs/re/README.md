@@ -9,6 +9,12 @@ computes as `base + offset`).
 | `FUN_02902e60__pad_sync_loop.c` | `0x2902e60` | `0x2802e60` | loops over the 8 pad-state blocks and applies each |
 | `FUN_0290dca0__pad_dispatch.c` | `0x290dca0` | `0x280dca0` | per-pad dispatch; `param_2 == 0` resets the page |
 
+## SAMPLE OPTIONS input
+
+[Native DATA-event trace](SAMPLE-OPTIONS-INPUT.md): the signed integer emitter,
+control-surface identity, modal ownership, why float-property inference lost
+turns, and the host/emulator regression checks.
+
 ## The pad-state blocks
 
 `FUN_02902e60` is the clearest statement of where the per-pad state lives:
@@ -29,6 +35,30 @@ So **the internal trim state is `padblock + 0x1a8` (Start) and `padblock + 0x220
 parameter value, its applied copy, the property cache, the layer frames and the
 slider - is downstream of that state, which is why none of it made the app's own
 view change.
+
+## Firmware mechanisms
+
+[FIRMWARE-MECHANISMS.md](FIRMWARE-MECHANISMS.md) is the reference for what we
+learned about the firmware itself: loader and address spaces, the screen/page
+and paint model, pad state and the layer array, the sample, the slice container
+and its native API, the chop-type binding, the observable property system, the
+slice command/undo API, the control-surface input path, the sample pool and
+Extract, persistence, threading rules and the limits. Every entry carries its
+address, an evidence marker and a pointer to the deeper write-up.
+
+## Spectral Chop
+
+[The solve](SPECTRAL-CHOP-SOLVED.md) is the record: the chop model, the native
+slice API (`0x2950aa0` reset, `0x2950d20` insert-at-frame, `0x2950bb0`
+reconcile, `0x16680a0` select), the chop-type binding, the UI-thread phase
+machine, a catalogue of every mechanism used (hooking, `/proc/self/mem`,
+snapshots, page watches, value search, the panel harness, the model read-back
+test) and how each was verified. [The history](spectral-chop-handoff.md) is the
+short chronological record of the six passes and the leads that were disproved.
+The acceptance test is `mod/tests/emulator_spectral.py`.
+
+Note for anyone working here: this index states the address rule below, and the
+Spectral Chop investigation still lost a pass to ignoring it.
 
 ## HPSS investigation
 

@@ -68,7 +68,7 @@
 #define A_SCREEN_RESIZED 0x1660370 /* screen resize notification          */
 #define A_SAMPLE_FRAMES 0x2941f80  /* sample frame count getter           */
 #define A_PROG_INST 0x286bbe0      /* program -> instrument accessor      */
-#define A_ROTARY 0x15f5690         /* rotary connection core              */
+#define A_DATA_SIGNAL 0x140dbc0    /* signed integer event emitter, Ghidra 0x150dbc0 */
 #define A_REPAINT 0x1149880        /* component repaint (comp, x, y)      */
 #define A_TRIM_CORE 0x15e70c0      /* trim core (float value, param)      */
 #define A_BROADCAST 0x13bb930      /* value broadcaster (property, float) */
@@ -79,6 +79,7 @@
 #define A_LABEL_TEXT 0x11bae00     /* Label::getText (returns String&)    */
 
 #include "hpss.h"
+#include "spectral.h"
 
 #define T_LAYER 0xb0 /* -> context; [ctx+0x60] = instrument */
 #define T_MODEL 0x70
@@ -115,6 +116,7 @@ static sigjmp_buf g_cc_jmp;
 
 static void mlog(const char *fmt, ...);
 static void toast(const char *text);
+static long long now_ms(void);
 static void *g_screen;
 static void *g_trim_page;
 static int prop_references(uintptr_t P, uintptr_t param);
@@ -374,8 +376,11 @@ static void *install_hook(uintptr_t site, void *hook)
     uint32_t first = 0;
     if (!rd(site, &first, 4))
         return 0;
-    if (first != 0xD503233Fu && first != 0xD503245Fu) {
-        mlog("minimod: site %p has no paciasp/bti (%08x)\n", (void *)site, first);
+    /* paciasp/bti are the usual prologue, but many functions start with a
+     * plain instruction.  Any non-PC-relative instruction can be copied into
+     * the trampoline just as safely. */
+    if (pc_relative(first)) {
+        mlog("minimod: site %p starts PC-relative (%08x)\n", (void *)site, first);
         return 0;
     }
     /* Copy as much of the prologue as is safe: everything up to the first
@@ -1312,7 +1317,6 @@ static void (*orig_trim)(void *, float);
 static void (*orig_resized)(void *, long, long, long);
 static void (*orig_reg)(void *, void *);
 static void *(*orig_prog_inst)(void *, int);
-static void (*orig_rotary)(void *, float);
 /* The Sample page (0x2468 bytes) captured from SamplePage_Ctor; it owns the
  * Start/End widgets and is what must be repainted after a property change. */
 static void *g_page;
@@ -1647,6 +1651,8 @@ static volatile int g_hpss_arm;
 static uintptr_t g_hpss_arm_source;
 static const float *g_hpss_arm_buf;
 static size_t g_hpss_arm_frames;
+static unsigned g_hpss_arm_start;
+static unsigned g_hpss_arm_end;
 static unsigned g_hpss_arm_ch;
 static int g_hpss_arm_name;
 static volatile int g_hpss_sub_on;
@@ -1660,114 +1666,31 @@ static int g_hpss_cmd_n;
 
 static uint64_t g_hpss_name[2];
 static int g_hpss_names_ready;
+static int g_spectral_active;
 static volatile int g_hpss_menu;
+static volatile int g_hpss_busy;
 static volatile int g_hpss_sel;
-static int g_hpss_cc_state;
-static int g_hpss_cc_skip;
-static int g_rm_shift;
-static int g_rm_note_state;
-static unsigned char g_rm_note_status;
-static unsigned char g_rm_note;
-static long long g_hpss_guard_until;
-
-/* The DATA encoder reaches the app as `B0 64 value` on the control-surface
- * rawmidi port.  The app's JUCE hooks do not expose it, so intercept the read
- * that delivers it.  Each 32-byte control-surface event carries one MIDI byte
- * at offset 16.  While the menu owns input, the three CC reads are dropped
- * entirely (read returns 0); rewording the bytes was not enough because the
- * app still acted on the modified CC.  Note messages pass through so DATA
- * still confirms/closes. */
-typedef ssize_t (*read_fn)(int, void *, size_t);
-static int fd_midi_cache[1024];
-static int fd_midi_known[1024];
-static int fd_is_midi(int fd)
-{
-    if (fd < 0 || fd >= 1024)
-        return 0;
-    if (fd_midi_known[fd])
-        return fd_midi_cache[fd];
-    char link[128], path[256];
-    int n = snprintf(link, sizeof link, "/proc/self/fd/%d", fd);
-    ssize_t k = n > 0 && n < (int)sizeof link ? readlink(link, path, sizeof path - 1) : -1;
-    int midi = 0;
-    if (k > 0) {
-        path[k] = 0;
-        midi = !!strstr(path, "midi") || !!strstr(path, "snd/seq");
-    }
-    fd_midi_cache[fd] = midi;
-    fd_midi_known[fd] = 1;
-    return midi;
-}
+/* Native DATA input: the decoded control surface emits signed deltas through
+ * Ghidra FUN_0150dbc0(surface + 0x2da8, delta). Unlike the float broadcaster,
+ * this is an event: repeated identical deltas must each move the selection.
+ * Learn the surface from the same native event that opens SAMPLE OPTIONS. */
+static uintptr_t g_data_signal;
+static void (*orig_data_signal)(void *, int);
 static void hpss_repaint(void);
 
-ssize_t read(int fd, void *buffer, size_t count)
+static void data_signal(void *self, int delta)
 {
-    static read_fn real;
-    if (!real)
-        real = (read_fn)dlsym(RTLD_NEXT, "read");
-    ssize_t n = real ? real(fd, buffer, count) : -1;
-    if (n > 0 && fd_is_midi(fd)) {
-        unsigned char *p = buffer;
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        long long now = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-        int suppress = g_hpss_menu || g_hpss_guard_until > now;
-        int drop = 0;
-        for (ssize_t i = 0; i + 16 < n; i += 32) {
-            unsigned char b = p[i + 16];
-            if (b & 0x80) {
-                g_hpss_cc_skip = 0;
-                g_hpss_cc_state = 0;
-                g_rm_note_state = 0;
-                if (b == 0xb0) {
-                    g_hpss_cc_state = 1;
-                    g_hpss_cc_skip = 1;
-                    if (suppress) {
-                        drop = 1;
-                        g_hpss_guard_until = now + 200;
-                    }
-                } else if (b == 0x90 || b == 0x80) {
-                    g_rm_note_status = b;
-                    g_rm_note_state = 1;
-                }
-            } else if (g_hpss_cc_skip == 1) {
-                g_hpss_cc_skip = 2;
-                g_hpss_cc_state = b == 0x64 ? 2 : 0;
-                if (suppress) {
-                    drop = 1;
-                    g_hpss_guard_until = now + 200;
-                }
-            } else if (g_hpss_cc_skip == 2) {
-                g_hpss_cc_skip = 0;
-                if (suppress) {
-                    drop = 1;
-                    g_hpss_guard_until = now + 200;
-                    if (g_hpss_cc_state == 2 && g_hpss_menu) {
-                        g_hpss_sel = !g_hpss_sel;
-                        hpss_repaint();
-                        mlog("HPSS wheel value=%u sel=%d\n", b, g_hpss_sel);
-                    }
-                }
-                g_hpss_cc_state = 0;
-            } else if (g_rm_note_state == 1) {
-                g_rm_note = b;
-                g_rm_note_state = 2;
-            } else if (g_rm_note_state == 2) {
-                g_rm_note_state = 0;
-                unsigned char status = g_rm_note_status & 0xf0;
-                if (status == 0x90 && g_rm_note == 0x31 && b)
-                    g_rm_shift = 1;
-                else if (status == 0x80 && g_rm_note == 0x31)
-                    g_rm_shift = 0;
-                else if (status == 0x90 && g_rm_note == 0x6f && b &&
-                         g_rm_shift && !g_hpss_menu)
-                    g_hpss_guard_until = now + 1000;
-            }
+    if ((uintptr_t)self == __atomic_load_n(&g_data_signal, __ATOMIC_ACQUIRE) &&
+        (g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))) {
+        if (g_hpss_menu && !g_hpss_busy && delta) {
+            g_hpss_sel = (g_hpss_sel + (delta > 0 ? 1 : 2)) % 3;
+            hpss_repaint();
+            mlog("menu DATA delta=%d sel=%d\n", delta, g_hpss_sel);
         }
-        if (drop)
-            return 0;
+        return; /* consume only this surface's DATA event, including busy */
     }
-    return n;
+    if (orig_data_signal)
+        orig_data_signal(self, delta);
 }
 
 static void hpss_make_names(void)
@@ -1785,11 +1708,12 @@ static void hpss_ctor_hook(void *cmd, void *name, int dest, void *settings,
 {
     if (g_hpss_arm && (uintptr_t)padstate == g_hpss_arm_source) {
         hpss_make_names();
-        name = (void *)&g_hpss_name[g_hpss_arm_name ? 1 : 0];
+        int ni = g_hpss_arm_name ? 1 : 0;
+        name = (void *)&g_hpss_name[ni];
         if (g_hpss_cmd_n < 4)
             g_hpss_cmd[g_hpss_cmd_n++] = cmd;
-        mlog("HPSS ctor: cmd=%p dest=%d settings=%p name=%s\n", cmd, dest,
-             settings, g_hpss_arm_name ? "HPSS Percussive" : "HPSS Harmonic");
+        mlog("HPSS ctor: cmd=%p dest=%d settings=%p name_index=%d\n", cmd, dest,
+             settings, ni);
     }
     if (orig_hpss_ctor)
         orig_hpss_ctor(cmd, name, dest, settings, padstate, project, s1, s2, s3);
@@ -1804,28 +1728,34 @@ static void hpss_exec_hook(void *cmd)
     uintptr_t settings = 0;
     uint64_t old_start = 0, old_end = 0;
     int patched = 0;
-    if (armed && g_hpss_arm && g_hpss_arm_buf) {
-        g_hpss_sub_buf = g_hpss_arm_buf;
-        g_hpss_sub_frames = g_hpss_arm_frames;
-        g_hpss_sub_ch = g_hpss_arm_ch;
-        g_hpss_sub_pos = 0;
-        g_hpss_sub_on = 1;
+    if (armed && g_hpss_arm) {
         g_hpss_write_ok = 0;
+        g_hpss_sub_on = 0;
+        if (g_hpss_arm_buf) {
+            g_hpss_sub_buf = g_hpss_arm_buf;
+            g_hpss_sub_frames = g_hpss_arm_frames;
+            g_hpss_sub_ch = g_hpss_arm_ch;
+            g_hpss_sub_pos = 0;
+            g_hpss_sub_on = 1;
+        }
         /* The constructor stores the settings object by pointer; the execute
          * method is what copies its range into the slice command.  Patch it
          * here, for exactly the duration of that copy. */
         if (rd((uintptr_t)cmd + 0x60, &settings, 8) && settings &&
             rd(settings + HPSS_RANGE_START, &old_start, 8) &&
             rd(settings + HPSS_RANGE_END, &old_end, 8)) {
-            uint64_t start = 0, end = g_hpss_arm_frames;
+            uint64_t start = g_hpss_arm_start, end = g_hpss_arm_end;
             patched = wr(settings + HPSS_RANGE_START, &start, 8) &&
                       wr(settings + HPSS_RANGE_END, &end, 8);
-            mlog("HPSS exec: cmd=%p settings range %llu..%llu -> 0..%zu\n", cmd,
+            mlog("HPSS exec: cmd=%p settings range %llu..%llu -> %u..%u\n", cmd,
                  (unsigned long long)old_start, (unsigned long long)old_end,
-                 g_hpss_arm_frames);
+                 g_hpss_arm_start, g_hpss_arm_end);
         }
-        mlog("HPSS exec: cmd=%p armed %zu frames x %u ch\n", cmd,
-             g_hpss_arm_frames, g_hpss_arm_ch);
+        mlog("HPSS exec: cmd=%p armed %u..%u (%zu frames) x %u ch buf=%p\n", cmd,
+             g_hpss_arm_start, g_hpss_arm_end, g_hpss_arm_frames,
+             g_hpss_arm_ch, (void *)g_hpss_arm_buf);
+        if (!g_hpss_arm_buf)
+            g_hpss_write_ok = 1; /* native Extract copies the range itself */
     }
     if (orig_hpss_exec)
         orig_hpss_exec(cmd);
@@ -2078,16 +2008,17 @@ static int hpss_free_count(void *program)
     return count;
 }
 
-/* Run one native Extract whose audio comes from `buf` instead of the source
- * waveform.  The execute hook applies the full-sample range to the settings
- * object just before the native command copies it. */
+/* Run one native Extract over source frames [start,end).  If `buf` is non-null
+ * the writer callback substitutes it; otherwise the native reader copies the
+ * source range itself (used by Spectral Chop). */
 static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
-                            size_t frames, unsigned ch, int name, int *dest)
+                            unsigned start, unsigned end, unsigned ch, int name,
+                            int *dest)
 {
     if (dest)
         *dest = -1;
     uintptr_t program = 0;
-    if (!screen || !buf || !frames || !ch ||
+    if (!screen || start >= end || !ch ||
         !rd(state + 0x2310, &program, 8) || !program)
         return 0;
     int before = hpss_free_pad((void *)program);
@@ -2099,7 +2030,9 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
     g_hpss_cmd_n = 0;
     g_hpss_arm_source = state;
     g_hpss_arm_buf = buf;
-    g_hpss_arm_frames = frames;
+    g_hpss_arm_frames = end - start;
+    g_hpss_arm_start = start;
+    g_hpss_arm_end = end;
     g_hpss_arm_ch = ch;
     g_hpss_arm_name = name;
     g_hpss_arm = 1;
@@ -2113,10 +2046,11 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
         usleep(1000);
         after = hpss_free_pad((void *)program);
     }
-    int ok = after != before && g_hpss_write_ok;
-    mlog("HPSS extract: pad %d -> free %d (%s, write %s)\n", before, after,
-         after != before ? "assigned" : "NO ASSIGNMENT",
-         g_hpss_write_ok ? "complete" : "INCOMPLETE");
+    int write_ok = buf ? g_hpss_write_ok : 1;
+    int ok = after != before && write_ok;
+    mlog("HPSS extract: pad %d -> free %d (%s, write %s) range %u..%u\n", before,
+         after, after != before ? "assigned" : "NO ASSIGNMENT",
+         write_ok ? "complete" : "INCOMPLETE", start, end);
     return ok;
 }
 
@@ -2135,7 +2069,6 @@ struct hpss_job {
 };
 
 static struct hpss_job *volatile g_hpss_job;
-static volatile int g_hpss_busy;
 static volatile int g_hpss_done;
 static volatile int g_hpss_finalizing;
 static volatile int g_hpss_data_down;
@@ -2279,6 +2212,1144 @@ static void hpss_start(void)
     hpss_repaint();
 }
 
+static void hpss_close(void);
+static void cc_replay_k3(unsigned raw);
+
+/* ------------------------------------------------------- spectral markers */
+/* The input hook is NOT the UI thread. Publish only a request there; all
+ * model calls below run from screen_paint, after the stock paint returns. */
+static unsigned char g_spectral_event[16];
+static struct {
+    int phase, n;
+    void *screen;
+    uintptr_t state, sample;
+    unsigned frames, ch, rate, pos[16];
+    long long deadline;
+} g_spectral;
+
+static unsigned slice_count_of(uintptr_t sample, uintptr_t *begin_out,
+                               uintptr_t *cont_out)
+{
+    uintptr_t buf = 0, begin = 0, end = 0, cap = 0;
+    if (!sample || !rd(sample + 0x130, &buf, 8) || !buf ||
+        !rd(buf + 0x70, &begin, 8) || !rd(buf + 0x78, &end, 8) ||
+        !rd(buf + 0x80, &cap, 8) || end < begin || cap < end ||
+        ((end - begin) & 7) || (end - begin) / 8 > 128)
+        return 0;
+    if (begin_out) *begin_out = begin;
+    if (cont_out) *cont_out = buf + 0x10;
+    return (unsigned)((end - begin) / 8);
+}
+
+static void spectral_finish(const char *error)
+{
+    char status[96];
+    if (error)
+        snprintf(status, sizeof status, "Spectral: %s", error);
+    else
+        snprintf(status, sizeof status, "Spectral: %d slices on this pad", g_spectral.n);
+    mlog("%s\n", status);
+    hpss_set_status(status);
+    toast(error ? status : "Spectral: chopped");
+    g_spectral.phase = 0;
+    g_hpss_busy = 0;
+    __atomic_store_n(&g_spectral_active, 0, __ATOMIC_RELEASE);
+    hpss_repaint();
+}
+
+/* Same binding path used by the stock Split handler (Ghidra 0x1756728).
+ * Manual is enum 0. Calling the binding's model callback preserves the pad's
+ * chop type; assigning the view's cached enum alone does not. */
+static int spectral_manual(void)
+{
+    uintptr_t binding = 0, owner = 0, invoke = 0, manager = 0;
+    unsigned char flags = 0;
+    if (!rd((uintptr_t)g_screen + 0x168, &binding, 8) || !binding ||
+        !rd(binding + 0xe8, &flags, 1) || !rd(binding + 0xe0, &owner, 8))
+        return 0;
+    if (!(flags & 1) && owner) {
+        if (!rd(binding + 0xd0, &manager, 8) || !manager ||
+            !rd(binding + 0xd8, &invoke, 8) || !invoke)
+            return 0;
+        int manual = 0;
+        ((void (*)(uintptr_t, uintptr_t, const int *))invoke)(binding + 0xc0, owner, &manual);
+    } else {
+        FN(0x15d2840, void (*)(uintptr_t, int))(binding + 0x80, 0);
+    }
+    return 1;
+}
+
+static int spectral_verify(void)
+{
+    uintptr_t begin = 0;
+    if (slice_count_of(g_spectral.sample, &begin, 0) != (unsigned)g_spectral.n)
+        return 0;
+    for (int i = 0; i < g_spectral.n; ++i) {
+        uintptr_t slice = 0, start = 0, end = 0;
+        unsigned want_end = i + 1 < g_spectral.n ? g_spectral.pos[i + 1] : g_spectral.frames;
+        if (!rd(begin + (uintptr_t)i * 8, &slice, 8) || !slice ||
+            !rd(slice + 0x78, &start, 8) || !rd(slice + 0xd0, &end, 8) ||
+            start != g_spectral.pos[i] || end != want_end)
+            return 0;
+    }
+    return 1;
+}
+
+static int spectral_write_markers(void)
+{
+    uintptr_t cont = 0, selection = 0;
+    slice_count_of(g_spectral.sample, 0, &cont);
+    if (!cont || !rd((uintptr_t)g_screen + 0x180, &selection, 8) || !selection)
+        return 0;
+    /* Native Reset and Insert, as called by the stock Chop UI. These own the
+     * Slice allocation, destruction, listener links, selection and broadcasts.
+     * Never shorten its vector or poke observable Slice fields ourselves. */
+    FN(0x2950aa0, void (*)(uintptr_t))(cont);
+    for (int i = 0; i < g_spectral.n; ++i) {
+        int index = FN(0x2950d20, int (*)(uintptr_t, unsigned, unsigned, unsigned))(
+            cont, g_spectral.pos[i], 1, g_spectral.frames);
+        if (index != i)
+            return 0;
+    }
+    /* Reconcile adjacent ends through the native setters, including the tail. */
+    FN(0x2950bb0, void (*)(uintptr_t, unsigned))(cont, g_spectral.frames);
+    int first = 0;
+    FN(0x16680a0, void (*)(uintptr_t, const int *))(selection + 0x618, &first);
+    return spectral_verify();
+}
+
+static void spectral_start(void)
+{
+    int expected = 0;
+    if (g_hpss_busy || g_hpss_job ||
+        !__atomic_compare_exchange_n(&g_spectral_active, &expected, -1, 0,
+                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+        return;
+    memcpy(g_spectral_event, g_hpss_btn, sizeof g_spectral_event);
+    __atomic_store_n(&g_spectral_active, 1, __ATOMIC_RELEASE);
+    hpss_repaint();
+}
+
+/* One phase per UI pass: a CHOP press schedules a page switch, so it cannot
+ * be followed by a sleep/poll or by another toggle in the same callback. */
+static void spectral_tick(void)
+{
+    if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE) != 1)
+        return;
+    if (!g_spectral.phase) {
+        g_hpss_menu = 0;
+        g_hpss_busy = 1;
+        if (!hpss_sample_now(&g_spectral.screen, &g_spectral.state, &g_spectral.sample,
+                             &g_spectral.frames, &g_spectral.ch, &g_spectral.rate)) {
+            spectral_finish("no sample on this pad");
+            return;
+        }
+        char path[512] = {0};
+        float *input = NULL;
+        if (!hpss_path_for(g_spectral.sample, g_spectral.frames, g_spectral.ch,
+                           g_spectral.rate, path, sizeof path) ||
+            !wav_read_f32(path, g_spectral.frames, g_spectral.ch, g_spectral.rate,
+                          &input, NULL, NULL)) {
+            spectral_finish("cannot read sample WAV");
+            return;
+        }
+        unsigned detected = 0;
+        g_spectral.n = spectral_onsets(input, g_spectral.frames, g_spectral.ch,
+                                       g_spectral.rate, g_spectral.pos, 16, &detected);
+        free(input);
+        if (g_spectral.n < 2) {
+            spectral_finish("no onsets");
+            return;
+        }
+        for (int i = 0; i < g_spectral.n; ++i) {
+            if (g_spectral.pos[i] >= g_spectral.frames ||
+                (i && g_spectral.pos[i] <= g_spectral.pos[i - 1])) {
+                spectral_finish("invalid onsets");
+                return;
+            }
+        }
+        mlog("Spectral: source=%p frames=%u onsets=%d detected=%u\n",
+             (void *)g_spectral.sample, g_spectral.frames, g_spectral.n, detected);
+        if (!hpss_chop_mode() && orig_buttons) {
+            g_spectral_event[8] = 0x4b;
+            g_spectral_event[9] = 0x7f;
+            orig_buttons(g_spectral_event);
+            g_spectral_event[9] = 0;
+            orig_buttons(g_spectral_event);
+        }
+        if (!spectral_manual()) {
+            spectral_finish("cannot select Manual chop");
+            return;
+        }
+        g_spectral.phase = 1;
+        g_spectral.deadline = now_ms() + 3000;
+    } else {
+        void *screen = 0;
+        uintptr_t state = 0, sample = 0;
+        unsigned frames = 0, ch = 0, rate = 0;
+        if (!hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate) ||
+            screen != g_spectral.screen || state != g_spectral.state ||
+            sample != g_spectral.sample || frames != g_spectral.frames ||
+            ch != g_spectral.ch || rate != g_spectral.rate) {
+            spectral_finish("sample changed; cancelled");
+            return;
+        }
+        uintptr_t binding = 0;
+        int type = -1;
+        rd((uintptr_t)screen + 0x168, &binding, 8);
+        if (binding) rd(binding + 0x9c, &type, 4);
+        if (!hpss_chop_mode() || type != 0) {
+            if (now_ms() >= g_spectral.deadline)
+                spectral_finish("Manual chop did not open");
+        } else if (g_spectral.phase == 1) {
+            if (!spectral_write_markers()) {
+                spectral_finish("native marker write failed");
+                return;
+            }
+            g_spectral.phase = 2;
+            g_spectral.deadline = now_ms() + 150;
+        } else if (now_ms() >= g_spectral.deadline) {
+            spectral_finish(spectral_verify() ? NULL : "marker verification failed");
+        }
+    }
+    hpss_repaint();
+}
+
+#if MINIMOD_DEBUG
+/* ------------------------------------------------------- chop probe (debug) */
+/* All addresses below are Ghidra VAs minus 0x100000 (the mod's own offset
+ * space). Mixing the two spaces is how the first version of this probe ended
+ * up hooking unrelated functions and calling garbage. */
+/* Stock slice editing, found through the "Insert Slice" undo label at
+ * 0x46a80e0 and the telemetry key "slices_added":
+ *   FUN_021a3b10(editor, {sample, refcounted}, frame)  add a Manual slice
+ *   FUN_021a9fa0(editor)                              add at the playhead
+ *   FUN_01a60af0(ctrl, {sample, refcounted}, v, ed)   the undoable command
+ * The probe only observes; the apply path is written once these are verified. */
+static void (*orig_add_slice)(void *, void *, uint64_t);
+static void (*orig_add_slice_ph)(void *);
+static void (*orig_insert_cmd)(void *, void *, unsigned, void *);
+static void (*orig_rmall_cmd)(void *, void *, void *);
+static uintptr_t g_chop_editor;
+
+
+/* Slice objects are ~0x350-byte heap allocations, so the chop code that makes
+ * them can be found from the allocation's return address. Debug only; the
+ * logger is off unless the probe enables it. */
+static void *(*g_real_malloc)(size_t);
+static volatile int g_malloc_probe;
+static volatile int g_malloc_n;
+
+void *malloc(size_t n)
+{
+    if (!g_real_malloc)
+        g_real_malloc = (void *(*)(size_t))dlsym(RTLD_NEXT, "malloc");
+    if (!g_real_malloc)
+        return 0;
+    void *p = g_real_malloc(n);
+    if (g_malloc_probe && n >= 0x100 && n <= 0x8000 && p && g_malloc_n < 400) {
+        g_malloc_n++;
+        mlog("chop: malloc %zu -> %p lr=%p\n", n, p, __builtin_return_address(0));
+    }
+    return p;
+}
+
+static void cc_replay(unsigned cc, unsigned raw);
+
+static unsigned chop_slice_count(uintptr_t sample)
+{
+    uintptr_t buf = 0, lo = 0, hi = 0;
+    if (!sample || !rd(sample + 0x130, &buf, 8) || !buf)
+        return 0;
+    if (!rd(buf + 0x10 + 0x60, &lo, 8) || !rd(buf + 0x10 + 0x68, &hi, 8) || hi < lo)
+        return 0;
+    return (unsigned)((hi - lo) >> 3);
+}
+
+static uintptr_t chop_sample_from_sel(void *sel)
+{
+    uintptr_t sample = 0;
+    if (sel)
+        rd((uintptr_t)sel, &sample, 8);
+    return sample;
+}
+
+/* The serialized layer object keeps the chop model: SlicingStyle at +0xa8 and
+ * four std::vector<SlicePoint> pairs (each 0x18 bytes) at +0xb0/+0xc8/+0xe0/
+ * +0xf8. Print them so the live layout can be checked against the parser. */
+static void chop_dump_layer(uintptr_t lay)
+{
+    unsigned style = 0;
+    uintptr_t pairs[4][3] = {{0}};
+    if (!lay)
+        return;
+    rd(lay + 0xa8, &style, 4);
+    mlog("chop: layer=%p style=%u (+0xa8)\n", (void *)lay, style);
+    {
+        unsigned char f6e0 = 0;
+        unsigned m418 = 0, n738 = 0, a6e4 = 0;
+        rd(lay + 0x6e0, &f6e0, 1);
+        rd(lay + 0x418, &m418, 4);
+        rd(lay + 0x738, &n738, 4);
+        rd(lay + 0x6e4, &a6e4, 4);
+        mlog("chop:   flags +0x6e0=%u marker +0x418=%u +0x738=%u +0x6e4=%u\n",
+             f6e0, m418, n738, a6e4);
+    }
+    for (int i = 0; i < 4; ++i) {
+        uintptr_t at = lay + 0xb0 + (uintptr_t)i * 0x18;
+        rd(at, &pairs[i][0], 8);
+        rd(at + 8, &pairs[i][1], 8);
+        rd(at + 0x10, &pairs[i][2], 8);
+        mlog("chop:   vec[%d] at +0x%lx begin=%p end=%p cap=%p n=%lld\n", i,
+             (unsigned long)(0xb0 + i * 0x18), (void *)pairs[i][0],
+             (void *)pairs[i][1], (void *)pairs[i][2],
+             (long long)((pairs[i][1] - pairs[i][0]) / 0x18));
+    }
+    for (int i = 0; i < 4; ++i) {
+        uintptr_t n = (pairs[i][1] - pairs[i][0]) / 0x18;
+        if (n > 64)
+            n = 64;
+        for (uintptr_t k = 0; k < n; ++k) {
+            uintptr_t at = pairs[i][0] + k * 0x18;
+            double t = 0, e = 0;
+            float f = 0;
+            rd(at, &t, 8);
+            rd(at + 8, &f, 4);
+            rd(at + 0x10, &e, 8);
+            mlog("chop:   vec[%d][%lu] t=%.6f f=%.4f e=%.4f\n", i,
+                 (unsigned long)k, t, (double)f, e);
+        }
+    }
+}
+
+/* Find the editor object the stock slice commands take: an object whose
+ * +0x4c8 points at the live Sample. Discovery only - the shipped path must not
+ * depend on a full-heap search. */
+static void chop_scan(uintptr_t sample)
+{
+    if (!sample)
+        return;
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f)
+        return;
+    size_t chunk = 8u << 20;
+    unsigned char *buf = malloc(chunk);
+    if (!buf) {
+        fclose(f);
+        return;
+    }
+    char line[512];
+    int hits = 0;
+    while (fgets(line, sizeof line, f) && hits < 32) {
+        unsigned long lo = 0, hi = 0;
+        char perms[8] = {0};
+        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || perms[1] != 'w')
+            continue;
+        for (unsigned long a = lo; a < hi && hits < 32; a += chunk) {
+            size_t n = (hi - a) < chunk ? (size_t)(hi - a) : chunk;
+            if (!rd(a, buf, n))
+                continue;
+            for (size_t o = 0; o + 8 <= n && hits < 32; o += 8) {
+                uintptr_t q;
+                memcpy(&q, buf + o, 8);
+                if (q != sample || a + o < 0x4c8)
+                    continue;
+                uintptr_t base = a + o - 0x4c8;
+                uintptr_t ctl = 0, sel = 0, mgr = 0, mode = 0;
+                unsigned ref = 0;
+                rd(base + 0x10c8, &ctl, 8);
+                rd(base + 0x4d0, &sel, 8);
+                if (ctl)
+                    rd(ctl + 0x60, &mgr, 8);
+                rd(base + 0x528, &mode, 8);
+                if (sel)
+                    rd(sel + 8, &ref, 4);
+                /* The editor's selection is a heap pointer and its controller
+                 * has a command manager; that rejects the text and table
+                 * objects whose +0x4c8 happens to equal the sample. */
+                int shapecand = (sel >> 40) == 0xffff && ctl && mgr;
+                if (!shapecand)
+                    continue;
+                mlog("chop: scan cand editor=%p ctl=%p mgr=%p sel=%p ref=%u mode=%llu\n",
+                     (void *)base, (void *)ctl, (void *)mgr, (void *)sel, ref,
+                     (unsigned long long)(mode & 0xffffffff));
+                hits++;
+            }
+        }
+    }
+    free(buf);
+    fclose(f);
+    mlog("chop: scan done, %d candidate(s)\n", hits);
+}
+
+static void chop_dump(const char *tag, uintptr_t sample)
+{
+    uintptr_t buf = 0, lo = 0, hi = 0;
+    unsigned n = chop_slice_count(sample);
+    mlog("chop: %s sample=%p slices=%u\n", tag, (void *)sample, n);
+    if (!sample || !rd(sample + 0x130, &buf, 8) || !buf)
+        return;
+    if (!rd(buf + 0x10 + 0x60, &lo, 8) || !rd(buf + 0x10 + 0x68, &hi, 8))
+        return;
+    for (unsigned i = 0; i < n && i < 32; ++i) {
+        uintptr_t el = 0;
+        if (!rd(lo + i * 8, &el, 8) || !el)
+            break;
+        uintptr_t d0 = 0, c8 = 0, d8 = 0;
+        rd(el + 0xc8, &c8, 8);
+        rd(el + 0xd0, &d0, 8);
+        rd(el + 0xd8, &d8, 8);
+        mlog("chop:   slice[%u] obj=%p +0xc8=%llu +0xd0=%llu +0xd8=%llu\n", i,
+             (void *)el, (unsigned long long)c8, (unsigned long long)d0,
+             (unsigned long long)d8);
+    }
+}
+
+static void add_slice_hook(void *editor, void *sel, uint64_t pos)
+{
+    uintptr_t sample = chop_sample_from_sel(sel);
+    g_chop_editor = (uintptr_t)editor;
+    mlog("chop: add_slice editor=%p screen=%p pos=%llu before=%u\n", editor,
+         g_screen, (unsigned long long)pos, chop_slice_count(sample));
+    if (orig_add_slice)
+        orig_add_slice(editor, sel, pos);
+    mlog("chop: add_slice after=%u\n", chop_slice_count(sample));
+}
+
+static void add_slice_ph_hook(void *editor)
+{
+    g_chop_editor = (uintptr_t)editor;
+    mlog("chop: add_slice_ph editor=%p screen=%p\n", editor, g_screen);
+    if (orig_add_slice_ph)
+        orig_add_slice_ph(editor);
+}
+
+static void insert_cmd_hook(void *ctl, void *sel, unsigned v, void *ed)
+{
+    mlog("chop: insert_cmd ctl=%p sel=%p val=%u ed=%p editor_seen=%p\n", ctl, sel,
+         v, ed, (void *)g_chop_editor);
+    if (orig_insert_cmd)
+        orig_insert_cmd(ctl, sel, v, ed);
+}
+
+/* The slice editor owns the selected sample at +0x4c8, the marker index at
+ * +0x528 and the refcounted selection at +0x4d0. Any of its methods hands us
+ * the instance without guessing. */
+static void (*orig_slice_sel)(void *, unsigned);
+static void slice_sel_hook(void *editor, unsigned index)
+{
+    if (!g_chop_editor) {
+        g_chop_editor = (uintptr_t)editor;
+        mlog("chop: editor captured from selectSlice editor=%p index=%u\n", editor,
+             index);
+    }
+    if (orig_slice_sel)
+        orig_slice_sel(editor, index);
+}
+
+/* Remove Slice: (controller, {sample, refcounted}, value, editor). Its fourth
+ * argument is the slice editor itself. */
+static void (*orig_rm_slice)(void *, void *, unsigned, void *);
+static void rm_slice_hook(void *ctl, void *sel, unsigned v, void *ed)
+{
+    uintptr_t sample = chop_sample_from_sel(sel);
+    mlog("chop: rm_slice ctl=%p sel=%p val=%u ed=%p sample=%p before=%u\n", ctl, sel, v,
+         ed, (void *)sample, chop_slice_count(sample));
+    if (ed) {
+        g_chop_editor = (uintptr_t)ed;
+        mlog("chop: editor captured from rm_slice ed=%p\n", ed);
+    }
+    if (orig_rm_slice)
+        orig_rm_slice(ctl, sel, v, ed);
+    mlog("chop: rm_slice after=%u\n", chop_slice_count(sample));
+}
+
+/* The layer's marker resolver is called by every chop UI action. Its caller
+ * identifies the editor-side function; hooking that entry then yields the
+ * editor itself in x0. */
+static int (*orig_marker_at)(void *, unsigned);
+static void marker_at_hook(void *layer, unsigned index)
+{
+    uintptr_t lr = (uintptr_t)__builtin_return_address(0);
+    mlog("chop: marker_at layer=%p index=%u caller=0x%llx\n", layer, index,
+         (unsigned long long)(lr - base));
+    if (orig_marker_at)
+        orig_marker_at(layer, index);
+}
+
+/* Slice-list helper that runs on every edit; its caller is the edit code. */
+static void (*orig_slice_publish)(void *);
+static void slice_publish_hook(void *a)
+{
+    uintptr_t lr = (uintptr_t)__builtin_return_address(0);
+    mlog("chop: slice_publish arg=%p caller=0x%llx\n", a,
+         (unsigned long long)(lr - base));
+    if (orig_slice_publish)
+        orig_slice_publish(a);
+}
+
+
+/* ---- snapshot: what the UI just changed ---------------------------------- */
+static int g_snap_track;
+static int g_snap_n;
+
+static unsigned fnv(const unsigned char *p, size_t n)
+{
+    unsigned h = 2166136261u;
+    for (size_t i = 0; i < n; ++i) {
+        h ^= p[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void chop_snapshot(const char *tag)
+{
+    void *screen = 0;
+    uintptr_t state = 0, sample = 0;
+    unsigned frames = 0, ch = 0, rate = 0;
+    if (!hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate))
+        return;
+    uintptr_t binding = 0, st = 0, lay = 0;
+    if (screen && rd((uintptr_t)screen + 0x178, &binding, 8) && binding &&
+        rd(binding + 0x60, &st, 8) && st && rd(st + 0x22e8, &lay, 8) && lay)
+        (void)lay;
+    unsigned marker = 0, count = chop_slice_count(sample);
+    if (lay)
+        rd(lay + 0x418, &marker, 4);
+    mlog("SNAP %s chop=%d marker=%u count=%u frames=%u sample=%p layer=%p\n", tag,
+         in_chop_mode(), marker, count, frames, (void *)sample, (void *)lay);
+    if (lay) {
+        static const unsigned lo[] = {0xa8, 0xb0, 0xb8, 0xc0, 0xc8, 0xd0, 0xd8, 0xe0,
+                                      0xe8, 0xf0, 0xf8, 0x100, 0x6e0, 0x738};
+        for (unsigned i = 0; i < sizeof lo / sizeof lo[0]; ++i) {
+            uintptr_t q = 0;
+            rd(lay + lo[i], &q, 8);
+            mlog("SNAP L %03x %016llx\n", lo[i], (unsigned long long)q);
+        }
+    }
+    uintptr_t buf = 0, lo = 0, hi = 0;
+    if (sample && rd(sample + 0x130, &buf, 8) && buf &&
+        rd(buf + 0x70, &lo, 8) && rd(buf + 0x78, &hi, 8) && hi > lo) {
+        unsigned n = (unsigned)((hi - lo) / 8);
+        mlog("SNAP slicevec %p..%p n=%u\n", (void *)lo, (void *)hi, n);
+        if (n > 8)
+            n = 8;
+        for (unsigned i = 0; i < n; ++i) {
+            uintptr_t sp = 0;
+            if (!rd(lo + i * 8, &sp, 8) || !sp)
+                break;
+            unsigned char obj[0x340];
+            memset(obj, 0, sizeof obj);
+            rd(sp, obj, sizeof obj);
+            mlog("SNAP P %u %p hash=%08x\n", i, (void *)sp, fnv(obj, sizeof obj));
+            for (unsigned k = 0; k < 0x140; k += 8) {
+                uintptr_t q = 0;
+                rd(sp + k, &q, 8);
+                mlog("SNAP S %u %03x %016llx\n", i, k, (unsigned long long)q);
+            }
+        }
+    }
+}
+
+/* Every slice edit asks the sample for its slice list first, so the caller of
+ * this accessor during a merge/erase is the code that mutates it. */
+static void *(*orig_slice_list)(void *);
+static void *slice_list_hook(void *sample)
+{
+    uintptr_t lr = (uintptr_t)__builtin_return_address(0);
+    mlog("chop: slice_list sample=%p caller=0x%llx\n", sample,
+         (unsigned long long)(lr - base));
+    return orig_slice_list ? orig_slice_list(sample) : 0;
+}
+
+/* The UI's slice-action dispatch: (editor, msg, kind). kind 1 means "slice
+ * edit"; the editor reads its selected marker from +0x528. */
+static void (*orig_slice_action)(void *, void *, int);
+static void slice_action_hook(void *ed, void *msg, int kind)
+{
+    uintptr_t sample = 0, ctl = 0, sel = 0;
+    unsigned marker = 0, playhead = 0;
+    rd((uintptr_t)ed + 0x4c8, &sample, 8);
+    rd((uintptr_t)ed + 0x4d0, &sel, 8);
+    rd((uintptr_t)ed + 0x10c8, &ctl, 8);
+    rd((uintptr_t)ed + 0x528, &marker, 4);
+    rd((uintptr_t)ed + 0x848, &playhead, 4);
+    mlog("chop: slice_action ed=%p kind=%d sample=%p marker=%u playhead=%u ctl=%p "
+         "sel=%p\n", ed, kind, (void *)sample, marker, playhead, (void *)ctl,
+         (void *)sel);
+    if (ed)
+        g_chop_editor = (uintptr_t)ed;
+    if (orig_slice_action)
+        orig_slice_action(ed, msg, kind);
+}
+
+/* Split Slice: same shape; its fourth argument is the editor. */
+static void (*orig_split_cmd)(void *, void *, unsigned, void *);
+static void split_cmd_hook(void *ctl, void *sel, unsigned v, void *ed)
+{
+    uintptr_t sample = chop_sample_from_sel(sel);
+    mlog("chop: split_cmd ctl=%p sel=%p val=%u ed=%p sample=%p before=%u\n", ctl, sel, v,
+         ed, (void *)sample, chop_slice_count(sample));
+    if (ed) {
+        g_chop_editor = (uintptr_t)ed;
+        mlog("chop: editor captured from split ed=%p\n", ed);
+    }
+    if (orig_split_cmd)
+        orig_split_cmd(ctl, sel, v, ed);
+    mlog("chop: split_cmd after=%u\n", chop_slice_count(sample));
+}
+
+static void rmall_cmd_hook(void *ctl, void *sel, void *ed)
+{
+    mlog("chop: rmall_cmd ctl=%p sel=%p ed=%p\n", ctl, sel, ed);
+    if (orig_rmall_cmd)
+        orig_rmall_cmd(ctl, sel, ed);
+}
+
+/* Probe calls go through a guarded boundary: a wrong candidate must not take
+ * the app down while the layout is still being established. */
+static volatile int g_chop_ok;
+
+static void chop_add_guarded(uintptr_t ed, uintptr_t *pair, uint64_t frame)
+{
+    g_chop_ok = 0;
+    if (sigsetjmp(g_cc_jmp, 1) == 0) {
+        g_cc_recover = 1;
+        if (orig_add_slice)
+            orig_add_slice((void *)ed, pair, frame);
+        g_cc_recover = 0;
+        g_chop_ok = 1;
+    } else {
+        g_cc_recover = 0;
+    }
+}
+
+static void chop_rmall_guarded(uintptr_t ctl, uintptr_t *pair, uintptr_t ed)
+{
+    g_chop_ok = 0;
+    if (sigsetjmp(g_cc_jmp, 1) == 0) {
+        g_cc_recover = 1;
+        if (orig_rmall_cmd)
+            orig_rmall_cmd((void *)ctl, pair, (void *)ed);
+        g_cc_recover = 0;
+        g_chop_ok = 1;
+    } else {
+        g_cc_recover = 0;
+    }
+}
+
+/* Stronger signature: the editor holds the *selected marker index* at +0x528,
+ * a Sample pointer at +0x4c8 and the command controller at +0x10c8. The marker
+ * index is small and changes with the UI, so matching it is very selective. */
+static void chop_scan_marker(uintptr_t layer)
+{
+    unsigned marker = 0;
+    if (!layer || !rd(layer + 0x418, &marker, 4)) {
+        mlog("chop: scan2 no marker\n");
+        return;
+    }
+    mlog("chop: scan2 looking for marker=%u\n", marker);
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f)
+        return;
+    size_t chunk = 8u << 20;
+    unsigned char *buf = malloc(chunk);
+    if (!buf) {
+        fclose(f);
+        return;
+    }
+    char line[512];
+    int hits = 0;
+    while (fgets(line, sizeof line, f) && hits < 16) {
+        unsigned long lo = 0, hi = 0;
+        char perms[8] = {0};
+        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || perms[1] != 'w')
+            continue;
+        for (unsigned long a = lo; a < hi && hits < 16; a += chunk) {
+            size_t n = (hi - a) < chunk ? (size_t)(hi - a) : chunk;
+            if (!rd(a, buf, n))
+                continue;
+            for (size_t o = 0; o + 4 <= n && hits < 16; o += 4) {
+                unsigned m;
+                memcpy(&m, buf + o, 4);
+                if (m != marker || a + o < 0x528)
+                    continue;
+                uintptr_t b = a + o - 0x528;
+                uintptr_t smp = 0, sel = 0, ctl = 0, mgr = 0, ph = 0, key = 0;
+                rd(b + 0x4c8, &smp, 8);
+                rd(b + 0x4d0, &sel, 8);
+                rd(b + 0x10c8, &ctl, 8);
+                rd(b + 0x848, &ph, 8);
+                rd(b, &key, 8);
+                if (ctl)
+                    rd(ctl + 0x60, &mgr, 8);
+                if (!ctl || !mgr || (ctl >> 40) != 0xffff || (mgr >> 40) != 0xffff)
+                    continue;
+                mlog("chop: scan2 cand base=%p vt=0x%llx sample=%p sel=%p ctl=%p "
+                     "playhead=%llu\n", (void *)b, (unsigned long long)(key - base),
+                     (void *)smp, (void *)sel, (void *)ctl,
+                     (unsigned long long)(ph & 0xffffffff));
+                hits++;
+            }
+        }
+    }
+    free(buf);
+    fclose(f);
+    mlog("chop: scan2 done, %d\n", hits);
+}
+
+/* The editor is a long-lived object that owns the selected Sample at +0x4c8.
+ * Look for a pointer to it inside the objects we can already reach. */
+static void chop_find(uintptr_t sample)
+{
+    uintptr_t roots[3] = {(uintptr_t)g_screen, 0, 0};
+    uintptr_t binding = 0, st = 0;
+    if (roots[0] && rd(roots[0] + 0x178, &binding, 8) && binding &&
+        rd(binding + 0x60, &st, 8))
+        roots[1] = st;
+    roots[2] = binding;
+    const char *names[3] = {"screen", "state", "binding"};
+    for (int r = 0; r < 3; ++r) {
+        if (!roots[r])
+            continue;
+        for (uintptr_t o = 0; o < 0x12000; o += 8) {
+            uintptr_t v = 0;
+            if (!rd(roots[r] + o, &v, 8) || !v)
+                continue;
+            if (v < 0xffff00000000ULL)
+                continue;
+            uintptr_t s = 0, ctl = 0, sel = 0;
+            if (!rd(v + 0x4c8, &s, 8) || s != sample)
+                continue;
+            rd(v + 0x10c8, &ctl, 8);
+            rd(v + 0x4d0, &sel, 8);
+            mlog("chop: find hit %s+0x%lx -> editor=%p ctl=%p sel=%p\n", names[r],
+                 (unsigned long)o, (void *)v, (void *)ctl, (void *)sel);
+        }
+    }
+    mlog("chop: find done\n");
+}
+
+/* Commands are queued by the probe thread and run on the UI thread from the
+ * button hook: the app's model is not safe to touch from a foreign thread. */
+static char g_chop_cmd[64];
+
+static void chop_probe_run(void)
+{
+    char cmd[64];
+    memcpy(cmd, g_chop_cmd, sizeof cmd);
+    if (!cmd[0])
+        return;
+    g_chop_cmd[0] = 0;
+    void *screen = 0;
+    uintptr_t state = 0, sample = 0;
+    unsigned frames = 0, ch = 0, rate = 0;
+    int have = hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate);
+    mlog("chop: cmd '%s' editor=%p screen=%p sample=%p frames=%u\n", cmd,
+         (void *)g_chop_editor, screen, (void *)sample, frames);
+    mlog("chop: view chop=%d sample_page=%d levels=%d last_pad=%d shift=%d\n",
+         in_chop_mode(), sample_page_visible(), levels_active(), g_last_pad,
+         g_shift);
+    if (!strncmp(cmd, "rw ", 3)) {
+        unsigned long addr = 0, len = 0;
+        if (sscanf(cmd + 3, "%lx %lx", &addr, &len) != 2 || !addr || len > 0x400)
+            return;
+        for (unsigned long o = 0; o < len; o += 8) {
+            uintptr_t q = 0;
+            if (!rd((uintptr_t)addr + o, &q, 8))
+                break;
+            mlog("chop: R %03lx %016llx\n", o, (unsigned long long)q);
+        }
+        return;
+    }
+    if (!strncmp(cmd, "sl ", 3)) {
+        unsigned idx = (unsigned)strtoul(cmd + 3, 0, 10);
+        uintptr_t buf = 0, lo = 0, hi = 0;
+        if (!sample || !rd(sample + 0x130, &buf, 8) || !buf)
+            return;
+        lo = buf + 0x10 + 0x60;
+        if (!rd(lo, &lo, 8) || !rd(buf + 0x10 + 0x68, &hi, 8) || hi <= lo)
+            return;
+        if (idx >= (hi - lo) / 8) {
+            mlog("chop: sl idx %u out of range\n", idx);
+            return;
+        }
+        uintptr_t sp = 0;
+        if (!rd(lo + idx * 8, &sp, 8) || !sp)
+            return;
+        mlog("chop: sl idx=%u obj=%p\n", idx, (void *)sp);
+        for (unsigned o = 0; o < 0x140; o += 8) {
+            uintptr_t q = 0;
+            if (!rd(sp + o, &q, 8))
+                break;
+            mlog("chop: S %03x %016llx\n", o, (unsigned long long)q);
+        }
+        return;
+    }
+    if (!strcmp(cmd, "lay")) {
+        uintptr_t binding = 0, st = 0, lay = 0;
+        if (!screen || !rd((uintptr_t)screen + 0x178, &binding, 8) || !binding ||
+            !rd(binding + 0x60, &st, 8) || !st || !rd(st + 0x22e8, &lay, 8) || !lay) {
+            mlog("chop: lay no layer\n");
+            return;
+        }
+        mlog("chop: lay layer=%p\n", (void *)lay);
+        for (unsigned o = 0; o < 0xb30; o += 8) {
+            uintptr_t q = 0;
+            if (!rd(lay + o, &q, 8))
+                break;
+            mlog("chop: L %03x %016llx\n", o, (unsigned long long)q);
+        }
+        return;
+    }
+    if (!strcmp(cmd, "scan2")) {
+        uintptr_t binding = 0, st = 0, lay = 0;
+        if (screen && rd((uintptr_t)screen + 0x178, &binding, 8) && binding &&
+            rd(binding + 0x60, &st, 8) && st && rd(st + 0x22e8, &lay, 8))
+            chop_scan_marker(lay);
+        return;
+    }
+    if (!strcmp(cmd, "find")) {
+        chop_find(sample);
+        return;
+    }
+    if (!strcmp(cmd, "scan")) {
+        chop_scan(sample);
+        return;
+    }
+    if (!strcmp(cmd, "dump")) {
+        chop_dump("before", sample);
+        {
+            uintptr_t binding = 0, st = 0, lay = 0, smp = 0;
+            if (screen && rd((uintptr_t)screen + 0x178, &binding, 8) && binding &&
+                rd(binding + 0x60, &st, 8) && st &&
+                rd(st + 0x22e8, &lay, 8) && lay) {
+                mlog("chop: chain screen=%p binding=%p state=%p layer=%p\n", screen,
+                     (void *)binding, (void *)st, (void *)lay);
+                if (rd(lay + 0x4a8, &smp, 8))
+                    mlog("chop:   layer+0x4a8=%p (sample)\n", (void *)smp);
+                chop_dump_layer(lay);
+            }
+            /* Which of the objects we can already reach is the editor that the
+             * stock slice commands take as their first argument? */
+            uintptr_t cand[4] = {(uintptr_t)screen, binding, st, lay};
+            const char *names[4] = {"screen", "binding", "state", "layer"};
+            for (int i = 0; i < 4; ++i) {
+                if (!cand[i])
+                    continue;
+                uintptr_t c0 = 0, d0 = 0, ctl = 0, mode = 0, ph = 0;
+                rd(cand[i] + 0x4c8, &c0, 8);
+                rd(cand[i] + 0x4d0, &d0, 8);
+                rd(cand[i] + 0x10c8, &ctl, 8);
+                rd(cand[i] + 0x528, &mode, 8);
+                rd(cand[i] + 0x848, &ph, 8);
+                mlog("chop: cand %s=%p +4c8=%p +4d0=%p +10c8=%p +528=%llu +848=%llu\n",
+                     names[i], (void *)cand[i], (void *)c0, (void *)d0, (void *)ctl,
+                     (unsigned long long)(mode & 0xffffffff),
+                     (unsigned long long)(ph & 0xffffffff));
+            }
+        }
+        if (g_chop_editor) {
+            uintptr_t es = 0, sel = 0, ctl = 0, ph = 0;
+            rd(g_chop_editor + 0x4c8, &es, 8);
+            rd(g_chop_editor + 0x4d0, &sel, 8);
+            rd(g_chop_editor + 0x10c8, &ctl, 8);
+            rd(g_chop_editor + 0x848, &ph, 8);
+            mlog("chop: editor +0x4c8=%p +0x4d0=%p +0x10c8=%p +0x848=%llu\n",
+                 (void *)es, (void *)sel, (void *)ctl, (unsigned long long)(ph & 0xffffffff));
+        }
+        return;
+    }
+    if (!strcmp(cmd, "rp")) {
+        if (g_screen)
+            FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(g_screen, 0, 0);
+        mlog("chop: repaint issued\n");
+        return;
+    }
+    if (!strncmp(cmd, "ww ", 3)) {
+        unsigned long addr = 0, val = 0;
+        if (sscanf(cmd + 3, "%lx %lx", &addr, &val) != 2 || !addr)
+            return;
+        uintptr_t old = 0;
+        rd((uintptr_t)addr, &old, 8);
+        int ok = wr((uintptr_t)addr, &val, 8);
+        mlog("chop: ww %p %llu -> %llu ok=%d\n", (void *)addr,
+             (unsigned long long)old, (unsigned long long)val, ok);
+        return;
+    }
+    if (!strncmp(cmd, "findq ", 6)) {
+        unsigned long long want = 0;
+        if (sscanf(cmd + 6, "%llx", &want) != 1)
+            return;
+        FILE *f = fopen("/proc/self/maps", "r");
+        if (!f)
+            return;
+        size_t chunk = 8u << 20;
+        unsigned char *b = malloc(chunk);
+        char line[512];
+        int hits = 0;
+        while (b && fgets(line, sizeof line, f) && hits < 16) {
+            unsigned long lo = 0, hi = 0;
+            char perms[8] = {0};
+            if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || perms[1] != 'w')
+                continue;
+            for (unsigned long a = lo; a < hi && hits < 16; a += chunk) {
+                size_t n = (hi - a) < chunk ? (size_t)(hi - a) : chunk;
+                if (!rd(a, b, n))
+                    continue;
+                for (size_t o = 0; o + 8 <= n && hits < 16; o += 8) {
+                    unsigned long long v;
+                    memcpy(&v, b + o, 8);
+                    if (v == want) {
+                        mlog("chop: findq %llx at %p\n", want, (void *)(a + o));
+                        hits++;
+                    }
+                }
+            }
+        }
+        if (b)
+            free(b);
+        fclose(f);
+        mlog("chop: findq done %d\n", hits);
+        return;
+    }
+    if (!strncmp(cmd, "findval ", 8)) {
+        unsigned long want = 0;
+        if (sscanf(cmd + 8, "%lx", &want) != 1)
+            return;
+        FILE *f = fopen("/proc/self/maps", "r");
+        if (!f)
+            return;
+        size_t chunk = 8u << 20;
+        unsigned char *b = malloc(chunk);
+        char line[512];
+        int hits = 0;
+        while (b && fgets(line, sizeof line, f) && hits < 24) {
+            unsigned long lo = 0, hi = 0;
+            char perms[8] = {0};
+            if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || perms[1] != 'w')
+                continue;
+            for (unsigned long a = lo; a < hi && hits < 24; a += chunk) {
+                size_t n = (hi - a) < chunk ? (size_t)(hi - a) : chunk;
+                if (!rd(a, b, n))
+                    continue;
+                for (size_t o = 0; o + 4 <= n && hits < 24; o += 4) {
+                    unsigned v;
+                    memcpy(&v, b + o, 4);
+                    if (v == (unsigned)want) {
+                        mlog("chop: findval 0x%lx at %p\n", want, (void *)(a + o));
+                        hits++;
+                    }
+                }
+            }
+        }
+        if (b)
+            free(b);
+        fclose(f);
+        mlog("chop: findval done %d\n", hits);
+        return;
+    }
+
+    if (!strcmp(cmd, "snap")) {
+        chop_snapshot("manual");
+        return;
+    }
+    if (!strcmp(cmd, "snaptrack")) {
+        g_snap_n = 0;
+        g_snap_track = 1;
+        mlog("chop: snapshot tracking on\n");
+        return;
+    }
+    if (!strcmp(cmd, "snapoff")) {
+        g_snap_track = 0;
+        mlog("chop: snapshot tracking off\n");
+        return;
+    }
+    if (!strcmp(cmd, "alloc")) {
+        g_malloc_n = 0;
+        g_malloc_probe = 1;
+        mlog("chop: malloc probe on\n");
+        return;
+    }
+    if (!strcmp(cmd, "allocoff")) {
+        g_malloc_probe = 0;
+        mlog("chop: malloc probe off\n");
+        return;
+    }
+    if (!strncmp(cmd, "add ", 4)) {
+        unsigned want = (unsigned)strtoul(cmd + 4, 0, 10);
+        if (!g_chop_editor || !sample || !orig_add_slice) {
+            mlog("chop: add refused (no editor/sample)\n");
+            return;
+        }
+        uintptr_t sel = 0;
+        if (!rd(g_chop_editor + 0x4d0, &sel, 8) || !sel) {
+            mlog("chop: add refused (no selection)\n");
+            return;
+        }
+        uintptr_t pair[2];
+        pair[0] = sample;
+        pair[1] = sel;
+        mlog("chop: add frame=%u before=%u\n", want, chop_slice_count(sample));
+        orig_add_slice((void *)g_chop_editor, pair, want);
+        chop_dump("after-add", sample);
+        return;
+    }
+    if (!strncmp(cmd, "addx ", 5)) {
+        unsigned long ed = 0, frame = 0;
+        if (sscanf(cmd + 5, "%lx %lu", &ed, &frame) != 2 || !sample || !orig_add_slice) {
+            mlog("chop: addx refused\n");
+            return;
+        }
+        uintptr_t sel = 0;
+        rd(ed + 0x4d0, &sel, 8);
+        uintptr_t pair[2] = {sample, sel};
+        unsigned before = chop_slice_count(sample);
+        mlog("chop: addx ed=%p sel=%p frame=%lu before=%u\n", (void *)ed, (void *)sel,
+             frame, before);
+        chop_add_guarded(ed, pair, frame);
+        unsigned after = chop_slice_count(sample);
+        mlog("chop: addx after=%u guard=%d %s\n", after, (int)g_chop_ok,
+             !g_chop_ok ? "FAULTED" : (after == before + 1 ? "OK" : "UNEXPECTED"));
+        chop_dump("after-addx", sample);
+        return;
+    }
+    if (!strncmp(cmd, "rmallx ", 7)) {
+        unsigned long ed = 0;
+        if (sscanf(cmd + 7, "%lx", &ed) != 1 || !sample || !orig_rmall_cmd) {
+            mlog("chop: rmallx refused\n");
+            return;
+        }
+        uintptr_t ctl = 0, sel = 0;
+        rd(ed + 0x10c8, &ctl, 8);
+        rd(ed + 0x4d0, &sel, 8);
+        uintptr_t pair[2] = {sample, sel};
+        mlog("chop: rmallx ed=%p ctl=%p sel=%p before=%u\n", (void *)ed, (void *)ctl,
+             (void *)sel, chop_slice_count(sample));
+        chop_rmall_guarded(ctl, pair, ed);
+        mlog("chop: rmallx after=%u guard=%d\n", chop_slice_count(sample), (int)g_chop_ok);
+        chop_dump("after-rmall", sample);
+        return;
+    }
+    if (!strncmp(cmd, "mk ", 3)) {
+        unsigned long off = 0;
+        unsigned n = 16;
+        int got = sscanf(cmd + 3, "%lx %u", &off, &n);
+        if (got < 1 || !off)
+            return;
+        if (n > 64)
+            n = 64;
+        uintptr_t addr = base + (uintptr_t)off;
+        for (unsigned i = 0; i < n; ++i) {
+            uintptr_t q = 0;
+            if (!rd(addr + (uintptr_t)i * 8, &q, 8))
+                break;
+            mlog("chop:   m[0x%lx+%u] = 0x%llx\n", (unsigned long)off, i,
+                 (unsigned long long)(q - base));
+        }
+        return;
+    }
+    if (!strncmp(cmd, "vl", 2)) {
+        unsigned n = cmd[2] ? (unsigned)strtoul(cmd + 3, 0, 10) : 40;
+        uintptr_t buf = 0, cont = 0, vt = 0;
+        if (!sample || !rd(sample + 0x130, &buf, 8) || !buf)
+            return;
+        cont = buf + 0x10;
+        if (!rd(cont, &vt, 8))
+            return;
+        mlog("chop: slicelist=%p vtable=%p off=0x%llx\n", (void *)cont, (void *)vt,
+             (unsigned long long)(vt - base));
+        for (unsigned i = 0; i < n; ++i) {
+            uintptr_t q = 0;
+            if (!rd(vt + (uintptr_t)i * 8, &q, 8))
+                break;
+            mlog("chop:   lv[%u] = 0x%llx\n", i, (unsigned long long)(q - base));
+        }
+        return;
+    }
+    if (!strcmp(cmd, "wvec")) {
+        uintptr_t buf = 0, cont = 0, begin = 0;
+        if (sample && rd(sample + 0x130, &buf, 8) && buf) {
+            cont = buf + 0x10;
+            rd(cont + 0x60, &begin, 8);
+            mlog("chop: watch vector header %p and elements %p\n",
+                 (void *)(cont + 0x68), (void *)begin);
+            watch_arm(cont + 0x68, "slicevec");
+            watch_arm(cont + 0x60, "slicevec0");
+            if (begin)
+                watch_arm(begin, "sliceelems");
+        }
+        return;
+    }
+    if (!strcmp(cmd, "samp")) {
+        uintptr_t a = 0, b = 0, buf = 0;
+        rd(sample + 0x170, &a, 8);
+        rd(sample + 0x178, &b, 8);
+        rd(sample + 0x130, &buf, 8);
+        mlog("chop: sample=%p +0x170=%p +0x178=%p +0x130=%p\n", (void *)sample,
+             (void *)a, (void *)b, (void *)buf);
+        g_chop_ok = 0;
+        if (sigsetjmp(g_cc_jmp, 1) == 0) {
+            g_cc_recover = 1;
+            unsigned r = FN(0x2943640, unsigned (*)(void *, unsigned))((void *)sample, 1);
+            g_cc_recover = 0;
+            g_chop_ok = 1;
+            mlog("chop: isSampleValid=%u\n", r);
+        } else {
+            g_cc_recover = 0;
+            mlog("chop: isSampleValid FAULTED\n");
+        }
+        return;
+    }
+    if (!strcmp(cmd, "count")) {
+        chop_dump("count", sample);
+        return;
+    }
+    if (!strncmp(cmd, "vt", 2)) {
+        unsigned n = cmd[2] ? (unsigned)strtoul(cmd + 3, 0, 10) : 40;
+        uintptr_t vt = 0;
+        if (!sample || !rd(sample, &vt, 8))
+            return;
+        mlog("chop: sample=%p vtable=%p file_off=0x%llx entries=%u\n", (void *)sample,
+             (void *)vt, (unsigned long long)(vt - base), n);
+        for (unsigned i = 0; i < n; ++i) {
+            uintptr_t q = 0;
+            if (!rd(vt + (uintptr_t)i * 8, &q, 8))
+                break;
+            mlog("chop:   vt[%u] = 0x%llx\n", i, (unsigned long long)(q - base));
+        }
+        return;
+    }
+    (void)have;
+}
+
+static void *chop_probe_thread(void *arg)
+{
+    (void)arg;
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 200 * 1000 * 1000};
+    for (;;) {
+        nanosleep(&ts, 0);
+        int fd = open("/run/minimod.chop", O_RDONLY);
+        if (fd < 0)
+            continue;
+        char buf[64];
+        ssize_t n = read(fd, buf, sizeof buf - 1);
+        close(fd);
+        unlink("/run/minimod.chop");
+        if (n <= 0)
+            continue;
+        buf[n] = 0;
+        char *nl = strchr(buf, '\n');
+        if (nl)
+            *nl = 0;
+        memcpy(g_chop_cmd, buf, sizeof g_chop_cmd);
+        mlog("chop: queued '%s'\n", g_chop_cmd);
+    }
+    return 0;
+}
+#endif
+
 static void hpss_finalize(void)
 {
     if (g_hpss_finalizing || !__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE))
@@ -2323,7 +3394,7 @@ static void hpss_finalize(void)
             goto out;
         }
         int first_pad = -1, second_pad = -1;
-        int a = hpss_extract_ctx(job->screen, job->state, job->harmonic,
+        int a = hpss_extract_ctx(job->screen, job->state, job->harmonic, 0,
                                  job->frames, job->ch, 0, &first_pad);
         if (!a) {
             hpss_restore_chop();
@@ -2331,7 +3402,7 @@ static void hpss_finalize(void)
             toast("HPSS: write failed");
             goto out;
         }
-        int b = hpss_extract_ctx(job->screen, job->state, job->percussive,
+        int b = hpss_extract_ctx(job->screen, job->state, job->percussive, 0,
                                  job->frames, job->ch, 1, &second_pad);
         hpss_restore_chop();
         if (!b) {
@@ -2352,9 +3423,6 @@ out:
     g_hpss_busy = 0;
     g_hpss_menu = 0;
     g_hpss_data_down = 0;
-    g_hpss_cc_state = 0;
-    g_hpss_cc_skip = 0;
-    g_hpss_guard_until = 0;
     g_hpss_finalizing = 0;
     hpss_repaint();
 }
@@ -2365,9 +3433,6 @@ static void hpss_open(void)
         return;
     g_hpss_menu = 1;
     g_hpss_sel = 0;
-    g_hpss_cc_state = 0;
-    g_hpss_cc_skip = 0;
-    g_hpss_guard_until = 0;
     g_hpss_data_down = 0;
     hpss_set_status("");
     hpss_repaint();
@@ -2379,9 +3444,6 @@ static void hpss_close(void)
         return;
     g_hpss_menu = 0;
     g_hpss_data_down = 0;
-    g_hpss_cc_state = 0;
-    g_hpss_cc_skip = 0;
-    g_hpss_guard_until = 0;
     hpss_repaint();
 }
 
@@ -2391,6 +3453,8 @@ static void hpss_activate(void)
         return;
     if (g_hpss_sel == 0)
         hpss_start();
+    else if (g_hpss_sel == 1)
+        spectral_start();
     else
         hpss_close();
 }
@@ -2402,39 +3466,50 @@ static void draw_text(void *g, const char *s, int x, int y, int w, int h,
 
 static void hpss_draw_menu(void *g)
 {
-    int x = 14, y = 26, w = 292, h = 150;
+    int x = 14, y = 18, w = 292, h = 174;
     draw_colour(g, 0xff101014);
     draw_rect(g, x, y, w, h);
     draw_colour(g, 0xffffb43c);
     draw_rect(g, x, y, w, 2);
     draw_rect(g, x, y + h - 2, w, 2);
     draw_colour(g, 0xffffffff);
-    draw_text(g, "SAMPLE OPTIONS", x + 10, y + 8, w - 20, 24, 18.0f);
+    draw_text(g, "SAMPLE OPTIONS", x + 10, y + 6, w - 20, 22, 18.0f);
     if (g_hpss_busy) {
-        draw_text(g, "Processing HPSS...", x + 10, y + 56, w - 20, 24, 16.0f);
-        draw_text(g, "harmonic + percussive", x + 10, y + 82, w - 20, 20,
-                  12.0f);
+        draw_text(g, "Processing...", x + 10, y + 56, w - 20, 24, 16.0f);
+        if (g_hpss_status[0])
+            draw_text(g, g_hpss_status, x + 10, y + 84, w - 20, 20, 12.0f);
     } else {
         if (g_hpss_sel == 0) {
             draw_colour(g, 0xff3a2a10);
-            draw_rect(g, x + 6, y + 44, w - 12, 46);
+            draw_rect(g, x + 6, y + 36, w - 12, 42);
             draw_colour(g, 0xffffffff);
         }
-        draw_text(g, "HPSS", x + 12, y + 48, w - 24, 22, 16.0f);
-        draw_text(g, "split into harmonic + percussive", x + 12, y + 68,
-                  w - 24, 18, 12.0f);
+        draw_text(g, "HPSS", x + 12, y + 38, w - 24, 22, 16.0f);
+        draw_text(g, "split into harmonic + percussive", x + 12, y + 58,
+                  w - 24, 16, 12.0f);
         if (g_hpss_sel == 1) {
             draw_colour(g, 0xff3a2a10);
-            draw_rect(g, x + 6, y + 94, w - 12, 28);
+            draw_rect(g, x + 6, y + 82, w - 12, 42);
             draw_colour(g, 0xffffffff);
         }
-        draw_text(g, "Close", x + 12, y + 96, w - 24, 22, 16.0f);
+        draw_text(g, "Spectral Chop", x + 12, y + 84, w - 24, 22, 16.0f);
+        draw_text(g, "slice this sample at detected onsets", x + 12, y + 104,
+                  w - 24, 16,
+                  12.0f);
+        if (g_hpss_sel == 2) {
+            draw_colour(g, 0xff3a2a10);
+            draw_rect(g, x + 6, y + 128, w - 12, 26);
+            draw_colour(g, 0xffffffff);
+        }
+        draw_text(g, "Close", x + 12, y + 130, w - 24, 22, 16.0f);
         if (g_hpss_status[0])
-            draw_text(g, g_hpss_status, x + 10, y + 124, w - 20, 18, 12.0f);
+            draw_text(g, g_hpss_status, x + 10, y + 150, w - 20, 16, 11.0f);
     }
-    draw_colour(g, 0xffb0b0b0);
-    draw_text(g, "TURN: select    DATA: confirm", x + 10, y + h - 22,
-              w - 20, 16, 11.0f);
+    if (!g_hpss_busy && !g_hpss_status[0]) {
+        draw_colour(g, 0xffb0b0b0);
+        draw_text(g, "TURN: select    DATA: confirm", x + 10, y + h - 20,
+                  w - 20, 16, 11.0f);
+    }
 }
 
 static void buttons(void *event)
@@ -2442,9 +3517,27 @@ static void buttons(void *event)
 
     unsigned code = event ? FIELD(event, 8, uint8_t) : 0;
     unsigned down = event ? FIELD(event, 9, uint8_t) : 0;
-    if (event && rd((uintptr_t)event, g_hpss_btn, sizeof g_hpss_btn))
+    if (event && rd((uintptr_t)event, g_hpss_btn, sizeof g_hpss_btn)) {
         g_hpss_btn_valid = 1;
+        uintptr_t context = 0, surface = 0;
+        memcpy(&context, g_hpss_btn, sizeof context);
+        if (context && rd(context + 0x10, &surface, sizeof surface) && surface)
+            __atomic_store_n(&g_data_signal, surface + 0x2da8, __ATOMIC_RELEASE);
+    }
+#if MINIMOD_DEBUG
+    if (g_snap_track && g_snap_n < 24) {
+        char tag[16];
+        snprintf(tag, sizeof tag, "btn%02x%d", code, down ? 1 : 0);
+        chop_snapshot(tag);
+        g_snap_n++;
+    }
+#endif
     if (code == 0x6f) { /* DATA press/turn */
+        static int consumed;
+        if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
+            consumed = 1;
+        if (down && (g_hpss_menu || (g_shift && sample_page_visible())))
+            consumed = 1;
         int visible = sample_page_visible();
         if (down && !g_hpss_data_down) {
             if (g_shift) {
@@ -2459,8 +3552,10 @@ static void buttons(void *event)
             }
         }
         g_hpss_data_down = !!down;
-        if (g_hpss_menu || (g_shift && visible))
+        if (consumed || g_hpss_menu || (g_shift && visible)) {
+            if (!down) consumed = 0;
             return;
+        }
     }
     if (getenv("MINIMOD_VIS") && g_screen)
         mlog("minimod: vis code=0x%02x chopA=%d chopB=%d\n", code,
@@ -2481,7 +3576,7 @@ static void buttons(void *event)
             orig_buttons(event);
         return;
     }
-    if (g_hpss_menu)
+    if (g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
         return;
     if (code == 0x0e && g_shift && !in_chop_mode()) { /* SHIFT + B3: 3 %, 6 %, 9 %, untrimmed */
         /* The button repeats while held, so act on the press edge only. */
@@ -2587,6 +3682,8 @@ static struct {
 
 static void note_on(void *input, int src, int pad, void *props, float vel)
 {
+    if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
+        return;
     g_last_pad = pad;
     g_props = props;
 
@@ -2617,6 +3714,21 @@ static void *g_cs_self;
 
 static void cs_event(void *self, int code, void *payload)
 {
+#if MINIMOD_LOG
+    {
+        static int n;
+        if (n < 200) {
+            unsigned char raw[16];
+            memset(raw, 0, sizeof raw);
+            if (payload && rd((uintptr_t)payload, raw, sizeof raw)) {
+                n++;
+                mlog("cs %02x | %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                     code & 0xff, raw[0], raw[1], raw[2], raw[3],
+                     raw[4], raw[5], raw[6], raw[7]);
+            }
+        }
+    }
+#endif
     if (self)
         g_cs_self = self;
     if (debug_mode && g_dbg < 160) {
@@ -2654,12 +3766,6 @@ static void trim_reg(void *a, void *b)
 static void *prog_inst(void *a, int b)
 {
     return orig_prog_inst ? orig_prog_inst(a, b) : 0;
-}
-
-static void rotary(void *a, float v)
-{
-    if (orig_rotary)
-        orig_rotary(a, v);
 }
 
 /* The trim core is called by the broadcaster's listener loop, which keeps the
@@ -2888,6 +3994,7 @@ static void bcast_hook(void *self, float v)
     g_nbc = i + 1;
     if (probe_mode && i < 64)
         mlog("minimod: bcast %p v=%.4f\n", self, (double)v);
+
     /* Record the property a *native* broadcast uses: that is the object the
      * page listens to. Our own broadcasts are flagged. */
     if (!g_own_call) {
@@ -3501,6 +4608,8 @@ static uintptr_t ctl_obj_for(uintptr_t base)
  * app performs exactly what a knob does. */
 static unsigned char g_cc_ev[32];
 static int g_cc_ev_valid;
+static unsigned char g_cc_k3_ev[32];
+static volatile int g_cc_k3_valid;
 static unsigned g_cc_raw[2];
 static float g_cc_range[2] = {127.0f, 127.0f};
 static int g_cc_seen[2];
@@ -3508,7 +4617,21 @@ static int g_in_cc_replay;
 
 static void cc_capture(void *ev, unsigned raw, float lo, float range)
 {
-    (void)lo;
+    /* Keep the stock decoder/transport intact. Only DATA reaches the native
+     * integer signal while our modal menu owns controls; knobs must not edit
+     * the sample behind it. Replayed internal commands are not user input. */
+    if (!g_in_cc_replay && ev &&
+        (g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE)) &&
+        ((unsigned char *)ev)[8] != 0x64)
+        return;
+#if MINIMOD_DEBUG
+    if (g_snap_track && !g_in_cc_replay && ev && g_snap_n < 24) {
+        char tag[24];
+        snprintf(tag, sizeof tag, "cc%02x=%u", ((unsigned char *)ev)[8], raw);
+        chop_snapshot(tag);
+        g_snap_n++;
+    }
+#endif
     if (!g_in_cc_replay && ev) {
         unsigned char cc = ((unsigned char *)ev)[8];
         static int allc;
@@ -3534,6 +4657,10 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
                 g_cc_range[idx] = range;
             g_cc_seen[idx] = 1;
         }
+        if (cc == 0x12 && !g_cc_k3_valid) {
+            memcpy(g_cc_k3_ev, ev, sizeof g_cc_k3_ev);
+            g_cc_k3_valid = 1;
+        }
     }
     if (orig_cc)
         orig_cc(ev, raw, lo, range);
@@ -3542,12 +4669,30 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
 static void cc_replay(unsigned cc, unsigned raw)
 {
     unsigned char ev[32];
+    if (!g_cc_ev_valid) {
+        mlog("Spectral: no captured CC event, cannot replay\n");
+        return;
+    }
     memcpy(ev, g_cc_ev, sizeof ev);
     ev[8] = (unsigned char)cc;
     g_in_cc_replay = 1;
     if (orig_cc)
         orig_cc(ev, raw, 0.0f, 127.0f);
     g_in_cc_replay = 0;
+}
+
+static void cc_replay_k3(unsigned raw)
+{
+    if (!g_cc_k3_valid)
+        return;
+    unsigned char ev[32];
+    memcpy(ev, g_cc_k3_ev, sizeof ev);
+    ev[8] = 0x12;
+    g_in_cc_replay = 1;
+    if (orig_cc)
+        orig_cc(ev, raw, 0.0f, 127.0f);
+    g_in_cc_replay = 0;
+    mlog("Spectral: replayed K3=%u (valid=%d)\n", raw, g_cc_k3_valid);
 }
 
 static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
@@ -4312,6 +5457,10 @@ static void screen_paint(void *p, void *g)
         g_screen = p;
         mlog("minimod: screen=%p\n", p);
     }
+#if MINIMOD_DEBUG
+    chop_probe_run(); /* model probes must also run on the UI thread */
+#endif
+    spectral_tick();
     if (__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE))
         hpss_finalize();
     if (g_hpss_restore_pending && !g_shift && sample_page_visible()) {
@@ -5227,6 +6376,9 @@ __attribute__((constructor)) static void load(void)
     void *t_sync = install_hook(base + 0x2822260, (void *)sync_probe);
     if (t_sync)
         orig_sync = (void (*)(void *, void *, void *, void *))t_sync;
+    void *t_data = install_hook(base + A_DATA_SIGNAL, (void *)data_signal);
+    if (t_data)
+        orig_data_signal = (void (*)(void *, int))t_data;
     void *t_cc = install_hook(base + 0x159f230, (void *)cc_capture);
     if (t_cc)
         orig_cc = (void (*)(void *, unsigned, float, float))t_cc;
@@ -5256,6 +6408,46 @@ __attribute__((constructor)) static void load(void)
     void *t_cp = install_hook(base + 0x280dca0, (void *)copypad_probe);
     if (t_cp)
         orig_copypad = (void (*)(void *, void *))t_cp;
+#endif
+#if MINIMOD_DEBUG
+    {
+        void *t = 0;
+        t = install_hook(base + 0x20a3b10, (void *)add_slice_hook);
+        if (t)
+            orig_add_slice = (void (*)(void *, void *, uint64_t))t;
+        t = install_hook(base + 0x20a9fa0, (void *)add_slice_ph_hook);
+        if (t)
+            orig_add_slice_ph = (void (*)(void *))t;
+        t = install_hook(base + 0x1960af0, (void *)insert_cmd_hook);
+        if (t)
+            orig_insert_cmd = (void (*)(void *, void *, unsigned, void *))t;
+        t = install_hook(base + 0x195cf40, (void *)rmall_cmd_hook);
+        if (t)
+            orig_rmall_cmd = (void (*)(void *, void *, void *))t;
+        t = install_hook(base + 0x192d040, (void *)slice_publish_hook);
+        if (t)
+            orig_slice_publish = (void (*)(void *))t;
+        t = install_hook(base + 0x2941ff0, (void *)slice_list_hook);
+        if (t)
+            orig_slice_list = (void *(*)(void *))t;
+        t = install_hook(base + 0x20a7140, (void *)slice_action_hook);
+        if (t)
+            orig_slice_action = (void (*)(void *, void *, int))t;
+        t = install_hook(base + 0x1960d50, (void *)split_cmd_hook);
+        if (t)
+            orig_split_cmd = (void (*)(void *, void *, unsigned, void *))t;
+        t = install_hook(base + 0x195d1c0, (void *)rm_slice_hook);
+        if (t)
+            orig_rm_slice = (void (*)(void *, void *, unsigned, void *))t;
+        t = install_hook(base + 0x2814ec0, (void *)marker_at_hook);
+        if (t)
+            orig_marker_at = (int (*)(void *, unsigned))t;
+        t = install_hook(base + 0x20aa9e0, (void *)slice_sel_hook);
+        if (t)
+            orig_slice_sel = (void (*)(void *, unsigned))t;
+        mlog("chop hooks: add=%p ph=%p cmd=%p\n", (void *)orig_add_slice,
+             (void *)orig_add_slice_ph, (void *)orig_insert_cmd);
+    }
 #endif
     void *t_trim = install_hook(base + A_TRIM_CORE, (void *)trim_probe); /* also learns param->property */
     void *t_bc = install_hook(base + A_BROADCAST, (void *)bcast_hook);
@@ -5310,11 +6502,12 @@ __attribute__((constructor)) static void load(void)
     install_screen_paint();
 #if MINIMOD_DEBUG
     {
-        pthread_t wth, sth, bth, hth;
+        pthread_t wth, sth, bth, hth, cth;
         pthread_create(&wth, 0, watch_thread, 0);
         pthread_create(&sth, 0, slider_probe_thread, 0);
         pthread_create(&bth, 0, bcast_probe_thread, 0);
         pthread_create(&hth, 0, heap_probe_thread, 0);
+        pthread_create(&cth, 0, chop_probe_thread, 0);
     }
 #endif
     if (!relay_used) {

@@ -11,10 +11,7 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 `autorun` package. Nothing on disk is modified: the library is copied to `/run`
 (tmpfs) and preloaded into the stock app, so a reboot returns to stock.
 
-**Current status:** pitch shift is verified on hardware. AutoTrim's native
-command and UI updates are verified in the emulator. SAMPLE OPTIONS / HPSS is
-verified in the emulator. See [`docs/AUTOTRIM-NATIVE.md`](../docs/AUTOTRIM-NATIVE.md)
-and [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md) for validation details.
+**Current status:** pitch shift is verified on hardware. AutoTrim's native command and UI updates are verified in the emulator. SAMPLE OPTIONS, HPSS and Spectral Chop are emulator-verified. See [`docs/AUTOTRIM-NATIVE.md`](../docs/AUTOTRIM-NATIVE.md), [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md), and [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md) for details.
 
 | # | feature | control | state |
 | --- | --- | --- | --- |
@@ -22,6 +19,7 @@ and [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md) for validation details.
 | 2 | AutoTrim of the selected pad's sample | `SHIFT` + `B3` | native command path and marker refresh verified in emulator |
 | 3 | AutoTrim soft-key caption | `SHIFT` held on the Sample page | verified; hidden in Chop mode |
 | 4 | SAMPLE OPTIONS → HPSS split onto two pads | `SHIFT` + `DATA`, then `DATA` | emulator-verified; see [HPSS-HANDOFF](../HPSS-HANDOFF.md) |
+| 5 | SAMPLE OPTIONS → Spectral Chop slices the selected pad at detected onsets | `SHIFT` + `DATA`, choose Spectral Chop, `DATA` | emulator-verified by `mod/tests/emulator_spectral.py`; see [SPECTRAL-CHOP](../docs/SPECTRAL-CHOP.md) |
 
 Chromatic MIDI from an external controller is not included in the release build.
 
@@ -52,13 +50,25 @@ released   : Trim        Tune        Filter
   16/24/32-bit and float32 WAV files are supported. AutoTrim is suppressed in
   Chop mode, where SHIFT+B3 is the stock Split command.
 * **SAMPLE OPTIONS / HPSS** — `SHIFT` + `DATA` opens the menu on the Sample
-  page. Turn `DATA` to choose **HPSS** or **Close**, press `DATA` to confirm,
-  or press `SHIFT` + `DATA` to close. HPSS reads the selected sample, runs the
-  split on a worker thread, and creates `HPSS Harmonic` then `HPSS Percussive`
-  on the next two empty pads through the stock Extract command. The source
-  sample and the live trim/chop range are left unchanged. Needs two empty pads;
-  outputs are float32 WAVs on this firmware. Full details and validation:
+  page. Turn `DATA` to choose **HPSS**, **Spectral Chop** or **Close**, press
+  `DATA` to confirm, or press `SHIFT` + `DATA` to close. The wheel uses the
+  firmware's native signed DATA event (`0x140dbc0`), filtered to the control
+  surface signal at `+0x2da8`. Repeated identical deltas still move. The native
+  CC hook blocks knobs behind the menu; there are no raw MIDI, evdev or
+  float-property navigation fallbacks. See
+  [input trace and regression checks](../docs/re/SAMPLE-OPTIONS-INPUT.md).
+  HPSS runs on a worker thread and creates `HPSS Harmonic` then `HPSS
+  Percussive` on the next two empty pads through the stock Extract command. The
+  source sample and live trim/chop range are left unchanged. Needs two empty
+  pads; outputs are float32 WAVs on this firmware. Details:
   [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md).
+* **Spectral Chop** — from the same menu. Detects up to 16 spectral-flux onsets,
+  then slices the selected pad at those frame positions. It drives the
+  firmware's slice API and binding callback, which owns allocation and observer
+  updates. Each boundary is read back before success. It creates no samples,
+  files or other pads. Algorithm: [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md);
+  mechanisms and evidence: [`docs/re/SPECTRAL-CHOP-SOLVED.md`](../docs/re/SPECTRAL-CHOP-SOLVED.md).
+  Acceptance test: `mod/tests/emulator_spectral.py`.
 * **Chromatic MIDI** — not included in the release build; see
   [`MIDI-CHROMATIC.md`](../docs/MIDI-CHROMATIC.md) for the investigation.
 

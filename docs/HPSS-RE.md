@@ -346,14 +346,12 @@ trim/chop range is restored immediately afterwards.
   `SHIFT+DATA` close, DATA-repeat suppression and page visibility gating;
 - restoration of the Sample page's Chop/Full mode after the native handler.
 
-The DATA encoder is not visible through the app's JUCE/button hooks. It arrives
-on `/dev/snd/midiC1D0` as a rawmidi stream; this firmware's control-surface
-reader returns 32-byte events with one MIDI byte at offset 16. A `read`
-interposer tracks `B0 64 value` while the menu is open, uses the value for menu
-selection, and drops the three reads that form the `B0` message (the read
-returns 0) so the app never sees the CC. Rewriting the payload was not enough:
-the app still moved the page underneath. Note messages still pass through, and
-a short guard covers the gap between SHIFT+DATA and the menu becoming visible.
+The DATA turn path was resolved through Ghidra on 2026-11-05. The decoded
+control dispatcher sends signed DATA deltas to the native integer signal at
+mod `0x140dbc0`, using `surface+0x2da8`. That object-filtered hook is the sole
+menu navigation source. The former rawmidi interposer and float-property
+inference were removed. The native control hook suppresses knobs while the
+menu owns input. See [the complete trace and tests](re/SAMPLE-OPTIONS-INPUT.md).
 
 Deliberate limits: the app emits float32 WAVs on this firmware; the working
 project copy may be re-saved with 24-bit dither (±2 LSB). If the second native

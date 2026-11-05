@@ -14,16 +14,12 @@ Branch: `feature/sample-options-hpss`. **Changes are uncommitted.**
 
 Implemented and validated in the emulator:
 
-- `SHIFT+DATA` opens SAMPLE OPTIONS only on the visible Sample page. The DATA
-  wheel selects **HPSS** or **Close**; DATA confirms; `SHIFT+DATA` closes.
-  DATA repeats and the underlying DATA action are suppressed while open. The
-  encoder is read from the control-surface rawmidi stream (`/dev/snd/midiC1D0`)
-  because it does not reach the app's JUCE callbacks; each firmware event is 32
-  bytes with the MIDI byte at offset 16. While the menu is open, the three
-  reads that make up a `B0` control-change message are dropped entirely
-  (`read` returns 0), so the page underneath never sees the wheel, knobs or
-  fader; note messages still pass through for DATA confirm/close. A short
-  guard also covers the gap between SHIFT+DATA and the menu becoming visible.
+- `SHIFT+DATA` opens SAMPLE OPTIONS on the visible Sample page. DATA selects
+  **HPSS**, **Spectral Chop** or **Close** and confirms; `SHIFT+DATA` closes.
+  As of 2026-11-05 the menu uses one native signed DATA-event hook, mod
+  `0x140dbc0`, filtered to the surface's signal at `+0x2da8`. Repeated deltas
+  are events, not value changes. The old rawmidi/evdev and float-property
+  paths were removed. See [the input trace](docs/re/SAMPLE-OPTIONS-INPUT.md).
 - HPSS runs on a worker thread. The source is read exactly as the app has it
   (PCM16/24/32, float32/64, extensible WAVs; unsaved recordings through a unique
   `TempProjects` match). Source/project identity is checked again before commit.
