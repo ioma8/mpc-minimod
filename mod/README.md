@@ -11,7 +11,7 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 `autorun` package. Nothing on disk is modified: the library is copied to `/run`
 (tmpfs) and preloaded into the stock app, so a reboot returns to stock.
 
-**Current status:** pitch shift is verified on hardware. AutoTrim's native command and UI updates are verified in the emulator. SAMPLE OPTIONS, HPSS and Spectral Chop are emulator-verified. Add Reverb appends an RT60-length tail through the native Extract writer; see [`docs/REVERB-HANDOFF.md`](../docs/REVERB-HANDOFF.md). See also [`docs/AUTOTRIM-NATIVE.md`](../docs/AUTOTRIM-NATIVE.md), [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md), and [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md).
+**Current status:** pitch shift is verified on hardware. AutoTrim's native command and UI updates are verified in the emulator. SAMPLE OPTIONS, HPSS, Spectral Chop, Reverb, Vinyl, Lo-Fi, and Bass Synth are emulator-verified. Bass Synth saves a DaisySP physical-model C2 pluck and auditions a chromatic C2–D#3 range from pads 1–16 while its parameter page is open. It does not instantiate the firmware's FMBass class because that class requires an H3 host context. Details: [`docs/re/BASS-SAMPLE.md`](../docs/re/BASS-SAMPLE.md). Add Reverb appends an RT60-length tail through the native Extract writer; see [`docs/REVERB-HANDOFF.md`](../docs/REVERB-HANDOFF.md). See also [`docs/AUTOTRIM-NATIVE.md`](../docs/AUTOTRIM-NATIVE.md), [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md), and [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md).
 
 | # | feature | control | state |
 | --- | --- | --- | --- |
@@ -21,8 +21,10 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 | 4 | SAMPLE OPTIONS → HPSS split onto two pads | `SHIFT` + `DATA`, then `DATA` | emulator-verified; see [HPSS-HANDOFF](../HPSS-HANDOFF.md) |
 | 5 | SAMPLE OPTIONS → Spectral Chop slices the selected pad at detected onsets | `SHIFT` + `DATA`, choose Spectral Chop, `DATA` | emulator-verified by `mod/tests/emulator_spectral.py`; see [SPECTRAL-CHOP](../docs/SPECTRAL-CHOP.md) |
 | 6 | SAMPLE OPTIONS → Add Reverb creates a reverbed copy with a tail on a free pad | `SHIFT` + `DATA`, choose Add Reverb, `DATA` | longer WAV and non-silent tail checked in emulator |
+| 7 | SAMPLE OPTIONS → Bass Synth auditions C2–D#3 on pads 1–16 and saves a plucked C2 sample to the next free pad; K1/K2/K3 shape brightness, excitation and filter live | `SHIFT` + `DATA`, choose Bass Synth, play pads or press `DATA` to save | live audio mix, output WAV, C2 pitch, source preservation and no restart checked in emulator |
 
-Chromatic MIDI from an external controller is not included in the release build.
+Chromatic external MIDI playback is available while 16 Levels is active; see
+[`MIDI-CHROMATIC.md`](../docs/MIDI-CHROMATIC.md) for setup and mechanism.
 
 Status history, evidence and open work: [`docs/MINIMOD.md`](../docs/MINIMOD.md).
 The Sample/Trim page itself: [`docs/TRIM-PAGE.md`](../docs/TRIM-PAGE.md).
@@ -51,7 +53,7 @@ released   : Trim        Tune        Filter
   16/24/32-bit and float32 WAV files are supported. AutoTrim is suppressed in
   Chop mode, where SHIFT+B3 is the stock Split command.
 * **SAMPLE OPTIONS** — `SHIFT` + `DATA` opens the menu on the Sample
-  page. Turn `DATA` to choose **HPSS**, **Spectral Chop**, **Add Reverb** or **Close**, press
+  page. Turn `DATA` to choose **HPSS**, **Spectral Chop**, **Add Reverb**, **Vinyl**, **Lo-Fi**, **Bass Synth** or **Close**, press
   `DATA` to confirm, or press `SHIFT` + `DATA` to close. The wheel uses the
   firmware's native signed DATA event (`0x140dbc0`), filtered to the control
   surface signal at `+0x2da8`. Repeated identical deltas still move. The native
@@ -75,8 +77,20 @@ released   : Trim        Tune        Filter
   audio through stock Extract so the firmware assigns it to the next empty pad.
   The source is unchanged. DSP details and the writer hook are
   in [`docs/REVERB-HANDOFF.md`](../docs/REVERB-HANDOFF.md).
-* **Chromatic MIDI** — not included in the release build; see
-  [`MIDI-CHROMATIC.md`](../docs/MIDI-CHROMATIC.md) for the investigation.
+* **Bass Synth** — from the same menu, opens a small parameter page. K1 changes
+  string brightness, K2 excitation/structure and K3 low-pass cutoff. Press `DATA` to render
+  one plucked C2 note (MIDI 36), held for 400 ms in a 1.5 second sample, then
+  assign it through native Extract to the next empty pad. Pads 1–16 also play
+  the live chromatic range C2–D#3; turning the knobs reshapes ringing and new
+  notes. The current pad's sample is preserved. The DaisySP renderer avoids the firmware FMBass class,
+  whose constructor requires the H3 host interface. Implementation and Ghidra
+  evidence: [`docs/re/BASS-SAMPLE.md`](../docs/re/BASS-SAMPLE.md); emulator
+  check: `mod/tests/emulator_bass_sample.py`.
+* **Chromatic MIDI** — select a pad, enable Pad MIDI In in MIDI Config, then
+  enter 16 Levels. External note-ons are shifted from C3 through the native
+  pitch setter while the firmware handles routing and note-offs. See
+  [`MIDI-CHROMATIC.md`](../docs/MIDI-CHROMATIC.md); emulator check:
+  `tests/emulator_midi_chromatic.py`.
 
 ## Install (device)
 
@@ -113,7 +127,9 @@ MPCLAB_PORT_OFFSET=100 python3 lab.py ssh 'tail -f /run/minimod.log'
 
 Extra switches (off by default): `MINIMOD_HOOKS` (bitmask: 2 proc, 16 buttons,
 32 note_on, 64 cs, 128 note_off), `MINIMOD_DEBUG=1`, `MINIMOD_PROBE=1` with
-`MINIMOD_PROBES=<bits>`, `MINIMOD_MIDI=1`, `MINIMOD_TESTTRIM=0.09,0.45`.
+`MINIMOD_PROBES=<bits>`, `MINIMOD_TESTTRIM=0.09,0.45`. Chromatic MIDI is
+handled by the native hook in the default release build; it has no separate
+thread or environment switch.
 
 ## How it hooks
 

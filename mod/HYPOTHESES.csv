@@ -1,0 +1,1 @@
+H38,"The production build still uses the local C2 renderer and remains stable after excluding native probes","Rebuild release library and run emulator_bass_sample.py; require C2 peak, pad assignment, source preservation, and unchanged PID/restart count",,"Validation after the experimental native probe; restore the proven production artifacts"

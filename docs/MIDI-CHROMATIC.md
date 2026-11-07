@@ -1,137 +1,69 @@
-# Chromatic MIDI in 16 Levels — investigation log
+# External MIDI chromatic playback in 16 Levels
 
-Goal: an external MIDI keyboard should play the **selected pad's sample
-chromatically** in 16 Levels, instead of triggering one sample per key.
+The release build now transposes incoming external MIDI note-ons chromatically
+while 16 Levels is active. The firmware still receives and routes every event,
+so its selected-pad routing, note-off matching, sustain and audio engine remain
+in control. Root is MIDI note 60 (C3), matching SampQOL's documented default.
 
-Status: **not working.** The injection point is identified and proven, but the
-app's 16 Levels pitch path never runs in the emulator, so there is nothing to
-drive. This file records every finding, including the approaches that failed, so
-the next attempt does not repeat them.
+## User setup
 
-All addresses are **file VAs** for firmware 1.3.0.12. Ghidra addresses are
-file VA + `0x100000` — mixing them up produced two wrong conclusions earlier in
-this investigation (see §7).
+1. In MIDI Config, select the external keyboard's port and enable **Pad MIDI
+   In**.
+2. Select the sample pad to play and turn on **16 LEVELS**.
+3. Play the keyboard. C3 plays at the sample's original pitch; each semitone
+   above or below shifts it by one semitone. Chords, key releases and sustain
+   continue through the firmware's own MIDI path.
 
-## 1. The audio/MIDI topology
+Outside 16 Levels, MIDI events are passed through unchanged. The existing
+PLUS/MINUS octave control remains a separate 16 Levels feature.
 
-ALSA cards inside the device:
+## Firmware path and evidence
 
-| card | id | what it is |
-|---|---|---|
-| 0 | `Loopback` | the app's audio tap |
-| 1 | `Surface` | control surface **and pads** (SerialMIDI) |
-| 2 | `MIDI` | rear MIDI jack (SerialMIDI) |
-| 3 | `fmidi` | USB MIDI gadget |
+The SampQOL v0.1.5 package supplied for this work documents a MIDI **Keys** mode
+that plays the selected pad chromatically, with C3 as the default root. Its
+protected `mpcqol.so` was imported into the project's Ghidra instance and
+inspected with the Java Ghidra bridge. The `keys_init` setup installs a callback
+at firmware file offset `0x211b090`. The callback:
 
-The app opens **card 1 only** (two descriptors). It never opens card 2, so an
-external keyboard on the rear jack reaches nothing. The panel's MIDI log confirms
-the bytes arrive (`in 90 26 64` …) and are then dropped.
+* accepts note events with event type `3` and positive velocity;
+* reads MIDI note from event offset `+0x30`;
+* calls firmware offset `0x27e4400` with the event property block at `+0x14`
+  and `note - root` as the fourth argument;
+* lets the original firmware note-event dispatcher run afterward.
 
-Writing to a rawmidi node does **not** feed the app's input: bytes written to
-`/dev/snd/midiC1D0` appear in the panel log as `out`, i.e. they go out to the
-wire. This kills the "echo the note onto the Surface card" idea (§4).
+The callback compares its source argument as a **signed 32-bit integer**.
+External MIDI source IDs can have the high bit set; treating the value as an
+unsigned pointer incorrectly rejects those notes. The physical-pad sentinel
+`0x7ffffffa` remains excluded by SampQOL's signed comparison.
 
-## 2. The pad path
+The stock firmware functions were independently decompiled through the same
+Java bridge. At Ghidra addresses `0x221b090` and `0x28e4400` (firmware file
+offsets `0x211b090` and `0x27e4400`), the dispatcher consumes that event and the
+pitch setter writes its pitch data into the note-event property block. The mod
+uses these exact hooks and setter. It applies the delta only when its existing
+16 Levels button-state tracker and Sample page are active, and calls the
+setter trampoline to avoid applying the mod's PLUS/MINUS octave wrapper twice.
 
-A panel pad press fires exactly two of the mod's hooks:
+The earlier raw-ALSA experiment was wrong: it opened a MIDI device already
+owned by the firmware, then called the pad `note_on` entry directly. That
+created competing input paths and merely triggered pad samples. The experiment
+and its optional thread are removed. MIDI events are now transformed in the
+native event path already used by the firmware.
 
-```
-minimod: cs code=0x04
-minimod: note_on pad=4 vel=0.79        ← PAD 5
-```
+## Current limits
 
-So pads call `note_on` (`A_NOTE_ON`, file `0x1e27360`; Ghidra `0x1f27360`):
+The mod uses the firmware/SampQOL default root, C3 (MIDI 60); per-pad custom
+root-note editing is not exposed in MiniMod. The firmware must be configured to
+receive the controller on its selected pad input. The SampQOL reference also
+has a configurable chopped-pad mode; MiniMod currently applies chromatic pitch
+to incoming notes in 16 Levels without a separate slice-versus-pitch setting.
 
-```c
-void FUN_01f27360(undefined4 a0, long a1, int pad, undefined4 a3, long a4)
-```
+## Emulator verification
 
-* `a1` and `a4` are pointers (`a4` is read at `+0x158`); `a4 == 0` is handled.
-* The mod declares `(void *input, int src, int pad, void *props, float vel)`.
-  forwarding works because the app ignores the spare `s0` float, but `src` is
-  truncated to `int` — harmless only because the value is passed straight back.
-* `cs code=0x04` is the control-surface side of the same press.
-
-Pads arrive from the panel as **channel-10** notes (`99 25 vv` for PAD 1, ids
-37…52). Channel-1 notes (`90 …`) take the plain MIDI map — that is why an
-injected `90` note ignores 16 Levels and why the bridge must speak `99`.
-
-## 3. Replaying a pad press (works, but is not the pitch path)
-
-The mod reads card 2 itself, maps `k = (note - 36) mod 16`, and calls the app's
-own `note_on` with the arguments captured from a real pad press:
-
-```
-note_on pad=4 vel=0.79                 ← template captured from PAD 5
-midi note=48 -> pad 12
-midi note=52 -> pad 0
-midi note=55 -> pad 3
-```
-
-The call executes cleanly (app stable, panel responsive, 0.07 s redraw) **but the
-app plays that pad's own sample**. Replaying `note_on(pad)` reproduces a normal
-pad press, not a 16-Levels step — so the pitch decision is not inside `note_on`.
-
-## 4. Approaches that do not work
-
-| approach | why it fails |
-|---|---|
-| read card 2 in the mod and play pads | the app never opens card 2, so no notes arrive at all |
-| read card 2 **and** echo onto card 1 | writes go out to the wire (`out` in the panel log), not into the app |
-| that echo, continued | it floods the control-surface stream; the app stops accepting buttons |
-| `read()` interposer + suppress/rewrite | only fires when the app reads a MIDI node; it does not open card 2 |
-| replay `note_on` with a captured template | plays the pad's own sample (see §3) |
-| `A_PITCH_OFF` (`0x27e4400`) | not a pitch setter: it builds a MIDI-style byte plus a bitmask; it never runs during playback |
-| `sixteen_proc` (`0x21472f0`) | never called in the emulator, even with 16 Levels toggled |
-
-## 5. 16 Levels does not engage in the emulator
-
-Measured, not inferred:
-
-* 16 LEVELS is button code `0x28` (panel: id 40, `90 28 7F`, channel 1).
-* Pressing it and then PAD 5 gives `note_on pad=4` and the header shows
-  **A05 HipHop-Kik-BeYou2** — the pad's *own* sample, not a pitch of A01.
-* `sixteen_proc` count over the whole session: **0**.
-* `pitch offset` (the `A_PITCH_OFF` hook) count: **0**.
-
-So the app is not in the pitch mode the feature needs. Either the button only
-arms the mode and something else enables it, or the mode applies to a screen the
-emulator never reaches (the device has no digitizer, so screens are reached
-through hardware buttons only).
-
-**This is the open question.** Until a pad press produces a pitched note,
-chromatic MIDI cannot be built on the 16-Levels path.
-
-## 6. Operational facts (cost hours, worth writing down)
-
-* `/run` is **tmpfs**: `lab.py preload` installs the library and the systemd
-  drop-in there, so **a reboot always returns to the stock service**. Re-preload
-  after every boot.
-* The root filesystem is **read-only** (dm-verity): `mkdir /usr/local` fails with
-  "Read-only file system", so the mod cannot be installed persistently.
-* `lab.py preload` **rewrites the drop-in**, dropping any `Environment=` lines
-  you added. Re-add `MINIMOD_MIDI` / `MINIMOD_DEBUG` afterwards.
-* Restarting the app (`systemctl restart ac50`) does **not** break the panel:
-  measured 0.07 s redraw afterwards. What broke it was the mod flooding the
-  control-surface wire (§4).
-* Reboot with `lab.py stop` then `lab.py run --headless`; the panel is a separate
-  host process and must be restarted (`lab.py panel`) after a VM restart.
-
-## 7. Corrections to earlier notes
-
-* `docs/MOD-REFERENCE.md` claimed "Chromatic control — external MIDI — works".
-  It does not; the claim is corrected there.
-* Two "wrong anchor" conclusions during this investigation were my own address
-  error (using file VAs as Ghidra addresses). The anchors are correct:
-  `note_on` at `0x1e27360`, `sixteen_proc` at `0x21472f0`, `pitch_off` at
-  `0x27e4400`.
-* The earlier "octave shift works" confirmation was based on the key handler's
-  log, not on audio: `A_PITCH_OFF` never fires during playback, so the `+`/`-`
-  keys change the mod's state and nothing else.
-
-## 8. Next step
-
-Find the function that a **genuinely active** 16 Levelpad press calls. With the
-mode actually engaged, a pad press must produce a different call than
-`note_on(pad)`; the mod's existing hooks (buttons, cs_event, note_on) will show
-which one fires. That call is the injection point the keyboard should replay.
+`mod/tests/emulator_midi_chromatic.py` passed on the virtual MPC with MIDI Port
+set to External and Pad MIDI In On. It sent C3, C#3 and G3 through the
+`ext_midi` endpoint and observed three note-on transforms; the final event was
+MIDI 67 with a `+7` semitone delta. A note sent after leaving 16 Levels passed
+through unchanged, and the firmware process stayed alive with no service
+restart. The test uses the same external-MIDI route as a controller; the mod
+does not open or write the app's ALSA rawmidi nodes.

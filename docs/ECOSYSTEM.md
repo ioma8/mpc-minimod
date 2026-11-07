@@ -191,9 +191,11 @@ panel and screen, and restart stock on exit.
   (peanut_gb), `mpc-tic80` — the same contract, heavier stacks (CMake/Rust).
 
 Note for MIDI work: the stock app's external MIDI goes through
-**`/lib/librbinmidi.so`** (it appears in the app's maps), and every
-`/dev/snd/midiC?D0` other than the panel is held `EBUSY` — so a mod cannot
-simply open the raw device. Interpose that library, or use the ALSA sequencer.
+**`/lib/librbinmidi.so`** and its ALSA sequencer ports; the app owns its raw MIDI
+devices, so a mod must not open another competing raw-device reader. For
+chromatic playback, the mod hooks the downstream native note dispatcher at
+`0x211b090` and applies pitch with the firmware setter at `0x27e4400`. Details
+and emulator evidence: [`MIDI-CHROMATIC.md`](MIDI-CHROMATIC.md).
 
 A **mod** (patches the stock app and keeps it) and an **app** (replaces the
 screen) are different products. `minimod` is a mod, because the three wanted

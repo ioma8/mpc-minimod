@@ -20,12 +20,14 @@ Anything not measured is marked as such.
 
 An `LD_PRELOAD` shared object (`minimod.so`) for the stock MPC Sample app. The
 release build currently ships pitch shifting in 16 Levels, native-command
-AutoTrim, and the temporary AutoTrim soft-key caption. External chromatic MIDI
-is not included in the release build.
+AutoTrim, the temporary AutoTrim soft-key caption, and external chromatic MIDI
+in 16 Levels. See [`MIDI-CHROMATIC.md`](MIDI-CHROMATIC.md) for its native event
+hook and emulator evidence.
 
 | feature | trigger | current state |
 |---|---|---|
 | Pitch shift | PLUS / MINUS in 16 Levels; both reset | verified on hardware; keys are swallowed only in 16 Levels |
+| External chromatic MIDI | select a pad, enable Pad MIDI In, turn on 16 Levels | native MIDI event hook; C3 root; emulator-verified |
 | AutoTrim | SHIFT + B3 on the Sample page | native control path and marker refresh verified in emulator |
 | AutoTrim caption | hold SHIFT on the Sample page | drawn in the paint hook; hidden in Chop mode |
 

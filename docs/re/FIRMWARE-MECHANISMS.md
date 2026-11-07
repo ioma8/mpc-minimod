@@ -184,6 +184,23 @@ The float broadcaster `0x13bb930` is still used by absolute knobs and the
 existing AutoTrim instrumentation. It is not the menu's encoder source.
 There are no transport or property-change fallbacks for menu navigation.
 
+### External MIDI in 16 Levels
+
+| mechanism | detail | evidence |
+|---|---|---|
+| native MIDI note dispatcher | mod offset `0x211b090` / Ghidra VA `0x221b090`; four arguments, event at argument 3, source ID in argument 4 | Ghidra Java bridge decompile of stock firmware and SampQOL v0.1.5 |
+| note fields | event type `3` at `+8`, velocity at `+0x10`, note number at `+0x30`; transform note-ons only | Ghidra decompile of SampQOL's callback and emulator event trace |
+| chromatic pitch setter | mod offset `0x27e4400` / Ghidra VA `0x28e4400`; pass event property block `event+0x14` and `note-root` as argument 4 | stock firmware decompile; setter writes note pitch properties |
+| source-ID comparison | SampQOL treats the argument as signed 32-bit; `0x7ffffffa` is the physical-pad sentinel and is excluded | SampQOL callback decompile; emulator showed external source IDs have the high bit set |
+| selected mode | use the mod's 16 LEVELS button state while the Sample page is visible | `buttons()` state hook and emulator |
+| native flow | mutate note properties, then call the original dispatcher once; firmware retains routing, note-off and sustain handling | emulator, C3/C#3/G3 and no-restart check |
+
+The former raw-ALSA thread and direct `note_on(pad)` replay were removed: the
+app already owns its MIDI endpoints, and replaying a pad does not transpose a
+sample. See [MIDI-CHROMATIC.md](../MIDI-CHROMATIC.md) and
+[`../../mod/tests/emulator_midi_chromatic.py`](../../mod/tests/emulator_midi_chromatic.py)
+for the source investigation and live acceptance check.
+
 ## 10. Sample pool, pad occupancy and Extract
 
 | mechanism | call (Ghidra VA) | evidence |
@@ -230,6 +247,106 @@ length and native Extract still registers and assigns it to a free pad. Other
 Extract calls pass through unchanged. Runtime acceptance is
 `mod/tests/emulator_reverb.py`.
 
+### Built-in H3 reverb effect
+
+The firmware includes a native stereo effect class named
+`Air::H3M::StereoReverb` (`StereoReverb` in its effect registry). Factory
+`0x3d46910` maps the type to a thunk at `0x3d445b0`; that allocates the instance
+and calls constructor `0x3dac6b0`. The constructor registers 18 parameters.
+Main-vtable slot 11 (`0x3dabed0`) processes stereo audio, slot 9
+(`0x3dad0b0`) prepares/resizes its buffers, and slot 21 (`0x3daca50`) applies
+parameter updates. The internal topology and parameter labels/ranges are not
+fully reconstructed. Add Reverb instantiates this native effect directly for
+offline rendering. Full trace and reproduction commands:
+[BUILTIN-REVERB.md](BUILTIN-REVERB.md).
+
+Normal live firmware use is through the H3 patch graph: `FUN_03cf5180` parses each
+`H3Part`, calls registry `FUN_03d46910` with its type and host context, creates
+the effect wrapper/default parameter map, and sends `H3pc` and `H3ps` setup
+messages before linking the effect. The graph processor `FUN_03d27ca0` walks
+that chain and invokes each effect's vtable slot 11 (`+0x58`) on the stereo
+buffers for each block. Add Reverb instead uses a standalone offline instance:
+call factory `base+0x3c445b0` with `(NULL, &context)`, then vtable slot 9 with
+`&context`, slot 11 per stereo block, and slot 1 to destroy. The context layout
+is `{float sample_rate, uint32_t reserved, int32_t block_size}`. Slot 9's second
+argument is a context pointer, not a boolean; passing `1` crashes because the
+base setup dereferences it. This lifecycle was verified in the emulator. See
+[the full H3 reverb trace](BUILTIN-REVERB.md).
+
+### H3 instrument host boundary and Bass Synth
+
+Ghidra's FMBass registration path is `FUN_03d46910`; its factory is
+`FUN_03d45d50`, constructor `FUN_03e0af30`, parameter table `0x072acc20`, and
+main vtable `0x07185c18`. Slots 9, 11, 13, and 21 are setup, render, event, and
+parameter update. Unlike the effect classes above, FMBass requires a live H3
+host object: its constructor calls `FUN_03cedde0`, which queries `H3pp`
+(`0x48337070`) through host vtable slot 4. The effect audio-context struct does
+not implement this host interface; using it for FMBass construction crashed
+the emulator. The current **Bass Synth** menu item therefore renders a local
+plucked C2 tone in `mod/src/bass_sample.c` and uses native Extract to assign its
+WAV to the next empty pad. K1/K2/K3 control harmonic brightness, drive, and
+low-pass cutoff. Details and validation are in [BASS-SAMPLE.md](BASS-SAMPLE.md).
+
+Ghidra maps the standalone event and voice path. FMBass owns a 12-voice manager
+at instrument `+0xc0` (active count at manager `+0x68`) and a queue at instrument
+`+0x358` (size `0xe58`, read index `+0xe10`). The queue callback closure,
+invoker, and active flag are at `+0xe28`, `+0xe30`, and `+0xe38`. The standalone
+instrument callback at `+0x38` is null after prepare, so a correctly shaped
+callback is needed to accept probe events. `FUN_03e0c1a0` drains the ring only
+when active; it dereferences the closure and calls the invoker. Always validate
+both pointers before a probe call.
+
+Ghidra's program image base is `0x100000`; runtime offsets must subtract it.
+Thus `FUN_03e0c1a0` at Ghidra VA `0x3e0c1a0` is called at `app_base+0x3d0c1a0`.
+Using the VA directly as a runtime offset called unrelated code and crashed.
+With the corrected offset, queue read indices advanced and slot-42 event
+handling allocated a group through manager slot 2 (`FUN_03e0d0a0`). Note-on
+dispatch (`FUN_03e0eb60` → `FUN_03e0ed60` → `FUN_03e0b430`) fans into child
+voice vtable `0x06ed2040`. Entry `+0x10` (`FUN_03e068f0`) initializes the voice
+DSP; entry `+0x20` (`FUN_03e060a0`) updates pitch/velocity; entry `+0x48`
+(`FUN_03e08840`) renders. The parent FMBass renderer (`FUN_03e06450`) walks
+active groups and invokes their render method at `+0x48`.
+
+A corrected queue drain has succeeded in the emulator: one group and one valid
+child were active, note-on and note-off read indices advanced, and the firmware
+remained up. The first audio block and full native output were still exactly
+zero. Other attempts crashed intermittently during dispatch, including cases
+where the closure and invoker were non-null. Therefore the host callback and
+pump are not a complete native lifecycle, and the intermittent dispatch fault
+is not explained by a missing queue closure alone. Parameter-table defaults
+for Amp Attack/Decay/Sustain/Release are `0/0.6/1/0.1`, and Master Volume is
+about `0.707`; explicitly setting the amp envelope and master still yielded
+silence. These findings disprove both the pitch-only event theory and the
+zero-default amp theory.
+
+The group stop bit at `+0xb` is clear, so it does not explain silence. The outer
+wrapper renderer `FUN_03d27ca0` walks the graph node list at `graph+0x88`; this
+pointer is null after prepare with both minimal FMBass XML and the exact
+firmware-embedded FMBass preset XML. The allocated voice's DSP countdown at
+`+0x3dc` stays at 1 after graph processing. This effect-chain wrapper has no
+FMBass render node and cannot render the instrument by itself.
+
+Ghidra RTTI scanning found `H3MPCInstance` (RTTI at `0x06fa3cf0`) and
+`H3MPCSynthBase` (`0x06fa3eb8`). `H3MPCInstance`'s process and build methods
+resolve to the same generic functions `FUN_03d27ca0` and `FUN_03d28620`.
+`H3MPCSynthBase` derives from that class and from `VoiceManageable`, audio-plugin
+parameter interfaces, an observer, and `juce::Timer`; the adjacent
+`H3MPCVoiceManagedInterface` vtable contains abstract voice-management hooks.
+This identifies the wider plugin object model, but not a safe offline FMBass
+host/render lifecycle. `H3MpcSynthDemo` is a distinct synth implementation
+whose constructor initializes its own voices. Do not infer that it can render
+FMBass.
+
+Direct event dispatch remains intermittent even with non-null queue closure
+and invoker. Direct calls to the FMBass part renderer have not been proven safe.
+Do not link `fmbass_sample.c` into the release build. Current Bass Synth
+production uses the local C2 renderer in `mod/src/bass_sample.c`, assigns
+through native Extract, and restores original source audio bytes after Extract
+to defeat one-LSB PCM dither. The November 6 production emulator rerun passed
+with a 65 Hz peak, 66,150 stereo frames at 44.1 kHz, source audio preserved,
+pad assignment, and no restart. See [`BASS-SAMPLE.md`](BASS-SAMPLE.md) for the
+full probe chronology and validation.
+
 ## 11. Persistence and serialization
 
 * Pad/sample serialization is a separate class from the runtime layer. The
@@ -251,11 +368,25 @@ Extract calls pass through unchanged. Runtime acceptance is
 | control-surface / input | `buttons()`, `cc_capture()`, `data_signal()` | must not touch the model; publish a request only |
 | UI / paint | `screen_paint()`, after the stock paint | the only place model calls are safe |
 | worker | HPSS DSP and file I/O | never touches the model; commits through the native command on the UI thread |
-| audio | playback; calls the marker resolver for the slice it plays | observe only |
+| audio | playback; calls the marker resolver for the slice it plays; Bass Synth mixes into a private planar block before the native writer | do not touch the model, allocate, or lock |
 
 Cross-thread hand-off is an atomic flag plus a phase machine, one phase per
 paint pass. Evidence: [rt] — blocking the input thread and polling for a page
 switch in the same callback both failed.
+
+### Bass Synth live preview
+
+The stock note-on/off hooks (`0x1e27360` / `0x1e270d0`) receive the pad index.
+While SAMPLE OPTIONS is on its Bass Synth page, pad indices 0–15 queue C2–D#3
+to the four-voice DaisySP preview. The hooked audio writer is `0x03f398f0`
+(Ghidra VA `0x040398f0`): it receives planar float channels, converts them to
+S32 interleaved output and calls `snd_pcm_writei`. The hook copies the planar
+block into thread-local scratch, mixes the preview into channels 0 and 1, then
+calls the original writer. This avoids changing the app's mixer buffers or
+installing a second audio-device path. K1/K2/K3 updates are atomically read at
+each block so active voices respond immediately. Evidence: Ghidra decompilation
+and emulator counters showing pad notes, nonzero mixed audio, knob values and
+no app restart; full details are in [BASS-SAMPLE.md](BASS-SAMPLE.md).
 
 ## 13. Constants and limits
 

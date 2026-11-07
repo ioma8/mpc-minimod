@@ -1,7 +1,8 @@
-"""Verify Add Reverb through the real SAMPLE OPTIONS menu and Extract path.
+"""Verify native sample effects through SAMPLE OPTIONS and native Extract.
 
 Requires a running virtual-mpc-sample lab with the Sample page visible and the
-mod preloaded. The action adds one Reverb sample to the next free pad.
+mod preloaded. By default this verifies Reverb. Use --effect vinyl or --effect
+lofi to verify the two new native effects.
 """
 import argparse
 import json
@@ -20,7 +21,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--lab', type=Path, required=True)
     parser.add_argument('--panel', default='http://127.0.0.1:8765')
+    parser.add_argument('--effect', choices=('reverb', 'vinyl', 'lofi'), default='reverb')
     args = parser.parse_args()
+    action = {
+        'reverb': ('Reverb', 2, True, 'Reverb'),
+        'vinyl': ('Vinyl', 3, False, 'Vinyl'),
+        'lofi': ('Lo-Fi', 4, False, 'Lo-Fi'),
+    }[args.effect]
+    title, menu_index, expect_tail, filename_prefix = action
     sys.path.insert(0, str(args.lab))
     import lab
 
@@ -104,8 +112,8 @@ def main():
 
     # Quote the directory separately: sample project names can contain `[]`,
     # which are glob syntax if they are included in the unquoted pattern.
-    output_glob = shlex.quote(str(source_path.parent)) + '/Reverb*.wav'
-    list_outputs = 'for f in ' + output_glob + '; do [ -f "$f" ] && sha256sum "$f"; done'
+    output_glob = shlex.quote(str(source_path.parent)) + '/' + shlex.quote(filename_prefix) + '*.wav'
+    list_outputs = 'for f in ' + output_glob + '; do [ -f "$f" ] && sha256sum "$f"; done; true'
     def output_hashes():
         lines = ssh(list_outputs).decode().splitlines()
         return {line.split(None, 1)[1]: line.split(None, 1)[0] for line in lines}
@@ -116,8 +124,8 @@ def main():
     control('SHIFT', 'press', 127)
     tap('DATA')
     control('SHIFT', 'release')
-    control('DATA', 'turn', 1)
-    control('DATA', 'turn', 1)
+    for _ in range(menu_index):
+        control('DATA', 'turn', 1)
     tap('DATA')
 
     status_addr = mod_base + symbol('g_hpss_status')
@@ -127,31 +135,33 @@ def main():
         time.sleep(.25)
         status = memory(status_addr, 96).split(b'\0', 1)[0].decode(errors='replace')
         busy = int.from_bytes(memory(busy_addr, 4), 'little', signed=True)
-        if status == 'Reverb: copy created' and not busy:
+        if status == f'{title}: copy created' and not busy:
             break
-        if status.startswith('Reverb:') and status != 'Processing reverb...' and not busy:
+        if status.startswith(title + ':') and not status.startswith('Processing ') and not busy:
             raise AssertionError(status)
-    assert status == 'Reverb: copy created', f'Unexpected result: {status}'
+    assert status == f'{title}: copy created', f'Unexpected result: {status}'
 
     current = output_hashes()
     changed = {path for path, digest in current.items() if before.get(path) != digest}
     assert len(changed) == 1, f'Expected one new or replaced Reverb WAV, found {changed}'
     output_path = next(iter(changed))
     output_fmt, output_frames, output_data = wav(ssh('cat ' + shlex.quote(output_path)))
-    assert output_frames > source_frames, (source_frames, output_frames)
+    if expect_tail:
+        assert output_frames > source_frames, (source_frames, output_frames)
+    else:
+        assert output_frames == source_frames, (source_frames, output_frames)
     assert output_fmt[1] == source_channels and output_fmt[2] == source_rate
     assert output_data != source_wav[2], 'Output is identical to the source'
-    tail = output_data[source_frames * source_channels * (output_fmt[3] // 8):]
     assert output_fmt[0] == 3 and output_fmt[3] == 32, output_fmt
-    samples = struct.unpack('<' + 'f' * (len(tail) // 4), tail)
-    tail_rms = (sum(x * x for x in samples) / max(1, len(samples))) ** .5
-    assert tail_rms > 1e-5, f'Extended tail is silent: RMS={tail_rms}'
+    samples = struct.unpack('<' + 'f' * (len(output_data) // 4), output_data)
+    output_rms = (sum(x * x for x in samples) / max(1, len(samples))) ** .5
+    assert output_rms > 1e-5, f'Output is silent: RMS={output_rms}'
     assert int(ssh('pidof "MPC Sample"')) == pid, 'Firmware restarted during Reverb'
     assert ssh('systemctl show ac50 -p NRestarts').decode().strip() == baseline_restarts
     print(f'PASS: {output_path}; {output_frames} frames (+{output_frames - source_frames} tail), '
           f'{output_fmt[1]} ch @ '
           f'{output_fmt[2]} Hz; native Extract assigned the pad; {status}; pid={pid}, '
-          f'{baseline_restarts}; tail RMS={tail_rms:.6f}')
+          f'{baseline_restarts}; output RMS={output_rms:.6f}')
 
 
 if __name__ == '__main__':

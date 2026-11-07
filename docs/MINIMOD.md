@@ -12,9 +12,10 @@ for current AutoTrim reverse-engineering findings see
 | Pitch shift in 16 Levels | PLUS / MINUS | Moves the 16-pad pitch row by 8 semitones per press, up to ±32 semitones. Pressing both resets to the original pitch. Keys are swallowed only while 16 Levels is active. |
 | AutoTrim | SHIFT + B3 | Trims the selected pad's sample using native app control commands. Three presses while holding SHIFT use 3%, 6%, and 9% peak thresholds; the fourth clears trim. Releasing SHIFT resets the cycle. |
 | AutoTrim caption | Hold SHIFT on the Sample page | Replaces the third soft-key caption with AutoTrim; suppressed in Chop mode. |
+| External MIDI chromatic playback | Select a sample, enable Pad MIDI In, turn on 16 LEVELS | Transposes external MIDI note-ons in the native event path from C3; firmware routing and note-offs remain native. |
 
-Chromatic MIDI from an external controller is not included in the release
-build. Its investigation is in [`MIDI-CHROMATIC.md`](MIDI-CHROMATIC.md).
+Implementation evidence, setup and limits are in
+[`MIDI-CHROMATIC.md`](MIDI-CHROMATIC.md).
 
 ## AutoTrim behavior
 

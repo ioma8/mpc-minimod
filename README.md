@@ -12,13 +12,18 @@ original MPC Sample experience, with just small fixes that enhance it for better
 | --- | --- |
 | **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim | `SHIFT` + `B3` |
 | **Octave shift** of pads in 16 Levels mode — by half the grid | `PLUS` / `MINUS` keys (both = reset) |
+| **External MIDI chromatic playback** of the selected sample while in 16 Levels (C3 root) | Enable **Pad MIDI In** in MIDI Config, then play a MIDI keyboard |
 | **HPSS** — splits the selected sample into harmonic and percussive copies on two empty pads; the source sample is left untouched | `SHIFT` + `DATA`, choose **HPSS**, `DATA` |
 | **Spectral Chop** — cuts the selected sample into musical regions — a new chord, a new phrase, a different drum — and chops that same pad at those boundaries (Manual slice markers, up to 16) | `SHIFT` + `DATA`, choose **Spectral Chop**, `DATA` |
+| **Add Reverb** — adds the firmware's stereo reverb and a rendered tail to a new pad copy | `SHIFT` + `DATA`, choose **Add Reverb**, `DATA` |
+| **Vinyl / Lo-Fi** — applies the firmware's Vinyl or Decimator effect to a new pad copy | `SHIFT` + `DATA`, choose **Vinyl** or **Lo-Fi**, `DATA` |
+| **Bass Synth** — previews C2–D#3 from pads 1–16 and saves a shaped C2 pluck to a new pad | `SHIFT` + `DATA`, choose **Bass Synth**; K1/K2/K3 shape it |
 
-The trim and pitch changes confirm themselves on screen for a second. HPSS and
-Spectral Chop open a small **SAMPLE OPTIONS** menu; turn the DATA encoder to
-choose an action, press DATA to confirm, or press `SHIFT+DATA` to close. HPSS
-needs two empty pads and creates `HPSS Harmonic` and `HPSS Percussive`.
+The trim and pitch changes confirm themselves on screen for a second. HPSS,
+Spectral Chop, Add Reverb, Vinyl, Lo-Fi and Bass Synth are in the small
+**SAMPLE OPTIONS** menu; turn the DATA encoder to choose an action, press DATA
+to confirm, or press `SHIFT+DATA` to close. HPSS needs two empty pads and
+creates `HPSS Harmonic` and `HPSS Percussive`.
 Spectral Chop slices the pad into **regions, not notes**: it cuts where the
 music changes identity — a new chord, a new phrase, a different drum — so the
 pieces stay recombable instead of being one pad per hit. Every boundary still
@@ -34,7 +39,8 @@ reports. It never creates samples or uses free pads. Details:
 [`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md); the model, the mechanisms and
 the evidence: [`docs/re/SPECTRAL-CHOP-SOLVED.md`](docs/re/SPECTRAL-CHOP-SOLVED.md).
 
-Chromatic MIDI from an external keyboard is in progress —
+External MIDI plays the selected sample chromatically while 16 Levels is active
+(C3 root); enable Pad MIDI In in MIDI Config. Details:
 [`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).
 
 ## Install
@@ -54,6 +60,8 @@ cd mod && ./build.sh && ./pack.sh
 ```
 
 That writes `mod/build/minimod.zip` — the same package as the release.
+Release description format and the complete feature overview are in
+[`RELEASE-NOTES.md`](RELEASE-NOTES.md).
 
 ## Docs
 

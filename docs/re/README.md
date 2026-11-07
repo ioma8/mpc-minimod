@@ -72,3 +72,8 @@ the useful tooling and the blind paths.
 
 The HPSS Extract writer boundary also supports Add Reverb's appended tail:
 [writer-tail mechanism and emulator evidence](../REVERB-HANDOFF.md).
+The firmware's built-in `Air::H3M::StereoReverb` class, factory, vtable and
+current integration boundary are documented in [BUILTIN-REVERB.md](BUILTIN-REVERB.md).
+The Sample Options Bass Synth renderer and the H3 host interface requirement
+that blocks direct FMBass construction are documented in
+[BASS-SAMPLE.md](BASS-SAMPLE.md).

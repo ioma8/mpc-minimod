@@ -7,7 +7,7 @@
  * Features
  *   1. octave shift in 16 Levels: PLUS / MINUS move the whole chromatic row by
  *      an octave while 16 LEVELS is lit.
- *   2. chromatic control from an external MIDI controller (always on).
+ *   2. chromatic external MIDI playback for the selected sample in 16 Levels.
  *   3. autotrim of the sample shown on the Sample page: SHIFT + B3 trims Start
  *      and End to the silent edges.
  *
@@ -45,13 +45,6 @@
 #ifndef MINIMOD_LOG
 #define MINIMOD_LOG 0      /* 0: no log file, no output at all */
 #endif
-/* Chromatic play from an external controller is not shipped: the control
- * surface carries a proprietary frame format, not MIDI, so the feature needs the
- * decoder first. See docs/MIDI-CHROMATIC.md. */
-#ifndef MINIMOD_CHROMATIC
-#define MINIMOD_CHROMATIC 0
-#endif
-
 /* Release builds carry no probes: the /run channels, the experimental hooks
  * and the polling threads are all compiled out unless MINIMOD_DEBUG is set. */
 #ifndef MINIMOD_DEBUG
@@ -63,6 +56,8 @@
 #define A_BUTTONS 0x159f2f0        /* physical button dispatch (event)    */
 #define A_NOTE_ON 0x1e27360        /* note on (input, src, pad, props, v) */
 #define A_NOTE_OFF 0x1e270d0       /* note off (input, src, pad)           */
+#define A_MIDI_NOTE_EVENT 0x211b090 /* native MIDI note-event dispatcher     */
+#define A_BASS_AUDIO_WRITER 0x03f398f0 /* Ghidra 0x040398f0; planar float -> PCM */
 #define A_CS_EVENT 0x23aff60       /* control-surface event (self, c, p)  */
 #define A_TRIM_WRITE 0x14d0890     /* generic observable property setter  */
 #define A_SCREEN_RESIZED 0x1660370 /* screen resize notification          */
@@ -80,7 +75,8 @@
 
 #include "hpss.h"
 #include "spectral.h"
-#include "reverb.h"
+#include "h3m_effect.h"
+#include "bass_sample.h"
 
 #define T_LAYER 0xb0 /* -> context; [ctx+0x60] = instrument */
 #define T_MODEL 0x70
@@ -1311,6 +1307,11 @@ static void (*orig_minus)(void *);
 static void (*orig_buttons)(void *);
 static void (*orig_note_on)(void *, int, int, void *, float);
 static void (*orig_note_off)(void *, int, int);
+static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
+static volatile uint32_t g_midi_chromatic_count;
+static volatile int g_midi_chromatic_note = -1;
+static volatile int g_midi_chromatic_delta;
+static void (*orig_bass_audio_writer)(void *, void *, size_t, int);
 static void (*orig_cs)(void *, int, void *);
 static void (*orig_trim_write)(void *, long, long);
 static void (*orig_frames)(void *);
@@ -1477,10 +1478,6 @@ static void (*orig_repaint)(void *, uint64_t, uint64_t);
 
 static void set_filter_text(const char *t);
 static void do_autotrim(void);
-
-#if MINIMOD_CHROMATIC
-static void play_note(int pitch, int on, float velocity);
-#endif
 
 static volatile int g_shift;
 static volatile int g_trim_req;
@@ -1667,12 +1664,37 @@ static volatile int g_hpss_write_ok;
 static void *g_hpss_cmd[4];
 static int g_hpss_cmd_n;
 
-static uint64_t g_hpss_name[3];
+static uint64_t g_hpss_name[6];
 static int g_hpss_names_ready;
 static int g_spectral_active;
 static volatile int g_hpss_menu;
 static volatile int g_hpss_busy;
 static volatile int g_hpss_sel;
+static volatile int g_bass_edit;
+static float g_bass_knob[3] = {0.52f, 0.18f, 0.56f};
+static volatile unsigned g_bass_preview_notes;
+static volatile unsigned g_bass_preview_blocks;
+static volatile uint32_t g_bass_preview_peak_bits;
+static volatile int g_bass_preview_active;
+static volatile int g_bass_preview_available;
+static uint32_t bass_float_bits(float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    return bits;
+}
+static void bass_preview_set_active(int active)
+{
+    if (active && !g_bass_preview_available)
+        active = 0;
+    if (active) {
+        __atomic_store_n(&g_bass_preview_notes, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_bass_preview_blocks, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_bass_preview_peak_bits, 0, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&g_bass_preview_active, active != 0, __ATOMIC_RELEASE);
+    bass_preview_enable(active);
+}
 /* Native DATA input: the decoded control surface emits signed deltas through
  * Ghidra FUN_0150dbc0(surface + 0x2da8, delta). Unlike the float broadcaster,
  * this is an event: repeated identical deltas must each move the selection.
@@ -1686,9 +1708,11 @@ static void data_signal(void *self, int delta)
     if ((uintptr_t)self == __atomic_load_n(&g_data_signal, __ATOMIC_ACQUIRE) &&
         (g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))) {
         if (g_hpss_menu && !g_hpss_busy && delta) {
-            g_hpss_sel = (g_hpss_sel + (delta > 0 ? 1 : 3)) % 4;
-            hpss_repaint();
-            mlog("menu DATA delta=%d sel=%d\n", delta, g_hpss_sel);
+            if (!g_bass_edit) {
+                g_hpss_sel = (g_hpss_sel + (delta > 0 ? 1 : 6)) % 7;
+                hpss_repaint();
+                mlog("menu DATA delta=%d sel=%d\n", delta, g_hpss_sel);
+            }
         }
         return; /* consume only this surface's DATA event, including busy */
     }
@@ -1703,6 +1727,9 @@ static void hpss_make_names(void)
     FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[0], "HPSS Harmonic");
     FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[1], "HPSS Percussive");
     FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[2], "Reverb");
+    FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[3], "Vinyl");
+    FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[4], "Lo-Fi");
+    FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[5], "Bass C2");
     g_hpss_names_ready = 1;
 }
 
@@ -1713,7 +1740,7 @@ static void hpss_ctor_hook(void *cmd, void *name, int dest, void *settings,
     if (g_hpss_arm && (uintptr_t)padstate == g_hpss_arm_source) {
         hpss_make_names();
         int ni = g_hpss_arm_name;
-        if (ni < 0 || ni >= 3)
+        if (ni < 0 || ni >= 6)
             ni = 0;
         name = (void *)&g_hpss_name[ni];
         if (g_hpss_cmd_n < 4)
@@ -2035,7 +2062,7 @@ static int hpss_free_count(void *program)
  * source range itself (used by Spectral Chop). */
 static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
                             unsigned start, unsigned end, unsigned source_frames,
-                            unsigned ch, int name,
+                            unsigned buffer_frames, unsigned ch, int name,
                             int *dest)
 {
     if (dest)
@@ -2053,7 +2080,7 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
     g_hpss_cmd_n = 0;
     g_hpss_arm_source = state;
     g_hpss_arm_buf = buf;
-    g_hpss_arm_frames = end - start;
+    g_hpss_arm_frames = buf ? buffer_frames : end - start;
     g_hpss_arm_source_frames = source_frames;
     g_hpss_arm_start = start;
     g_hpss_arm_end = end;
@@ -2078,6 +2105,66 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
     return ok;
 }
 
+static int bass_source_backup(const char *path, off_t *data_offset,
+                              unsigned char **data, size_t *data_size)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    unsigned char header[12];
+    int ok = 0;
+    if (pread(fd, header, sizeof header, 0) != (ssize_t)sizeof header ||
+        memcmp(header, "RIFF", 4) || memcmp(header + 8, "WAVE", 4))
+        goto done;
+    off_t pos = 12;
+    for (int chunks = 0; chunks < 64; ++chunks) {
+        unsigned char chunk[8];
+        if (pread(fd, chunk, sizeof chunk, pos) != (ssize_t)sizeof chunk)
+            break;
+        uint32_t size = (uint32_t)chunk[4] | (uint32_t)chunk[5] << 8 |
+                        (uint32_t)chunk[6] << 16 | (uint32_t)chunk[7] << 24;
+        if (!memcmp(chunk, "data", 4)) {
+            unsigned char *copy = malloc(size ? size : 1);
+            if (!copy)
+                break;
+            if (pread(fd, copy, size, pos + 8) != (ssize_t)size) {
+                free(copy);
+                break;
+            }
+            *data_offset = pos + 8;
+            *data = copy;
+            *data_size = size;
+            ok = 1;
+            break;
+        }
+        pos += 8 + (off_t)size + (size & 1);
+    }
+done:
+    close(fd);
+    return ok;
+}
+
+static int bass_source_restore(const char *path, off_t data_offset,
+                               const unsigned char *data, size_t data_size)
+{
+    int fd = open(path, O_WRONLY);
+    if (fd < 0)
+        return 0;
+    size_t written = 0;
+    while (written < data_size) {
+        ssize_t n = pwrite(fd, data + written, data_size - written,
+                           data_offset + (off_t)written);
+        if (n <= 0) {
+            close(fd);
+            return 0;
+        }
+        written += (size_t)n;
+    }
+    int ok = fdatasync(fd) == 0;
+    close(fd);
+    return ok;
+}
+
 /* ------------------------------------------------------------ HPSS job/menu */
 struct hpss_job {
     void *screen;
@@ -2091,8 +2178,13 @@ struct hpss_job {
     float *percussive;
     float *rendered;
     size_t rendered_frames;
-    int reverb;
+    unsigned rendered_ch;
+    int action;
     int rc;
+    char source_path[512];
+    off_t source_data_offset;
+    unsigned char *source_audio_backup;
+    size_t source_audio_bytes;
 };
 
 static struct hpss_job *volatile g_hpss_job;
@@ -2104,6 +2196,25 @@ static unsigned char g_hpss_btn[16];
 static int g_hpss_btn_valid;
 static int g_hpss_chop_before;
 static int g_hpss_restore_pending;
+static void hpss_set_status(const char *text);
+
+static const char *sample_action_name(int action)
+{
+    switch (action) {
+    case 1: return "Reverb";
+    case 2: return "Vinyl";
+    case 3: return "Lo-Fi";
+    case 4: return "Bass Synth";
+    default: return "HPSS";
+    }
+}
+
+static void sample_action_status(int action, const char *message)
+{
+    char text[96];
+    snprintf(text, sizeof text, "%s: %s", sample_action_name(action), message);
+    hpss_set_status(text);
+}
 
 static void hpss_repaint(void)
 {
@@ -2152,16 +2263,23 @@ static void *hpss_worker(void *arg)
 {
     struct hpss_job *job = arg;
     int rc;
-    if (job->reverb)
-        rc = reverb_render(job->input, job->frames, job->ch, job->rate,
-                           &job->rendered, &job->rendered_frames);
+    if (job->action == 4)
+        rc = bass_sample_render(job->rate, g_bass_knob[0], g_bass_knob[1],
+                                g_bass_knob[2], &job->rendered,
+                                &job->rendered_frames);
+    else if (job->action != 0)
+        rc = h3m_effect_render(base, (enum h3m_effect)(job->action - 1),
+                               job->input, job->frames, job->ch, job->rate,
+                               &job->rendered, &job->rendered_frames);
     else
         rc = hpss_split(job->input, job->frames, job->ch, job->rate,
                         &job->harmonic, &job->percussive);
+    if (job->action == 4)
+        job->rendered_ch = 2;
     job->rc = rc;
     __atomic_store_n(&g_hpss_done, 1, __ATOMIC_RELEASE);
     mlog("%s worker: rc=%d frames=%u ch=%u output=%zu\n",
-         job->reverb ? "Reverb" : "HPSS", rc, job->frames, job->ch,
+         sample_action_name(job->action), rc, job->frames, job->ch,
          job->rendered_frames);
     hpss_repaint();
     return NULL;
@@ -2175,6 +2293,7 @@ static void hpss_free_job(struct hpss_job *job)
     free(job->harmonic);
     free(job->percussive);
     free(job->rendered);
+    free(job->source_audio_backup);
     free(job);
 }
 
@@ -2189,34 +2308,35 @@ static void hpss_set_status(const char *text)
     g_hpss_status[n] = 0;
 }
 
-static void sample_transform_start(int reverb)
+static void sample_transform_start(int action)
 {
     if (g_hpss_busy || g_hpss_job)
         return;
     void *screen = 0;
     uintptr_t state = 0, sample = 0;
     unsigned frames = 0, ch = 0, rate = 0;
+    const char *name = sample_action_name(action);
     if (!hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate)) {
-        hpss_set_status(reverb ? "Reverb: no sample on this pad" : "HPSS: no sample on this pad");
-        toast(reverb ? "Reverb: no sample" : "HPSS: no sample");
+        sample_action_status(action, "no sample on this pad");
+        toast(action ? "Effect: no sample" : "HPSS: no sample");
         return;
     }
     char path[512] = {0};
     if (!hpss_path_for(sample, frames, ch, rate, path, sizeof path)) {
-        hpss_set_status(reverb ? "Reverb: no exact WAV file" : "HPSS: no exact WAV file");
-        toast(reverb ? "Reverb: no WAV" : "HPSS: no WAV");
+        sample_action_status(action, "no exact WAV file");
+        toast(action ? "Effect: no WAV" : "HPSS: no WAV");
         return;
     }
     float *input = NULL;
     if (!wav_read_f32(path, frames, ch, rate, &input, NULL, NULL)) {
-        hpss_set_status(reverb ? "Reverb: cannot decode WAV" : "HPSS: cannot decode WAV");
-        toast(reverb ? "Reverb: bad WAV" : "HPSS: bad WAV");
+        sample_action_status(action, "cannot decode WAV");
+        toast(action ? "Effect: bad WAV" : "HPSS: bad WAV");
         return;
     }
     struct hpss_job *job = calloc(1, sizeof *job);
     if (!job) {
         free(input);
-        hpss_set_status(reverb ? "Reverb: out of memory" : "HPSS: out of memory");
+        sample_action_status(action, "out of memory");
         return;
     }
     job->screen = screen;
@@ -2226,23 +2346,25 @@ static void sample_transform_start(int reverb)
     job->ch = ch;
     job->rate = rate;
     job->input = input;
-    job->reverb = reverb;
+    job->action = action;
     job->rc = -1;
     g_hpss_chop_before = hpss_chop_mode();
     g_hpss_job = job;
     g_hpss_busy = 1;
     __atomic_store_n(&g_hpss_done, 0, __ATOMIC_RELEASE);
-    hpss_set_status(reverb ? "Processing reverb..." : "Processing HPSS...");
+    char status[96];
+    snprintf(status, sizeof status, "Processing %s...", name);
+    hpss_set_status(status);
     mlog("%s start: %s frames=%u ch=%u rate=%u\n",
-         reverb ? "Reverb" : "HPSS", path, frames, ch, rate);
+         name, path, frames, ch, rate);
     pthread_t th;
     int cr = pthread_create(&th, 0, hpss_worker, job);
     if (cr != 0) {
         g_hpss_job = NULL;
         g_hpss_busy = 0;
         hpss_free_job(job);
-        hpss_set_status(reverb ? "Reverb: worker failed" : "HPSS: worker failed");
-        toast(reverb ? "Reverb: worker failed" : "HPSS: worker failed");
+        sample_action_status(action, "worker failed");
+        toast(action ? "Effect: worker failed" : "HPSS: worker failed");
         return;
     }
     pthread_detach(th);
@@ -2250,7 +2372,69 @@ static void sample_transform_start(int reverb)
 }
 
 static void hpss_start(void) { sample_transform_start(0); }
-static void reverb_start(void) { sample_transform_start(1); }
+static void effect_start(int action) { sample_transform_start(action); }
+
+static void fmbass_start(void)
+{
+    if (g_hpss_busy || g_hpss_job)
+        return;
+    void *screen = 0;
+    uintptr_t state = 0, sample = 0;
+    unsigned frames = 0, ch = 0, rate = 0;
+    if (!hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate)) {
+        sample_action_status(4, "load a sample pad first");
+        toast("Bass: select sample pad");
+        return;
+    }
+    struct hpss_job *job = calloc(1, sizeof *job);
+    if (!job) {
+        sample_action_status(4, "out of memory");
+        return;
+    }
+    if (!hpss_path_for(sample, frames, ch, rate, job->source_path,
+                       sizeof job->source_path) ||
+        !bass_source_backup(job->source_path, &job->source_data_offset,
+                            &job->source_audio_backup, &job->source_audio_bytes)) {
+        hpss_free_job(job);
+        sample_action_status(4, "cannot preserve source sample");
+        toast("Bass: source read failed");
+        return;
+    }
+    uintptr_t program = 0;
+    if (!rd(state + 0x2310, &program, 8) || !program || hpss_free_count((void *)program) < 1) {
+        hpss_free_job(job);
+        sample_action_status(4, "need 1 empty pad");
+        toast("Bass: need 1 pad");
+        return;
+    }
+    job->screen = screen;
+    job->state = state;
+    job->sample = sample;
+    job->frames = frames;
+    job->ch = ch;
+    job->rate = rate;
+    job->action = 4;
+    job->rendered_ch = 2;
+    job->rc = -1;
+    g_hpss_chop_before = hpss_chop_mode();
+    bass_preview_set_active(0);
+    g_hpss_job = job;
+    g_hpss_busy = 1;
+    __atomic_store_n(&g_hpss_done, 0, __ATOMIC_RELEASE);
+    hpss_set_status("Rendering Bass C2...");
+    pthread_t th;
+    if (pthread_create(&th, 0, hpss_worker, job) != 0) {
+        g_hpss_job = NULL;
+        g_hpss_busy = 0;
+        hpss_free_job(job);
+        bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
+        bass_preview_set_active(1);
+        sample_action_status(4, "worker failed");
+        return;
+    }
+    pthread_detach(th);
+    hpss_repaint();
+}
 
 static void hpss_close(void);
 static void cc_replay_k3(unsigned raw);
@@ -3403,16 +3587,17 @@ static void hpss_finalize(void)
         g_hpss_finalizing = 0;
         return;
     }
+    int effect = job->action != 0;
     if (job->rc != 0 ||
-        (job->reverb ? (!job->rendered || job->rendered_frames > UINT32_MAX)
-                     : (!job->harmonic || !job->percussive))) {
-        hpss_set_status(job->reverb ? "Reverb: processing failed" : "HPSS: processing failed");
-        toast(job->reverb ? "Reverb: processing failed" : "HPSS: processing failed");
+        (effect ? (!job->rendered || job->rendered_frames > UINT32_MAX)
+                : (!job->harmonic || !job->percussive))) {
+        sample_action_status(job->action, "processing failed");
+        toast(effect ? "Effect: processing failed" : "HPSS: processing failed");
         goto out;
     }
     if (g_screen != job->screen || !sample_page_visible()) {
-        hpss_set_status(job->reverb ? "Reverb: cancelled (page changed)" : "HPSS: cancelled (page changed)");
-        toast(job->reverb ? "Reverb cancelled" : "HPSS cancelled");
+        sample_action_status(job->action, "cancelled (page changed)");
+        toast(effect ? "Effect cancelled" : "HPSS cancelled");
         goto out;
     }
     {
@@ -3422,35 +3607,50 @@ static void hpss_finalize(void)
         if (!hpss_read_sample(job->screen, &s, &st, &smp, &fr, &ch, &rt) ||
             st != job->state || smp != job->sample || fr != job->frames ||
             ch != job->ch || rt != job->rate) {
-            hpss_set_status(job->reverb ? "Reverb: cancelled (sample changed)" : "HPSS: cancelled (sample changed)");
-            toast(job->reverb ? "Reverb cancelled" : "HPSS cancelled");
+            sample_action_status(job->action, "cancelled (sample changed)");
+            toast(effect ? "Effect cancelled" : "HPSS cancelled");
             goto out;
         }
     }
     {
         uintptr_t program = 0;
-        int required = job->reverb ? 1 : 2;
+        int required = effect ? 1 : 2;
         if (!rd(job->state + 0x2310, &program, 8) || !program ||
             hpss_free_count((void *)program) < required) {
-            hpss_set_status(job->reverb ? "Reverb: need 1 empty pad" : "HPSS: need 2 empty pads");
-            toast(job->reverb ? "Reverb: need 1 pad" : "HPSS: need 2 pads");
+            sample_action_status(job->action, effect ? "need 1 empty pad" : "need 2 empty pads");
+            toast(effect ? "Effect: need 1 pad" : "HPSS: need 2 pads");
             goto out;
         }
-        if (job->reverb) {
+        if (effect) {
             int pad = -1;
+            unsigned read_frames = job->frames;
+            if (job->action == 4 && job->rendered_frames < read_frames)
+                read_frames = (unsigned)job->rendered_frames;
             int ok = hpss_extract_ctx(job->screen, job->state, job->rendered, 0,
-                                      (unsigned)job->rendered_frames, job->frames,
-                                      job->ch, 2, &pad);
+                                      read_frames, read_frames,
+                                      (unsigned)job->rendered_frames,
+                                      job->rendered_ch ? job->rendered_ch : job->ch,
+                                      job->action + 1, &pad);
             hpss_restore_chop();
+            int source_ok = bass_source_restore(job->source_path,
+                                                job->source_data_offset,
+                                                job->source_audio_backup,
+                                                job->source_audio_bytes);
+            if (!source_ok) {
+                sample_action_status(job->action, "source restore failed");
+                toast("Bass: source restore failed");
+                goto out;
+            }
             if (!ok) {
-                hpss_set_status("Reverb: output failed");
-                toast("Reverb: write failed");
+                sample_action_status(job->action, "output failed");
+                toast("Effect: write failed");
                 goto out;
             }
         } else {
             int first_pad = -1, second_pad = -1;
             int a = hpss_extract_ctx(job->screen, job->state, job->harmonic, 0,
-                                     job->frames, job->frames, job->ch, 0, &first_pad);
+                                     job->frames, job->frames, job->frames,
+                                     job->ch, 0, &first_pad);
             if (!a) {
                 hpss_restore_chop();
                 hpss_set_status("HPSS: first output failed");
@@ -3458,7 +3658,8 @@ static void hpss_finalize(void)
                 goto out;
             }
             int b = hpss_extract_ctx(job->screen, job->state, job->percussive, 0,
-                                     job->frames, job->frames, job->ch, 1, &second_pad);
+                                     job->frames, job->frames, job->frames,
+                                     job->ch, 1, &second_pad);
             hpss_restore_chop();
             if (!b) {
                 /* Do not attempt a destructive rollback outside the native command. */
@@ -3468,18 +3669,27 @@ static void hpss_finalize(void)
             }
         }
     }
-    if (job->reverb) {
-        hpss_set_status("Reverb: copy created");
-        toast("Reverb done");
+    if (effect) {
+        sample_action_status(job->action, "copy created");
+        toast(job->action == 1 ? "Reverb done" : job->action == 2 ? "Vinyl done" :
+              job->action == 3 ? "Lo-Fi done" : "Bass C2 done");
     } else {
         hpss_set_status("HPSS: harmonic + percussive created");
         toast("HPSS done");
     }
     g_hpss_menu = 0;
+    g_bass_edit = 0;
 out:
+    if (job->action == 4 && job->source_audio_backup &&
+        !bass_source_restore(job->source_path, job->source_data_offset,
+                             job->source_audio_backup, job->source_audio_bytes)) {
+        sample_action_status(4, "source restore failed");
+        toast("Bass: source restore failed");
+    }
     hpss_free_job(job);
     g_hpss_busy = 0;
     g_hpss_menu = 0;
+    bass_preview_set_active(0);
     g_hpss_data_down = 0;
     g_hpss_finalizing = 0;
     hpss_repaint();
@@ -3491,6 +3701,8 @@ static void hpss_open(void)
         return;
     g_hpss_menu = 1;
     g_hpss_sel = 0;
+    g_bass_edit = 0;
+    bass_preview_set_active(0);
     g_hpss_data_down = 0;
     hpss_set_status("");
     hpss_repaint();
@@ -3501,6 +3713,8 @@ static void hpss_close(void)
     if (g_hpss_busy)
         return;
     g_hpss_menu = 0;
+    g_bass_edit = 0;
+    bass_preview_set_active(0);
     g_hpss_data_down = 0;
     hpss_repaint();
 }
@@ -3509,12 +3723,23 @@ static void hpss_activate(void)
 {
     if (g_hpss_busy)
         return;
+    if (g_bass_edit) {
+        fmbass_start();
+        return;
+    }
     if (g_hpss_sel == 0)
         hpss_start();
     else if (g_hpss_sel == 1)
         spectral_start();
-    else if (g_hpss_sel == 2)
-        reverb_start();
+    else if (g_hpss_sel >= 2 && g_hpss_sel <= 4)
+        effect_start(g_hpss_sel - 1);
+    else if (g_hpss_sel == 5) {
+        g_bass_edit = 1;
+        bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
+        bass_preview_set_active(1);
+        hpss_set_status(g_bass_preview_available ? "" : "Live preview unavailable");
+        hpss_repaint();
+    }
     else
         hpss_close();
 }
@@ -3532,32 +3757,66 @@ static void hpss_draw_menu(void *g)
     draw_colour(g, 0xffffb43c);
     draw_rect(g, x, y, w, 2);
     draw_rect(g, x, y + h - 2, w, 2);
-    draw_colour(g, 0xffffffff);
-    draw_text(g, "SAMPLE OPTIONS", x + 10, y + 6, w - 20, 22, 18.0f);
+    if (!g_bass_edit) {
+        draw_colour(g, 0xffffffff);
+        draw_text(g, "SAMPLE OPTIONS", x + 10, y + 6, w - 20, 22, 18.0f);
+    }
     if (g_hpss_busy) {
         draw_text(g, "Processing...", x + 10, y + 70, w - 20, 24, 16.0f);
         if (g_hpss_status[0])
             draw_text(g, g_hpss_status, x + 10, y + 98, w - 20, 20, 12.0f);
     } else {
-        static const char *titles[] = {"HPSS", "Spectral Chop", "Add Reverb", "Close"};
-        static const char *details[] = {
-            "split into harmonic + percussive",
-            "slice at detected onsets",
-            "save a reverbed copy to a new pad",
-            ""};
-        for (int i = 0; i < 4; ++i) {
-            int row_y = y + 34 + i * 38;
+        if (g_bass_edit) {
+            draw_colour(g, 0xffffb43c);
+            draw_text(g, "BASS SYNTH", x + 12, y + 6, w - 24, 22, 18.0f);
+            draw_colour(g, 0xffb8b8be);
+            draw_text(g, "PADS C2-D#3  /  CHROMATIC", x + 12, y + 36,
+                      w - 24, 16, 11.0f);
+
+            const int col_x[] = {x + 16, x + 108, x + 200};
+            const char *knob_labels[] = {"BRIGHT", "EXCITE", "FILTER"};
+            for (int i = 0; i < 3; ++i) {
+                draw_colour(g, 0xffffb43c);
+                draw_text(g, i == 0 ? "K1" : i == 1 ? "K2" : "K3",
+                          col_x[i], y + 72, 76, 16, 11.0f);
+                draw_colour(g, 0xffffffff);
+                draw_text(g, knob_labels[i], col_x[i], y + 90, 76, 18, 12.0f);
+                draw_colour(g, 0xff36363d);
+                draw_rect(g, col_x[i], y + 116, 76, 4);
+                draw_colour(g, 0xffffb43c);
+                draw_rect(g, col_x[i], y + 116,
+                          (int)(76.0f * g_bass_knob[i] + 0.5f), 4);
+                char value[8];
+                snprintf(value, sizeof value, "%.2f", (double)g_bass_knob[i]);
+                draw_colour(g, 0xffffffff);
+                draw_text(g, value, col_x[i], y + 128, 76, 20, 14.0f);
+            }
+
+            draw_colour(g, 0xff48484f);
+            draw_rect(g, x + 12, y + 164, w - 24, 1);
+            if (g_hpss_status[0]) {
+                draw_colour(g, 0xffe8e8ec);
+                draw_text(g, g_hpss_status, x + 12, y + 168, w - 24, 14, 10.0f);
+            }
+            draw_colour(g, 0xffffb43c);
+            draw_text(g, "PADS: PLAY   DATA: SAVE   SHIFT+DATA: BACK",
+                      x + 10, y + 192, w - 20, 16, 10.0f);
+            return;
+        }
+        static const char *titles[] = {
+            "HPSS", "Spectral Chop", "Add Reverb", "Vinyl", "Lo-Fi (Decimator)",
+            "Bass Synth", "Close"};
+        for (int i = 0; i < 7; ++i) {
+            int row_y = y + 32 + i * 24;
             if (g_hpss_sel == i) {
                 draw_colour(g, 0xff3a2a10);
-                draw_rect(g, x + 6, row_y, w - 12, 34);
+                draw_rect(g, x + 6, row_y, w - 12, 23);
                 draw_colour(g, 0xffffffff);
             }
-            draw_text(g, titles[i], x + 12, row_y + 1, w - 24, 18, 15.0f);
-            if (details[i][0])
-                draw_text(g, details[i], x + 12, row_y + 18, w - 24, 14, 10.0f);
+            draw_text(g, titles[i], x + 12, row_y + 2, w - 24, 18, 13.0f);
         }
         if (g_hpss_status[0])
-            draw_text(g, g_hpss_status, x + 10, y + 196, w - 20, 14, 10.0f);
+            draw_text(g, g_hpss_status, x + 10, y + 200, w - 20, 14, 10.0f);
     }
     if (!g_hpss_busy && !g_hpss_status[0]) {
         draw_colour(g, 0xffb0b0b0);
@@ -3738,6 +3997,12 @@ static void note_on(void *input, int src, int pad, void *props, float vel)
 {
     if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
         return;
+    if (__atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE) &&
+        pad >= 0 && pad < 16) {
+        bass_preview_note((unsigned)pad, vel);
+        __atomic_add_fetch(&g_bass_preview_notes, 1, __ATOMIC_RELAXED);
+        return;
+    }
     g_last_pad = pad;
     g_props = props;
 
@@ -3760,8 +4025,56 @@ static void note_on(void *input, int src, int pad, void *props, float vel)
 
 static void note_off(void *input, int src, int pad)
 {
+    if (g_hpss_menu && g_bass_edit && pad >= 0 && pad < 16)
+        return;
     if (orig_note_off)
         orig_note_off(input, src, pad);
+}
+
+/* The firmware's audio writer accepts planar float channels, then converts
+   them to S32 PCM. Mix the preview into private block storage so the live
+   engine buffers are never changed. The normal device block is 128 frames. */
+static void bass_audio_writer(void *self, void *input, size_t frames, int offset)
+{
+    static __thread float scratch[8][2048];
+    float *channels[8];
+    if (!__atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE)) {
+        bass_preview_mix(NULL, 0, 0, 44100); /* clear any ringing voices after close */
+        if (orig_bass_audio_writer)
+            orig_bass_audio_writer(self, input, frames, offset);
+        return;
+    }
+    int count = FIELD(self, 0xd8, int32_t);
+    if (count < 0)
+        count = FIELD(self, 0xe4, int32_t);
+    if (!orig_bass_audio_writer)
+        return;
+    if (count < 1 || count > 8 || frames > 2048 || !input) {
+        orig_bass_audio_writer(self, input, frames, offset);
+        return;
+    }
+
+    float **source = input;
+    for (int i = 0; i < count; ++i) {
+        if (!source[i]) {
+            orig_bass_audio_writer(self, input, frames, offset);
+            return;
+        }
+        memcpy(scratch[i], source[i], frames * sizeof(float));
+        channels[i] = scratch[i];
+    }
+    float peak = bass_preview_mix(channels, frames, (unsigned)count, 44100);
+    if (peak > 0.f) {
+        __atomic_add_fetch(&g_bass_preview_blocks, 1, __ATOMIC_RELAXED);
+        uint32_t previous_bits = __atomic_load_n(&g_bass_preview_peak_bits, __ATOMIC_RELAXED);
+        float previous;
+        memcpy(&previous, &previous_bits, sizeof previous);
+        if (peak > previous)
+            __atomic_store_n(&g_bass_preview_peak_bits, bass_float_bits(peak), __ATOMIC_RELAXED);
+        orig_bass_audio_writer(self, channels, frames, offset);
+    } else {
+        orig_bass_audio_writer(self, input, frames, offset);
+    }
 }
 
 static void *g_cs_self;
@@ -4671,6 +4984,17 @@ static int g_in_cc_replay;
 
 static void cc_capture(void *ev, unsigned raw, float lo, float range)
 {
+    if (!g_in_cc_replay && ev && g_hpss_menu && g_bass_edit && !g_hpss_busy) {
+        unsigned cc = ((unsigned char *)ev)[8];
+        int knob = cc == 0x10 ? 0 : cc == 0x11 ? 1 : cc == 0x12 ? 2 : -1;
+        if (knob >= 0) {
+            float scale = range > 1.0f ? range : 127.0f;
+            g_bass_knob[knob] = fminf(1.f, fmaxf(0.f, raw / scale));
+            bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
+            hpss_repaint();
+            return;
+        }
+    }
     /* Keep the stock decoder/transport intact. Only DATA reaches the native
      * integer signal while our modal menu owns controls; knobs must not edit
      * the sample behind it. Replayed internal commands are not user input. */
@@ -5740,71 +6064,37 @@ static void str_assign_hook(void *dest, const char *text)
 
 
 
-#if MINIMOD_CHROMATIC
-/* ------------------------------------------------------------ MIDI (feature 2) */
-/* Chromatic play from an external controller: the app already receives MIDI on
- * its ALSA rawmidi node; we read the same node and trigger the pads with the
- * full chromatic range instead of the 16-levels quantisation. */
-static int midi_fd = -1;
-
-static void *midi_thread(void *arg)
+/* ------------------------------------------------------------ MIDI (feature 2)
+ * Keep the firmware's MIDI input, note-on/off matching, sustain and audio
+ * routing intact. The SampQOL reference confirms the native pitch setter takes
+ * the event property block at +0x14 and a semitone delta as argument four. */
+static void midi_note_event(void *app, void *context, void *event,
+                            uintptr_t source)
 {
-    (void)arg;
-    /* find the rawmidi node */
-    for (int i = 0; i < 8 && midi_fd < 0; ++i) {
-        char p[64];
-        snprintf(p, sizeof p, "/dev/snd/midiC%dD0", i);
-        int fd = open(p, O_RDONLY | O_NONBLOCK);
-        if (fd >= 0)
-            midi_fd = fd;
-    }
-    if (midi_fd < 0) {
-        mlog("minimod: midi: no rawmidi node\n");
-        return 0;
-    }
-    mlog("minimod: midi: listening on fd %d\n", midi_fd);
-    unsigned char b[3];
-    int have = 0;
-    for (;;) {
-        unsigned char c;
-        ssize_t n = read(midi_fd, &c, 1);
-        if (n != 1) {
-            struct timespec ts = {.tv_sec = 0, .tv_nsec = 20 * 1000 * 1000};
-            nanosleep(&ts, 0);
-            continue;
-        }
-        if (c & 0x80) {
-            b[0] = c;
-            have = 1;
-            continue;
-        }
-        if (!have)
-            continue;
-        b[1] = c;
-        unsigned char st = b[0] & 0xf0;
-        if (st == 0x90 || st == 0x80) {
-            static unsigned char last[16];
-            unsigned char note = b[1];
-            (void)last;
-            play_note((int)note, st == 0x90, 0.8f);
+    if (event) {
+        uint32_t type = 0;
+        float velocity = 0.0f;
+        uint8_t note = 0xff;
+        memcpy(&type, (char *)event + 8, sizeof type);
+        memcpy(&velocity, (char *)event + 0x10, sizeof velocity);
+        memcpy(&note, (char *)event + 0x30, sizeof note);
+        int32_t source_id = (int32_t)(uint32_t)source;
+        if (levels_active() &&
+            (source_id <= 0x7fffffef || source_id == 0x7ffffff6) &&
+            (type & 0xffu) == 3 && velocity > 0.0f && note <= 127 &&
+            orig_pitch_off) {
+            /* MIDI 60 (C3) is the stock keyboard root. Use the pitch setter's
+             * trampoline so PLUS/MINUS's 16 Levels wrapper cannot alter this
+             * explicit keyboard interval. */
+            orig_pitch_off((char *)event + 0x14, 0, 0, (int)note - 60);
+            g_midi_chromatic_note = note;
+            g_midi_chromatic_delta = (int)note - 60;
+            __atomic_add_fetch(&g_midi_chromatic_count, 1, __ATOMIC_RELAXED);
         }
     }
-    return 0;
+    if (orig_midi_note_event)
+        orig_midi_note_event(app, context, event, source);
 }
-
-static void play_note(int pitch, int on, float velocity)
-{
-    if (!orig_note_on)
-        return;
-    /* pad index carries the chromatic step; the app maps it through the
-     * 16-levels table, so offset it by the octave the user selected. */
-    int pad = pitch % 16;
-    if (pad < 0)
-        pad += 16;
-    if (on)
-        orig_note_on(0, 0, pad, 0, velocity);
-}
-#endif /* MINIMOD_CHROMATIC */
 
 /* -------------------------------------------------------- probe threads */
 static void *needle_thread(void *arg)
@@ -6442,10 +6732,14 @@ __attribute__((constructor)) static void load(void)
     void *t_poff = install_hook(base + A_PITCH_OFF, (void *)pitch_off);
     if (t_poff)
         orig_pitch_off = (void (*)(void *, uint64_t, uint64_t, int))t_poff;
+    void *t_midi = install_hook(base + A_MIDI_NOTE_EVENT, (void *)midi_note_event);
+    if (t_midi)
+        orig_midi_note_event = (void (*)(void *, void *, void *, uintptr_t))t_midi;
     void *t_btn = (hook_mask & 16) ? install_hook(base + A_BUTTONS, (void *)buttons) : 0;
     void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)note_on) : 0;
     void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)cs_event) : 0;
     void *t_off = (hook_mask & 128) ? install_hook(base + A_NOTE_OFF, (void *)note_off) : 0;
+    void *t_bass_audio = install_hook(base + A_BASS_AUDIO_WRITER, (void *)bass_audio_writer);
     void *t_sc = install_hook(base + 0x1968020, (void *)setctl_probe);
     if (t_sc)
         orig_setctl = (void (*)(void *, void *, int, int, float))t_sc;
@@ -6529,6 +6823,10 @@ __attribute__((constructor)) static void load(void)
         orig_cs = (void (*)(void *, int, void *))t_cs;
     if (t_off)
         orig_note_off = (void (*)(void *, int, int))t_off;
+    if (t_bass_audio) {
+        orig_bass_audio_writer = (void (*)(void *, void *, size_t, int))t_bass_audio;
+    }
+    g_bass_preview_available = t_note && t_off && t_bass_audio;
     if (t_trim)
         orig_trim = (void (*)(void *, float))t_trim;
     if (t_sa)
@@ -6580,16 +6878,6 @@ __attribute__((constructor)) static void load(void)
     }
     mlog("minimod: codes relay=%p tramp=%p\n", (void *)relay_page,
          (void *)tramp_page);
-    pthread_t th;
-#if MINIMOD_CHROMATIC
-    /* The app owns the control-surface rawmidi node; opening it here makes the
-     * stock app fail to start, so the feature is opt-in. */
-    const char *midi_env = getenv("MINIMOD_MIDI");
-    if (midi_env && atoi(midi_env) != 0)
-        pthread_create(&th, 0, midi_thread, 0);
-#else
-    (void)th;
-#endif
     mlog("minimod: base=%p mask=%d safe=%d probe=%d (ctor=%d proc=%d plus=%d minus=%d)\n",
          (void *)base, hook_mask, safe_mode, probe_mode, t_ctor != 0, t_proc != 0);
 }
