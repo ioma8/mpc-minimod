@@ -11,7 +11,7 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 `autorun` package. Nothing on disk is modified: the library is copied to `/run`
 (tmpfs) and preloaded into the stock app, so a reboot returns to stock.
 
-**Current status:** pitch shift is verified on hardware. AutoTrim's native command and UI updates are verified in the emulator. SAMPLE OPTIONS, HPSS, Spectral Chop, Reverb, Vinyl, Lo-Fi, and Bass Synth are emulator-verified. Bass Synth saves a DaisySP physical-model C2 pluck and auditions a chromatic C2–D#3 range from pads 1–16 while its parameter page is open. It does not instantiate the firmware's FMBass class because that class requires an H3 host context. Details: [`docs/re/BASS-SAMPLE.md`](../docs/re/BASS-SAMPLE.md). Add Reverb appends an RT60-length tail through the native Extract writer; see [`docs/REVERB-HANDOFF.md`](../docs/REVERB-HANDOFF.md). See also [`docs/AUTOTRIM-NATIVE.md`](../docs/AUTOTRIM-NATIVE.md), [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md), and [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md).
+**Current status:** pitch shift and full-keyboard chromatic external MIDI are verified on hardware. AutoTrim's native command and UI updates are verified in the emulator. SAMPLE OPTIONS, HPSS, Spectral Chop, Reverb, Vinyl, Lo-Fi, and Bass Synth are emulator-verified. Bass Synth saves a DaisySP physical-model C2 pluck and auditions a chromatic C2–D#3 range from pads 1–16 while its parameter page is open. It does not instantiate the firmware's FMBass class because that class requires an H3 host context. Details: [`docs/re/BASS-SAMPLE.md`](../docs/re/BASS-SAMPLE.md). Add Reverb appends an RT60-length tail through the native Extract writer; see [`docs/REVERB-HANDOFF.md`](../docs/REVERB-HANDOFF.md). See also [`docs/AUTOTRIM-NATIVE.md`](../docs/AUTOTRIM-NATIVE.md), [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md), and [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md).
 
 | # | feature | control | state |
 | --- | --- | --- | --- |
@@ -22,6 +22,7 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 | 5 | SAMPLE OPTIONS → Spectral Chop slices the selected pad at detected onsets | `SHIFT` + `DATA`, choose Spectral Chop, `DATA` | emulator-verified by `mod/tests/emulator_spectral.py`; see [SPECTRAL-CHOP](../docs/SPECTRAL-CHOP.md) |
 | 6 | SAMPLE OPTIONS → Add Reverb creates a reverbed copy with a tail on a free pad | `SHIFT` + `DATA`, choose Add Reverb, `DATA` | longer WAV and non-silent tail checked in emulator |
 | 7 | SAMPLE OPTIONS → Bass Synth auditions C2–D#3 on pads 1–16 and saves a plucked C2 sample to the next free pad; K1/K2/K3 shape brightness, excitation and filter live | `SHIFT` + `DATA`, choose Bass Synth, play pads or press `DATA` to save | live audio mix, output WAV, C2 pitch, source preservation and no restart checked in emulator |
+| 8 | external MIDI plays the selected pad chromatically over the whole keyboard (no wrapping, exact semitones) | MIDI keyboard, Pad MIDI In **On**, then 16 Levels | verified on device (emulator: 48→110.4, 60→220.7, 65→293.4 Hz on a 220 Hz sample) |
 
 Chromatic external MIDI playback is available while 16 Levels is active; see
 [`MIDI-CHROMATIC.md`](../docs/MIDI-CHROMATIC.md) for setup and mechanism.
@@ -86,9 +87,14 @@ released   : Trim        Tune        Filter
   whose constructor requires the H3 host interface. Implementation and Ghidra
   evidence: [`docs/re/BASS-SAMPLE.md`](../docs/re/BASS-SAMPLE.md); emulator
   check: `mod/tests/emulator_bass_sample.py`.
-* **Chromatic MIDI** — select a pad, enable Pad MIDI In in MIDI Config, then
-  enter 16 Levels. External note-ons are shifted from C3 through the native
-  pitch setter while the firmware handles routing and note-offs. See
+* **Chromatic MIDI** — select a pad, enable **Pad MIDI In** in MIDI Config (it
+  resets to Off on every app start), then enter 16 Levels. Every external note
+  plays the selected pad: C3 is the root and the whole keyboard is transposed
+  by exact semitones, with no wrapping and no out-of-range fallback to other
+  pads. The mod rebuilds the note event for the selected pad and calls the
+  app's own pitch setter (`w3 = note - 60`) before dispatching with the
+  physical-pad source; note-offs are tracked and replayed the same way. With 16
+  Levels off the dispatcher is left byte-identical to stock. See
   [`MIDI-CHROMATIC.md`](../docs/MIDI-CHROMATIC.md); emulator check:
   `tests/emulator_midi_chromatic.py`.
 

@@ -430,6 +430,93 @@ static void *install_hook(uintptr_t site, void *hook)
     return tr;
 }
 
+/* ---------------------------------------------------------- MIDI hook (lazy)
+ * Outside 16 Levels the stock app must see its own dispatcher code, not a
+ * hook that merely forwards. The slot and the trampoline are built once; the
+ * entry instruction is swapped in when 16 Levels turns on and restored when
+ * it turns off or the Sample page goes away. */
+static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
+static void midi_note_event(void *app, void *context, void *event,
+                            uintptr_t source);
+static unsigned char g_midi_orig[4], g_midi_patch[4];
+static int g_midi_ready, g_midi_on;
+/* A physical pad press identifies its pad through property 0 of the note event
+ * (event+0x16), whose value is the bank's pad-note base plus the pad index.
+ * Learn that base from a real pad press so MIDI can address the same row. */
+static volatile int g_pad_prop_pending, g_pad_prop_val, g_pad_prop_base = 0x75;
+static volatile int g_pad_level_byte;
+static volatile uintptr_t g_pad_ctx;
+static volatile int g_pad_tune_mode;
+static unsigned char g_midi_replayed[128];
+
+static int midi_hook_site_ok(void)
+{
+    /* The first four instructions of the dispatcher in firmware 1.3.0.12. */
+    static const unsigned char want[16] = {
+        0x3f, 0x23, 0x03, 0xd5, 0xff, 0x03, 0x03, 0xd1,
+        0xfd, 0x7b, 0x06, 0xa9, 0xfd, 0x83, 0x01, 0x91 };
+    unsigned char got[16];
+    return rd(base + A_MIDI_NOTE_EVENT, got, sizeof got) &&
+           !memcmp(got, want, sizeof want);
+}
+
+static void midi_site_bytes(const void *p)
+{
+    uintptr_t site = base + A_MIDI_NOTE_EVENT;
+    uintptr_t page = site & ~(uintptr_t)0xfff;
+    if (mprotect((void *)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
+        return;
+    wr(site, p, 4);
+    __builtin___clear_cache((char *)site, (char *)site + 4);
+    mprotect((void *)page, 0x2000, PROT_READ | PROT_EXEC);
+}
+
+static void midi_hook_set(int on)
+{
+    if (!base || !relay_page || !tramp_page || nslots >= 60 || ntramp >= 60)
+        return;
+    on = on ? 1 : 0;
+    if (on == g_midi_on)
+        return;
+    if (on) {
+        if (!g_midi_ready) {
+            if (!midi_hook_site_ok()) {
+                mlog("minimod: MIDI dispatcher mismatch; not hooking\n");
+                toast("MIDI hook: firmware?");
+                return;
+            }
+            if (!rd(base + A_MIDI_NOTE_EVENT, g_midi_orig, 4))
+                return;
+            /* The relay/trampoline pages are RX after load; reopen them for
+             * the one-time slot build. */
+            mprotect(relay_page, 4096, PROT_READ | PROT_WRITE);
+            mprotect(tramp_page, 4096, PROT_READ | PROT_WRITE);
+            void *t = install_hook(base + A_MIDI_NOTE_EVENT,
+                                   (void *)midi_note_event);
+            mprotect(relay_page, 4096, PROT_READ | PROT_EXEC);
+            mprotect(tramp_page, 4096, PROT_READ | PROT_EXEC);
+            if (!t)
+                return;
+            orig_midi_note_event =
+                (void (*)(void *, void *, void *, uintptr_t))t;
+            g_midi_ready = 1;
+            if (!rd(base + A_MIDI_NOTE_EVENT, g_midi_patch, 4))
+                return;
+            mlog("minimod: MIDI hook installed\n");
+        } else {
+            midi_site_bytes(g_midi_patch);
+            mlog("minimod: MIDI hook on\n");
+        }
+        g_midi_on = 1;
+    } else {
+        if (g_midi_ready) {
+            midi_site_bytes(g_midi_orig);
+            mlog("minimod: MIDI hook off (stock)\n");
+        }
+        g_midi_on = 0;
+    }
+}
+
 /* -------------------------------------------------------- 16 Levels state */
 static int g_octave;
 static volatile int g_levels; /* 16 LEVELS mode, tracked from button 0x28 */
@@ -458,7 +545,9 @@ static int levels_active(void)
     if (!s || FIELD(s, 0, uintptr_t) != base + 0x6e212a0) /* SampleModeScreen */
         return 0;
     if (!FN(0x112fd50, int (*)(void *))(s)) {
+        if (g_levels) mlog("lv: predicate 0, clearing\n");
         g_levels = 0;
+        midi_hook_set(0);
         return 0;
     }
     return g_levels;
@@ -3830,6 +3919,10 @@ static void buttons(void *event)
 
     unsigned code = event ? FIELD(event, 8, uint8_t) : 0;
     unsigned down = event ? FIELD(event, 9, uint8_t) : 0;
+    mlog("btn %02x %u\n", code, down);
+    /* Keep the lazy MIDI hook in sync with the visible mode: leaving the Sample
+     * page restores the stock dispatcher on the very next button. */
+    midi_hook_set(levels_active());
     if (event && rd((uintptr_t)event, g_hpss_btn, sizeof g_hpss_btn)) {
         g_hpss_btn_valid = 1;
         uintptr_t context = 0, surface = 0;
@@ -3951,7 +4044,10 @@ static void buttons(void *event)
     }
     if (code == 0x28 && down) {
         g_levels = !g_levels;
+        if (g_levels && g_last_pad >= 0 && g_last_pad < 16)
+            g_pad_level_byte = g_last_pad;
         mlog("minimod: 16 LEVELS mode -> %d\n", g_levels);
+        midi_hook_set(levels_active());
     }
     if ((code == 0x36 || code == 0x37) && levels_active()) {
         int plus = (code == 0x36);
@@ -4005,6 +4101,10 @@ static void note_on(void *input, int src, int pad, void *props, float vel)
     }
     g_last_pad = pad;
     g_props = props;
+    if (g_pad_prop_pending) {
+        g_pad_prop_base = g_pad_prop_val - pad;
+        g_pad_prop_pending = 0;
+    }
 
     if (!g_replaying_pad && pad >= 0 && pad < 128) {
         /* remember a real pad press so the page can be re-selected later */
@@ -6079,17 +6179,69 @@ static void midi_note_event(void *app, void *context, void *event,
         memcpy(&velocity, (char *)event + 0x10, sizeof velocity);
         memcpy(&note, (char *)event + 0x30, sizeof note);
         int32_t source_id = (int32_t)(uint32_t)source;
-        if (levels_active() &&
-            (source_id <= 0x7fffffef || source_id == 0x7ffffff6) &&
-            (type & 0xffu) == 3 && velocity > 0.0f && note <= 127 &&
-            orig_pitch_off) {
-            /* MIDI 60 (C3) is the stock keyboard root. Use the pitch setter's
-             * trampoline so PLUS/MINUS's 16 Levels wrapper cannot alter this
-             * explicit keyboard interval. */
-            orig_pitch_off((char *)event + 0x14, 0, 0, (int)note - 60);
-            g_midi_chromatic_note = note;
-            g_midi_chromatic_delta = (int)note - 60;
-            __atomic_add_fetch(&g_midi_chromatic_count, 1, __ATOMIC_RELAXED);
+        int external = source_id <= 0x7fffffef || source_id == 0x7ffffff6;
+        unsigned char *e = (unsigned char *)event;
+        mlog("ev ext=%d src=%llx ctx=%llx app=%llx type=%u note=%u vel=%.3f lv=%d\n",
+             external, (unsigned long long)source, (unsigned long long)(uintptr_t)context,
+             (unsigned long long)(uintptr_t)app, type & 0xffu, note, velocity, g_levels);
+        if (!external) {
+            char hex[200]; int k = 0;
+            for (int i = 0; i < 64 && k < (int)sizeof hex - 4; ++i)
+                k += snprintf(hex + k, sizeof hex - k, " %02x", e[i]);
+            mlog("padbytes%s\n", hex);
+            g_pad_ctx = (uintptr_t)context;
+        }
+        if (!external && (type & 0xffu) == 3 && velocity > 0.0f) {
+            uint16_t mask = 0;
+            memcpy(&mask, e + 0x14, 2);
+            g_pad_tune_mode = (mask & 1u) ? 0 : 1;
+            if (mask & 1u) {
+                g_pad_prop_val = e[0x16];
+                g_pad_level_byte = e[0x30];
+                g_pad_prop_pending = 1;
+            }
+        }
+        int note_on = (type & 0xffu) == 3 && velocity > 0.0f;
+        int note_off = note <= 127 &&
+                       (((type & 0xffu) == 3 && velocity <= 0.0f) ||
+                        (type & 0xffu) == 2);
+        if (levels_active() && external && note <= 127 &&
+            ((type & 0xffu) == 3 || note_off)) {
+            int row = (int)note - 60;
+            if (note_on || g_midi_replayed[note]) {
+                /* Re-send the note as the selected pad's event: clear the
+                 * property mask, put the selected pad in event+0x30, then apply
+                 * the pitch offset with the app's own setter - the same call
+                 * the 16 Levels renderer makes. */
+                uint16_t old_mask;
+                uint8_t old_prop, old_note;
+                memcpy(&old_mask, e + 0x14, 2);
+                old_prop = e[0x16];
+                old_note = e[0x30];
+                uint16_t mask = 0;
+                memcpy(e + 0x14, &mask, 2);
+                e[0x30] = (unsigned char)g_pad_level_byte;
+                /* Use the app's own property setter: this is exactly the path
+                 * PLUS/MINUS uses to shift the row by octaves. */
+                if (orig_pitch_off)
+                    orig_pitch_off(e + 0x14, 0, 0, row);
+                if (note_on) {
+                    g_midi_replayed[note] = 1;
+                    g_midi_chromatic_note = note;
+                    g_midi_chromatic_delta = row;
+                    __atomic_add_fetch(&g_midi_chromatic_count, 1, __ATOMIC_RELAXED);
+                } else {
+                    g_midi_replayed[note] = 0;
+                }
+                mlog("synth ctx=%llx src=7ffffffa prop=%u e30=%u lv=%d\n",
+                     (unsigned long long)g_pad_ctx, e[0x16], e[0x30], g_levels);
+                if (orig_midi_note_event)
+                    orig_midi_note_event(app, (void *)g_pad_ctx, event, 0x7ffffffa);
+                memcpy(e + 0x14, &old_mask, 2);
+                e[0x16] = old_prop;
+                e[0x30] = old_note;
+                return;
+            }
         }
     }
     if (orig_midi_note_event)
@@ -6732,9 +6884,9 @@ __attribute__((constructor)) static void load(void)
     void *t_poff = install_hook(base + A_PITCH_OFF, (void *)pitch_off);
     if (t_poff)
         orig_pitch_off = (void (*)(void *, uint64_t, uint64_t, int))t_poff;
-    void *t_midi = install_hook(base + A_MIDI_NOTE_EVENT, (void *)midi_note_event);
-    if (t_midi)
-        orig_midi_note_event = (void (*)(void *, void *, void *, uintptr_t))t_midi;
+    /* The MIDI dispatcher is hooked lazily by midi_hook_set(): outside
+     * 16 Levels the stock code must stay untouched. */
+    mlog("minimod: MIDI hook deferred until 16 LEVELS\n");
     void *t_btn = (hook_mask & 16) ? install_hook(base + A_BUTTONS, (void *)buttons) : 0;
     void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)note_on) : 0;
     void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)cs_event) : 0;

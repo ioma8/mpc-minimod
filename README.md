@@ -39,8 +39,9 @@ reports. It never creates samples or uses free pads. Details:
 [`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md); the model, the mechanisms and
 the evidence: [`docs/re/SPECTRAL-CHOP-SOLVED.md`](docs/re/SPECTRAL-CHOP-SOLVED.md).
 
-External MIDI plays the selected sample chromatically while 16 Levels is active
-(C3 root); enable Pad MIDI In in MIDI Config. Details:
+External MIDI plays the selected sample chromatically over the whole keyboard
+while 16 Levels is active (C3 root, exact semitones, no wrapping). Enable **Pad
+MIDI In** in MIDI Config — it resets to Off on every start. Details:
 [`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).
 
 ## Install
@@ -71,6 +72,7 @@ Release description format and the complete feature overview are in
 - [`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md) — the region detector and the in-place chop write
 - [`docs/re/SPECTRAL-CHOP-SOLVED.md`](docs/re/SPECTRAL-CHOP-SOLVED.md) — the chop model, the write recipe, the path there and the probe toolkit
 - [`docs/re/FIRMWARE-MECHANISMS.md`](docs/re/FIRMWARE-MECHANISMS.md) — the firmware internals we mapped: loader, screen/paint, layers, properties, commands, input, sample pool, threading
+- [`docs/MIDI-16LEVELS-METHOD.md`](docs/MIDI-16LEVELS-METHOD.md) — what actually solved the chromatic MIDI problem, and the reusable method
 - [`docs/`](docs/) — device notes, emulator, reverse-engineering writeups
 - [`tools/hpss/`](tools/hpss/) — Python reference, algorithm notes and WAV helper scripts
 - [`converter/`](converter/) — separate tool: project → per-pad stems
