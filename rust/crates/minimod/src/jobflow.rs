@@ -5,8 +5,32 @@
 //! reports.  The extract itself stays a callback because it drives a firmware
 //! handler and waits on the app's writer - the one part that is still glue.
 
-use crate::job::{ACTION_BASS, ACTION_SPLIT, Job};
-use crate::{firmware, pads, page, selection, status, wav_ffi};
+use core::mem::size_of;
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+
+use crate::job::{ACTION_BASS, ACTION_SPLIT, Job, PATH_BYTES};
+use crate::{firmware, pads, page, paths, selection, status, wav, wav_ffi};
+
+/// The job the worker is running, if any.
+static JOB: AtomicPtr<Job> = AtomicPtr::new(core::ptr::null_mut());
+/// Whether the worker has finished.
+static DONE: AtomicBool = AtomicBool::new(false);
+/// Whether the UI thread is finishing the job.
+static FINALIZING: AtomicBool = AtomicBool::new(false);
+/// The screen the page is on.
+static SCREEN: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// What the glue has to supply when a job starts.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StartHooks {
+    /// The worker finished; the UI thread will pick it up.
+    pub finished: Option<unsafe extern "C" fn()>,
+    /// Redraw.
+    pub repaint: Option<unsafe extern "C" fn()>,
+    /// Show a toast.
+    pub toast: Option<unsafe extern "C" fn(*const u8)>,
+}
 
 /// The app's extract: screen, state, buffer, start, end, source frames, buffer
 /// frames, channels, name index, and where the assigned pad lands.
@@ -327,4 +351,268 @@ pub unsafe extern "C" fn minimod_job_finalize(
     // SAFETY: the job is live and about to be abandoned.
     unsafe { crate::job::minimod_job_free(core::ptr::from_mut(job)) };
     0
+}
+
+/// Fill a fresh job from the selection.
+fn fill(
+    job: &mut Job,
+    selected: &selection::Selection,
+    path: &std::path::Path,
+    input: *mut f32,
+    action: i32,
+) {
+    job.screen = selected.screen;
+    job.state = selected.state;
+    job.sample = selected.sample;
+    job.frames = selected.frames;
+    job.channels = u32::from(selected.channels);
+    job.rate = selected.rate;
+    job.input = input;
+    job.action = action;
+    job.rc = -1;
+    let bytes = path.to_string_lossy();
+    let take = bytes.len().min(PATH_BYTES - 1);
+    job.source_path[..take].copy_from_slice(&bytes.as_bytes()[..take]);
+}
+
+/// Copy a slice into a `malloc` block, which the job frees with libc `free`.
+fn into_malloc(values: &[f32]) -> *mut f32 {
+    let bytes = values.len().saturating_mul(size_of::<f32>()).max(1);
+    // SAFETY: a plain allocation, checked for null.
+    let buffer = unsafe { libc::malloc(bytes) }.cast::<f32>();
+    if buffer.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: `buffer` holds `bytes` and the source is a live slice.
+    unsafe { core::ptr::copy_nonoverlapping(values.as_ptr(), buffer, values.len()) };
+    buffer
+}
+
+/// Start `action` on the selected sample.
+///
+/// Returns the job when it started, so the glue can keep its busy flag; on
+/// failure the status line and the toast are already set and null comes back.
+///
+/// # Safety
+///
+/// `knobs` must be readable for three values and `hooks` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_job_start(
+    action: i32,
+    base: usize,
+    knobs: *const f32,
+    hooks: *const StartHooks,
+) -> *mut Job {
+    if hooks.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: the caller promises the hooks are live for this call.
+    let hooks = unsafe { *hooks };
+    if JOB.load(Ordering::Acquire).is_null() {
+        // Nothing is running: try to start.
+    } else {
+        return core::ptr::null_mut();
+    }
+    let Some(selected) = selection::current(base, current_screen()) else {
+        status::set_action_status(action, "no sample on this pad");
+        // SAFETY: see the function contract.
+        unsafe {
+            say(
+                hooks.toast,
+                if action == 0 {
+                    "HPSS: no sample"
+                } else {
+                    "Effect: no sample"
+                },
+            );
+        }
+        return core::ptr::null_mut();
+    };
+    let Some(path) = paths::for_sample(
+        selected.sample,
+        selected.frames,
+        selected.channels,
+        selected.rate,
+    ) else {
+        status::set_action_status(action, "no exact WAV file");
+        // SAFETY: see the function contract.
+        unsafe {
+            say(
+                hooks.toast,
+                if action == 0 {
+                    "HPSS: no WAV"
+                } else {
+                    "Effect: no WAV"
+                },
+            );
+        }
+        return core::ptr::null_mut();
+    };
+    let Some(job) = (unsafe { prepare(action, &selected, &path, hooks) }) else {
+        return core::ptr::null_mut();
+    };
+    status::set_status(&format!("Processing {}...", status::action_name(action)));
+    JOB.store(job, Ordering::Release);
+    DONE.store(false, Ordering::Release);
+    let knobs = if knobs.is_null() {
+        [0.5_f32, 0.5, 0.5]
+    } else {
+        // SAFETY: the caller promises three readable values.
+        let values = unsafe { core::slice::from_raw_parts(knobs, 3) };
+        [values[0], values[1], values[2]]
+    };
+    let job_address = job as usize;
+    std::thread::spawn(move || {
+        // SAFETY: the job is owned by the flow until the UI thread frees it, and
+        // the address is stable for its whole life.
+        unsafe { crate::job::minimod_job_run(job_address as *mut Job, knobs.as_ptr(), base) };
+        DONE.store(true, Ordering::Release);
+        if let Some(finished) = hooks.finished {
+            // SAFETY: the caller's callback.
+            unsafe { finished() };
+        }
+        if let Some(repaint) = hooks.repaint {
+            // SAFETY: the caller's callback.
+            unsafe { repaint() };
+        }
+    });
+    job
+}
+
+/// Whether a job is running or waiting to be finished.
+#[must_use]
+pub fn busy() -> bool {
+    !JOB.load(Ordering::Acquire).is_null()
+}
+
+/// Whether a job is running, for the C glue.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_job_busy() -> i32 {
+    i32::from(busy())
+}
+
+/// Finish the job if the worker is done.
+///
+/// Returns 1 when a job was consumed, 0 when there was nothing to do.
+///
+/// # Safety
+///
+/// `hooks` must be live for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_job_finish(
+    hooks: *const Hooks,
+    screen: usize,
+    base: usize,
+) -> i32 {
+    if hooks.is_null() || FINALIZING.swap(true, Ordering::AcqRel) {
+        return 0;
+    }
+    if !DONE.swap(false, Ordering::AcqRel) {
+        FINALIZING.store(false, Ordering::Release);
+        return 0;
+    }
+    let job = JOB.swap(core::ptr::null_mut(), Ordering::AcqRel);
+    if job.is_null() {
+        FINALIZING.store(false, Ordering::Release);
+        return 0;
+    }
+    // SAFETY: the pointer came from `minimod_job_start` and is ours now.
+    unsafe { minimod_job_finalize(job, hooks, screen, base) };
+    FINALIZING.store(false, Ordering::Release);
+    1
+}
+
+/// Allocate the job and give it its input (or, for the bass synth, a backup of
+/// the source it will overwrite).
+///
+/// # Safety
+///
+/// `hooks` must be live for this call.
+unsafe fn prepare(
+    action: i32,
+    selected: &selection::Selection,
+    path: &std::path::Path,
+    hooks: StartHooks,
+) -> Option<*mut Job> {
+    let synth = action == ACTION_BASS;
+    let input = if synth {
+        core::ptr::null_mut()
+    } else {
+        let Some(samples) = wav::read_f32(path, selected.frames, selected.channels, selected.rate)
+        else {
+            status::set_action_status(action, "cannot decode WAV");
+            // SAFETY: see the caller's contract.
+            unsafe { say_failure(hooks.toast, action, "bad WAV") };
+            return None;
+        };
+        into_malloc(&samples)
+    };
+    // SAFETY: a plain allocation, checked for null.
+    let job = unsafe { libc::calloc(1, size_of::<Job>()) }.cast::<Job>();
+    if (input.is_null() && !synth) || job.is_null() {
+        // SAFETY: both came from `malloc`; nothing else owns them.
+        unsafe {
+            libc::free(input.cast());
+            libc::free(job.cast());
+        }
+        status::set_action_status(action, "out of memory");
+        return None;
+    }
+    // SAFETY: `job` is a fresh zeroed allocation we own.
+    let fields = unsafe { &mut *job };
+    fill(fields, selected, path, input, action);
+    if synth {
+        // SAFETY: the path is NUL-terminated and the outputs are the job's own
+        // fields, which it frees later.
+        let backed_up = unsafe {
+            wav_ffi::bass_source_backup(
+                fields.source_path.as_ptr().cast(),
+                core::ptr::addr_of_mut!(fields.source_data_offset),
+                core::ptr::addr_of_mut!(fields.source_audio_backup),
+                core::ptr::addr_of_mut!(fields.source_audio_bytes),
+            )
+        };
+        if backed_up == 0 {
+            // SAFETY: the job owns its buffers.
+            unsafe { crate::job::minimod_job_free(job) };
+            status::set_action_status(action, "cannot preserve source sample");
+            // SAFETY: see the caller's contract.
+            unsafe { say(hooks.toast, "Bass: source read failed") };
+            return None;
+        }
+        fields.rendered_channels = 2;
+    }
+    Some(job)
+}
+
+/// The "bad WAV" toast for an action.
+///
+/// # Safety
+///
+/// `toast` must accept a NUL-terminated string.
+unsafe fn say_failure(toast: Option<unsafe extern "C" fn(*const u8)>, action: i32, what: &str) {
+    let text = if action == 0 { "HPSS: " } else { "Effect: " };
+    let mut joined = [0_u8; 48];
+    let head = text.len();
+    joined[..head].copy_from_slice(text.as_bytes());
+    let tail = what.len().min(joined.len() - head - 1);
+    joined[head..head + tail].copy_from_slice(&what.as_bytes()[..tail]);
+    // SAFETY: the buffer is NUL-terminated above and outlives the call.
+    unsafe {
+        say(
+            toast,
+            core::str::from_utf8(&joined[..head + tail]).unwrap_or(""),
+        );
+    }
+}
+
+/// Record the current screen; the glue calls this when it changes.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_job_set_screen(screen: usize) {
+    SCREEN.store(screen as *mut (), Ordering::Release);
+}
+
+/// The screen the page is on.
+fn current_screen() -> usize {
+    SCREEN.load(Ordering::Acquire) as usize
 }

@@ -41,6 +41,20 @@ struct minimod_job_hooks {
     void (*toast)(const char *text);
 };
 
+struct minimod_start_hooks {
+    void (*finished)(void);
+    void (*repaint)(void);
+    void (*toast)(const char *text);
+};
+
+struct minimod_job *minimod_job_start(int32_t action, uintptr_t app_base,
+                                      const float *knobs,
+                                      const struct minimod_start_hooks *hooks);
+int32_t minimod_job_busy(void);
+int32_t minimod_job_finish(const struct minimod_job_hooks *hooks,
+                           uintptr_t screen, uintptr_t app_base);
+void minimod_job_set_screen(uintptr_t screen);
+
 int32_t minimod_job_finalize(struct minimod_job *job,
                              const struct minimod_job_hooks *hooks,
                              uintptr_t screen, uintptr_t app_base);

@@ -915,9 +915,7 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
 /* The layout is defined once, in rust/crates/minimod/src/job.rs. */
 typedef struct minimod_job hpss_job;
 
-static hpss_job *volatile g_hpss_job;
 static volatile int g_hpss_done;
-static volatile int g_hpss_finalizing;
 static volatile int g_hpss_data_down;
 static unsigned char g_hpss_btn[16];
 static int g_hpss_btn_valid;
@@ -961,82 +959,28 @@ static void hpss_restore_chop(void)
     mlog("HPSS: restored chop mode to %d\n", g_hpss_chop_before);
 }
 
-static void *hpss_worker(void *arg)
-{
-    hpss_job *job = arg;
-    int rc = minimod_job_run(job, g_bass_knob, base);
-    __atomic_store_n(&g_hpss_done, 1, __ATOMIC_RELEASE);
-    mlog("%s worker: rc=%d frames=%u ch=%u output=%zu\n", sample_action_name(job->action),
-         rc, job->frames, job->ch, job->rendered_frames);
-    hpss_repaint();
-    return NULL;
-}
 
-static void hpss_free_job(hpss_job *job)
+
+static void hpss_finished(void)
 {
-    minimod_job_free(job);
+    __atomic_store_n(&g_hpss_done, 1, __ATOMIC_RELEASE);
 }
 
 static void sample_transform_start(int action)
 {
-    if (g_hpss_busy || g_hpss_job)
+    if (g_hpss_busy || minimod_job_busy())
         return;
-    void *screen = 0;
-    uintptr_t state = 0, sample = 0;
-    unsigned frames = 0, ch = 0, rate = 0;
-    const char *name = sample_action_name(action);
-    if (!hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate)) {
-        sample_action_status(action, "no sample on this pad");
-        toast(action ? "Effect: no sample" : "HPSS: no sample");
+    struct minimod_start_hooks hooks = {
+        .finished = hpss_finished,
+        .repaint = hpss_repaint,
+        .toast = toast,
+    };
+    minimod_job_set_screen((uintptr_t)g_screen);
+    if (!minimod_job_start(action, base, g_bass_knob, &hooks))
         return;
-    }
-    char path[512] = {0};
-    if (!hpss_path_for(sample, frames, ch, rate, path, sizeof path)) {
-        sample_action_status(action, "no exact WAV file");
-        toast(action ? "Effect: no WAV" : "HPSS: no WAV");
-        return;
-    }
-    float *input = NULL;
-    if (!wav_read_f32(path, frames, ch, rate, &input, NULL, NULL)) {
-        sample_action_status(action, "cannot decode WAV");
-        toast(action ? "Effect: bad WAV" : "HPSS: bad WAV");
-        return;
-    }
-    hpss_job *job = calloc(1, sizeof *job);
-    if (!job) {
-        free(input);
-        sample_action_status(action, "out of memory");
-        return;
-    }
-    job->screen = (uintptr_t)screen;
-    job->state = state;
-    job->sample = sample;
-    job->frames = frames;
-    job->ch = ch;
-    job->rate = rate;
-    job->input = input;
-    job->action = action;
-    job->rc = -1;
     g_hpss_chop_before = hpss_chop_mode();
-    g_hpss_job = job;
     g_hpss_busy = 1;
     __atomic_store_n(&g_hpss_done, 0, __ATOMIC_RELEASE);
-    char status[96];
-    snprintf(status, sizeof status, "Processing %s...", name);
-    hpss_set_status(status);
-    mlog("%s start: %s frames=%u ch=%u rate=%u\n",
-         name, path, frames, ch, rate);
-    pthread_t th;
-    int cr = pthread_create(&th, 0, hpss_worker, job);
-    if (cr != 0) {
-        g_hpss_job = NULL;
-        g_hpss_busy = 0;
-        hpss_free_job(job);
-        sample_action_status(action, "worker failed");
-        toast(action ? "Effect: worker failed" : "HPSS: worker failed");
-        return;
-    }
-    pthread_detach(th);
     hpss_repaint();
 }
 
@@ -1045,63 +989,20 @@ static void effect_start(int action) { sample_transform_start(action); }
 
 static void fmbass_start(void)
 {
-    if (g_hpss_busy || g_hpss_job)
+    if (g_hpss_busy || minimod_job_busy())
         return;
-    void *screen = 0;
-    uintptr_t state = 0, sample = 0;
-    unsigned frames = 0, ch = 0, rate = 0;
-    if (!hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate)) {
-        sample_action_status(4, "load a sample pad first");
-        toast("Bass: select sample pad");
+    struct minimod_start_hooks hooks = {
+        .finished = hpss_finished,
+        .repaint = hpss_repaint,
+        .toast = toast,
+    };
+    minimod_job_set_screen((uintptr_t)g_screen);
+    hpss_job *job = minimod_job_start(4, base, g_bass_knob, &hooks);
+    if (!job)
         return;
-    }
-    hpss_job *job = calloc(1, sizeof *job);
-    if (!job) {
-        sample_action_status(4, "out of memory");
-        return;
-    }
-    if (!hpss_path_for(sample, frames, ch, rate, job->source_path,
-                       sizeof job->source_path) ||
-        !bass_source_backup(job->source_path, &job->source_data_offset,
-                            &job->source_audio_backup, &job->source_audio_bytes)) {
-        hpss_free_job(job);
-        sample_action_status(4, "cannot preserve source sample");
-        toast("Bass: source read failed");
-        return;
-    }
-    uintptr_t program = 0;
-    if (!rd(state + 0x2310, &program, 8) || !program || minimod_pads_free_estimate(base, (uintptr_t)program) < 1) {
-        hpss_free_job(job);
-        sample_action_status(4, "need 1 empty pad");
-        toast("Bass: need 1 pad");
-        return;
-    }
-    job->screen = (uintptr_t)screen;
-    job->state = state;
-    job->sample = sample;
-    job->frames = frames;
-    job->ch = ch;
-    job->rate = rate;
-    job->action = 4;
-    job->rendered_ch = 2;
-    job->rc = -1;
     g_hpss_chop_before = hpss_chop_mode();
-    bass_preview_set_active(0);
-    g_hpss_job = job;
     g_hpss_busy = 1;
     __atomic_store_n(&g_hpss_done, 0, __ATOMIC_RELEASE);
-    hpss_set_status("Rendering Bass C2...");
-    pthread_t th;
-    if (pthread_create(&th, 0, hpss_worker, job) != 0) {
-        g_hpss_job = NULL;
-        g_hpss_busy = 0;
-        hpss_free_job(job);
-        bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
-        bass_preview_set_active(1);
-        sample_action_status(4, "worker failed");
-        return;
-    }
-    pthread_detach(th);
     hpss_repaint();
 }
 
@@ -1145,7 +1046,7 @@ static void spectral_finish(const char *error)
 static void spectral_start(void)
 {
     int expected = 0;
-    if (g_hpss_busy || g_hpss_job ||
+    if (g_hpss_busy || minimod_job_busy() ||
         !__atomic_compare_exchange_n(&g_spectral_active, &expected, -1, 0,
                                      __ATOMIC_RELEASE, __ATOMIC_RELAXED))
         return;
@@ -1238,28 +1139,18 @@ static int hpss_extract_hook(uintptr_t screen, uintptr_t state, const float *buf
 
 static void hpss_finalize(void)
 {
-    if (g_hpss_finalizing || !__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE))
-        return;
-    g_hpss_finalizing = 1;
-    __atomic_store_n(&g_hpss_done, 0, __ATOMIC_RELEASE);
-    hpss_job *job = g_hpss_job;
-    g_hpss_job = NULL;
-    if (!job) {
-        g_hpss_busy = 0;
-        g_hpss_finalizing = 0;
-        return;
-    }
     struct minimod_job_hooks hooks = {
         .extract = hpss_extract_hook,
         .restore_chop = hpss_restore_chop,
         .toast = toast,
     };
-    minimod_job_finalize(job, &hooks, (uintptr_t)g_screen, base);
+    minimod_job_set_screen((uintptr_t)g_screen);
+    if (!minimod_job_finish(&hooks, (uintptr_t)g_screen, base))
+        return;
     g_hpss_busy = 0;
     g_hpss_menu = 0;
     bass_preview_set_active(0);
     g_hpss_data_down = 0;
-    g_hpss_finalizing = 0;
     hpss_repaint();
 }
 
