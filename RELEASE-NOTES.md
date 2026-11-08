@@ -65,9 +65,11 @@ The release supports MPC Sample firmware **1.3.0.12** only.
   block just before the app's device write, so no second audio device is opened
   and the app's own rendering path is untouched.
 - Measure the round-trip latency when the view opens (a short chirp through the
-  output, cross-correlated against the capture) and apply it to every take, so
-  overdubs and synced loops line up; a buffer-based estimate is used when the
-  input cannot hear the output, and `K1` trims it.
+  output, cross-correlated against the capture), keep measuring it while loops
+  play whenever the input hears the output, and apply it to every take so
+  overdubs and synced loops line up; a buffer-based estimate is used when no
+  return path exists, `K1` trims it, and the result is stored in
+  `/data/minimod-looper.cfg` so it survives a restart.
 - Draw the loop state, length, playhead and input level as a fullscreen view,
   and block pad notes from the app while it is open.
 - Add `mod/tests/emulator_looper.py` and an in-process output tap for audio
@@ -105,8 +107,10 @@ The release supports MPC Sample firmware **1.3.0.12** only.
 ## Verification
 
 - Live Looper verified in the emulator: opening calibrates the round trip from
-  the chirp (loop cable in), and clicks recorded through the cable land within
-  6 frames of the pulse grid; a 1.17 s loop recorded from the tone input plays
+  the chirp (1808 frames, repeatable over five open/close cycles), continuous
+  correlation locks while a loop plays, the value is seeded from
+  `/data/minimod-looper.cfg` after a restart, and clicks recorded through the
+  cable land within 45 frames (1 ms) of the pulse grid; a 1.17 s loop recorded from the tone input plays
   at 0.15 rms / 441 Hz after the input is unplugged; stop silences it; overdub
   keeps the loop length; a short take under a 1.27 s pulse becomes exactly one
   pulse; `STOP` silences everything, `ERASE`+pad clears one, `SHIFT`+`LOOP`

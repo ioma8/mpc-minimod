@@ -47,9 +47,10 @@ restarts. Pressing a pad records, pressing it again plays, another press stops;
 `SHIFT`+pad overdubs and returns to playback; `ERASE`+pad clears one loop and
 `STOP` stops them all; `LOOP` starts a sync pulse from the last loop's length,
 after which new loops are quantized to whole pulse lengths (the metronome click
-is off by default, `SHIFT`+`LOOP` toggles it). Opening the view plays a short
-chirp and measures the round-trip latency so recordings and overdubs line up;
-`K1` trims it. Pads are blocked from the app while the view is open and
+is off by default, `SHIFT`+`LOOP` toggles it). Latency is measured on open with a
+short chirp, re-measured continuously while loops play whenever the input hears
+the output, and stored in `/data/minimod-looper.cfg` so recordings and overdubs
+line up across starts; `K1` trims it. Pads are blocked from the app while the view is open and
 `SHIFT`+`DATA` closes it. Details: [`docs/LIVE-LOOPER.md`](docs/LIVE-LOOPER.md).
 
 External MIDI plays the selected sample chromatically over the whole keyboard

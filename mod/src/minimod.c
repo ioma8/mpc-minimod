@@ -3861,6 +3861,12 @@ static void draw_text(void *g, const char *s, int x, int y, int w, int h,
  * forces its own repaints. */
 static volatile int g_looper_pump_started;
 
+static void looper_autocal_step(void);
+static void looper_cal_retry(void);
+static void looper_cfg_save(void);
+static int g_cfg_meas;
+static long long g_cfg_saved_at;
+
 static void *looper_pump_thread(void *arg)
 {
     (void)arg;
@@ -3869,6 +3875,21 @@ static void *looper_pump_thread(void *arg)
         nanosleep(&ts, 0);
         if (!looper_is_open())
             continue;
+        looper_autocal_step();
+        looper_cal_retry();
+        if (looper_calibration_pending())
+            looper_calibration_finish();
+        {
+            unsigned cal = looper_calibrated_latency();
+            if (cal && now_ms() > g_cfg_saved_at + 10000) {
+                int d = (int)cal - g_cfg_meas;
+                if (d > 32 || d < -32) {
+                    g_cfg_meas = (int)cal;
+                    g_cfg_saved_at = now_ms();
+                    looper_cfg_save();
+                }
+            }
+        }
         void *comp = g_paint_comp ? g_paint_comp : g_screen;
         if (orig_repaint && comp)
             orig_repaint(comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
@@ -4390,6 +4411,15 @@ static volatile unsigned g_out_write_calls;
 #define OUTTAP_FRAMES (44100u * 2u)
 static volatile float g_outtap[OUTTAP_FRAMES];
 static volatile unsigned g_outtap_w;
+
+/* Input history for the continuous auto-calibration: the same monotonic frame
+ * counter as the output tap, so a lag between a sample written to the device
+ * and its echo in the input is directly the round-trip delay. */
+#define INHIST_FRAMES 32768u
+static volatile float g_inhist[INHIST_FRAMES];
+static volatile unsigned g_inhist_w;
+static volatile int g_auto_ok;
+static unsigned g_auto_lag;
 static long (*real_snd_pcm_readn)(void *, void **, unsigned long);
 static int (*real_snd_pcm_set_channels)(void *, unsigned);
 static volatile unsigned g_pcm_channels = 4;
@@ -4441,6 +4471,17 @@ long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size)
     }
     if (looper && buffer && size)
         looper_render_s32((int32_t *)buffer, ch, (unsigned)size);
+#if MINIMOD_LOG
+    {
+        static int n;
+        if (n < 6) {
+            n++;
+            uintptr_t lr = (uintptr_t)__builtin_return_address(0);
+            mlog("minimod: WRITEI caller=%p file=%#lx size=%lu\n", (void *)lr,
+                 (unsigned long)(lr - base), (unsigned long)size);
+        }
+    }
+#endif
     long got = real_snd_pcm_writei(pcm, buffer, size);
     if (!looper || got <= 0 || !buffer)
         return got;
@@ -4484,9 +4525,35 @@ long snd_pcm_readi(void *pcm, void *buffer, unsigned long size)
         if (real_snd_pcm_avail && (avail = real_snd_pcm_avail(pcm)) > 0)
             g_in_delay = (unsigned)avail;
     }
+#if MINIMOD_LOG
+    {
+        static int n;
+        if (n < 6) {
+            n++;
+            uintptr_t lr = (uintptr_t)__builtin_return_address(0);
+            mlog("minimod: READI caller=%p file=%#lx size=%lu\n", (void *)lr,
+                 (unsigned long)(lr - base), (unsigned long)size);
+        }
+    }
+#endif
     long got = real_snd_pcm_readi(pcm, buffer, size);
     if (got > 0) {
         __atomic_add_fetch(&g_audio_in_calls, 1, __ATOMIC_RELAXED);
+        if (looper_is_open() && buffer) {
+            unsigned c = g_pcm_channels ? g_pcm_channels : 4;
+            const int32_t *s32 = buffer;
+            unsigned w = g_inhist_w;
+            for (long i = 0; i < got; ++i) {
+                float v;
+                if (c >= 2)
+                    v = ((float)s32[i * (long)c] + (float)s32[i * (long)c + 1]) *
+                        (0.5f / 2147483648.0f);
+                else
+                    v = (float)s32[i * (long)c] * (1.0f / 2147483648.0f);
+                g_inhist[(w++) % INHIST_FRAMES] = v;
+            }
+            g_inhist_w = w;
+        }
         if (looper_is_open() && buffer)
             looper_input_s32_interleaved((const int32_t *)buffer, g_pcm_channels,
                                          (unsigned)got);
@@ -4509,6 +4576,121 @@ long snd_pcm_readn(void *pcm, void **bufs, unsigned long size)
                              (unsigned)got);
     }
     return got;
+}
+
+/* Hand-edited latency trim survives a restart. */
+#define LOOPER_CFG "/data/minimod-looper.cfg"
+
+static void looper_cfg_load(void)
+{
+    int fd = open(LOOPER_CFG, O_RDONLY);
+    if (fd < 0)
+        return;
+    char buf[64] = {0};
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0)
+        return;
+    int trim = 0, meas = 0;
+    if (sscanf(buf, "%d %d", &trim, &meas) >= 1)
+        g_lat_extra = trim * 44;
+    if (meas > 0) {
+        g_cfg_meas = meas;
+        looper_seed_latency((unsigned)meas);
+    }
+}
+
+static void looper_cfg_save(void)
+{
+    int fd = open(LOOPER_CFG, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return;
+    char buf[32];
+    int n = snprintf(buf, sizeof buf, "%d %d\n", g_lat_extra / 44, g_cfg_meas);
+    if (n > 0)
+        (void)!write(fd, buf, (size_t)n);
+    close(fd);
+}
+
+/* Continuous auto-calibration: correlate the last stretch of device output
+ * against the input history. Whenever the input hears the output - a loop
+ * cable, the resample source, a microphone picking up the speaker - the lag is
+ * the true round trip and is adopted directly. Runs on the repaint thread. */
+static void looper_autocal_step(void)
+{
+    enum { M = 2048, MAXLAG = 4096 };
+    static long long next_at;
+    if (now_ms() < next_at)
+        return;
+    unsigned O = g_outtap_w, I = g_inhist_w;
+    if (O < M + MAXLAG + 2000 || I < M + MAXLAG + 2000)
+        return;
+    next_at = now_ms() + 2500;
+
+    static float outw[M];
+    unsigned o0 = O - MAXLAG - M;
+    float eo = 0.f;
+    for (unsigned k = 0; k < M; ++k) {
+        float v = g_outtap[(o0 + k) % OUTTAP_FRAMES];
+        outw[k] = v;
+        eo += v * v;
+    }
+    if (eo < 1e-4f)
+        return;
+    long base = (long)I - (long)O;
+    unsigned i0 = (unsigned)((long)o0 + base);
+    float best = 0.f;
+    unsigned best_lag = 0;
+    for (unsigned lag = 0; lag < MAXLAG; lag += 2) {
+        float acc = 0.f, ei = 0.f;
+        unsigned idx = i0 + lag;
+        for (unsigned k = 0; k < M; k += 2) {
+            float b = g_inhist[(idx + k) & (INHIST_FRAMES - 1)];
+            acc += outw[k] * b;
+            ei += b * b;
+        }
+        float norm = sqrtf(eo * ei);
+        if (norm > 1e-6f) {
+            float c = acc / norm;
+            if (c > best) {
+                best = c;
+                best_lag = lag;
+            }
+        }
+    }
+    if (best > 0.45f) {
+        if (g_auto_ok && best_lag + 128 > g_auto_lag && best_lag < g_auto_lag + 128)
+            g_auto_lag = (g_auto_lag * 3 + best_lag) / 4;
+        else
+            g_auto_lag = best_lag;
+        g_auto_ok = 1;
+        looper_force_latency(g_auto_lag);
+        mlog("minimod: autocal lag=%u conf=%.2f\n", g_auto_lag, (double)best);
+    } else {
+        g_auto_ok = 0;
+    }
+}
+
+/* If the chirp found no return path, try again a few times: the user may have
+ * switched the input source after opening the view. */
+static void looper_cal_retry(void)
+{
+    static long long next_at;
+    static int tries;
+    if (!looper_is_open()) {
+        tries = 0;
+        return;
+    }
+    if (looper_calibration_state() != 5 || tries >= 5)
+        return;
+    if (now_ms() < next_at)
+        return;
+    struct looper_view v;
+    if (looper_snapshot(&v) && v.recording_pad >= 0)
+        return;
+    tries++;
+    next_at = now_ms() + 4000;
+    looper_calibrate();
 }
 
 static void audio_writer(void *self, void *input, size_t frames, int offset)
@@ -5495,6 +5677,7 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
                 if (ms > 400)
                     ms = 400;
                 g_lat_extra = ms * 44;
+                looper_cfg_save();
                 k1_last = (int)raw;
                 char line[40];
                 snprintf(line, sizeof line, "LAT %+d ms", ms);
@@ -7288,6 +7471,7 @@ __attribute__((constructor)) static void load(void)
     debug_mode = dbg_env && atoi(dbg_env) != 0;
     const char *probe_env = getenv("MINIMOD_PROBE");
     probe_mode = probe_env && atoi(probe_env) != 0;
+    looper_cfg_load();
     {
         const char *lat = getenv("MINIMOD_LOOP_LAT");
         if (lat && *lat)

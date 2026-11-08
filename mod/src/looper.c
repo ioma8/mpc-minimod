@@ -52,7 +52,7 @@ static volatile unsigned g_lat; /* measured record latency, frames */
  * opens and the input is captured for a moment afterwards. If the chirp comes
  * back (loop cable, resample, a microphone hearing the speaker) the measured
  * delay is used directly; if it does not, the buffer-based estimate stays. */
-#define LP_CAL_PROBE 882u   /* 20 ms chirp */
+#define LP_CAL_PROBE 1323u  /* 30 ms chirp */
 #define LP_CAL_CAP 32768u   /* capture window, 0.74 s */
 static volatile int g_cal_state;      /* 0 idle, 1 arm, 2 capture, 3 ready, 4 done, 5 failed */
 static volatile uint64_t g_cal_probe_t;
@@ -399,7 +399,7 @@ static float probe_sample(unsigned i)
     float u = (float)i / (float)LP_CAL_PROBE;
     float f = 1000.f + 3000.f * u;                 /* 1 kHz -> 4 kHz chirp */
     float win = 0.5f - 0.5f * cosf(6.2831853f * u);
-    return sinf(6.2831853f * f * (float)i / (float)LP_RATE) * win * 0.3f;
+    return sinf(6.2831853f * f * (float)i / (float)LP_RATE) * win * 0.4f;
 }
 
 void looper_calibrate(void)
@@ -431,26 +431,34 @@ void looper_calibration_finish(void)
         g_cal_state = 5;
         return;
     }
-    float energy = 0.f;
-    for (unsigned i = 0; i < cap; ++i)
-        energy += g_cal_cap[i] * g_cal_cap[i];
+    float ep = 0.f;
+    for (unsigned i = 0; i < LP_CAL_PROBE; i += 2)
+        ep += probe_sample(i) * probe_sample(i);
+    if (ep < 1e-9f) {
+        g_cal_state = 5;
+        return;
+    }
     float best = 0.f;
     unsigned best_lag = 0;
     unsigned limit = cap - LP_CAL_PROBE;
-    for (unsigned lag = 0; lag < limit; lag += 1) {
-        float acc = 0.f;
-        for (unsigned i = 0; i < LP_CAL_PROBE; i += 2)
-            acc += g_cal_cap[lag + i] * probe_sample(i);
-        float a = acc < 0.f ? -acc : acc;
-        if (a > best) {
-            best = a;
+    for (unsigned lag = 0; lag + LP_CAL_PROBE <= cap; ++lag) {
+        float acc = 0.f, ei = 0.f;
+        for (unsigned i = 0; i < LP_CAL_PROBE; i += 2) {
+            float v = g_cal_cap[lag + i];
+            acc += v * probe_sample(i);
+            ei += v * v;
+        }
+        if (ei < 1e-9f)
+            continue;
+        float c = acc / sqrtf(ei * ep);
+        if (c > best) {
+            best = c;
             best_lag = lag;
         }
     }
-    float norm = sqrtf(energy / (float)cap * (float)LP_CAL_PROBE);
-    float conf = norm > 1e-6f ? best / norm : 0.f;
-    g_cal_conf = conf;
-    if (conf < 0.05f) {
+    (void)limit;
+    g_cal_conf = best;
+    if (best < 0.3f) {
         g_cal_state = 5;
         say("CALIB: no return, using estimate");
         return;
@@ -466,6 +474,26 @@ void looper_calibration_finish(void)
     char line[40];
     snprintf(line, sizeof line, "CALIB %d ms", (int)(d * 1000 / LP_RATE));
     say(line);
+}
+
+/* Adopt a latency measured earlier (persisted at startup) without pretending a
+ * calibration just ran. */
+void looper_seed_latency(unsigned frames)
+{
+    if (frames > LP_LAT_MAX)
+        frames = LP_LAT_MAX;
+    g_cal_result = (int)frames;
+    g_lat = frames;
+}
+
+/* Adopt a latency measured by the continuous input/output correlation. */
+void looper_force_latency(unsigned frames)
+{
+    if (frames > LP_LAT_MAX)
+        frames = LP_LAT_MAX;
+    g_cal_result = (int)frames;
+    g_lat = frames;
+    g_cal_state = 4;
 }
 
 int looper_calibration_state(void)

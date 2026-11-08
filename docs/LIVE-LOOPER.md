@@ -133,24 +133,39 @@ input was captured `in` frames ago (plus whatever waits in the mod's ring).
 Recording without correcting that writes the performance late in the loop, which
 is exactly what makes overdubs and synced loops feel behind.
 
-When the view opens it **calibrates itself**: it plays a 20 ms 1→4 kHz chirp into
-the output, captures 0.74 s of input and cross-correlates the two. If the chirp
-comes back — a loop cable, the resample source, or a microphone that hears the
-speaker — the measured round trip becomes the compensation (padded to whole
-frames by the transport stamp, ±3 ms quantisation). If it does not come back, the
-mod falls back to the device buffers: `snd_pcm_delay` of the output (smoothed)
-plus the block being written, `snd_pcm_avail` of the capture stream and the
-frames waiting in the input ring. `K1` trims ±400 ms on top for the room, the
-cable or personal preference.
+Latency is measured in three layers, so it works even when the simple case does
+not:
+
+1. **Chirp on open.** The view plays a 30 ms 1→4 kHz chirp, captures 0.74 s of
+   input and cross-correlates the two with a normalised score. If the chirp comes
+   back — a loop cable, the resample source, a microphone that hears the speaker
+   — the measured round trip becomes the compensation. It repeats up to five
+   times, 4 s apart, while no take is running, so switching the input source
+   after opening still calibrates.
+2. **Continuous correlation while playing.** The mod keeps the last two seconds
+   of what it sent to the device and the same span of input, and every 2.5 s
+   cross-correlates them. Whenever the input contains any of the output (bleed,
+   resample, cable) the lag is the true round trip, and it is adopted directly —
+   this tracks changes and corrects a bad chirp.
+3. **Buffer estimate.** With no return path at all (a silent instrument input),
+   it falls back to the device buffers: `snd_pcm_delay` of the output (smoothed)
+   plus the block being written, `snd_pcm_avail` of the capture stream and the
+   frames waiting in the input ring.
+
+A successful measurement is written to `/data/minimod-looper.cfg` and seeded at
+the next start, so one calibration lasts until the hardware setup changes. `K1`
+adds a trim of ±400 ms (stored in the same file) for the room or personal
+preference.
 
 The value is snapshotted when a take starts and used for the whole take: a new
 recording drops its first `lat` frames (they belong before the loop start) and
 overdubs write `lat` frames earlier, wrapping inside the loop.
 
-Measured in the emulator with the loop cable in: the chirp calibrates to
-`2142` frames, and clicks recorded through the cable land **6 frames** from the
-expected pulse grid (0.14 ms). A fixed `MINIMOD_LOOP_LAT=<frames>` overrides the
-whole thing for experiments.
+Measured in the emulator with the loop cable in: the chirp calibrates
+consistently (1808 frames over five open/close cycles), the continuous
+correlation locks at 1844 while a loop plays, and clicks recorded through the
+cable land **45 frames** from the expected pulse grid (1 ms). A fixed
+`MINIMOD_LOOP_LAT=<frames>` overrides the whole thing for experiments.
 
 ### Clock and threads
 
@@ -182,8 +197,8 @@ The test drives the panel and reads the mod's own state and output tap from
 Last run on the release build:
 
 ```
-live looper: loop 51712 frames (1.17s), 0.150 rms at 435 Hz, calib 1700 frames,
-take latency 1700 frames, sync 51712, quantized 25820 -> 51712
+live looper: loop 51584 frames (1.17s), 0.150 rms at 441 Hz, calib 1844 frames,
+take latency 1844 frames, sync 51584, quantized 25548 -> 51584
 ```
 
 What that covers, in order: opening the view calibrates the round-trip latency
@@ -211,9 +226,11 @@ in-process tap is.
 
 * Mono loops, 8 s maximum, no undo. The 44.1 kHz constant is only used for the
   seconds readout; looping itself is frame-based.
-* The chirp only calibrates when the selected input can hear the output (loop
-  cable, resample, or speaker + microphone). With a silent instrument input the
-  buffer estimate is used instead and `K1` is the trim.
+* Both automatic measurements need the selected input to hear the output (loop
+  cable, resample, speaker + microphone). With a silent instrument input the
+  buffer estimate is used, seeded by the last stored measurement, and `K1` is
+  the trim. A measured value is a property of the device's audio path, so it
+  applies to every source.
 * **The app's hidden page selection still follows the last pad press.** Pad
   events are dispatched to the app's observer listeners upstream of the note
   handler, and the pad-grid selection is one of those siblings. Blocking the

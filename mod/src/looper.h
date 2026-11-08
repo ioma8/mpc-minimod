@@ -81,6 +81,8 @@ void looper_calibrate(void);
 int looper_calibration_pending(void);
 void looper_calibration_finish(void);
 int looper_calibration_state(void);
+void looper_force_latency(unsigned frames);
+void looper_seed_latency(unsigned frames);
 unsigned looper_calibrated_latency(void);
 
 /* Audio hooks. `channels` is planar float as the firmware passes it. */

@@ -149,8 +149,8 @@ def main():
         close_looper()          # a previous run may have left the view open
     open_looper()
     assert u32(symbol('g_open')) == 1, 'the looper view did not open'
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline and u32(symbol('g_cal_state')) == 2:
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline and u32(symbol('g_cal_state')) in (1, 2, 3):
         time.sleep(0.05)
     cal_state = u32(symbol('g_cal_state'))
     cal_frames = u32(symbol('g_cal_result'))
@@ -191,8 +191,10 @@ def main():
     time.sleep(0.3)
     assert rms(output_tail()) < 0.01, 'output should be silent after stop'
 
-    # --- SHIFT + pad overdubs, a second press returns to playback
-    route('tone')
+    # --- SHIFT + pad overdubs, a second press returns to playback. The input is
+    #     silent here so the check is about the state machine and the untouched
+    #     loop, not about what a second tone would add.
+    route('none')
     time.sleep(0.2)
     hold('SHIFT', 'PAD 1')
     wait_state(0, 3)                       # DUB
