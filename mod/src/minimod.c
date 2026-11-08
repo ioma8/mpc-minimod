@@ -87,6 +87,7 @@
 #include "chop_ffi.h"
 #include "pads_ffi.h"
 #include "cfg_ffi.h"
+#include "buttons_ffi.h"
 #include "input_ffi.h"
 #include "sample_ffi.h"
 #include "status_ffi.h"
@@ -1469,36 +1470,52 @@ static void hpss_draw_menu(void *g)
 
 static void release_held_pads(void);
 
+static int button_action(unsigned code, unsigned down, int looper,
+                         int menu, int data_down, int busy, int bass_edit,
+                         int spectral, int levels, unsigned *value)
+{
+    return minimod_button_action(code, down, g_shift, g_erase_down, looper, menu,
+                                 data_down, busy, bass_edit, spectral, levels,
+                                 sample_page_visible(), g_plus_held, g_minus_held,
+                                 value);
+}
+
 static void buttons(void *event)
 {
-
     unsigned code = event ? FIELD(event, 8, uint8_t) : 0;
     unsigned down = event ? FIELD(event, 9, uint8_t) : 0;
-    mlog("btn %02x %u\n", code, down);
+    unsigned value = 0;
+
     /* Keep the lazy MIDI hook in sync with the visible mode: leaving the Sample
      * page restores the stock dispatcher on the very next button. */
     midi_hook_set(levels_active());
-    if (looper_is_open()) {
-        if (code == 0x31) {
-            /* Track SHIFT here but never forward it: the app pairs SHIFT with a
-             * pad press for its own shortcuts (Full Level), and the looper owns
-             * the pads. */
-            g_shift = down ? 1 : 0;
+    int looper = looper_is_open();
+    int action = button_action(code, down, looper, g_hpss_menu, g_hpss_data_down,
+                              g_hpss_busy, g_bass_edit,
+                              __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE),
+                              g_midi.levels, &value);
+    if (looper) {
+        switch (action) {
+        case MINIMOD_ACTION_SHIFT:
+            g_shift = value ? 1 : 0;
+            return;
+        case MINIMOD_ACTION_ERASE:
+            g_erase_down = value ? 1 : 0;
+            return;
+        case MINIMOD_ACTION_LOOPER: {
+            int was = looper_is_open();
+            looper_button(code, (int)down, g_shift, g_erase_down);
+            if (was && !looper_is_open()) {
+                g_shift = 0;
+                g_erase_down = 0;
+                release_held_pads();
+                hpss_repaint();
+            }
             return;
         }
-        if (code == 0x09) { /* ERASE: held while a pad is pressed clears it */
-            g_erase_down = down ? 1 : 0;
+        default:
             return;
         }
-        int was = looper_is_open();
-        looper_button(code, (int)down, g_shift, g_erase_down);
-        if (was && !looper_is_open()) {
-            g_shift = 0;
-            g_erase_down = 0;
-            release_held_pads();
-            hpss_repaint();
-        }
-        return;
     }
     if (event && rd((uintptr_t)event, g_hpss_btn, sizeof g_hpss_btn)) {
         g_hpss_btn_valid = 1;
@@ -1507,39 +1524,32 @@ static void buttons(void *event)
         if (context && rd(context + 0x10, &surface, sizeof surface) && surface)
             __atomic_store_n(&g_input.data_target, surface + 0x2da8, __ATOMIC_RELEASE);
     }
-    if (code == 0x6f) { /* DATA press/turn */
-        static int consumed;
-        if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
-            consumed = 1;
-        if (down && (g_hpss_menu || (g_shift && sample_page_visible())))
-            consumed = 1;
-        int visible = sample_page_visible();
-        if (down && !g_hpss_data_down) {
-            if (g_shift) {
-                if (visible && !g_hpss_busy) {
-                    if (g_hpss_menu)
-                        hpss_close();
-                    else
-                        hpss_open();
-                }
-            } else if (g_hpss_menu) {
-                hpss_activate();
-            }
+    if (code == 0x6f) {
+        g_hpss_data_down = down ? 1 : 0;
+        if (action == MINIMOD_ACTION_MENU_OPEN && sample_page_visible() && !g_hpss_busy) {
+            hpss_open();
+            return;
         }
-        g_hpss_data_down = !!down;
-        if (consumed || g_hpss_menu || (g_shift && visible)) {
-            if (!down) consumed = 0;
+        if (action == MINIMOD_ACTION_MENU_CLOSE) {
+            hpss_close();
+            return;
+        }
+        if (action == MINIMOD_ACTION_MENU_ACTIVATE) {
+            hpss_activate();
+            return;
+        }
+        if (action != MINIMOD_ACTION_FORWARD) {
+            if (!down)
+                g_hpss_data_down = 0;
+            else
+                g_hpss_data_down = 1;
             return;
         }
     }
-    if (getenv("MINIMOD_VIS") && g_screen)
-        mlog("minimod: vis code=0x%02x chopA=%d chopB=%d\n", code,
-             FN(0x112fd50, int (*)(void *))((char *)g_screen + 0x15e0),
-             FN(0x112fd50, int (*)(void *))((char *)g_screen + 0x1ee0));
-    if (code == 0x31) { /* SHIFT */
-        g_shift = down ? 1 : 0;
+    if (action == MINIMOD_ACTION_SHIFT) {
+        g_shift = value ? 1 : 0;
         if (!down) {
-            g_trim_step = 0;      /* the cycle only lives while SHIFT is held */
+            g_trim_step = 0;
             g_b3_down = 0;
             if (g_hpss_restore_pending) {
                 g_hpss_restore_pending = 0;
@@ -1551,40 +1561,38 @@ static void buttons(void *event)
             orig_buttons(event);
         return;
     }
-    if (g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
+    if (action == MINIMOD_ACTION_CONSUME || action == MINIMOD_ACTION_MENU_ENCODER)
         return;
-    if (code == 0x0e && g_shift && !in_chop_mode()) { /* SHIFT + B3: 3 %, 6 %, 9 %, untrimmed */
-        /* The button repeats while held, so act on the press edge only. */
+    if (action == MINIMOD_ACTION_AUTOTRIM) {
         if (down && !g_b3_down) {
-            /* Analysis is cheap now (block reads); it must stay on this thread
-             * so the commit is queued for the very next repaint. */
             do_autotrim();
             g_trim_step = (g_trim_step + 1) % 4;
         }
         g_b3_down = down;
         return;
     }
-    /* PLUS / MINUS move the 16 Levels row by an octave. The pitch hook only
-     * runs for that screen, so bumping unconditionally is safe - and the old
-     * guard (g_octave != 0) made the first press a no-op. */
-    if (getenv("MINIMOD_BTNLOG")) {
-        static int n;
-        if (n < 24) {
-            n++;
-            unsigned char raw[16];
-            if (rd((uintptr_t)event, raw, sizeof raw)) {
-                mlog("minimod: btn ev="
-                     "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
-                     raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-                     raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14],
-                     raw[15]);
-            }
+    if (action == MINIMOD_ACTION_BUMP_OCTAVE || action == MINIMOD_ACTION_RESET_PITCH) {
+        if (code == MINIMOD_KEY_PLUS)
+            g_plus_held = down ? 1 : 0;
+        else
+            g_minus_held = down ? 1 : 0;
+        if (action == MINIMOD_ACTION_RESET_PITCH) {
+            g_octave = 0;
+            toast("Pitch reset");
+        } else {
+            bump_octave((int)value);
         }
+        return;
+    }
+    if (action == MINIMOD_ACTION_TOGGLE_LEVELS) {
+        g_midi.levels = !g_midi.levels;
+        if (g_midi.levels && g_input.last_pad >= 0 && g_input.last_pad < 16)
+            g_midi.pad_level_byte = g_input.last_pad;
+        midi_hook_set(levels_active());
+        return;
     }
     do_poke();
     if (down && g_mark_v0 >= 0.0f) {
-        /* any key press may change what the page shows: drop our edges and ask
-         * for a repaint so they actually disappear */
         g_mark_v0 = -1.0f;
         g_mark_v1 = -1.0f;
         if (g_screen)
@@ -1592,58 +1600,9 @@ static void buttons(void *event)
                 g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
     }
     if (code == 0x06 && down == 0x7f) {
-        /* remember the object of the last press so it can be replayed to make
-         * the sample page reload (which is when it redraws its trim) */
         uintptr_t ob = 0;
         if (rd((uintptr_t)event, &ob, 8) && ob)
             g_last_press_obj = ob;
-    }
-    if (code == 0x06) {
-        static int k06;
-        if (k06 < 10) {
-            k06++;
-            unsigned char raw[16];
-            if (rd((uintptr_t)event, raw, sizeof raw))
-                mlog("minimod: ev06 %02x %02x %02x %02x %02x %02x %02x %02x | "
-                     "%02x %02x %02x %02x %02x %02x %02x %02x\n",
-                     raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-                     raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14],
-                     raw[15]);
-        }
-    }
-    if (code == 0x28 && down) {
-        g_midi.levels = !g_midi.levels;
-        if (g_midi.levels && g_input.last_pad >= 0 && g_input.last_pad < 16)
-            g_midi.pad_level_byte = g_input.last_pad;
-        mlog("minimod: 16 LEVELS mode -> %d\n", g_midi.levels);
-        midi_hook_set(levels_active());
-    }
-    if ((code == 0x36 || code == 0x37) && levels_active()) {
-        int plus = (code == 0x36);
-        if (down) {
-            /* both keys at once = reset the row to its original pitch */
-            if (plus ? g_minus_held : g_plus_held) {
-                g_octave = 0;
-                mlog("minimod: PLUS+MINUS -> pitch reset to original\n");
-                toast("Pitch reset");
-            } else {
-                bump_octave(plus ? +1 : -1);
-            }
-            if (plus)
-                g_plus_held = 1;
-            else
-                g_minus_held = 1;
-        } else {
-            if (plus)
-                g_plus_held = 0;
-            else
-                g_minus_held = 0;
-        }
-        return; /* swallow: the stock action would nudge the selected knob */
-    }
-    if (debug_mode && g_dbg < 80) {
-        g_dbg++;
-        mlog("minimod: button code=0x%02x down=%u\n", code, down);
     }
     if (orig_buttons)
         orig_buttons(event);

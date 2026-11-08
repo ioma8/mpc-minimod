@@ -14,6 +14,7 @@
 pub mod analysis_ffi;
 pub mod audio;
 pub mod bass_ffi;
+pub mod buttons;
 pub mod cfg;
 pub mod cfg_ffi;
 pub mod chop;
