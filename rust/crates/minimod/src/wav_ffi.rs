@@ -42,6 +42,32 @@ fn to_malloc<T: Copy>(values: &[T]) -> *mut T {
     buffer
 }
 
+/// One sample, scaled to the 16-bit range the trim logic compares against.
+///
+/// # Safety
+///
+/// `bytes` must be readable for `width` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pcm_at(bytes: *const u8, width: u32, format: u32) -> i32 {
+    if bytes.is_null() {
+        return 0;
+    }
+    let Ok(width) = u16::try_from(width) else {
+        return 0;
+    };
+    if width == 0 || width > 8 {
+        return 0;
+    }
+    let encoding = if format == 3 {
+        Encoding::Float
+    } else {
+        Encoding::Pcm
+    };
+    // SAFETY: the caller promises `bytes` is readable for `width` bytes.
+    let slice = unsafe { core::slice::from_raw_parts(bytes, usize::from(width)) };
+    wav::scaled_sample(slice, width, encoding)
+}
+
 /// Read a WAV header.
 ///
 /// # Safety

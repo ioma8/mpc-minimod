@@ -228,6 +228,43 @@ fn read_format(file: &File, offset: u64, size: u32) -> Option<Format> {
     })
 }
 
+/// One sample of `bytes`, scaled to the 16-bit integer range the trim logic
+/// compares against.
+///
+/// This is the reference's scale, not `-1.0 .. 1.0`: 16-bit samples are used as
+/// they are, 24- and 32-bit ones are shifted down, and float samples are scaled
+/// by 32768.
+#[must_use]
+pub fn scaled_sample(bytes: &[u8], width: u16, encoding: Encoding) -> i32 {
+    match (encoding, width) {
+        (Encoding::Float, 4) => {
+            let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            if !value.is_finite() {
+                return 0;
+            }
+            if value >= 1.0 {
+                return 32_767;
+            }
+            if value <= -1.0 {
+                return -32_768;
+            }
+            (value * 32_768.0) as i32
+        }
+        (Encoding::Pcm, 2) => i32::from(i16::from_le_bytes([bytes[0], bytes[1]])),
+        (Encoding::Pcm, 3) => {
+            let value = i32::from(bytes[0])
+                | (i32::from(bytes[1]) << 8)
+                | (i32::from(bytes[2].cast_signed()) << 16);
+            value >> 8
+        }
+        (Encoding::Pcm, 4) => {
+            let value = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            value >> 16
+        }
+        _ => 0,
+    }
+}
+
 /// One sample of `bytes`, scaled into `-1.0 .. 1.0`.
 fn decode(bytes: &[u8], info: &Info) -> f32 {
     match (info.encoding, info.width) {
@@ -312,6 +349,38 @@ mod tests {
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect()
+    }
+
+    #[test]
+    fn the_trim_scale_matches_the_reference() {
+        use super::{Encoding, scaled_sample};
+        assert_eq!(
+            scaled_sample(&(-32_768_i16).to_le_bytes(), 2, Encoding::Pcm),
+            -32_768
+        );
+        assert_eq!(
+            scaled_sample(&32_767_i16.to_le_bytes(), 2, Encoding::Pcm),
+            32_767
+        );
+        // 24-bit full scale shifts down to 16 bits.
+        assert_eq!(scaled_sample(&[0x00, 0x00, 0x40], 3, Encoding::Pcm), 16_384);
+        assert_eq!(
+            scaled_sample(&[0x00, 0x00, 0xC0], 3, Encoding::Pcm),
+            -16_384
+        );
+        // Float is clamped before scaling, like the reference.
+        assert_eq!(
+            scaled_sample(&1.0_f32.to_le_bytes(), 4, Encoding::Float),
+            32_767
+        );
+        assert_eq!(
+            scaled_sample(&(-1.0_f32).to_le_bytes(), 4, Encoding::Float),
+            -32_768
+        );
+        assert_eq!(
+            scaled_sample(&f32::NAN.to_le_bytes(), 4, Encoding::Float),
+            0
+        );
     }
 
     #[test]

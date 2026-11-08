@@ -495,29 +495,6 @@ static int bump_octave(int d)
 }
 
 
-static int pcm_at(const unsigned char *p, unsigned bps, unsigned format)
-{
-    if (format == 3) {
-        float value;
-        memcpy(&value, p, sizeof value);
-        if (!isfinite(value)) return 0;
-        if (value >= 1.0f) return 32767;
-        if (value <= -1.0f) return -32768;
-        return (int)(value * 32768.0f);
-    }
-    if (bps == 2) {
-        short v;
-        memcpy(&v, p, 2);
-        return v;
-    }
-    if (bps == 3) {
-        int v = (int)p[0] | ((int)p[1] << 8) | ((int)(signed char)p[2] << 16);
-        return (short)(v >> 8);
-    }
-    int v;
-    memcpy(&v, p, 4);
-    return (short)(v >> 16);
-}
 
 /* SHIFT+B3 cycles 3 % -> 6 % -> 9 % -> untrimmed while SHIFT stays held;
  * releasing SHIFT resets the cycle. */
@@ -720,7 +697,6 @@ static uintptr_t broadcast_prop(uintptr_t param, float cur)
 /* ------------------------------------------------------------ app screens */
 
 
-static int find_displayed_sample(unsigned *frames, char *path, size_t pathsz);
 
 
 /* ------------------------------------------------------------- app hooks */
@@ -892,16 +868,10 @@ static void pitch_off(void *a0, uint64_t a1, uint64_t a2, int a3)
         orig_pitch_off(a0, a1, a2, off);
 }
 
-static void heap_snapshot(const char *tag);
-static void heap_diff(const char *tag);
 static uintptr_t g_last_press_obj;
-static void find_float_pair(float v);
 /* "findv <float>" - every address in the small writable ranges holding exactly
  * this float. Run with two knob values and intersect to find the stored state. */
 
-static void byte_snap(void);
-static void byte_diff(void);
-static void find_value(float v);
 static void (*orig_screen_paint)(void *, void *);
 static volatile int g_pending_ctl;
 static float g_pending_v0, g_pending_v1;
@@ -1536,7 +1506,6 @@ static void fmbass_start(void)
 }
 
 static void hpss_close(void);
-static void cc_replay_k3(unsigned raw);
 
 /* ------------------------------------------------------- spectral markers */
 /* The input hook is NOT the UI thread. Publish only a request there; all

@@ -22,4 +22,7 @@ int bass_source_backup(const char *path, off_t *data_offset,
 int bass_source_restore(const char *path, off_t data_offset,
                         const unsigned char *data, size_t data_size);
 
+/* One sample, scaled to the 16-bit range the trim logic compares against. */
+int pcm_at(const unsigned char *p, unsigned bps, unsigned format);
+
 #endif
