@@ -73,6 +73,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "cfg_ffi.h"
 #include "sample_ffi.h"
 #include "status_ffi.h"
 #include "paths_ffi.h"
@@ -2566,46 +2567,20 @@ long snd_pcm_readn(void *pcm, void **bufs, unsigned long size)
 }
 
 /* Hand-edited latency trim survives a restart. */
-#define LOOPER_CFG "/data/minimod-looper.cfg"
 
 static void looper_cfg_load(void)
 {
-    int fd = open(LOOPER_CFG, O_RDONLY);
-    if (fd < 0)
+    int trim = 0, master = -1;
+    if (!minimod_cfg_load(&trim, &master))
         return;
-    char buf[64] = {0};
-    ssize_t n = read(fd, buf, sizeof buf - 1);
-    close(fd);
-    if (n <= 0)
-        return;
-    int trim = 0, master = 127;
-    int got = sscanf(buf, "%d %d", &trim, &master);
-    if (got >= 1) {
-        if (trim < -400)
-            trim = -400;
-        if (trim > 400)
-            trim = 400;
-        g_lat_extra = trim * 44;
-    }
-    if (got >= 2) {
-        if (master < 0)
-            master = 0;
-        if (master > 127)
-            master = 127;
+    g_lat_extra = trim;
+    if (master >= 0)
         looper_set_master((unsigned)master);
-    }
 }
 
 static void looper_cfg_save(void)
 {
-    int fd = open(LOOPER_CFG, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0)
-        return;
-    char buf[32];
-    int n = snprintf(buf, sizeof buf, "%d %u\n", g_lat_extra / 44, looper_master());
-    if (n > 0)
-        (void)!write(fd, buf, (size_t)n);
-    close(fd);
+    minimod_cfg_save(g_lat_extra, looper_master());
 }
 
 static void audio_writer(void *self, void *input, size_t frames, int offset)
