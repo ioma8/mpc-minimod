@@ -2013,10 +2013,6 @@ static void note_off(void *input, int src, int pad)
    block storage so the live engine buffers are never changed. The normal
    device block is 128 frames; the lab runs a larger one, so the copy allows
    up to 4096 and falls through for anything bigger. */
-static int audio_channels(void *self, int input_side)
-{
-    return minimod_audio_channels((uintptr_t)self, input_side);
-}
 
 /* The firmware's input stream is RW_INTERLEAVED S32_LE. Rather than chase the
  * app's own read thread, the preloaded library exports the two ALSA entry

@@ -283,9 +283,19 @@ because they declare the C ABI the Rust implements.  Deleting them removes 920
 lines of superseded code from the repository - the binary is unchanged.
 
 `hpss.c` (153) and `spectral.c` (339) are the opposite case: still compiled, and
-their Rust ports exist and pass their golden fixtures but are **not wired**, so
-the device still runs the C.  Wiring them is a straight swap of two entry points
-and is the next round's work.
+their Rust ports exist and pass their golden fixtures but are **not wired**.
+
+Wiring them was attempted and reverted: with the Rust onset detector behind
+`spectral_onsets`, the Spectral Chop device test failed on the boundaries - the
+app's first slice started at 0 where the detector asked for 264, and the rest of
+the list shifted with it. The golden fixture compares positions on one synthetic
+input and passes, so the mismatch is in something the fixture does not cover
+(sub-frame rounding, or the leading-silence rule, both plausible). That needs a
+differential run on a real sample before the swap is safe - the detector is not
+wrong in general, it is wrong on this material and the fixture did not catch it.
+
+The C stays in place until that is understood; a wrong boundary list would chop
+the user's pad incorrectly, which is worse than a slower port.
 
 ## Inventory after round 31
 
