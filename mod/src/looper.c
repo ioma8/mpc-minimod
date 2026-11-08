@@ -47,6 +47,7 @@ static volatile unsigned g_sync_frames;
 static volatile uint64_t g_pulse_epoch;
 static volatile uint64_t g_t; /* played frames since open */
 static volatile unsigned g_lat; /* measured record latency, frames */
+static volatile unsigned g_master = 127; /* MAIN VOLUME, 0..127 */
 
 static volatile unsigned g_lat_used; /* latency snapshotted for the last take */
 static volatile char g_lat_src = 'E'; /* E estimate, C chirp, A correlation, S seeded */
@@ -358,6 +359,16 @@ int looper_button(unsigned code, int down, int shift, int erase)
     return 1; /* every other control is blocked while the view is open */
 }
 
+void looper_set_master(unsigned value)
+{
+    g_master = value > 127 ? 127 : value;
+}
+
+unsigned looper_master(void)
+{
+    return g_master;
+}
+
 void looper_set_latency(unsigned frames)
 {
     g_lat = frames > LP_LAT_MAX ? LP_LAT_MAX : frames;
@@ -586,6 +597,9 @@ void looper_render_s32(int32_t *buf, unsigned channels, unsigned frames)
             }
         }
         float peak = 0.f;
+        float gain = (float)g_master * (1.0f / 127.0f);
+        for (unsigned i = 0; i < n; ++i)
+            add[i] *= gain;
         for (unsigned i = 0; i < n; ++i) {
             int32_t *frame = buf + (size_t)(done + i) * channels;
             for (unsigned c = 0; c < channels; ++c) {

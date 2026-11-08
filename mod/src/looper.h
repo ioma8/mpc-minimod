@@ -71,6 +71,9 @@ void looper_stop_all(void);
 /* Record latency compensation, in frames: the measured output + input delay
  * plus whatever waits in the input ring. Snapshotted when a take starts. */
 void looper_set_latency(unsigned frames);
+/* MAIN VOLUME (0..127): the loops follow the master knob. */
+void looper_set_master(unsigned value);
+unsigned looper_master(void);
 void looper_set_latency_ex(unsigned frames, char source);
 unsigned looper_input_backlog(void);
 int looper_click_enabled(void);

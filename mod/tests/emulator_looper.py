@@ -173,6 +173,17 @@ def main():
     assert abs(length - rec) < 4000, (length, rec)
     assert lat == cal_frames, f'take latency {lat} != ring geometry {cal_frames}'
 
+    # --- MAIN VOLUME scales the loops like the rest of the app
+    control('MAIN VOLUME', 'set', 127)
+    time.sleep(0.3)
+    vol_full = rms(output_tail())
+    control('MAIN VOLUME', 'set', 64)
+    time.sleep(0.3)
+    vol_half = rms(output_tail())
+    control('MAIN VOLUME', 'set', 127)
+    time.sleep(0.2)
+    assert 0.35 < vol_half / vol_full < 0.65, (vol_half, vol_full)
+
     # --- unplug the input: what remains can only be the loop we recorded
     route('none')
     time.sleep(0.5)

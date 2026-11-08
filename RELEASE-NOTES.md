@@ -55,6 +55,13 @@ The release supports MPC Sample firmware **1.3.0.12** only.
   the selected input source, press again to play, press a playing loop to stop.
 - `ERASE` + pad clears one loop, `STOP` stops every loop, and the sync click is
   off by default (`SHIFT` + `LOOP` toggles it).
+- The loops follow `MAIN VOLUME`: the knob's CC is tracked and applied as a gain
+  on the loop mix, and the level is remembered in `/data/minimod-looper.cfg`.
+- Keep the audio device untouched from the repaint thread: the ring sizes and the
+  channel count now come from `snd_pcm_hw_params_current` on the stream's own
+  audio thread, and the loop mix uses the device's real channel count. This
+  removes the cross-thread ALSA calls and the stride guess that could corrupt the
+  output buffer and take the app down after closing the view.
 - `SHIFT` + pad overdubs into the loop and the next press returns to playback;
   `SHIFT` + `LOOP` clears everything; `SHIFT` + `DATA` closes the view.
 - `LOOP` starts an audible sync pulse whose period is the most recent loop's

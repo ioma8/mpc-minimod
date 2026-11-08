@@ -50,7 +50,8 @@ after which new loops are quantized to whole pulse lengths (the metronome click
 is off by default, `SHIFT`+`LOOP` toggles it). Recording latency comes from the
 firmware's own ALSA ring geometry (one buffer per direction, read from the
 device), so overdubs line up with headphones, USB audio or an instrument input;
-`K1` trims it and the value is kept in `/data/minimod-looper.cfg`. Pads are blocked from the app while the view is open and
+`K1` trims it and the value is kept in `/data/minimod-looper.cfg`; the loops
+follow `MAIN VOLUME` like the rest of the app. Pads are blocked from the app while the view is open and
 `SHIFT`+`DATA` closes it. Details: [`docs/LIVE-LOOPER.md`](docs/LIVE-LOOPER.md).
 
 External MIDI plays the selected sample chromatically over the whole keyboard

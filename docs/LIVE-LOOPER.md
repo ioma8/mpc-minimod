@@ -73,6 +73,9 @@ looper before this was fixed.
     the next multiple is used instead, so recorded material is never silently
     truncated. The tail is padded with silence, so `length` is always a multiple
     of the pulse even when the take was shorter (`rec < length`).
+* **MAIN VOLUME** scales the loops exactly like the rest of the app: the knob's
+  CC (19) is tracked and applied as a gain on the loop mix, and the value is
+  stored in `/data/minimod-looper.cfg` so it survives a restart.
 * **Overdub** clamps each sample to full scale, so an input that hears the
   output cannot grow a loop without bound.
 * **Closing** the view stops all playback and clears the pulse but keeps the
@@ -142,6 +145,12 @@ In the lab the firmware uses 1024 frames per ring, so the looper applies
 `2048` frames (46 ms); a click recorded through the loop cable lands **69 frames
 (1.6 ms)** from the expected pulse grid. The strip shows `BUF 46ms`.
 
+The sizes are read with `snd_pcm_hw_params_current` **on the stream's own audio
+thread** (the first write/read after the view opens) and the channel count used
+for mixing comes from the same query, never from a guess: touching the app's pcm
+from the repaint thread is exactly the kind of thing that can wedge ALSA and take
+the whole app down when the view closes.
+
 `K1` adds a trim of ±400 ms on top for the room or personal preference, stored in
 `/data/minimod-looper.cfg` and reused at the next start (the strip then shows
 `BUF` with the trimmed total). If the firmware ever reports no buffer geometry,
@@ -195,7 +204,8 @@ is unplugged the device output still carries the recorded 440 Hz at 0.15 rms
 `SHIFT`+pad reaches `DUB` and the next press returns to `PLAY` with the length
 unchanged; `LOOP` sets the pulse to the last loop length and a short take is
 quantized to exactly one pulse with `rec < length`; `STOP` silences everything;
-`ERASE`+pad clears one pad; `SHIFT`+`LOOP` toggles the click both ways;
+`ERASE`+pad clears one pad; `SHIFT`+`LOOP` toggles the click both ways; the
+loops follow `MAIN VOLUME` (half the knob gives roughly half the level);
 `SHIFT`+`DATA` closes the view, the loops survive, the app does not restart and
 its pid is unchanged.
 

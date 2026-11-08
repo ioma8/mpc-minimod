@@ -1575,6 +1575,7 @@ static void do_autotrim(void);
 
 static volatile int g_shift;
 static volatile int g_erase_down;
+static volatile int g_buf_dirty; /* re-read the device rings on the audio thread */
 static volatile int g_trim_req;
 static volatile int g_last_pad = -1;
 static volatile int g_core_hit;
@@ -3837,6 +3838,7 @@ static void hpss_activate(void)
     }
     else if (g_hpss_sel == 6) {
         if (looper_activate()) {
+            g_buf_dirty = 1; /* re-read the device rings on its own thread */
             g_hpss_menu = 0;
             g_bass_edit = 0;
             bass_preview_set_active(0);
@@ -3861,16 +3863,18 @@ static void draw_text(void *g, const char *s, int x, int y, int w, int h,
 static volatile int g_looper_pump_started;
 
 static void looper_cfg_save(void);
-static int g_cfg_meas; /* kept for the config format, unused */
+static long long g_cfg_saved_at;
 
 /* Buffer geometry of the two streams, read once from ALSA. The firmware keeps
  * both of its rings full, so one buffer per direction is the latency it works
  * with - the number the sampler itself uses, no probe needed. */
 static volatile unsigned g_buf_out;
 static volatile unsigned g_buf_in;
+static volatile unsigned g_out_ch; /* channels of the device buffer, from ALSA */
+static volatile unsigned g_in_ch;
 static volatile void *g_out_pcm;
 static volatile void *g_in_pcm;
-static unsigned stream_buffer_frames(void *pcm);
+static unsigned stream_buffer_frames(void *pcm, unsigned *channels);
 
 static void *looper_pump_thread(void *arg)
 {
@@ -3883,19 +3887,8 @@ static void *looper_pump_thread(void *arg)
         /* The counters move in bursts inside each audio callback, so a single
          * sample depends on the phase. Average a short burst of samples that
          * spans several callbacks to get the level itself. */
-        /* the device can reopen with a different ring size (USB, headphones) */
-        {
-            static int tick;
-            if ((++tick % 50) == 0) {
-                if (g_out_pcm)
-                    g_buf_out = stream_buffer_frames((void *)g_out_pcm);
-                if (g_in_pcm)
-                    g_buf_in = stream_buffer_frames((void *)g_in_pcm);
-            }
-        }
-
         void *comp = g_paint_comp ? g_paint_comp : g_screen;
-        if (orig_repaint && comp)
+        if (orig_repaint && comp && looper_is_open()) /* do not paint into a view being closed */
             orig_repaint(comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
     }
     return 0;
@@ -4405,10 +4398,12 @@ static long (*real_snd_pcm_avail)(void *);
 static unsigned (*real_hw_malloc)(void **);
 static int (*real_hw_current)(void *, void *);
 static int (*real_hw_bufsize)(void *, unsigned long *);
+static int (*real_hw_channels)(void *, unsigned *);
 static void (*real_hw_free)(void *);
 
-/* Frames in one ALSA ring. Called once per stream. */
-static unsigned stream_buffer_frames(void *pcm)
+/* Frames in one ALSA ring, and the channel count the device really uses.
+ * Called only from the audio thread that owns the stream. */
+static unsigned stream_buffer_frames(void *pcm, unsigned *channels)
 {
     if (!pcm || !real_hw_malloc)
         return 0;
@@ -4420,6 +4415,11 @@ static unsigned stream_buffer_frames(void *pcm)
         unsigned long f = 0;
         if (real_hw_bufsize(hw, &f) >= 0 && f < 65536)
             frames = (unsigned)f;
+        if (channels && real_hw_channels) {
+            unsigned c = 0;
+            if (real_hw_channels(hw, &c) >= 0 && c > 0 && c <= 32)
+                *channels = c;
+        }
     }
     if (real_hw_free)
         real_hw_free(hw);
@@ -4462,11 +4462,15 @@ long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size)
             (long (*)(void *, const void *, unsigned long))dlsym(RTLD_NEXT, "snd_pcm_writei");
     if (!real_snd_pcm_writei)
         return -1;
-    unsigned ch = g_pcm_channels ? g_pcm_channels : 4;
+    unsigned ch = g_out_ch ? g_out_ch : (g_pcm_channels ? g_pcm_channels : 4);
     int looper = looper_is_open();
     g_out_pcm = pcm;
-    if (looper && !g_buf_out)
-        g_buf_out = stream_buffer_frames(pcm);
+    if (looper && (!g_buf_out || g_buf_dirty)) {
+        unsigned c = 0;
+        g_buf_out = stream_buffer_frames(pcm, &c);
+        if (c)
+            g_out_ch = c;
+    }
     if (looper) {
         long delay = 0;
         if (!real_snd_pcm_delay)
@@ -4563,14 +4567,21 @@ long snd_pcm_readi(void *pcm, void *buffer, unsigned long size)
     }
 #endif
     g_in_pcm = pcm;
-    if (!g_buf_in)
-        g_buf_in = stream_buffer_frames(pcm);
+    if (!g_buf_in || g_buf_dirty) {
+        unsigned c = 0;
+        g_buf_in = stream_buffer_frames(pcm, &c);
+        if (c)
+            g_in_ch = c;
+        if (g_buf_dirty && g_buf_out)
+            g_buf_dirty = 0;
+    }
     long got = real_snd_pcm_readi(pcm, buffer, size);
     if (got > 0) {
 
         __atomic_add_fetch(&g_audio_in_calls, 1, __ATOMIC_RELAXED);
         if (looper_is_open() && buffer)
-            looper_input_s32_interleaved((const int32_t *)buffer, g_pcm_channels,
+            looper_input_s32_interleaved((const int32_t *)buffer,
+                                         g_in_ch ? g_in_ch : g_pcm_channels,
                                          (unsigned)got);
     }
     return got;
@@ -4606,9 +4617,12 @@ static void looper_cfg_load(void)
     close(fd);
     if (n <= 0)
         return;
-    int trim = 0;
-    if (sscanf(buf, "%d", &trim) == 1)
+    int trim = 0, master = 127;
+    int got = sscanf(buf, "%d %d", &trim, &master);
+    if (got >= 1)
         g_lat_extra = trim * 44;
+    if (got >= 2)
+        looper_set_master((unsigned)master);
 }
 
 static void looper_cfg_save(void)
@@ -4617,7 +4631,7 @@ static void looper_cfg_save(void)
     if (fd < 0)
         return;
     char buf[32];
-    int n = snprintf(buf, sizeof buf, "%d\n", g_lat_extra / 44);
+    int n = snprintf(buf, sizeof buf, "%d %u\n", g_lat_extra / 44, looper_master());
     if (n > 0)
         (void)!write(fd, buf, (size_t)n);
     close(fd);
@@ -5594,6 +5608,13 @@ static int g_in_cc_replay;
 
 static void cc_capture(void *ev, unsigned raw, float lo, float range)
 {
+    if (!g_in_cc_replay && ev && ((unsigned char *)ev)[8] == 0x13) {
+        looper_set_master(raw); /* MAIN VOLUME */
+        if (now_ms() > g_cfg_saved_at + 5000) {
+            g_cfg_saved_at = now_ms();
+            looper_cfg_save();
+        }
+    }
     if (!g_in_cc_replay && ev && looper_is_open()) {
         unsigned cc = ((unsigned char *)ev)[8];
         if (cc == 0x10) { /* K1: trim the record latency, 1 ms per step */
@@ -7404,6 +7425,7 @@ __attribute__((constructor)) static void load(void)
     real_hw_malloc = (unsigned (*)(void **))dlsym(RTLD_NEXT, "snd_pcm_hw_params_malloc");
     real_hw_current = (int (*)(void *, void *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_current");
     real_hw_bufsize = (int (*)(void *, unsigned long *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_get_buffer_size");
+    real_hw_channels = (int (*)(void *, unsigned *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_get_channels");
     real_hw_free = (void (*)(void *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_free");
     looper_cfg_load();
     {
