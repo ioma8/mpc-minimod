@@ -64,7 +64,7 @@ def main():
         return read(symbol('g_hpss_status'), 96).split(b'\0', 1)[0].decode(errors='replace')
 
     def busy():
-        return struct.unpack('<i', read(symbol('g_hpss_busy'), 4))[0]
+        return struct.unpack('<i', read(symbol('g_menu') + 4, 4))[0]
 
     restarts = ssh('systemctl show ac50 -p NRestarts').decode().strip()
 

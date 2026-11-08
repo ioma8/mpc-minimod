@@ -52,8 +52,6 @@ pub struct State {
     pub replaying: i32,
     /// The control-surface object last seen.
     pub cs_self: usize,
-    /// The selected effects-menu row.
-    pub menu_selection: i32,
     /// The encoder's surface, as the button handler recorded it.
     pub data_target: usize,
     /// The pad note base the app reports for the bank.
@@ -80,7 +78,6 @@ impl State {
             props: 0,
             replaying: 0,
             cs_self: 0,
-            menu_selection: 0,
             data_target: 0,
             pad_prop_base: 0x75,
         }
@@ -300,21 +297,25 @@ pub unsafe extern "C" fn minimod_input_surface(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_input_data(
     state: *mut State,
+    selection: *mut i32,
     self_address: usize,
     delta: i32,
     context: Context,
     callback: Option<DataSignal>,
 ) {
-    if state.is_null() {
+    if state.is_null() || selection.is_null() {
         return;
     }
     // SAFETY: the caller promises the state is live.
-    let state = unsafe { &mut *state };
-    if self_address == state.data_target && (context.menu_open != 0 || context.spectral_active != 0)
-    {
+    let data_target = unsafe { (*state).data_target };
+    if self_address == data_target && (context.menu_open != 0 || context.spectral_active != 0) {
         if context.menu_open != 0 && context.busy == 0 && delta != 0 && context.bass_edit == 0 {
             let step = if delta > 0 { 1 } else { 7 };
-            state.menu_selection = (state.menu_selection + step) % MENU_ITEMS;
+            // The row belongs to the menu, which owns it; this hook only moves it.
+            // SAFETY: the caller promises the pointer is writable.
+            let current = unsafe { *selection };
+            // SAFETY: see above.
+            unsafe { *selection = (current + step) % MENU_ITEMS };
             if let Some(repaint) = context.repaint {
                 // SAFETY: the caller's callback.
                 unsafe { repaint() };
@@ -338,7 +339,6 @@ mod tests {
         assert_eq!(state.last_pad, -1);
         assert!(state.held_on.iter().all(|&held| held == 0));
         assert!(state.pad_rec.iter().all(|record| record.valid == 0));
-        assert_eq!(state.menu_selection, 0);
         assert_eq!(state.pad_prop_base, 0x75);
         assert_eq!(MENU_ITEMS, 8);
     }

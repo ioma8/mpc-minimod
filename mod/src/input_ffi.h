@@ -26,7 +26,6 @@ struct minimod_input {
     uintptr_t props;
     int32_t replaying;
     uintptr_t cs_self;
-    int32_t menu_selection;
     uintptr_t data_target;
     int32_t pad_prop_base;
 };
@@ -61,8 +60,9 @@ void minimod_input_release_held(struct minimod_input *state,
 void minimod_input_surface(struct minimod_input *state, uintptr_t self_address,
                            int32_t code, uintptr_t payload,
                            minimod_surface_fn callback);
-void minimod_input_data(struct minimod_input *state, uintptr_t self_address,
-                        int32_t delta, struct minimod_input_context ctx,
+void minimod_input_data(struct minimod_input *state, int32_t *selection,
+                        uintptr_t self_address, int32_t delta,
+                        struct minimod_input_context ctx,
                         minimod_data_signal_fn callback);
 
 #endif

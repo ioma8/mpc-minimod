@@ -101,7 +101,7 @@ def main():
     before = bass_outputs()
     restarts = ssh('systemctl show ac50 -p NRestarts').decode().strip()
     status_addr = mod_base + symbol('g_hpss_status')
-    busy_addr = mod_base + symbol('g_hpss_busy')
+    busy_addr = mod_base + symbol('g_menu') + 4  # busy is the second i32
 
     # Open SAMPLE OPTIONS, select Bass Synth (row 5), then open its control page.
     control('SHIFT', 'press', 127)

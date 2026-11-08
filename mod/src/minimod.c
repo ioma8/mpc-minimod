@@ -88,6 +88,7 @@
 #include "pads_ffi.h"
 #include "cfg_ffi.h"
 #include "buttons_ffi.h"
+#include "menu_ffi.h"
 #include "input_ffi.h"
 #include "sample_ffi.h"
 #include "status_ffi.h"
@@ -128,6 +129,12 @@ static void mlog(const char *fmt, ...);
 static void toast(const char *text);
 #include "clock_ffi.h"
 static void *g_screen;
+static struct minimod_menu g_menu __attribute__((used));
+#define g_hpss_menu g_menu.open
+#define g_hpss_busy g_menu.busy
+#define g_bass_edit g_menu.bass_edit
+#define g_hpss_data_down g_menu.data_down
+#define g_hpss_restore_pending g_menu.restore_pending
 static struct minimod_input g_input;
 static void input_context(struct minimod_input_context *ctx);
 static void looper_draw(void *g);
@@ -679,9 +686,6 @@ static int g_hpss_cmd_n;
 static uint64_t g_hpss_name[6];
 static int g_hpss_names_ready;
 static int g_spectral_active;
-static volatile int g_hpss_menu;
-static volatile int g_hpss_busy;
-static volatile int g_bass_edit;
 static float g_bass_knob[3] = {0.52f, 0.18f, 0.56f};
 static volatile unsigned g_bass_preview_notes;
 static volatile unsigned g_bass_preview_blocks;
@@ -717,7 +721,7 @@ static void data_signal(void *self, int delta)
 {
     struct minimod_input_context ctx;
     input_context(&ctx);
-    minimod_input_data(&g_input, (uintptr_t)self, delta, ctx,
+    minimod_input_data(&g_input, &g_menu.selection, (uintptr_t)self, delta, ctx,
                        (minimod_data_signal_fn)orig_data_signal);
 }
 
@@ -906,11 +910,9 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
 typedef struct minimod_job hpss_job;
 
 static volatile int g_hpss_done;
-static volatile int g_hpss_data_down;
 static unsigned char g_hpss_btn[16];
 static int g_hpss_btn_valid;
 static int g_hpss_chop_before;
-static int g_hpss_restore_pending;
 static void hpss_repaint(void)
 {
     void *comp = g_paint_comp ? g_paint_comp : g_screen;
@@ -1149,7 +1151,7 @@ static void hpss_open(void)
     if (!sample_page_visible() || g_hpss_busy)
         return;
     g_hpss_menu = 1;
-    g_input.menu_selection = 0;
+    g_menu.selection = 0;
     g_bass_edit = 0;
     bass_preview_set_active(0);
     g_hpss_data_down = 0;
@@ -1176,20 +1178,20 @@ static void hpss_activate(void)
         fmbass_start();
         return;
     }
-    if (g_input.menu_selection == 0)
+    if (g_menu.selection == 0)
         hpss_start();
-    else if (g_input.menu_selection == 1)
+    else if (g_menu.selection == 1)
         spectral_start();
-    else if (g_input.menu_selection >= 2 && g_input.menu_selection <= 4)
-        effect_start(g_input.menu_selection - 1);
-    else if (g_input.menu_selection == 5) {
+    else if (g_menu.selection >= 2 && g_menu.selection <= 4)
+        effect_start(g_menu.selection - 1);
+    else if (g_menu.selection == 5) {
         g_bass_edit = 1;
         bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
         bass_preview_set_active(1);
         hpss_set_status(g_bass_preview_available ? "" : "Live preview unavailable");
         hpss_repaint();
     }
-    else if (g_input.menu_selection == 6) {
+    else if (g_menu.selection == 6) {
         if (looper_activate()) {
             g_buf_dirty = 1; /* re-read the device rings on its own thread */
             g_hpss_menu = 0;
@@ -1451,7 +1453,7 @@ static void hpss_draw_menu(void *g)
             "Bass Synth", "Live Looper", "Close"};
         for (int i = 0; i < 8; ++i) {
             int row_y = y + 26 + i * 20;
-            if (g_input.menu_selection == i) {
+            if (g_menu.selection == i) {
                 draw_colour(g, 0xff3a2a10);
                 draw_rect(g, x + 6, row_y, w - 12, 19);
                 draw_colour(g, 0xffffffff);

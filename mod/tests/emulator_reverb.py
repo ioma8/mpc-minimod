@@ -129,7 +129,7 @@ def main():
     tap('DATA')
 
     status_addr = mod_base + symbol('g_hpss_status')
-    busy_addr = mod_base + symbol('g_hpss_busy')
+    busy_addr = mod_base + symbol('g_menu') + 4  # busy is the second i32
     status = ''
     for _ in range(20):
         time.sleep(.25)
