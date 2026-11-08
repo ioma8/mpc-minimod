@@ -148,7 +148,13 @@ Measured with the input silenced, the ratio is a **stable 0.331** (two runs,
 app's own volume curve, which the mod mixes into.  Silencing the input also
 changes the level the test's later `loop_rms` check sees (0.63 instead of 0.15),
 so the whole measurement section needs to be re-derived together rather than
-patched band by band - that is what the next round has to do.
+patched band by band.
+
+Re-deriving it as one block did not work either: with the input routed to
+`none`, the loop measured **0.0** - in this lab, unplugging AUDIO IN stops the
+output path altogether, so the loop cannot be isolated that way.  The isolation
+has to come from the app (deselect the pad, or mute its monitor) or from the tap
+itself (a loop-only probe), not from the jack routing.
 
 It is a test-design issue, not a mod bug: to measure the loop's response to MAIN
 VOLUME, the app's own playback of that pad has to be out of the picture - either
