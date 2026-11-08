@@ -1,8 +1,10 @@
 # HPSS prototype — harmonic / percussive split
 
-Prototype for a possible on-device transform: split one sample into what **rings**
-(chords, bass, vocals) and what **hits** (drums, clicks, transients), as two new
-samples.
+Reference implementation of the HPSS transform that ships in the mod
+(`mod/src/hpss.c`): split one sample into what **rings** (chords, bass, vocals)
+and what **hits** (drums, clicks, transients), written as two new samples. The C
+port is validated sample-by-sample against this code; see
+[`../../docs/FEATURES.md`](../../docs/FEATURES.md#hpss).
 
 No ML, no model — an STFT, two median filters and a soft mask:
 

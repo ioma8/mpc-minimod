@@ -56,8 +56,8 @@ The release supports MPC Sample firmware **1.3.0.12** only.
   routing, note-offs and sustain stay in the firmware's native path.
 - Document the captured setter contract, the dispatcher/router/16 Levels
   decompilation and the measurement method
-  ([`docs/RE-MIDI-16LEVELS-FINDINGS.md`](docs/RE-MIDI-16LEVELS-FINDINGS.md),
-  [`docs/MIDI-16LEVELS-METHOD.md`](docs/MIDI-16LEVELS-METHOD.md)).
+  ([`docs/FEATURES.md`](docs/FEATURES.md#external-midi-chromatic-playback),
+  [`docs/HISTORY.md`](docs/HISTORY.md#4-external-midi--16-levels)).
 - Verified on a real device and in the emulator: 48→110.4, 60→220.7,
   65→293.4 Hz on a 220 Hz sample; 16 Levels off leaves the dispatcher
   byte-identical to stock.

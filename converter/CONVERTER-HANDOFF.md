@@ -6,7 +6,7 @@ mixdown as closely as an offline model can.
 
 Last updated: 2026-11-02. This is the canonical current-state document; the
 evidence behind every claim is in [`docs/FINDINGS.md`](docs/FINDINGS.md) and the
-rejected alternatives are in [`HYPOTHESES.csv`](HYPOTHESES.csv).
+rejected alternatives are in [`HYPOTHESES.csv`](../HYPOTHESES.csv).
 
 ---
 
@@ -223,12 +223,12 @@ uv run mpc2stems convert project1/bapap1.xpj --out out-dry \
 | --- | --- |
 | [`docs/FORMAT.md`](docs/FORMAT.md) | the `.xpj` format field by field; the filter enum, coefficient forms and SVF topology with firmware addresses |
 | [`docs/FINDINGS.md`](docs/FINDINGS.md) | the evidence log — measurements, firmware findings, disproved hypotheses (85 sections) |
-| [`HYPOTHESES.csv`](HYPOTHESES.csv) | debugging ledger — 102 hypotheses with proved/disproved verdicts |
+| [`HYPOTHESES.csv`](../HYPOTHESES.csv) | debugging ledger — 102 hypotheses with proved/disproved verdicts |
 | [`docs/DEVICE-PROBE.md`](docs/DEVICE-PROBE.md) | getting ground truth off the device and the emulator; `LD_PRELOAD` technique |
-| [`docs/MODDING.md`](docs/MODDING.md) | the device's SD-card autorun and how the community mod patches the app in RAM |
-| [`docs/EMULATOR.md`](docs/EMULATOR.md) | running the virtual MPC Sample |
-| [`docs/ECOSYSTEM.md`](docs/ECOSYSTEM.md) | how custom firmware boots, and the community tools |
-| [`docs/MINIMOD.md`](../docs/MINIMOD.md) | `mpc-mini`, the minimal mod |
-| [`CONTEXT.md`](CONTEXT.md) | glossary (song, sequence, pad, mixdown, stem, Color Compressor) |
+| [`../docs/MODDING.md`](../docs/MODDING.md) | the device's SD-card autorun and how the community mod patches the app in RAM |
+| [`../docs/EMULATOR.md`](../docs/EMULATOR.md) | running the virtual MPC Sample |
+| [`../docs/MODDING.md#6-the-ecosystem`](../docs/MODDING.md#6-the-ecosystem) | how custom firmware boots, and the community tools |
+| [`../docs/FEATURES.md`](../docs/FEATURES.md) | `mpc-mini`, the minimal mod |
+| [`CONTEXT.md`](../CONTEXT.md) | glossary (song, sequence, pad, mixdown, stem, Color Compressor) |
 | [`README.md`](README.md) | short overview and the modelled / not-modelled lists |
 | [`USER-TASK.md`](USER-TASK.md) | the manual per-pad export procedure for a real device |

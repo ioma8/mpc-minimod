@@ -6,7 +6,7 @@ Glossary for the MPC Sample domain. Terms only — no implementation, no plans.
 > song → per-pad stems). It is not the mod's vocabulary; for `minimod`
 > (the `LD_PRELOAD` firmware mod) start at [`README.md`](README.md),
 > [`mod/README.md`](mod/README.md) and
-> [`docs/re/FIRMWARE-MECHANISMS.md`](docs/re/FIRMWARE-MECHANISMS.md).
+> [`docs/MECHANISMS.md`](docs/MECHANISMS.md).
 
 ## Source material
 

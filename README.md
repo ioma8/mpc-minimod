@@ -36,13 +36,13 @@ slices on the same pad. It uses the firmware's own slice API (reset,
 insert-at-frame, reconcile), sets the chop type to Manual through the binding's
 model callback, and verifies every boundary by reading it back before it
 reports. It never creates samples or uses free pads. Details:
-[`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md); the model, the mechanisms and
-the evidence: [`docs/re/SPECTRAL-CHOP-SOLVED.md`](docs/re/SPECTRAL-CHOP-SOLVED.md).
+[`docs/FEATURES.md`](docs/FEATURES.md#spectral-chop); the slice API and chop
+binding: [`docs/MECHANISMS.md`](docs/MECHANISMS.md#5-the-slice-container-and-a-slice).
 
 External MIDI plays the selected sample chromatically over the whole keyboard
 while 16 Levels is active (C3 root, exact semitones, no wrapping). Enable **Pad
 MIDI In** in MIDI Config — it resets to Off on every start. Details:
-[`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).
+[`docs/FEATURES.md`](docs/FEATURES.md#external-midi-chromatic-playback).
 
 ## Install
 
@@ -66,13 +66,15 @@ Release description format and the complete feature overview are in
 
 ## Docs
 
-- [`mod/README.md`](mod/README.md) — details, controls, hooks
-- [`AUTOTRIM-HANDOFF.md`](AUTOTRIM-HANDOFF.md) — how AutoTrim works
-- [`HPSS-HANDOFF.md`](HPSS-HANDOFF.md) — how SAMPLE OPTIONS / HPSS works and what was validated
-- [`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md) — the region detector and the in-place chop write
-- [`docs/re/SPECTRAL-CHOP-SOLVED.md`](docs/re/SPECTRAL-CHOP-SOLVED.md) — the chop model, the write recipe, the path there and the probe toolkit
-- [`docs/re/FIRMWARE-MECHANISMS.md`](docs/re/FIRMWARE-MECHANISMS.md) — the firmware internals we mapped: loader, screen/paint, layers, properties, commands, input, sample pool, threading
-- [`docs/MIDI-16LEVELS-METHOD.md`](docs/MIDI-16LEVELS-METHOD.md) — what actually solved the chromatic MIDI problem, and the reusable method
-- [`docs/`](docs/) — device notes, emulator, reverse-engineering writeups
-- [`tools/hpss/`](tools/hpss/) — Python reference, algorithm notes and WAV helper scripts
+- [`docs/README.md`](docs/README.md) — index, reading order and conventions
+- [`docs/FEATURES.md`](docs/FEATURES.md) — what every feature does, how it is wired, what was measured, known limits
+- [`docs/MECHANISMS.md`](docs/MECHANISMS.md) — the firmware internals we mapped: loader, screen/paint, pad state, sample, slices, chop binding, properties, input, MIDI, sample pool/Extract, effects, threading
+- [`docs/RE-METHOD.md`](docs/RE-METHOD.md) — how the reverse engineering is done, what paid off, blind paths, hardening rules
+- [`docs/TOOLING.md`](docs/TOOLING.md) — Ghidra bridge and scripts, kuna/r2, emulator lab, in-process probes, harnesses
+- [`docs/MODDING.md`](docs/MODDING.md) — boot chain, autorun protocol, hooking technique, packaging, ecosystem
+- [`docs/EMULATOR.md`](docs/EMULATOR.md) — the virtual MPC Sample
+- [`docs/DEVICE-NOTES.md`](docs/DEVICE-NOTES.md) — hardware, Bluetooth, WiFi, the hidden touch Preferences UI
+- [`docs/HISTORY.md`](docs/HISTORY.md) — investigations, reversals and open work
+- [`mod/README.md`](mod/README.md) — controls, anchors, build
+- [`tools/hpss/`](tools/hpss/) — Python reference implementations and WAV helpers
 - [`converter/`](converter/) — separate tool: project → per-pad stems

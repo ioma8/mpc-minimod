@@ -11,26 +11,28 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 `autorun` package. Nothing on disk is modified: the library is copied to `/run`
 (tmpfs) and preloaded into the stock app, so a reboot returns to stock.
 
-**Current status:** pitch shift and full-keyboard chromatic external MIDI are verified on hardware. AutoTrim's native command and UI updates are verified in the emulator. SAMPLE OPTIONS, HPSS, Spectral Chop, Reverb, Vinyl, Lo-Fi, and Bass Synth are emulator-verified. Bass Synth saves a DaisySP physical-model C2 pluck and auditions a chromatic C2–D#3 range from pads 1–16 while its parameter page is open. It does not instantiate the firmware's FMBass class because that class requires an H3 host context. Details: [`docs/re/BASS-SAMPLE.md`](../docs/re/BASS-SAMPLE.md). Add Reverb appends an RT60-length tail through the native Extract writer; see [`docs/REVERB-HANDOFF.md`](../docs/REVERB-HANDOFF.md). See also [`docs/AUTOTRIM-NATIVE.md`](../docs/AUTOTRIM-NATIVE.md), [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md), and [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md).
+**Current status:** pitch shift and full-keyboard chromatic external MIDI are verified on hardware. AutoTrim's native command and UI updates are verified in the emulator. SAMPLE OPTIONS, HPSS, Spectral Chop, Reverb, Vinyl, Lo-Fi, and Bass Synth are emulator-verified. Bass Synth saves a DaisySP physical-model C2 pluck and auditions a chromatic C2–D#3 range from pads 1–16 while its parameter page is open. It does not instantiate the firmware's FMBass class because that class requires an H3 host context. Details: [`docs/FEATURES.md`](../docs/FEATURES.md#bass-synth). Add Reverb appends a rendered tail through the native Extract writer; see [`docs/FEATURES.md`](../docs/FEATURES.md#add-reverb-vinyl-and-lo-fi). Per-feature behavior and validation: [`docs/FEATURES.md`](../docs/FEATURES.md); firmware mechanisms: [`docs/MECHANISMS.md`](../docs/MECHANISMS.md).
 
 | # | feature | control | state |
 | --- | --- | --- | --- |
 | 1 | pitch shift in 16 Levels, ±8 semitones (half the pad grid) | `PLUS` / `MINUS` | verified on device |
 | 2 | AutoTrim of the selected pad's sample | `SHIFT` + `B3` | native command path and marker refresh verified in emulator |
 | 3 | AutoTrim soft-key caption | `SHIFT` held on the Sample page | verified; hidden in Chop mode |
-| 4 | SAMPLE OPTIONS → HPSS split onto two pads | `SHIFT` + `DATA`, then `DATA` | emulator-verified; see [HPSS-HANDOFF](../HPSS-HANDOFF.md) |
-| 5 | SAMPLE OPTIONS → Spectral Chop slices the selected pad at detected onsets | `SHIFT` + `DATA`, choose Spectral Chop, `DATA` | emulator-verified by `mod/tests/emulator_spectral.py`; see [SPECTRAL-CHOP](../docs/SPECTRAL-CHOP.md) |
+| 4 | SAMPLE OPTIONS → HPSS split onto two pads | `SHIFT` + `DATA`, then `DATA` | emulator-verified; see [HPSS](../docs/FEATURES.md#hpss) |
+| 5 | SAMPLE OPTIONS → Spectral Chop slices the selected pad at detected onsets | `SHIFT` + `DATA`, choose Spectral Chop, `DATA` | emulator-verified by `mod/tests/emulator_spectral.py`; see [Spectral Chop](../docs/FEATURES.md#spectral-chop) |
 | 6 | SAMPLE OPTIONS → Add Reverb creates a reverbed copy with a tail on a free pad | `SHIFT` + `DATA`, choose Add Reverb, `DATA` | longer WAV and non-silent tail checked in emulator |
 | 7 | SAMPLE OPTIONS → Bass Synth auditions C2–D#3 on pads 1–16 and saves a plucked C2 sample to the next free pad; K1/K2/K3 shape brightness, excitation and filter live | `SHIFT` + `DATA`, choose Bass Synth, play pads or press `DATA` to save | live audio mix, output WAV, C2 pitch, source preservation and no restart checked in emulator |
 | 8 | external MIDI plays the selected pad chromatically over the whole keyboard (no wrapping, exact semitones) | MIDI keyboard, Pad MIDI In **On**, then 16 Levels | verified on device (emulator: 48→110.4, 60→220.7, 65→293.4 Hz on a 220 Hz sample) |
 
 Chromatic external MIDI playback is available while 16 Levels is active; see
-[`MIDI-CHROMATIC.md`](../docs/MIDI-CHROMATIC.md) for setup and mechanism.
+[`docs/FEATURES.md`](../docs/FEATURES.md#external-midi-chromatic-playback) for
+setup and mechanism.
 
-Status history, evidence and open work: [`docs/MINIMOD.md`](../docs/MINIMOD.md).
-The Sample/Trim page itself: [`docs/TRIM-PAGE.md`](../docs/TRIM-PAGE.md).
-The am-mod study that supplied the overlay technique: [`docs/AM-MOD-NOTES.md`](../docs/AM-MOD-NOTES.md).
-Ecosystem: [`docs/ECOSYSTEM.md`](../docs/ECOSYSTEM.md).
+Docs: [`docs/README.md`](../docs/README.md) is the index. Feature behavior:
+[`docs/FEATURES.md`](../docs/FEATURES.md). Firmware mechanisms and anchors:
+[`docs/MECHANISMS.md`](../docs/MECHANISMS.md). Boot chain, autorun and hook
+technique: [`docs/MODDING.md`](../docs/MODDING.md). Investigations and
+disproved leads: [`docs/HISTORY.md`](../docs/HISTORY.md).
 
 ## Controls
 
@@ -60,24 +62,26 @@ released   : Trim        Tune        Filter
   surface signal at `+0x2da8`. Repeated identical deltas still move. The native
   CC hook blocks knobs behind the menu; there are no raw MIDI, evdev or
   float-property navigation fallbacks. See
-  [input trace and regression checks](../docs/re/SAMPLE-OPTIONS-INPUT.md).
+  [input path and regression checks](../docs/MECHANISMS.md#9-the-control-surface-and-input-path).
   HPSS runs on a worker thread and creates `HPSS Harmonic` then `HPSS
   Percussive` on the next two empty pads through the stock Extract command. The
   source sample and live trim/chop range are left unchanged. Needs two empty
   pads; outputs are float32 WAVs on this firmware. Details:
-  [`HPSS-HANDOFF.md`](../HPSS-HANDOFF.md).
+  [`docs/FEATURES.md`](../docs/FEATURES.md#hpss).
 * **Spectral Chop** — from the same menu. Detects up to 16 spectral-flux onsets,
   then slices the selected pad at those frame positions. It drives the
   firmware's slice API and binding callback, which owns allocation and observer
   updates. Each boundary is read back before success. It creates no samples,
-  files or other pads. Algorithm: [`docs/SPECTRAL-CHOP.md`](../docs/SPECTRAL-CHOP.md);
-  mechanisms and evidence: [`docs/re/SPECTRAL-CHOP-SOLVED.md`](../docs/re/SPECTRAL-CHOP-SOLVED.md).
+  files or other pads. Detector and validation:
+  [`docs/FEATURES.md`](../docs/FEATURES.md#spectral-chop); slice API and chop
+  binding: [`docs/MECHANISMS.md`](../docs/MECHANISMS.md#5-the-slice-container-and-a-slice).
   Acceptance test: `mod/tests/emulator_spectral.py`.
 * **Add Reverb** — from the same menu. Reads the selected sample, renders a
   dry-plus-room copy with an appended RT60-length tail, then submits the float
   audio through stock Extract so the firmware assigns it to the next empty pad.
-  The source is unchanged. DSP details and the writer hook are
-  in [`docs/REVERB-HANDOFF.md`](../docs/REVERB-HANDOFF.md).
+  The source is unchanged. DSP details and the writer hook are in
+  [`docs/FEATURES.md`](../docs/FEATURES.md#add-reverb-vinyl-and-lo-fi) and
+  [`docs/MECHANISMS.md`](../docs/MECHANISMS.md#the-writer-boundary).
 * **Bass Synth** — from the same menu, opens a small parameter page. K1 changes
   string brightness, K2 excitation/structure and K3 low-pass cutoff. Press `DATA` to render
   one plucked C2 note (MIDI 36), held for 400 ms in a 1.5 second sample, then
@@ -85,7 +89,7 @@ released   : Trim        Tune        Filter
   the live chromatic range C2–D#3; turning the knobs reshapes ringing and new
   notes. The current pad's sample is preserved. The DaisySP renderer avoids the firmware FMBass class,
   whose constructor requires the H3 host interface. Implementation and Ghidra
-  evidence: [`docs/re/BASS-SAMPLE.md`](../docs/re/BASS-SAMPLE.md); emulator
+  evidence: [`docs/FEATURES.md`](../docs/FEATURES.md#bass-synth); emulator
   check: `mod/tests/emulator_bass_sample.py`.
 * **Chromatic MIDI** — select a pad, enable **Pad MIDI In** in MIDI Config (it
   resets to Off on every app start), then enter 16 Levels. Every external note
@@ -95,8 +99,8 @@ released   : Trim        Tune        Filter
   app's own pitch setter (`w3 = note - 60`) before dispatching with the
   physical-pad source; note-offs are tracked and replayed the same way. With 16
   Levels off the dispatcher is left byte-identical to stock. See
-  [`MIDI-CHROMATIC.md`](../docs/MIDI-CHROMATIC.md); emulator check:
-  `tests/emulator_midi_chromatic.py`.
+  [`docs/FEATURES.md`](../docs/FEATURES.md#external-midi-chromatic-playback);
+  emulator check: `tests/emulator_midi_chromatic.py`.
 
 ## Install (device)
 
@@ -154,9 +158,9 @@ trampoline address.
 
 The paint hook draws the temporary AutoTrim soft-key caption and confirmation
 toast. It no longer draws trim edges: those are updated by the native command.
-The earlier overlay investigation is in [`docs/AM-MOD-NOTES.md`](../docs/AM-MOD-NOTES.md).
+The overlay technique (paint-slot swap, graphics calls) is described in [`docs/MODDING.md`](../docs/MODDING.md#63-am-mod--the-overlay-technique).
 
-## Anchors (1.3.0.12)
+## Anchors (mod offsets, 1.3.0.12)
 
 | offset | meaning |
 | --- | --- |
