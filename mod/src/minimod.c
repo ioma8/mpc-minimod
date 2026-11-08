@@ -71,7 +71,7 @@
 #define A_LABEL_TEXT 0x11bae00     /* Label::getText (returns String&)    */
 
 #include "hpss.h"
-#include "spectral.h"
+#include "spectral_ffi.h"
 #include "h3m_effect.h"
 #include "audio_ffi.h"
 #include "audio_ffi.h"

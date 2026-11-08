@@ -190,7 +190,10 @@ fn bin_pitch_classes(rate: f32) -> ([bool; BINS], [usize; BINS]) {
         if (55.0..=2_000.0).contains(&frequency) {
             *in_range = true;
             let midi = 69.0 + 12.0 * (frequency / 440.0).log2();
-            let rounded = f32_to_u32(midi);
+            // The reference rounds to the nearest semitone (`lroundf`); a
+            // truncating cast would put half the bins a semitone off and change
+            // every chroma distance that the cut filter compares.
+            let rounded = f32_to_u32(midi.round());
             *class = usize::try_from(rounded % u32::try_from(CHROMA).unwrap_or(1)).unwrap_or(0);
         }
     }

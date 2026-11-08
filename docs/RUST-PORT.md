@@ -285,8 +285,8 @@ lines of superseded code from the repository - the binary is unchanged.
 `hpss.c` (153) and `spectral.c` (339) are the opposite case: still compiled, and
 their Rust ports exist and pass their golden fixtures but are **not wired**.
 
-A differential run on the sample the Spectral Chop test chops settled it: on
-`GuitPh-Grove3 E85 91V.wav` (62 259 frames, 24-bit stereo) the C detector returns
+A differential run on the sample the Spectral Chop test chops settled it.  The C
+detector returned
 
     264, 14187, 30059, 45419, 54635      (detected = 5)
 
@@ -294,25 +294,21 @@ and the Rust one
 
     264, 30059, 45419                     (detected = 3)
 
-Both `positions` *and* `detected` differ.  I first read that as "the divergence
-starts in candidate detection", but `detected` is `nkeep`, i.e. the count
-**after** the novelty filter - so a stricter filter in the Rust version explains
-5 vs 3 just as well.  That attribution was not proven either.
+The cause was one line in the chroma mapping: the reference rounds a bin's MIDI
+number to the nearest semitone (`lroundf`), the port truncated it.  At 43 Hz bin
+spacing a semitone is less than half a bin, so **half the bins landed a semitone
+off**, which changed every chroma distance the cut filter compares - and the
+filter then rejected two real onsets while all synthetic fixtures, whose chroma
+barely moves, still matched.
 
-What has been checked and matched: the Hann window (symmetric, `/ (N-1)`), the
-hop (512), the frame count (`ceil(frames/hop)`), the three-band split at 250 Hz
-and 2 kHz with per-band mean normalisation, the flux formula, the peak-picking
-rule and the novelty thresholds.  What has not been compared is the magnitude
-pipeline between the FFT and the two feature matrices (chroma bin mapping and the
-log-spaced timbre edges), which is where the remaining difference has to be.
+With `midi.round()` the Rust detector returns exactly the C list, and the Spectral
+Chop device test passes on the real sample with the C file deleted.  This is the
+one class of bug the golden fixtures could not catch, and the reason the swap was
+reverted three times rather than shipped: the fixture compares positions on
+synthetic material, which is blind to a feature-matrix error that only real
+material exposes.
 
-The Rust detector was then given the case the old fixture could not express - a
-take that starts with a quarter second of silence and then hits, which is what
-the leading-boundary rule exists for.  It matches the C position for position,
-so the detector is very likely not the cause of the device failure; the swappable
-part is the harness reading, not the algorithm.
-
-Wiring them was attempted and reverted: with the Rust onset detector behind
+`hpss.c` remains unwired.  The spectral one: with the Rust onset detector behind
 `spectral_onsets`, the Spectral Chop device test failed while iterating its cases
 (`('first from Trim', (a, 0, [...]))`) - a triple of the selected sample, a slice
 start and the boundary list, which is *not* the same thing as "the detector asked
