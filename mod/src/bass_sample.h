@@ -13,6 +13,7 @@ int bass_sample_render(unsigned rate, float harmonics, float drive,
 /* Realtime preview API. note() is safe from the pad-input thread; mix() runs
    on the firmware audio writer thread and does not allocate or lock. */
 void bass_preview_enable(int enabled);
+void bass_preview_reset(void);
 void bass_preview_set_params(float brightness, float excite, float cutoff);
 void bass_preview_note(unsigned pad, float velocity);
 float bass_preview_mix(float **channels, size_t frames, unsigned channel_count,

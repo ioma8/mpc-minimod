@@ -470,12 +470,20 @@ Synth renders with DaisySP instead — see [`FEATURES.md`](FEATURES.md#bass-synt
 
 Stock note-on/off hooks (`0x1e27360` / `0x1e270d0`) receive the pad index. While
 the Bass Synth page is open, pad indices 0–15 queue C2–D#3 to a four-voice
-DaisySP preview. The hooked audio writer is `0x03f398f0` (Ghidra `0x040398f0`):
-planar float channels in, S32 interleaved out via `snd_pcm_writei`. The hook
-copies the planar block into thread-local scratch, mixes into channels 0/1, then
-calls the original writer — no change to the app's mixer buffers and no second
-audio path. Knob values are read atomically per block so active voices respond.
+DaisySP preview. The device output is `snd_pcm_writei`: interleaved **S32_LE,
+4 channels, 44100 Hz** (read from the app's hw params on the first write). The
+app imports `snd_pcm_writei@ALSA_0.9`, so an unversioned preload symbol does not
+interpose; the mod patches the app's PLT stub (`0xb51ff8`) with a 16-byte slot to
+its own hook and calls libasound itself. The hook adds the preview to interleaved
+channels 0/1 before the write, leaves the app's planar/engine buffers untouched,
+and decays each voice over 1.2 s. Pads are swallowed whenever the Bass page is
+open — including during a save render — so a missed preview cannot start a
+looping sample underneath. Activation enables and resets the synth before
+publishing `active`, and the paint tick re-enables it if the page is open without
+it.
 
+The earlier anchor `0x03f398f0` is a different PCM writer (planar float → S32);
+it is not called during normal playback, so mixing there was inaudible.
 ---
 
 ## 12. TouchPreferences overlay (hidden settings UI)

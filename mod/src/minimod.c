@@ -57,7 +57,6 @@
 #define A_NOTE_ON 0x1e27360        /* note on (input, src, pad, props, v) */
 #define A_NOTE_OFF 0x1e270d0       /* note off (input, src, pad)           */
 #define A_MIDI_NOTE_EVENT 0x211b090 /* native MIDI note-event dispatcher     */
-#define A_BASS_AUDIO_WRITER 0x03f398f0 /* Ghidra 0x040398f0; planar float -> PCM */
 #define A_CS_EVENT 0x23aff60       /* control-surface event (self, c, p)  */
 #define A_TRIM_WRITE 0x14d0890     /* generic observable property setter  */
 #define A_SCREEN_RESIZED 0x1660370 /* screen resize notification          */
@@ -1400,7 +1399,6 @@ static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
 static volatile uint32_t g_midi_chromatic_count;
 static volatile int g_midi_chromatic_note = -1;
 static volatile int g_midi_chromatic_delta;
-static void (*orig_bass_audio_writer)(void *, void *, size_t, int);
 static void (*orig_cs)(void *, int, void *);
 static void (*orig_trim)(void *, float);
 /* The Sample page (0x2468 bytes) captured from SamplePage_Ctor; it owns the
@@ -1733,9 +1731,15 @@ static void bass_preview_set_active(int active)
         __atomic_store_n(&g_bass_preview_notes, 0, __ATOMIC_RELAXED);
         __atomic_store_n(&g_bass_preview_blocks, 0, __ATOMIC_RELAXED);
         __atomic_store_n(&g_bass_preview_peak_bits, 0, __ATOMIC_RELAXED);
+        /* Enable and clear before the audio thread can see active=1, so the
+         * first pad is neither dropped nor mixed into a stale voice. */
+        bass_preview_enable(1);
+        bass_preview_reset();
+        __atomic_store_n(&g_bass_preview_active, 1, __ATOMIC_RELEASE);
+    } else {
+        __atomic_store_n(&g_bass_preview_active, 0, __ATOMIC_RELEASE);
+        bass_preview_enable(0);
     }
-    __atomic_store_n(&g_bass_preview_active, active != 0, __ATOMIC_RELEASE);
-    bass_preview_enable(active);
 }
 /* Native DATA input: the decoded control surface emits signed deltas through
  * Ghidra FUN_0150dbc0(surface + 0x2da8, delta). Unlike the float broadcaster,
@@ -4135,59 +4139,121 @@ static void note_off(void *input, int src, int pad)
         orig_note_off(input, src, pad);
 }
 
-/* The firmware's audio writer accepts planar float channels, then converts
-   them to S32 PCM. Mix the preview into private block storage so the live
-   engine buffers are never changed. The normal device block is 128 frames. */
-static void bass_audio_writer(void *self, void *input, size_t frames, int offset)
-{
-    static __thread float scratch[8][2048];
-    float *channels[8];
-    if (!__atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE)) {
-        bass_preview_mix(NULL, 0, 0, 44100); /* clear any ringing voices after close */
-        if (orig_bass_audio_writer)
-            orig_bass_audio_writer(self, input, frames, offset);
-        return;
-    }
-    int count = FIELD(self, 0xd8, int32_t);
-    if (count < 0)
-        count = FIELD(self, 0xe4, int32_t);
-    if (!orig_bass_audio_writer)
-        return;
-    if (count < 1 || count > 8 || frames > 2048 || !input ||
-        ((uintptr_t)input & 7)) {
-        orig_bass_audio_writer(self, input, frames, offset);
-        return;
-    }
+/* Live preview goes into the firmware's real output call: the app writes
+ * interleaved S32 through snd_pcm_writei. The symbol is versioned
+ * (snd_pcm_writei@ALSA_0.9), so a preload definition does not interpose;
+ * patch the app's PLT stub instead and call libasound ourselves. The probe
+ * function reported S32_LE, 4 channels, 44100 Hz. */
+static long (*g_audio_real_writei)(void *, const void *, unsigned long);
+static int g_audio_ready;
+static int g_audio_format = -1;
+static unsigned g_audio_channels;
+static unsigned g_audio_rate;
+static int g_audio_probed;
+static volatile int g_audio_mixer_busy;
+static volatile int g_audio_was_active;
 
-    float **source = input;
-    for (int i = 0; i < count; ++i) {
-        /* The array length is not known; require the slot itself to be mapped
-         * before reading it, then validate the pointer it holds. */
-        if (!mapped(&source[i])) {
-            orig_bass_audio_writer(self, input, frames, offset);
-            return;
-        }
-        float *p = source[i];
-        if (!p || ((uintptr_t)p & 3) || !mapped(p) ||
-            !mapped((const void *)((uintptr_t)p + (frames - 1) * sizeof(float)))) {
-            orig_bass_audio_writer(self, input, frames, offset);
-            return;
-        }
-        memcpy(scratch[i], p, frames * sizeof(float));
-        channels[i] = scratch[i];
+static int patch_writei_plt(uintptr_t site, const void *hook)
+{
+    uint32_t original = 0;
+    if (!rd(site, &original, sizeof original))
+        return 0;
+    /* PLT entry: adrp x16, page */
+    if ((original & 0x9F00001Fu) != 0x90000010u) {
+        mlog("minimod: writei plt %p looks wrong (%#x)\n", (void *)site, original);
+        return 0;
     }
-    float peak = bass_preview_mix(channels, frames, (unsigned)count, 44100);
-    if (peak > 0.f) {
-        __atomic_add_fetch(&g_bass_preview_blocks, 1, __ATOMIC_RELAXED);
-        uint32_t previous_bits = __atomic_load_n(&g_bass_preview_peak_bits, __ATOMIC_RELAXED);
-        float previous;
-        memcpy(&previous, &previous_bits, sizeof previous);
-        if (peak > previous)
-            __atomic_store_n(&g_bass_preview_peak_bits, bass_float_bits(peak), __ATOMIC_RELAXED);
-        orig_bass_audio_writer(self, channels, frames, offset);
-    } else {
-        orig_bass_audio_writer(self, input, frames, offset);
+    uint32_t slot[4] = {0x58000050u /* ldr x16, [pc, #8] */,
+                        0xD61F0200u /* br x16 */, 0, 0};
+    uint64_t target = (uint64_t)(uintptr_t)hook;
+    memcpy(&slot[2], &target, sizeof target);
+    uintptr_t page = site & ~(uintptr_t)0xfff;
+    if (mprotect((void *)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        mlog("minimod: writei plt mprotect failed\n");
+        return 0;
     }
+    int ok = wr(site, slot, sizeof slot);
+    __builtin___clear_cache((char *)site, (char *)site + sizeof slot);
+    mprotect((void *)page, 0x2000, PROT_READ | PROT_EXEC);
+    return ok;
+}
+
+static void audio_probe_format(void *pcm)
+{
+    g_audio_probed = 1;
+    int (*hw_malloc)(void **) = dlsym(RTLD_DEFAULT, "snd_pcm_hw_params_malloc");
+    int (*hw_current)(void *, void *) = dlsym(RTLD_DEFAULT, "snd_pcm_hw_params_current");
+    int (*hw_free)(void *) = dlsym(RTLD_DEFAULT, "snd_pcm_hw_params_free");
+    int (*get_fmt)(void *, int *) = dlsym(RTLD_DEFAULT, "snd_pcm_hw_params_get_format");
+    int (*get_ch)(void *, unsigned *) = dlsym(RTLD_DEFAULT, "snd_pcm_hw_params_get_channels");
+    int (*get_rate)(void *, unsigned *, int *) = dlsym(RTLD_DEFAULT, "snd_pcm_hw_params_get_rate");
+    void *p = NULL;
+    if (hw_malloc && hw_current && hw_free && get_fmt && get_ch && get_rate &&
+        hw_malloc(&p) == 0) {
+        int fmt = -1, dir = 0;
+        unsigned ch = 0, rate = 0;
+        if (hw_current(pcm, p) == 0) {
+            get_fmt(p, &fmt);
+            get_ch(p, &ch);
+            get_rate(p, &rate, &dir);
+            g_audio_format = fmt;
+            g_audio_channels = ch;
+            g_audio_rate = rate;
+        }
+        hw_free(p);
+        mlog("minimod: output fmt=%d ch=%u rate=%u\n", g_audio_format,
+             g_audio_channels, g_audio_rate);
+    }
+}
+
+static long audio_writei(void *pcm, const void *buf, unsigned long frames)
+{
+    if (!g_audio_real_writei)
+        g_audio_real_writei = (long (*)(void *, const void *, unsigned long))
+                                  dlsym(RTLD_NEXT, "snd_pcm_writei");
+    if (!g_audio_real_writei)
+        return -1;
+    int active = __atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE);
+    if (!g_audio_probed && pcm)
+        audio_probe_format(pcm);
+    if (active && buf && frames && frames <= 4096 && g_audio_format == 10 &&
+        g_audio_channels >= 1 && g_audio_channels <= 8 &&
+        __atomic_exchange_n(&g_audio_mixer_busy, 1, __ATOMIC_ACQ_REL) == 0) {
+        static __thread float pv[2][4096];
+        float *rows[2] = {pv[0], pv[1]};
+        unsigned ch = g_audio_channels > 2 ? 2 : g_audio_channels;
+        memset(pv, 0, (size_t)ch * frames * sizeof(float));
+        float peak = bass_preview_mix(rows, frames, ch, g_audio_rate);
+        if (peak > 0.f) {
+            int32_t *out = (int32_t *)buf;
+            for (unsigned i = 0; i < frames; ++i) {
+                for (unsigned c = 0; c < ch; ++c) {
+                    float v = pv[c][i];
+                    if (v > 1.f) v = 1.f;
+                    else if (v < -1.f) v = -1.f;
+                    int64_t add = (int64_t)((double)v * 2147483647.0);
+                    int64_t acc = (int64_t)out[(size_t)i * g_audio_channels + c] + add;
+                    if (acc > INT32_MAX) acc = INT32_MAX;
+                    if (acc < INT32_MIN) acc = INT32_MIN;
+                    out[(size_t)i * g_audio_channels + c] = (int32_t)acc;
+                }
+            }
+            __atomic_add_fetch(&g_bass_preview_blocks, 1, __ATOMIC_RELAXED);
+            uint32_t previous_bits =
+                __atomic_load_n(&g_bass_preview_peak_bits, __ATOMIC_RELAXED);
+            float previous;
+            memcpy(&previous, &previous_bits, sizeof previous);
+            if (peak > previous)
+                __atomic_store_n(&g_bass_preview_peak_bits,
+                                 bass_float_bits(peak), __ATOMIC_RELAXED);
+        }
+        __atomic_store_n(&g_audio_mixer_busy, 0, __ATOMIC_RELEASE);
+    } else if (!active &&
+               __atomic_exchange_n(&g_audio_was_active, 0, __ATOMIC_ACQ_REL)) {
+        bass_preview_mix(NULL, 0, 0, g_audio_rate ? g_audio_rate : 44100);
+    }
+    __atomic_store_n(&g_audio_was_active, active, __ATOMIC_RELEASE);
+    return g_audio_real_writei(pcm, buf, frames);
 }
 
 static void *g_cs_self;
@@ -5025,6 +5091,10 @@ static void screen_paint(void *p, void *g)
     if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE) &&
         g_spectral.screen && (p != g_spectral.screen || !sample_page_visible()))
         spectral_finish("page changed");
+    if (g_hpss_menu && g_bass_edit && !g_hpss_busy &&
+        g_bass_preview_available &&
+        !__atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE))
+        bass_preview_set_active(1);
     if (FIELD(p, 0, uintptr_t) != base + A_SCREEN_VT)
         return;
     if (g_screen != p) {
@@ -5973,7 +6043,6 @@ __attribute__((constructor)) static void load(void)
     void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)note_on) : 0;
     void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)cs_event) : 0;
     void *t_off = (hook_mask & 128) ? install_hook(base + A_NOTE_OFF, (void *)note_off) : 0;
-    void *t_bass_audio = install_hook(base + A_BASS_AUDIO_WRITER, (void *)bass_audio_writer);
     void *t_sc = install_hook(base + 0x1968020, (void *)setctl_probe);
     if (t_sc)
         orig_setctl = (void (*)(void *, void *, int, int, float))t_sc;
@@ -6057,10 +6126,16 @@ __attribute__((constructor)) static void load(void)
         orig_cs = (void (*)(void *, int, void *))t_cs;
     if (t_off)
         orig_note_off = (void (*)(void *, int, int))t_off;
-    if (t_bass_audio) {
-        orig_bass_audio_writer = (void (*)(void *, void *, size_t, int))t_bass_audio;
+    {
+        void *las = dlopen("libasound.so.2", RTLD_LAZY);
+        g_audio_real_writei = las ? (long (*)(void *, const void *, unsigned long))
+                                        dlsym(las, "snd_pcm_writei") : NULL;
+        if (g_audio_real_writei)
+            g_audio_ready = patch_writei_plt(base + 0xb51ff8, (const void *)audio_writei);
+        mlog("minimod: audio writei=%p plt=%d\n",
+             (void *)g_audio_real_writei, g_audio_ready);
     }
-    g_bass_preview_available = t_note && t_off && t_bass_audio;
+    g_bass_preview_available = t_note && t_off && g_audio_ready;
     if (t_trim)
         orig_trim = (void (*)(void *, float))t_trim;
     if (t_sa)

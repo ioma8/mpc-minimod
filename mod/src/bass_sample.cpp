@@ -28,8 +28,15 @@ struct PreviewVoice {
     unsigned age = 0;
     unsigned quiet = 0;
     float level = 0.f;
+    float decay = 0.6f;
     bool active = false;
 };
+
+/* The preview sounds like the rendered sample only with the same envelope:
+ * full level for the key-down part, then the render's exponential tail. */
+/* The preview is an audition, not the saved sample: decay from the first
+ * sample so a stack of pads can never turn into a sustained drone. */
+constexpr float kPreviewLength = 1.2f;
 
 std::atomic<bool> preview_enabled{false};
 std::atomic<float> preview_brightness{0.52f};
@@ -94,7 +101,8 @@ void trigger_preview(unsigned pad, float velocity, float brightness,
                              ? cutoff_hz : preview_rate * 0.45f);
     voice.filter.SetRes(0.05f);
     voice.filter.SetDrive(excite * 0.35f);
-    voice.level = 0.75f * clamp01(velocity);
+    voice.level = 0.5f * clamp01(velocity);
+    voice.decay = 0.35f + excite * 0.15f;
     voice.age = 0;
     voice.quiet = 0;
     voice.active = true;
@@ -166,6 +174,14 @@ extern "C" int bass_sample_render(unsigned rate, float harmonics, float drive,
     return 0;
 }
 
+extern "C" void bass_preview_reset(void)
+{
+    stop_preview();
+    for (auto &pending : pending_velocity)
+        pending.store(0, std::memory_order_release);
+    preview_was_enabled = false;
+}
+
 extern "C" void bass_preview_enable(int enabled)
 {
     preview_enabled.store(enabled != 0, std::memory_order_release);
@@ -230,14 +246,16 @@ extern "C" float bass_preview_mix(float **channels, size_t frames,
             if (!voice.active)
                 continue;
             voice.filter.Process(voice.string.Process());
-            const float value = voice.filter.Low() * voice.level;
+            const float t = static_cast<float>(voice.age) / rate;
+            const float env = std::exp(-t / voice.decay);
+            const float value = voice.filter.Low() * voice.level * env;
             sample += value;
             const float magnitude = std::fabs(value);
             if (magnitude < 1e-5f)
                 ++voice.quiet;
             else
                 voice.quiet = 0;
-            if (++voice.age > rate * 4 || voice.quiet > rate / 3)
+            if (++voice.age > rate * kPreviewLength || voice.quiet > rate / 3)
                 voice.active = false;
         }
         if (sample > 0.85f) sample = 0.85f;
