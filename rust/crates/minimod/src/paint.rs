@@ -148,6 +148,13 @@ fn redraw(repaint: Option<Repaint>, component: usize) {
     }
 }
 
+/// Show a toast for the standard one second.
+pub fn show_toast(text: &str) {
+    // SAFETY: the text is valid for the call, and the module owns the buffer it
+    // is copied into.
+    unsafe { minimod_toast(text.as_ptr(), None, 0) };
+}
+
 /// The toast's text, or an empty string.
 #[must_use]
 pub fn toast_text() -> &'static [u8] {

@@ -71,7 +71,6 @@
 #define A_LABEL_TEXT 0x11bae00     /* Label::getText (returns String&)    */
 
 #include "hpss_ffi.h"
-#include "spectral_ffi.h"
 #include "h3m_effect.h"
 #include "job_ffi.h"
 #include "spectral_machine_ffi.h"

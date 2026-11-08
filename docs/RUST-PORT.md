@@ -328,6 +328,18 @@ temporary String/Font objects are laid out or destroyed.
 It stays unwired until that is understood; the C draws with its own calls, which
 is verified by every device run.
 
+## The spectral tick
+
+`spectral` holds the chop's frame state (the request flag, the phase, the three
+second deadline, the sample it is working on) and runs the whole tick: read the
+page's sample, resolve its WAV, hand it to the machine, close the menu, show the
+result.
+
+It is **not wired**.  Wiring it - the struct in C, the five glue functions
+replaced by shims - built cleanly but the Spectral Chop device test failed twice,
+so the port is wrong somewhere the compiler cannot see.  The module and its tests
+stay; the glue keeps doing the work until the difference is understood.
+
 ## What the last 3 287 lines are
 
 The glue that is left is one unit, and it is worth being precise about why it

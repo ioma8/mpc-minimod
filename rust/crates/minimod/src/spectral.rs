@@ -1,0 +1,339 @@
+//! The spectral chop's place in the frame.
+//!
+//! The input hook only raises a request; the work happens from the paint hook,
+//! on the UI thread, after the app has drawn.  That is why this is a small state
+//! machine rather than a task: one step per frame, three seconds at most.
+
+use crate::menu;
+use crate::paint;
+
+/// How long a run may take before it gives up.
+const DEADLINE_MS: i64 = 3_000;
+
+/// The event the mod replays to press the app's CHOP key.
+const CHOP_KEY: u8 = 0x4b;
+/// A full press.
+const PRESSED: u8 = 0x7f;
+
+/// What the chop is doing.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct State {
+    /// 1 while a run is in flight, -1 while it is being claimed.
+    pub active: i32,
+    /// 0 before the sample is read, 1 afterwards.
+    pub phase: i32,
+    /// How many slices the pad ended up with.
+    pub slices: i32,
+    /// When the run gives up, in milliseconds.
+    pub deadline: i64,
+    /// The button event that started it.
+    pub event: [u8; 16],
+    /// The screen it started on.
+    pub screen: usize,
+    /// The page state it started with.
+    pub page_state: usize,
+    /// The sample it is chopping.
+    pub sample: usize,
+    /// Its frame count.
+    pub frames: u32,
+    /// Its channel count.
+    pub channels: u32,
+    /// Its rate.
+    pub rate: u32,
+}
+
+/// What the glue has to supply.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Hooks {
+    /// Press the app's CHOP key.
+    pub press_chop: Option<unsafe extern "C" fn()>,
+    /// Replace the status line.
+    pub set_status: Option<unsafe extern "C" fn(*const u8)>,
+    /// Redraw the screen.
+    pub repaint: Option<unsafe extern "C" fn()>,
+}
+
+/// Press the app's CHOP key through its own button handler.
+///
+/// # Safety
+///
+/// `press` must be the app's displaced button hook.
+pub unsafe fn press_chop(state: &mut State, press: Option<unsafe extern "C" fn(*const u8)>) {
+    let Some(press) = press else { return };
+    state.event[8] = CHOP_KEY;
+    state.event[9] = PRESSED;
+    // SAFETY: the event buffer is ours and the callback is the app's hook.
+    unsafe {
+        press(state.event.as_ptr());
+        state.event[9] = 0;
+        press(state.event.as_ptr());
+    }
+}
+
+/// Claim a run; false when one is already going or a job is busy.
+pub fn start(state: &mut State, event: &[u8], busy: bool) -> bool {
+    if busy || state.active != 0 {
+        return false;
+    }
+    state.active = 1;
+    state.slices = 0;
+    state.event = [0; 16];
+    let length = event.len().min(state.event.len());
+    state.event[..length].copy_from_slice(&event[..length]);
+    true
+}
+
+/// Abandon a run and put the flags back.
+pub fn finish(state: &mut State, menu_state: &mut menu::State, hooks: Hooks, error: Option<&str>) {
+    let message = match error {
+        Some(error) => format!("Spectral: {error}"),
+        None => format!("Spectral: {} slices on this pad", state.slices),
+    };
+    state.phase = 0;
+    state.active = 0;
+    menu_state.busy = 0;
+    if let Some(status) = hooks.set_status {
+        let mut text = message.clone().into_bytes();
+        text.push(0);
+        // SAFETY: the text outlives the call and is NUL-terminated.
+        unsafe { status(text.as_ptr()) };
+    }
+    paint::show_toast(if error.is_some() {
+        &message
+    } else {
+        "Spectral: chopped"
+    });
+    repaint(hooks);
+}
+
+/// Redraw.
+fn repaint(hooks: Hooks) {
+    if let Some(repaint) = hooks.repaint {
+        // SAFETY: the glue's own callback.
+        unsafe { repaint() };
+    }
+}
+
+/// Run one frame of the chop, on the UI thread.
+///
+/// # Safety
+///
+/// The hooks must be the glue's callbacks, and `menu_state` the glue's menu.
+pub unsafe fn tick(
+    state: &mut State,
+    menu_state: &mut menu::State,
+    base: usize,
+    screen: usize,
+    hooks: Hooks,
+) {
+    if state.active != 1 {
+        return;
+    }
+    let now = crate::clock::now_ms();
+    if state.phase == 0 {
+        start_run(state, menu_state, base, screen, hooks, now);
+        return;
+    }
+    let mut slices = 0_u32;
+    let mut error: *const u8 = core::ptr::null();
+    // SAFETY: the machine is driven from this thread only.
+    let step = unsafe {
+        crate::spectral_machine::minimod_spectral_step(
+            base,
+            now,
+            core::ptr::from_mut(&mut slices),
+            core::ptr::from_mut(&mut error),
+        )
+    };
+    match step {
+        3 => {
+            state.slices = i32::try_from(slices).unwrap_or(0);
+            finish(state, menu_state, hooks, None);
+        }
+        4 => {
+            // SAFETY: the machine returns a NUL-terminated static or null.
+            let text = unsafe { error_text(error) };
+            finish(state, menu_state, hooks, Some(&text));
+        }
+        _ => repaint(hooks),
+    }
+}
+
+/// Read the sample, hand it to the machine and close the menu.
+fn start_run(
+    state: &mut State,
+    menu_state: &mut menu::State,
+    base: usize,
+    screen: usize,
+    hooks: Hooks,
+    now: i64,
+) {
+    let mut found_screen: usize = 0;
+    let mut page_state: usize = 0;
+    let mut sample: usize = 0;
+    let mut frames: u32 = 0;
+    let mut channels: u32 = 0;
+    let mut rate: u32 = 0;
+    // SAFETY: the page objects are read, not written.
+    let found = unsafe {
+        crate::selection::minimod_sample_now(
+            base,
+            screen,
+            core::ptr::from_mut(&mut found_screen),
+            core::ptr::from_mut(&mut page_state),
+            core::ptr::from_mut(&mut sample),
+            core::ptr::from_mut(&mut frames),
+            core::ptr::from_mut(&mut channels),
+            core::ptr::from_mut(&mut rate),
+        )
+    };
+    if found == 0 {
+        finish(state, menu_state, hooks, Some("no sample on this pad"));
+        return;
+    }
+    let Some(path) =
+        crate::paths::for_sample(sample, frames, u16::try_from(channels).unwrap_or(0), rate)
+    else {
+        finish(state, menu_state, hooks, Some("cannot read sample WAV"));
+        return;
+    };
+    let Some(samples) =
+        crate::wav::read_f32(&path, frames, u16::try_from(channels).unwrap_or(0), rate)
+    else {
+        finish(state, menu_state, hooks, Some("cannot read sample WAV"));
+        return;
+    };
+    let mut error: *const u8 = core::ptr::null();
+    // SAFETY: the samples live for the call and the error is writable.
+    let begun = unsafe {
+        crate::spectral_machine::minimod_spectral_begin(
+            base,
+            now,
+            found_screen,
+            page_state,
+            sample,
+            frames,
+            channels,
+            rate,
+            samples.as_ptr(),
+            hooks.press_chop,
+            core::ptr::from_mut(&mut error),
+        )
+    };
+    if begun != 0 {
+        // SAFETY: the machine returns a NUL-terminated static or null.
+        let text = unsafe { error_text(error) };
+        finish(state, menu_state, hooks, Some(&text));
+        return;
+    }
+    menu_state.open = 0;
+    menu_state.busy = 1;
+    state.phase = 1;
+    state.screen = found_screen;
+    state.page_state = page_state;
+    state.sample = sample;
+    state.frames = frames;
+    state.channels = channels;
+    state.rate = rate;
+    state.deadline = now + DEADLINE_MS;
+    repaint(hooks);
+}
+
+/// The text the machine reports, as an owned string.
+///
+/// # Safety
+///
+/// `error` must be null or a NUL-terminated string.
+unsafe fn error_text(error: *const u8) -> String {
+    if error.is_null() {
+        return String::from("unknown");
+    }
+    // SAFETY: the caller's contract.
+    unsafe { core::ffi::CStr::from_ptr(error.cast()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Claim a run, for the C glue.
+///
+/// # Safety
+///
+/// `state` must be live and `event` readable for `length` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_spectral_start(
+    state: *mut State,
+    event: *const u8,
+    length: i32,
+    busy: i32,
+) -> i32 {
+    if state.is_null() || event.is_null() || length <= 0 {
+        return 0;
+    }
+    let length = usize::try_from(length).unwrap_or(0);
+    // SAFETY: the caller's contract.
+    let bytes = unsafe { core::slice::from_raw_parts(event, length) };
+    // SAFETY: the caller's contract.
+    let state = unsafe { &mut *state };
+    i32::from(start(state, bytes, busy != 0))
+}
+
+/// Run one frame, for the C glue.
+///
+/// # Safety
+///
+/// `state` and `menu_state` must be live and `hooks` readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_spectral_tick(
+    state: *mut State,
+    menu_state: *mut core::ffi::c_void,
+    base: usize,
+    screen: usize,
+    hooks: *const Hooks,
+) {
+    if state.is_null() || menu_state.is_null() || hooks.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    let (state, menu_state, hooks) =
+        unsafe { (&mut *state, &mut *menu_state.cast::<menu::State>(), *hooks) };
+    // SAFETY: the hooks are the glue's callbacks.
+    unsafe { tick(state, menu_state, base, screen, hooks) };
+}
+
+/// Whether a run is in flight, for the C glue.
+///
+/// # Safety
+///
+/// `state` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_spectral_active(state: *const State) -> i32 {
+    if state.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's contract.
+    unsafe { (*state).active }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{State, start};
+
+    #[test]
+    fn a_run_cannot_start_twice() {
+        let mut state = State::default();
+        assert!(start(&mut state, &[1, 2, 3], false));
+        assert!(!start(&mut state, &[4], false), "already running");
+        let mut idle = State::default();
+        assert!(!start(&mut idle, &[1], true), "job busy");
+    }
+
+    #[test]
+    fn the_event_is_copied_in() {
+        let mut state = State::default();
+        assert!(start(&mut state, &[9, 8, 7], false));
+        assert_eq!(&state.event[..3], &[9, 8, 7]);
+        assert_eq!(state.event.len(), 16);
+    }
+}
