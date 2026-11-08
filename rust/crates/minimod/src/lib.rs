@@ -22,6 +22,7 @@ pub mod effect;
 pub mod effect_ffi;
 pub mod firmware;
 pub mod hooks;
+pub mod job;
 pub mod levels;
 pub mod looper_ffi;
 pub mod midi;

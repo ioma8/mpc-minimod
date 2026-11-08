@@ -73,6 +73,7 @@
 #include "hpss_ffi.h"
 #include "spectral_ffi.h"
 #include "h3m_effect.h"
+#include "job_ffi.h"
 #include "spectral_machine_ffi.h"
 #include "routing_ffi.h"
 #include "audio_ffi.h"
@@ -911,28 +912,10 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
 
 
 /* ------------------------------------------------------------ HPSS job/menu */
-struct hpss_job {
-    void *screen;
-    uintptr_t state;
-    uintptr_t sample;
-    unsigned frames;
-    unsigned ch;
-    unsigned rate;
-    float *input;
-    float *harmonic;
-    float *percussive;
-    float *rendered;
-    size_t rendered_frames;
-    unsigned rendered_ch;
-    int action;
-    int rc;
-    char source_path[512];
-    off_t source_data_offset;
-    unsigned char *source_audio_backup;
-    size_t source_audio_bytes;
-};
+/* The layout is defined once, in rust/crates/minimod/src/job.rs. */
+typedef struct minimod_job hpss_job;
 
-static struct hpss_job *volatile g_hpss_job;
+static hpss_job *volatile g_hpss_job;
 static volatile int g_hpss_done;
 static volatile int g_hpss_finalizing;
 static volatile int g_hpss_data_down;
@@ -980,40 +963,18 @@ static void hpss_restore_chop(void)
 
 static void *hpss_worker(void *arg)
 {
-    struct hpss_job *job = arg;
-    int rc;
-    if (job->action == 4)
-        rc = bass_sample_render(job->rate, g_bass_knob[0], g_bass_knob[1],
-                                g_bass_knob[2], &job->rendered,
-                                &job->rendered_frames);
-    else if (job->action != 0)
-        rc = h3m_effect_render(base, (enum h3m_effect)(job->action - 1),
-                               job->input, job->frames, job->ch, job->rate,
-                               &job->rendered, &job->rendered_frames);
-    else
-        rc = hpss_split(job->input, job->frames, job->ch, job->rate,
-                        &job->harmonic, &job->percussive);
-    if (job->action == 4)
-        job->rendered_ch = 2;
-    job->rc = rc;
+    hpss_job *job = arg;
+    int rc = minimod_job_run(job, g_bass_knob, base);
     __atomic_store_n(&g_hpss_done, 1, __ATOMIC_RELEASE);
-    mlog("%s worker: rc=%d frames=%u ch=%u output=%zu\n",
-         sample_action_name(job->action), rc, job->frames, job->ch,
-         job->rendered_frames);
+    mlog("%s worker: rc=%d frames=%u ch=%u output=%zu\n", sample_action_name(job->action),
+         rc, job->frames, job->ch, job->rendered_frames);
     hpss_repaint();
     return NULL;
 }
 
-static void hpss_free_job(struct hpss_job *job)
+static void hpss_free_job(hpss_job *job)
 {
-    if (!job)
-        return;
-    free(job->input);
-    free(job->harmonic);
-    free(job->percussive);
-    free(job->rendered);
-    free(job->source_audio_backup);
-    free(job);
+    minimod_job_free(job);
 }
 
 static void sample_transform_start(int action)
@@ -1041,13 +1002,13 @@ static void sample_transform_start(int action)
         toast(action ? "Effect: bad WAV" : "HPSS: bad WAV");
         return;
     }
-    struct hpss_job *job = calloc(1, sizeof *job);
+    hpss_job *job = calloc(1, sizeof *job);
     if (!job) {
         free(input);
         sample_action_status(action, "out of memory");
         return;
     }
-    job->screen = screen;
+    job->screen = (uintptr_t)screen;
     job->state = state;
     job->sample = sample;
     job->frames = frames;
@@ -1094,7 +1055,7 @@ static void fmbass_start(void)
         toast("Bass: select sample pad");
         return;
     }
-    struct hpss_job *job = calloc(1, sizeof *job);
+    hpss_job *job = calloc(1, sizeof *job);
     if (!job) {
         sample_action_status(4, "out of memory");
         return;
@@ -1115,7 +1076,7 @@ static void fmbass_start(void)
         toast("Bass: need 1 pad");
         return;
     }
-    job->screen = screen;
+    job->screen = (uintptr_t)screen;
     job->state = state;
     job->sample = sample;
     job->frames = frames;
@@ -1269,7 +1230,7 @@ static void hpss_finalize(void)
         return;
     g_hpss_finalizing = 1;
     __atomic_store_n(&g_hpss_done, 0, __ATOMIC_RELEASE);
-    struct hpss_job *job = g_hpss_job;
+    hpss_job *job = g_hpss_job;
     g_hpss_job = NULL;
     if (!job) {
         g_hpss_busy = 0;
@@ -1284,7 +1245,7 @@ static void hpss_finalize(void)
         toast(effect ? "Effect: processing failed" : "HPSS: processing failed");
         goto out;
     }
-    if (g_screen != job->screen || !sample_page_visible()) {
+    if ((uintptr_t)g_screen != job->screen || !sample_page_visible()) {
         sample_action_status(job->action, "cancelled (page changed)");
         toast(effect ? "Effect cancelled" : "HPSS cancelled");
         goto out;
@@ -1293,7 +1254,7 @@ static void hpss_finalize(void)
         void *s = 0;
         uintptr_t st = 0, smp = 0;
         unsigned fr = 0, ch = 0, rt = 0;
-        if (!hpss_read_sample(job->screen, &s, &st, &smp, &fr, &ch, &rt) ||
+        if (!hpss_read_sample((void *)job->screen, &s, &st, &smp, &fr, &ch, &rt) ||
             st != job->state || smp != job->sample || fr != job->frames ||
             ch != job->ch || rt != job->rate) {
             sample_action_status(job->action, "cancelled (sample changed)");
@@ -1315,7 +1276,7 @@ static void hpss_finalize(void)
             unsigned read_frames = job->frames;
             if (job->action == 4 && job->rendered_frames < read_frames)
                 read_frames = (unsigned)job->rendered_frames;
-            int ok = hpss_extract_ctx(job->screen, job->state, job->rendered, 0,
+            int ok = hpss_extract_ctx((void *)job->screen, job->state, job->rendered, 0,
                                       read_frames, read_frames,
                                       (unsigned)job->rendered_frames,
                                       job->rendered_ch ? job->rendered_ch : job->ch,
@@ -1342,7 +1303,7 @@ static void hpss_finalize(void)
             }
         } else {
             int first_pad = -1, second_pad = -1;
-            int a = hpss_extract_ctx(job->screen, job->state, job->harmonic, 0,
+            int a = hpss_extract_ctx((void *)job->screen, job->state, job->harmonic, 0,
                                      job->frames, job->frames, job->frames,
                                      job->ch, 0, &first_pad);
             if (!a) {
@@ -1351,7 +1312,7 @@ static void hpss_finalize(void)
                 toast("HPSS: write failed");
                 goto out;
             }
-            int b = hpss_extract_ctx(job->screen, job->state, job->percussive, 0,
+            int b = hpss_extract_ctx((void *)job->screen, job->state, job->percussive, 0,
                                      job->frames, job->frames, job->frames,
                                      job->ch, 1, &second_pad);
             hpss_restore_chop();
