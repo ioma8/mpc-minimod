@@ -76,6 +76,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "paths_ffi.h"
 #include "wav_ffi.h"
 #include "bass_sample.h"
 #include "looper.h"
@@ -840,194 +841,10 @@ static int page_layers(uintptr_t param, uintptr_t *layers, uintptr_t *instr)
     return 1;
 }
 
-static int path_from_buffer(const char *buf, unsigned want, char *out, size_t n)
-{
-    static const char *roots[] = {"/data/", "/media/", "/usr/share/", "/factory/"};
-    for (unsigned r = 0; r < 4; ++r) {
-        const char *hit = strstr(buf, roots[r]);
-        if (!hit)
-            continue;
-        const char *end = hit;
-        while (*end && *end >= 32 && *end < 127)
-            end++;
-        if (end - hit < 6 || end - hit > 500 || !strcasestr(hit, ".wav"))
-            continue;
-        char tmp[512];
-        snprintf(tmp, sizeof tmp, "%.*s", (int)(end - hit), hit);
-        unsigned fr = 0, rt = 0, ch = 0, doff = 0, bps = 2;
-        if (!wav_info(tmp, &fr, &rt, &ch, &doff, &bps, NULL) || fr != want)
-            continue;
-        snprintf(out, n, "%s", tmp);
-        return 1;
-    }
-    return 0;
-}
 
-/* A freshly recorded (unsaved) sample has no path anywhere near its object, but
- * the app has already written the audio into the temp project. Find the file by
- * its frame count - the recording's own length is a strong identifier. */
-static int find_wav_by_frames(unsigned want, char *out, size_t n)
-{
-    DIR *root = opendir("/data/TempProjects");
-    if (!root)
-        return 0;
-    struct dirent *de;
-    char best[512] = {0};
-    time_t best_t = 0;
-    while ((de = readdir(root)) != 0) {
-        if (de->d_name[0] == '.')
-            continue;
-        char dirp[512];
-        snprintf(dirp, sizeof dirp, "/data/TempProjects/%s", de->d_name);
-        struct stat ds;
-        if (stat(dirp, &ds) != 0 || !S_ISDIR(ds.st_mode))
-            continue;
-        DIR *sub = opendir(dirp);
-        if (!sub)
-            continue;
-        struct dirent *fe;
-        while ((fe = readdir(sub)) != 0) {
-            size_t l = strlen(fe->d_name);
-            if (l < 5 || strcasecmp(fe->d_name + l - 4, ".wav") != 0)
-                continue;
-            char full[512];
-            snprintf(full, sizeof full, "%s/%s", dirp, fe->d_name);
-            unsigned fr = 0, rate = 0, ch = 0, off = 0, bytes = 0, fmt = 0;
-            if (!wav_info(full, &fr, &rate, &ch, &off, &bytes, &fmt) || fr != want)
-                continue;
-            struct stat fs;
-            if (stat(full, &fs) != 0)
-                continue;
-            if (fs.st_mtime >= best_t) {
-                best_t = fs.st_mtime;
-                snprintf(best, sizeof best, "%s", full);
-            }
-        }
-        closedir(sub);
-    }
-    closedir(root);
-    if (!best[0])
-        return 0;
-    snprintf(out, n, "%s", best);
-    return 1;
-}
 
-/* The sample object carries its file: sample+0x30 is the holder, whose +0x120
- * is a std::string with the path. Read it directly before falling back to the
- * generic scan or the frame-count lookup. */
-static int path_from_object(uintptr_t sample, unsigned want, char *out, size_t n)
-{
-    uintptr_t holder = 0, sptr = 0;
-    char buf[512];
-    if (!rd(sample + 0x30, &holder, 8) || !holder || !mapped((void *)holder))
-        return 0;
-    if (!rd(holder + 0x120, &sptr, 8) || !sptr || !mapped((void *)sptr))
-        return 0;
-    if (!rd(sptr, buf, sizeof buf - 1))
-        return 0;
-    buf[sizeof buf - 1] = 0;
-    return path_from_buffer(buf, want, out, n);
-}
 
-static int wav_path_of(uintptr_t obj, unsigned want, char *out, size_t n)
-{
-    ranges_load();
-    char buf[512];
-    for (long o = 0; o < 0x2000; o += 8) {
-        uintptr_t q = 0;
-        if (!rd(obj + o, &q, 8) || !q || !mapped((void *)q))
-            continue;
-        if (!rd(q, buf, sizeof buf - 1))
-            continue;
-        buf[sizeof buf - 1] = 0;
-        if (path_from_buffer(buf, want, out, n)) {
-            mlog("minimod: path from sample+0x%lx -> %s\n", (unsigned long)o, out);
-            return 1;
-        }
-        /* one level deeper: the path often lives in a small holder object */
-        for (long k = 0; k < 0x400; k += 8) {
-            uintptr_t q2 = 0;
-            if (!rd(q + k, &q2, 8) || !q2 || !mapped((void *)q2))
-                continue;
-            if (!rd(q2, buf, sizeof buf - 1))
-                continue;
-            buf[sizeof buf - 1] = 0;
-            if (path_from_buffer(buf, want, out, n)) {
-                mlog("minimod: path from sample+0x%lx/+0x%lx -> %s\n",
-                     (unsigned long)o, (unsigned long)k, out);
-                return 1;
-            }
-        }
-    }
-    for (long d = -0x2000; d <= 0x2000; d += 8) {
-        uintptr_t a = (uintptr_t)((long)obj + d);
-        if (!mapped((void *)a) || !rd(a, buf, sizeof buf - 1))
-            continue;
-        buf[sizeof buf - 1] = 0;
-        int printable = 1;
-        for (size_t i = 0; i < sizeof buf - 1 && buf[i]; ++i)
-            if (buf[i] < 32 || buf[i] > 126) {
-                printable = 0;
-                break;
-            }
-        if (printable && path_from_buffer(buf, want, out, n))
-            return 1;
-    }
-    return 0;
-}
 
-/* Last resort that is still exact: the app keeps its loaded copy in
- * /data/TempProjects/<project>/<name>.wav. Match by frame count, which the
- * TrimParameter reports; only accept a unique match. */
-static int wav_by_frames(unsigned want, char *out, size_t n)
-{
-    const char *root = "/data/TempProjects";
-    DIR *d = opendir(root);
-    if (!d)
-        return 0;
-    struct dirent *de;
-    char path[512];
-    int found = 0;
-    while ((de = readdir(d))) {
-        if (de->d_name[0] == '.')
-            continue;
-        char sub[512];
-        snprintf(sub, sizeof sub, "%s/%s", root, de->d_name);
-        DIR *d2 = opendir(sub);
-        if (!d2)
-            continue;
-        struct dirent *f;
-        while ((f = readdir(d2))) {
-            size_t len = strlen(f->d_name);
-            if (len < 5 || strcasecmp(f->d_name + len - 4, ".wav"))
-                continue;
-            snprintf(path, sizeof path, "%s/%s", sub, f->d_name);
-            unsigned fr = 0, rt = 0, ch = 0, doff = 0, bps = 2;
-            int ok = wav_info(path, &fr, &rt, &ch, &doff, &bps, NULL);
-            static int logged;
-            if (logged < 10) {
-                logged++;
-                mlog("minimod: wav '%s' ok=%d frames=%u ch=%u\n", f->d_name, ok,
-                     fr, ch);
-            }
-            if (!ok || fr != want)
-                continue;
-            if (found) {
-                closedir(d2);
-                closedir(d);
-                mlog("minimod: autotrim: %u frames matches more than one wav\n", want);
-                return 0;
-            }
-            snprintf(out, n, "%s", path);
-            found = 1;
-        }
-        closedir(d2);
-    }
-    closedir(d);
-    if (found)
-        mlog("minimod: autotrim: wav by frames -> %s\n", out);
-    return found;
-}
 
 
 /* The page binds each trim parameter through a small binding object whose
@@ -1138,14 +955,6 @@ static int is_info_struct(uintptr_t info)
     return (ch == 1 || ch == 2) && fr > 0 && rt >= 8000 && rt <= 192000;
 }
 
-static int holder_wav_path(uintptr_t obj, char *out, size_t n)
-{
-    char buf[512];
-    if (!rd(obj, buf, sizeof buf - 1))
-        return 0;
-    buf[sizeof buf - 1] = 0;
-    return path_from_buffer(buf, 0, out, n) || 0;
-}
 
 static int find_displayed_sample(unsigned *frames, char *path, size_t pathsz);
 static void *find_sample_screen(void)
@@ -1194,22 +1003,17 @@ static int find_displayed_sample(unsigned *frames, char *path, size_t pathsz)
         uintptr_t info = 0;
         if (!rd(child + 0x130, &info, 8) || !is_info_struct(info))
             continue;
-        char p2[512] = {0};
-        for (int f = 0; f < 0x1000; f += 8) {
-            uintptr_t cand = 0;
-            if (!rd(child + f, &cand, 8) || !cand || !mapped((void *)cand))
-                continue;
-            if (holder_wav_path(cand, p2, sizeof p2))
-                break;
-        }
         unsigned fr = 0, rate = 0;
         rd(info + 4, &fr, 4);
         rd(info + 8, &rate, 4);
         *frames = fr;
-        snprintf(path, pathsz, "%s", p2);
-        mlog("minimod: sample obj=%p info=%p frames=%u path='%s'\n", (void *)child,
-             (void *)info, fr, p2[0] ? p2 : "?");
-        return p2[0] ? 1 : 0;
+        /* The old path lookup asked for a WAV of zero frames, which can never
+         * match, so it is gone and the object's frames are all this reports. */
+        if (pathsz)
+            path[0] = 0;
+        mlog("minimod: sample obj=%p info=%p frames=%u\n", (void *)child,
+             (void *)info, fr);
+        return 0;
     }
     mlog("minimod: displayed sample struct not found (screen=%p)\n", screen);
     return 0;
@@ -1823,131 +1627,9 @@ static int hpss_read_sample(void *s, void **screen, uintptr_t *state,
     return 1;
 }
 
-/* Metadata-only reader used to match a path before decoding.  It accepts the
- * same formats as wav_read_f32 (including 64-bit float). */
-static int hpss_wav_info(const char *path, unsigned *frames, unsigned *ch,
-                         unsigned *rate)
-{
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return 0;
-    unsigned char h[12];
-    if (pread(fd, h, 12, 0) != 12 || memcmp(h, "RIFF", 4) ||
-        memcmp(h + 8, "WAVE", 4)) {
-        close(fd);
-        return 0;
-    }
-    unsigned encoding = 0, channels = 0, bits = 0, rt = 0, dof = 0, len = 0;
-    off_t off = 12;
-    for (int guard = 0; guard < 64; ++guard) {
-        unsigned char ck[8];
-        if (pread(fd, ck, 8, off) != 8)
-            break;
-        unsigned sz = (unsigned)ck[4] | ((unsigned)ck[5] << 8) |
-                      ((unsigned)ck[6] << 16) | ((unsigned)ck[7] << 24);
-        if (!memcmp(ck, "fmt ", 4) && sz >= 16 && sz <= 40) {
-            unsigned char f[40] = {0};
-            if (sz > sizeof f || pread(fd, f, sz, off + 8) != (ssize_t)sz)
-                break;
-            encoding = (unsigned)f[0] | ((unsigned)f[1] << 8);
-            channels = (unsigned)f[2] | ((unsigned)f[3] << 8);
-            rt = (unsigned)f[4] | ((unsigned)f[5] << 8) |
-                 ((unsigned)f[6] << 16) | ((unsigned)f[7] << 24);
-            bits = (unsigned)f[14] | ((unsigned)f[15] << 8);
-            if (encoding == 0xfffe && sz >= 40)
-                encoding = (unsigned)f[24] | ((unsigned)f[25] << 8);
-        } else if (!memcmp(ck, "data", 4)) {
-            dof = (unsigned)off + 8;
-            len = sz;
-            if (encoding)
-                break;
-        }
-        off += 8 + (off_t)sz + (off_t)(sz & 1);
-    }
-    close(fd);
-    if (!dof || !len || !channels || !rt || !bits)
-        return 0;
-    if (!((encoding == 1 && (bits == 16 || bits == 24 || bits == 32)) ||
-          (encoding == 3 && (bits == 32 || bits == 64))))
-        return 0;
-    unsigned bps = bits / 8;
-    *frames = len / (bps * channels);
-    *ch = channels;
-    *rate = rt;
-    return 1;
-}
 
-static int hpss_wav_matches(const char *path, unsigned frames, unsigned ch,
-                            unsigned rate)
-{
-    unsigned fr = 0, c = 0, rt = 0;
-    return hpss_wav_info(path, &fr, &c, &rt) && fr == frames && c == ch &&
-           rt == rate;
-}
 
-/* A fallback for a freshly recorded sample that has no path in its object yet:
- * accept only a unique file with the same frame count, channel count and rate.
- * Frame count alone is not a safe identity. */
-static int hpss_wav_unique(unsigned want_frames, unsigned want_ch,
-                           unsigned want_rate, char *path, size_t pathsz)
-{
-    const char *root = "/data/TempProjects";
-    DIR *d = opendir(root);
-    if (!d)
-        return 0;
-    struct dirent *de;
-    char found[512] = {0};
-    int matches = 0;
-    while ((de = readdir(d))) {
-        if (de->d_name[0] == '.')
-            continue;
-        char sub[512];
-        snprintf(sub, sizeof sub, "%s/%s", root, de->d_name);
-        DIR *d2 = opendir(sub);
-        if (!d2)
-            continue;
-        struct dirent *f;
-        while ((f = readdir(d2))) {
-            size_t len = strlen(f->d_name);
-            if (len < 5 || strcasecmp(f->d_name + len - 4, ".wav"))
-                continue;
-            char full[512];
-            snprintf(full, sizeof full, "%s/%s", sub, f->d_name);
-            unsigned fr = 0, rt = 0, ch = 0;
-            if (!hpss_wav_info(full, &fr, &ch, &rt) || fr != want_frames ||
-                rt != want_rate || ch != want_ch)
-                continue;
-            matches++;
-            if (matches == 1)
-                snprintf(found, sizeof found, "%s", full);
-        }
-        closedir(d2);
-    }
-    closedir(d);
-    if (matches != 1)
-        return 0;
-    snprintf(path, pathsz, "%s", found);
-    return 1;
-}
 
-static int hpss_path_for(uintptr_t sample, unsigned frames, unsigned ch,
-                         unsigned rate, char *path, size_t pathsz)
-{
-    char candidate[512];
-    if (path_from_object(sample, frames, candidate, sizeof candidate) &&
-        hpss_wav_matches(candidate, frames, ch, rate)) {
-        snprintf(path, pathsz, "%s", candidate);
-        return 1;
-    }
-    if (wav_path_of(sample, frames, candidate, sizeof candidate) &&
-        hpss_wav_matches(candidate, frames, ch, rate)) {
-        snprintf(path, pathsz, "%s", candidate);
-        return 1;
-    }
-    if (hpss_wav_unique(frames, ch, rate, path, pathsz))
-        return 1;
-    return 0;
-}
 
 static int hpss_free_pad(void *program)
 {

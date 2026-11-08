@@ -63,6 +63,7 @@ slice.
 | Realtime bass preview (4 voices, 16 pads) | ported | unit test: a strike is audible, decays, both channels match |
 | `fmbass_sample.c` (FM bass preset renderer) | removed | never compiled and never called; the Bass Synth action renders with `bass_sample_render` |
 | WAV reading, source backup/restore | ported | 5 host tests over synthetic files; the effects and bass device tests run on it |
+| Sample-path resolution (object graph, unique/newest file) | ported | 6 host tests; the effects and bass device tests run on it |
 | `minimod.c` (hooks, features, UI glue) | C, shrinking | — |
 
 The looper, the effects and the whole bass synth are already what the device
@@ -154,6 +155,11 @@ object references `_Unwind_Resume` and friends from its panic hook's backtrace
 path.  Without `-lunwind` the library links but the firmware refuses to start the
 app (`undefined symbol: _Unwind_Resume`, exit 127).  Linking it costs ~20 KB
 after `--gc-sections` and strip.
+
+**A dead branch was hiding in the path lookup.** `holder_wav_path` asked for a
+WAV with *zero* frames, which no file can satisfy, so the branch in
+`find_displayed_sample` that used it could never fire; it is removed rather than
+ported, and the function now reports only the frame count it can actually read.
 
 **The sampler's own recordings are not at fixed offsets.** They carry a `JUNK`
 chunk in front of `fmt `, so both the format and the data chunk have to be found
