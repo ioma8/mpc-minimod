@@ -73,6 +73,9 @@ def main():
                 return int(fields[0], 16)
         raise AssertionError(f'missing symbol {name}')
 
+    # Another acceptance run may have restarted the app a moment ago; give the
+    # panel and the audio device a moment to settle before touching anything.
+    time.sleep(2.0)
     pid = int(ssh('pidof "MPC Sample"'))
     maps = ssh(f'cat /proc/{pid}/maps').splitlines()
     mod_base = int(next(x for x in maps if x.endswith('/minimod.so')).split('-')[0], 16)
@@ -104,6 +107,19 @@ def main():
 
     def rms(values):
         return math.sqrt(sum(v * v for v in values) / len(values))
+
+    def settled_rms(timeout=3.0):
+        """RMS of the output once it stops changing, so a knob turn that is
+        still travelling through the panel cannot be measured half-applied."""
+        previous = None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            value = rms(output_tail())
+            if previous is not None and abs(value - previous) < 0.02 * max(previous, 1e-9):
+                return value
+            previous = value
+            time.sleep(0.1)
+        return previous
 
     def zero_cross_hz(values, rate=44100):
         crossings = sum(1 for a, b in zip(values, values[1:]) if (a < 0) != (b < 0))
@@ -179,16 +195,9 @@ def main():
 
     # --- MAIN VOLUME scales the loops like the rest of the app
     control('MAIN VOLUME', 'set', 127)
-    time.sleep(0.3)
-    vol_full = rms(output_tail())
+    vol_full = settled_rms()
     control('MAIN VOLUME', 'set', 64)
-    # The knob travels through the emulator panel asynchronously, so wait for
-    # the change to become audible instead of assuming a fixed delay.
-    deadline = time.monotonic() + 2.0
-    vol_half = rms(output_tail())
-    while vol_half > 0.7 * vol_full and time.monotonic() < deadline:
-        time.sleep(0.05)
-        vol_half = rms(output_tail())
+    vol_half = settled_rms()
     control('MAIN VOLUME', 'set', 127)
     time.sleep(0.2)
     assert 0.35 < vol_half / vol_full < 0.65, (vol_half, vol_full)

@@ -13,6 +13,8 @@
 
 use core::fmt;
 
+pub mod bass;
+pub mod dsp;
 pub mod fft;
 pub mod hpss;
 pub mod looper;

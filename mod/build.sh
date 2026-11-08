@@ -6,17 +6,10 @@ cd "$(dirname "$0")"
 mkdir -p build
 
 common="-target aarch64-linux-gnu -fPIC -O2 -fno-omit-frame-pointer -mbranch-protection=standard -Wall -Wextra -ffunction-sections -fdata-sections"
-daisy="third_party/daisysp/Source"
 
 zig cc $common -c src/minimod.c -o build/minimod.o
 zig cc $common -c src/hpss.c -o build/hpss.o
 zig cc $common -c src/spectral.c -o build/spectral.o
-zig c++ $common -fno-exceptions -fno-rtti -I"$daisy" -c src/bass_sample.cpp -o build/bass_sample.o
-zig c++ $common -fno-exceptions -fno-rtti -fvisibility=hidden -I"$daisy" -I"$daisy/Utility" -c "$daisy/PhysicalModeling/stringvoice.cpp" -o build/daisy_stringvoice.o
-zig c++ $common -fno-exceptions -fno-rtti -fvisibility=hidden -I"$daisy" -I"$daisy/Utility" -c "$daisy/PhysicalModeling/karplusstring.cpp" -o build/daisy_karplusstring.o
-zig c++ $common -fno-exceptions -fno-rtti -fvisibility=hidden -I"$daisy" -I"$daisy/Utility" -c "$daisy/Filters/svf.cpp" -o build/daisy_svf.o
-zig c++ $common -fno-exceptions -fno-rtti -fvisibility=hidden -I"$daisy" -I"$daisy/Utility" -c "$daisy/Utility/dcblock.cpp" -o build/daisy_dcblock.o
-zig c++ $common -fno-exceptions -fno-rtti -fvisibility=hidden -I"$daisy" -I"$daisy/Utility" -c "$daisy/Dynamics/crossfade.cpp" -o build/daisy_crossfade.o
 
 # The looper engine is Rust.  Its static library carries the C ABI the rest of
 # the mod calls, so the C side does not change while the port lands feature by
@@ -30,8 +23,12 @@ fi
 rustlib=../rust/target/aarch64-unknown-linux-gnu/release/libminimod.a
 test -f "$rustlib" || { echo "Rust static library missing" >&2; exit 1; }
 
-objects="build/minimod.o build/hpss.o build/spectral.o build/bass_sample.o build/daisy_stringvoice.o build/daisy_karplusstring.o build/daisy_svf.o build/daisy_dcblock.o build/daisy_crossfade.o"
-zig c++ -target aarch64-linux-gnu -shared -fPIC -Wl,--gc-sections -o build/minimod.elf $objects "$rustlib" -lm
+objects="build/minimod.o build/hpss.o build/spectral.o"
+# `-lunwind`: the Rust standard library object references the unwinder even in a
+# `panic = "abort"` build (the panic hook's backtrace path), so the symbols have
+# to resolve at load time or the firmware refuses to start the whole process.
+# Linking it costs ~20 KB after --gc-sections and strip.
+zig cc -target aarch64-linux-gnu -shared -fPIC -Wl,--gc-sections -o build/minimod.elf $objects "$rustlib" -lm -lunwind
 nm build/minimod.elf | awk '$3=="g_screen"{print $1" g_screen"}' > build/minimod.map
 grep -q ' g_screen$' build/minimod.map || { echo "g_screen missing from the build" >&2; exit 1; }
 # The emulator test reads the looper's pad array and its stride by symbol.

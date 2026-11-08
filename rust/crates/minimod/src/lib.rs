@@ -11,6 +11,7 @@
 
 #![deny(clippy::panic, clippy::todo, clippy::unimplemented)]
 
+pub mod bass_ffi;
 pub mod effect;
 pub mod effect_ffi;
 pub mod firmware;

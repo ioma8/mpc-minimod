@@ -59,13 +59,14 @@ slice.
 | Sample conversion (S32 ↔ f32) | ported | golden fixture, bit-identical |
 | Firmware core: load base, `/proc/self/mem` access, branch hooks | ported | unit tests for the encodings; the loader walk cross-checks the C base on the device |
 | Firmware effects: reverb, vinyl, decimator | ported | all three emulator effect tests |
-| `bass_sample.cpp`, `fmbass_sample.c` | C | — |
-| DaisySP (SVF, Karplus, StringVoice, DC block, crossfade) | C++ | — |
+| Bass synth: Karplus string, SVF, DC blocker, crossfade, dust | ported | golden fixture, **bit-identical** over 132 300 samples; emulator bass test |
+| Realtime bass preview (4 voices, 16 pads) | ported | unit test: a strike is audible, decays, both channels match |
+| `fmbass_sample.c` (FM bass preset renderer) | removed | never compiled and never called; the Bass Synth action renders with `bass_sample_render` |
 | `minimod.c` (hooks, features, UI glue) | C | — |
 
-The looper is already the one the device runs: `mod/build.sh` links the Rust
-static library instead of `looper.c`, and the emulator acceptance test passes
-against it.
+The looper, the effects and the whole bass synth are already what the device
+runs: `mod/build.sh` links the Rust static library instead of the C engines, and
+the emulator acceptance test for each passes against it.
 
 ## How the looper is proven
 
@@ -119,6 +120,25 @@ bit 10 for `RET`, which matches `ret x0` and no real `ret` (the register field
 sits in bits 5-9).  The port masks the register field, so `ret` and `ret xN` are
 both refused as trampoline material.  That can only make the displacement window
 shorter, never wrong.
+
+**The note frequency is a bit pattern.** `bass_sample.cpp` tunes to
+`65.4063913f`; writing `65.40639` in Rust is one ulp lower, and that one ulp
+detunes the whole string (the delay is derived from it), which showed up as a
+1e-6 offset in every sample of the golden trace.  `NOTE_HZ` is therefore
+`f32::from_bits(0x4282_d013)` with a comment saying why.
+
+**The reference has to be built without FMA contraction to be comparable.** The
+Rust port never contracts `a * b + c`; clang does at `-O2`.  For the synth
+fixture the reference is compiled with `-ffp-contract=off` so both sides evaluate
+the same expression, which is what makes a bit-exact comparison meaningful.  (The
+looper fixture goes the other way: its reference *is* contracted, and the Rust
+mix uses `mul_add` to match it.)
+
+**The unwinder is needed even with `panic = "abort"`.** The Rust standard library
+object references `_Unwind_Resume` and friends from its panic hook's backtrace
+path.  Without `-lunwind` the library links but the firmware refuses to start the
+app (`undefined symbol: _Unwind_Resume`, exit 127).  Linking it costs ~20 KB
+after `--gc-sections` and strip.
 
 **Linker noise.** rustc asks the linker for `-Wl,-O1`; lld has deprecated it and
 zig forwards it verbatim, so every cross build printed a warning. The cross

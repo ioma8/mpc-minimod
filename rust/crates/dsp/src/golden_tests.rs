@@ -226,6 +226,42 @@ fn looper_trace_matches_the_reference() {
 }
 
 #[test]
+fn bass_matches_the_reference() {
+    // The reference was compiled with its `rand()` replaced by the same
+    // deterministic generator `SequenceNoise` implements, so the whole voice
+    // chain is comparable sample for sample.
+    let want = floats("bass_audio.bin");
+    let frames = usize::try_from(integers("bass_frames.bin")[0]).unwrap_or(0);
+    let got = crate::bass::render_with(
+        44_100,
+        0.55,
+        0.35,
+        0.62,
+        &mut crate::dsp::SequenceNoise::new(1),
+    )
+    .expect("renders");
+    assert_eq!(got.frames, frames);
+    assert_eq!(got.audio.len(), want.len());
+    let mut mismatches = 0_usize;
+    let mut first = None;
+    for (index, (value, expected)) in got.audio.iter().zip(want.iter()).enumerate() {
+        if value.to_bits() != expected.to_bits() {
+            mismatches += 1;
+            first.get_or_insert((index / 2, index % 2, *value, *expected));
+        }
+    }
+    let max = got
+        .audio
+        .iter()
+        .zip(want.iter())
+        .fold(0.0_f32, |peak, (a, b)| peak.max((a - b).abs()));
+    assert_eq!(
+        mismatches, 0,
+        "bass output differs in {mismatches} samples, first at {first:?}, max {max:e}"
+    );
+}
+
+#[test]
 fn looper_view_matches_the_c_layout() {
     use core::mem::{offset_of, size_of};
     // The paint hook in the firmware glue reads this struct through the C ABI,
@@ -253,6 +289,43 @@ fn convert_matches_the_reference() {
             "pair {i}: {:?} vs {:?}",
             pairs[i * 2],
             pairs[i * 2 + 1]
+        );
+    }
+}
+#[test]
+fn probe_synth_chain() {
+    use crate::dsp::SequenceNoise;
+    use crate::dsp::filters::Svf;
+    use crate::dsp::string_voice::StringVoice;
+    let mut noise = SequenceNoise::new(1);
+    let harmonics = 0.55_f32;
+    let drive = 0.35_f32;
+    let cutoff = 0.62_f32;
+    let mut voice = StringVoice::new(44_100.0);
+    voice.set_sustain(false);
+    voice.set_frequency(65.406_39);
+    voice.set_accent(0.65 + drive * 0.35);
+    voice.set_structure(0.25 + drive * 0.6);
+    voice.set_brightness(0.05 + harmonics * 0.9);
+    voice.set_damping(0.35 + (1.0 - harmonics) * 0.55);
+    voice.trigger();
+    let mut filter = Svf::new(44_100.0);
+    let ch = 700.0 * 24.0_f32.powf(cutoff);
+    filter.set_frequency(if ch < 44_100.0 * 0.45 {
+        ch
+    } else {
+        44_100.0 * 0.45
+    });
+    filter.set_resonance(0.05);
+    filter.set_drive(drive * 0.35);
+    for i in 0..5 {
+        let s = voice.process(i == 0, &mut noise);
+        filter.process(s);
+        println!(
+            "i={i} voice={:08x} low={:08x} aux={:08x}",
+            s.to_bits(),
+            filter.low_pass().to_bits(),
+            voice.aux().to_bits()
         );
     }
 }
