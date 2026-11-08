@@ -502,128 +502,6 @@ static int g_trim_step;
 static double g_trim_ratio;
 static int g_b3_down;      /* edge detection: the button auto-repeats while held */
 
-static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
-                     unsigned ch, unsigned bps, unsigned format, unsigned *first, unsigned *last)
-{
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return 0;
-    if (!ch)
-        ch = 1;
-    if (bps < 2 || bps > 4)
-        bps = 2;
-    /* Threshold: relative to the file's peak so quiet material is trimmed as
-     * well, with an absolute floor so a nearly silent file is not trimmed to
-     * nothing. g_trim_ratio is set per SHIFT+B3 press (3 %, then 6 %);
-     * MINIMOD_TRIM_DB overrides the relative part for the default case. */
-    unsigned char buf[16384];
-    short thr = 328; /* -40 dBFS fallback */
-    {
-        double db = -30.45757490560675; /* 3% of peak: three times the old threshold */
-        double ratio;
-        if (g_trim_ratio > 0.0) {
-            ratio = g_trim_ratio;
-        } else {
-            const char *e = getenv("MINIMOD_TRIM_DB");
-            if (e && *e)
-                db = atof(e);
-            if (db < -90.0) db = -90.0;
-            if (db > -6.0) db = -6.0;
-            ratio = pow(10.0, db / 20.0);
-        }
-        int peak = 0;
-        unsigned g = 0;
-        while (g < frames) {
-            ssize_t n = pread(fd, buf, sizeof buf, (off_t)dataoff + (off_t)g * bps * ch);
-            if (n <= 0)
-                break;
-            unsigned got = (unsigned)(n / (bps * ch));
-            for (unsigned i = 0; i < got; ++i)
-                for (unsigned c = 0; c < ch; ++c) {
-                    int v = pcm_at(buf + (i * ch + c) * bps, bps, format);
-                    if (v < 0) v = -v;
-                    if (v > peak) peak = v;
-                }
-            g += got;
-            if (got < sizeof buf / (bps * ch))
-                break;
-        }
-        if (peak > 0) {
-            double t = (double)peak * ratio;
-            if (t < 90.0) t = 90.0;      /* absolute floor ~ -51 dBFS */
-            if (t > 30000.0) t = 30000.0;
-            thr = (short)t;
-            mlog("minimod: trim threshold ratio %.4f peak %d -> %d\n", ratio,
-                 (int)peak, (int)thr);
-        }
-    }
-    unsigned f = 0;
-    int found_first = 0;
-    while (f < frames && !found_first) {
-        ssize_t n = pread(fd, buf, sizeof buf, (off_t)dataoff + (off_t)f * bps * ch);
-        if (n <= 0)
-            break;
-        unsigned got = (unsigned)(n / (bps * ch));
-        for (unsigned i = 0; i < got; ++i) {
-            int loud = 0;
-            for (unsigned c = 0; c < ch; ++c) {
-                int v = pcm_at(buf + (i * ch + c) * bps, bps, format);
-                if (v > thr || v < -thr)
-                    loud = 1;
-            }
-            if (loud) {
-                *first = f + i;
-                found_first = 1;
-                break;
-            }
-        }
-        f += got;
-        if (got < sizeof buf / (bps * ch))
-            break;
-    }
-    if (!found_first) {
-        close(fd);
-        return 0;
-    }
-    unsigned stop = f > frames ? frames : f;
-    unsigned lastf = *first;
-    /* Walk backwards in blocks: one pread per frame froze the UI thread on a
-     * 15k-frame sample, and the stock library has 500k-frame ones. */
-    unsigned block = (unsigned)(sizeof buf / (bps * ch));
-    if (!block)
-        block = 1;
-    unsigned end = frames;
-    while (end > 0) {
-        unsigned start = end > block ? end - block : 0;
-        unsigned cnt = end - start;
-        ssize_t n = pread(fd, buf, (size_t)cnt * bps * ch,
-                          (off_t)dataoff + (off_t)start * bps * ch);
-        if (n <= 0)
-            break;
-        unsigned got = (unsigned)(n / (bps * ch));
-        int found = 0;
-        for (unsigned i = got; i-- > 0;) {
-            int loud = 0;
-            for (unsigned c = 0; c < ch; ++c) {
-                int v = pcm_at(buf + (i * ch + c) * bps, bps, format);
-                if (v > thr || v < -thr)
-                    loud = 1;
-            }
-            if (loud) {
-                lastf = start + i;
-                found = 1;
-                break;
-            }
-        }
-        if (found)
-            break;
-        end = start;
-    }
-    (void)stop;
-    close(fd);
-    *last = lastf;
-    return 1;
-}
 
 /* --------------------------------------------------------- trim parameter */
 static struct {
@@ -4448,7 +4326,8 @@ static void do_autotrim(void)
     } else {
         g_trim_ratio = g_trim_step == 0 ? 0.03
                      : g_trim_step == 1 ? 0.06 : 0.09;
-        int ok = wav_edges(path, fr, off, ch, bytes, format, &first, &last);
+        int ok = wav_edges(path, fr, off, ch, bytes, format, g_trim_ratio,
+                           &first, &last);
         g_trim_ratio = 0.0;
         if (!ok)
             return;

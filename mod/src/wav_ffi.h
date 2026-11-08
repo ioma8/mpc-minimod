@@ -25,4 +25,9 @@ int bass_source_restore(const char *path, off_t data_offset,
 /* One sample, scaled to the 16-bit range the trim logic compares against. */
 int pcm_at(const unsigned char *p, unsigned bps, unsigned format);
 
+/* The first and last audible frame; `ratio` 0 means the default threshold. */
+int wav_edges(const char *path, unsigned frames, unsigned dataoff, unsigned ch,
+              unsigned bps, unsigned format, double ratio, unsigned *first,
+              unsigned *last);
+
 #endif

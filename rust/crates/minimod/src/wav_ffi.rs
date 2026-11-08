@@ -233,3 +233,51 @@ pub unsafe extern "C" fn bass_source_restore(
     let chunk = unsafe { core::slice::from_raw_parts(data, data_size) };
     i32::from(wav::restore_data(path, offset, chunk).is_ok())
 }
+
+/// The first and last audible frame of a recording.
+///
+/// # Safety
+///
+/// `path` must be a NUL-terminated string; `first` and `last` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wav_edges(
+    path: *const c_char,
+    frames: u32,
+    data_offset: u32,
+    channels: u32,
+    width: u32,
+    format: u32,
+    ratio: f64,
+    first: *mut u32,
+    last: *mut u32,
+) -> i32 {
+    if first.is_null() || last.is_null() {
+        return 0;
+    }
+    // SAFETY: see the function contract.
+    let Some(path) = (unsafe { c_path(path) }) else {
+        return 0;
+    };
+    let (Ok(channels), Ok(width)) = (u16::try_from(channels), u16::try_from(width)) else {
+        return 0;
+    };
+    let layout = crate::trim::Layout {
+        data_offset: u64::from(data_offset),
+        channels,
+        width,
+        encoding: if format == 3 {
+            Encoding::Float
+        } else {
+            Encoding::Pcm
+        },
+    };
+    let Some(edges) = crate::trim::edges(path, layout, frames, ratio) else {
+        return 0;
+    };
+    // SAFETY: the caller promises both pointers are writable.
+    unsafe {
+        *first = edges.first;
+        *last = edges.last;
+    }
+    1
+}

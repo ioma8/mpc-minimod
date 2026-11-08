@@ -22,5 +22,6 @@ pub mod paths_ffi;
 pub mod sample;
 pub mod status;
 pub mod status_ffi;
+pub mod trim;
 pub mod wav;
 pub mod wav_ffi;
