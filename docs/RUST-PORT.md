@@ -294,9 +294,17 @@ and the Rust one
 
     264, 30059, 45419                     (detected = 3)
 
-Both `positions` *and* `detected` differ, and `detected` is the candidate count
-after the novelty filter - so the divergence starts in candidate detection, not
-in the chroma/timbre thresholds at the end.  Two onsets are simply not found.
+Both `positions` *and* `detected` differ.  I first read that as "the divergence
+starts in candidate detection", but `detected` is `nkeep`, i.e. the count
+**after** the novelty filter - so a stricter filter in the Rust version explains
+5 vs 3 just as well.  That attribution was not proven either.
+
+What has been checked and matched: the Hann window (symmetric, `/ (N-1)`), the
+hop (512), the frame count (`ceil(frames/hop)`), the three-band split at 250 Hz
+and 2 kHz with per-band mean normalisation, the flux formula, the peak-picking
+rule and the novelty thresholds.  What has not been compared is the magnitude
+pipeline between the FFT and the two feature matrices (chroma bin mapping and the
+log-spaced timbre edges), which is where the remaining difference has to be.
 
 The Rust detector was then given the case the old fixture could not express - a
 take that starts with a quarter second of silence and then hits, which is what
