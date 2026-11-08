@@ -31,6 +31,9 @@ enum {
     LOOP_DRAIN = 5   /* take closed, still capturing the latency tail */
 };
 
+/* The view drawing is Rust (rust/crates/minimod/src/looper_view.rs). */
+void minimod_looper_draw(uintptr_t graphics);
+
 struct looper_pad_view {
     unsigned char state;
     unsigned len_frames;   /* closed loop length (0 while recording) */

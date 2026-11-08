@@ -28,6 +28,7 @@ pub mod job;
 pub mod jobflow;
 pub mod levels;
 pub mod looper_ffi;
+pub mod looper_view;
 pub mod menu;
 pub mod midi;
 pub mod pads;
