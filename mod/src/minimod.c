@@ -373,31 +373,33 @@ static pthread_mutex_t g_rng_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 static void ranges_load(void)
 {
-    pthread_mutex_lock(&g_rng_mtx);
-    if (__atomic_load_n(&g_rng_loaded, __ATOMIC_ACQUIRE)) {
-        pthread_mutex_unlock(&g_rng_mtx);
+    if (__atomic_load_n(&g_rng_loaded, __ATOMIC_ACQUIRE))
         return;
-    }
-    FILE *f = fopen("/proc/self/maps", "r");
-    if (!f) {
-        pthread_mutex_unlock(&g_rng_mtx);
-        return;
-    }
+    /* Read the file without the lock: it is blocking I/O and two concurrent
+     * loaders merely duplicate one read; the first one to install wins. */
+    struct rng local[512];
     int n = 0;
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f)
+        return;
     char line[512];
     while (fgets(line, sizeof line, f) && n < 512) {
         unsigned long lo = 0, hi = 0;
         char perms[8] = {0};
         if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3)
             continue;
-        g_rng[n].lo = lo;
-        g_rng[n].hi = hi;
-        g_rng[n].w = perms[1] == 'w';
+        local[n].lo = lo;
+        local[n].hi = hi;
+        local[n].w = perms[1] == 'w';
         n++;
     }
     fclose(f);
-    __atomic_store_n(&g_nrng, n, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_rng_loaded, 1, __ATOMIC_RELEASE);
+    pthread_mutex_lock(&g_rng_mtx);
+    if (!__atomic_load_n(&g_rng_loaded, __ATOMIC_ACQUIRE)) {
+        memcpy(g_rng, local, (size_t)n * sizeof local[0]);
+        __atomic_store_n(&g_nrng, n, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_rng_loaded, 1, __ATOMIC_RELEASE);
+    }
     pthread_mutex_unlock(&g_rng_mtx);
 }
 
@@ -412,7 +414,11 @@ static uint32_t enc_b(uintptr_t from, uintptr_t to)
     long off = (long)to - (long)from;
     if (off < -(1L << 27) || off >= (1L << 27))
         return 0;
-    return 0x14000000u | ((uint32_t)(off >> 2) & 0x03FFFFFFu);
+    /* Cast before the shift: a negative signed shift is implementation-defined.
+     * The low 26 bits of (uint32_t)off >> 2 are the same two's-complement
+     * offset the encoder needs. */
+    uint32_t imm = ((uint32_t)off >> 2) & 0x03FFFFFFu;
+    return 0x14000000u | imm;
 }
 
 static int pc_relative(uint32_t insn)
@@ -700,6 +706,8 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
      * is refused instead of scanned. */
     if (ch < 1 || ch > 2 || bps < 2 || bps > 4)
         return 0;
+    if ((format != 1 && format != 3) || (format == 3 && bps != 4))
+        return 0;
     const unsigned frame_bytes = bps * ch;
     int fd = open(path, O_RDONLY);
     if (fd < 0)
@@ -928,7 +936,7 @@ static float *sample_memory_read(uintptr_t sample, unsigned *frames,
         size_t n = (cells - at) * sizeof(float);
         if (n > chunk)
             n = chunk;
-        if (!rd(buf + at * sizeof(float), (char *)out + at * sizeof(float), n)) {
+        if (!rd(buf + at * sizeof(float), out + at, n)) {
             free(out);
             return 0;
         }
@@ -3229,6 +3237,7 @@ static void chop_probe_run(void)
              (void *)b, fr, cc, rt);
         if (ok) {
             unsigned char tmp[16384];
+            memset(tmp, 0, sizeof tmp);
             int peak = 0;
             unsigned g = 0;
             const unsigned stride = 4 * cc;
@@ -4160,7 +4169,7 @@ static void bass_audio_writer(void *self, void *input, size_t frames, int offset
         }
         float *p = source[i];
         if (!p || ((uintptr_t)p & 3) || !mapped(p) ||
-            !mapped((const char *)p + (frames - 1) * 4)) {
+            !mapped((const void *)((uintptr_t)p + (frames - 1) * sizeof(float)))) {
             orig_bass_audio_writer(self, input, frames, offset);
             return;
         }
@@ -4983,6 +4992,8 @@ static void dump_sliders(void *p)
 static void screen_paint(void *p, void *g)
 {
     static int logged;
+    if (!p)
+        return;
     g_paint_comp = p;
     g_paint_gfx = g;
     if (!logged && p) {

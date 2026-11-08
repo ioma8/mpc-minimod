@@ -394,5 +394,10 @@ A full read of `mod/src` with sanitizer runs and targeted repros found and fixed
     the bass preview checks the source pointer slot is mapped before reading it.
     The installed hook word is read back and compared, and a non-finite preview
     velocity is ignored.
+12. **Static analysis** — cppcheck, the Clang Static Analyzer and clang-tidy were
+    run over the tree (recipe in `TOOLING.md` §7). They found `fgets` under the
+    maps mutex, a null paint component, a negative right shift in the branch
+    encoder and the float-WAV byte-width contract; all are fixed and both
+    analyzers are clean on the shipped sources.
 
 ---

@@ -263,3 +263,43 @@ exported by the device (`converter/docs/DEVICE-PROBE.md`).
 | "does the feature work?" | emulator test reading the model/audio, not the log |
 | "is it the same build?" | sha256 of the app and the deployed library |
 | "what does the device do differently?" | `probe-tanf.so` on hardware, solo-project exports |
+
+## 7. Static analysis
+
+Two analyzers run over `mod/src`; both are clean on the shipped tree.
+
+```sh
+cd mod
+# cppcheck, release and debug configurations
+cppcheck --enable=warning,performance,portability --inconclusive --std=c11 \
+  --platform=unix64 --suppress=missingIncludeSystem --suppress=unusedFunction \
+  -DMINIMOD_DEBUG=0 -DMINIMOD_LOG=0 src/*.c
+
+# Clang Static Analyzer and clang-tidy, using the aarch64/glibc headers that zig
+# ships. Z is the lib_dir printed by `zig env`.
+Z=$(zig env | sed -n 's/.*lib_dir = "\(.*\)",/\1/p')
+INC="-isystem $Z/include -isystem $Z/libc/include/aarch64-linux-gnu \
+     -isystem $Z/libc/include/generic-glibc -isystem $Z/libc/include/any-linux-any \
+     -isystem $Z/libc/include/aarch64-linux-any"
+clang --target=aarch64-linux-gnu -std=gnu11 -O1 $INC -Isrc --analyze \
+  -Xanalyzer -analyzer-output=text src/minimod.c
+clang-tidy src/minimod.c -checks='-*,clang-analyzer-*,bugprone-*,cert-*' -- \
+  -target aarch64-linux-gnu -std=gnu11 -O1 $INC -Isrc
+```
+
+The analyzer also runs on `hpss.c`, `spectral.c`, `h3m_effect.c` (and
+`bass_sample.cpp` with `-std=c++17 -Ithird_party/daisysp/Source`).
+
+What is noise here: `performance-no-int-to-ptr` and
+`clang-analyzer-security.MmapWriteExec` are the design (app addresses; the relay
+and trampoline pages are RWX only while a hook is written),
+`clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling` asks for
+C11 Annex-K functions the device's glibc does not have,
+`bugprone-signed-bitwise`/`narrowing-conversions` fire on promoted bytes and
+uint→float DSP conversions, and `cert-err33-c` is mostly `snprintf`/`fclose`
+returns (the bounded path buffers fail downstream safely). DaisySP headers are
+third party.
+
+The audit fixed what the analyzers did find: `fgets` under the maps mutex, a
+null paint component, the negative right shift in `enc_b`, and the float-WAV
+byte-width contract.
