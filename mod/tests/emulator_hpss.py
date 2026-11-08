@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--panel', default='http://127.0.0.1:8765')
+    parser.add_argument('--lab', default=str(ROOT.parent / 'virtual-mpc-sample'),
+                        help='the virtual lab checkout (for the mod ELF symbols)')
     args = parser.parse_args()
 
     def ssh(command):

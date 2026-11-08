@@ -277,6 +277,20 @@ Rust static library in its place, and the emulator test for that feature becomes
 the acceptance gate. The C sources stay in `mod/src` until the whole mod is Rust
 because they are the reference the golden fixtures are recorded from.
 
+## Running the device suite
+
+Every test drives the app from a fresh start; running one straight after another
+without `systemctl restart ac50` fails on the previous test's screen state (the
+looper reports "the looper view did not open" if the bass page is still up).  A
+full run, verified on the round-51 artifact:
+
+    for t in looper bass_sample midi_chromatic spectral hpss; do
+        ssh ... 'systemctl restart ac50'; sleep 30
+        python3 mod/tests/emulator_$t.py --lab ~/projects/customs/virtual-mpc-sample
+    done
+
+All five pass (Reverb separately, `--effect reverb`).
+
 ## Dead sources removed
 
 Three C files were still in the tree but no longer compiled: `looper.c` (684
