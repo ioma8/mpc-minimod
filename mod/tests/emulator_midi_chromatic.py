@@ -4,7 +4,8 @@ Preconditions: the mod is preloaded; MIDI Config has MIDI Port=External and
 Pad MIDI In=On; a populated sample pad is selected in Sample Mode. The test
 uses the panel's external-MIDI input endpoint, then reads the mod's internal
 verification counters through /proc/<pid>/mem. The pitch delta is checked
-against the sample's own root note (data+0x3e4), not against C3.
+against the sample's own root note (data+0x3e4), not against C3, and a pad
+press is asserted to stay on the firmware's own path.
 """
 import argparse
 import json
@@ -83,6 +84,14 @@ def main():
     if not integer('g_levels'):
         tap('16 LEVELS')
     assert integer('g_levels') == 1, '16 Levels did not become active'
+
+    # Pads played on the device are not external MIDI: they must keep the
+    # firmware's own 16-Levels slot mapping, so the mod must not transform them.
+    before_pads = integer('g_midi_chromatic_count')
+    tap('PAD 2'); time.sleep(.3)
+    tap('PAD 1'); time.sleep(.3)
+    assert integer('g_midi_chromatic_count') == before_pads, \
+        'a pad press was treated as external MIDI'
 
     before = integer('g_midi_chromatic_count')
     for message in ('90 3c 64', '80 3c 00', '90 3d 64', '80 3d 00',

@@ -96,7 +96,9 @@ change it — a dedicated UI-selection source would be needed before release.
 an external keyboard plays the selected sample chromatically over the whole
 keyboard: the sample's **own root note** is the original pitch (C3/MIDI 60 when
 the sample carries none), each semitone is one semitone, no wrapping, no
-fallback to other pads. Chords, note-offs and sustain
+fallback to other pads. This applies **only to notes from outside the app**;
+pads played on the device in 16 Levels keep the firmware's own slot mapping
+(slot 0 = the sample at its root), exactly as before. Chords, note-offs and sustain
 stay in the firmware's own path. With 16 Levels off, events pass through
 unchanged.
 
