@@ -312,6 +312,12 @@ flag struct moved **together**, not the flags first.
 
 ## The paint hook
 
+Drawing and the toast are ported (`paint`) and wired.  The crash that blocked it
+was not the drawing at all: `minimod_set_base` was declared and implemented but
+**never called**, so `firmware::base()` returned 0 and every Rust draw jumped to
+`0 + offset`.  One line in the constructor fixed it (`base = found;
+minimod_set_base(base);`) and all six device tests pass with the Rust draws.
+
 Drawing and the toast are ported (`paint`) but **cannot be wired yet**: every
 attempt makes the app crash-loop at startup (`NRestarts=5` within seconds, before
 any interaction), so the fault is in the first paint, not in a toast.  The Rust
