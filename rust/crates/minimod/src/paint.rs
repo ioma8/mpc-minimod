@@ -150,9 +150,11 @@ fn redraw(repaint: Option<Repaint>, component: usize) {
 
 /// Show a toast for the standard one second.
 pub fn show_toast(text: &str) {
-    // SAFETY: the text is valid for the call, and the module owns the buffer it
-    // is copied into.
-    unsafe { minimod_toast(text.as_ptr(), None, 0) };
+    // The C entry point reads a NUL-terminated string, so hand it one.
+    let mut line = text.as_bytes().to_vec();
+    line.push(0);
+    // SAFETY: the buffer is NUL-terminated and lives for the call.
+    unsafe { minimod_toast(line.as_ptr(), None, 0) };
 }
 
 /// The toast's text, or an empty string.

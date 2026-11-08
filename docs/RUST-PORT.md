@@ -336,9 +336,17 @@ page's sample, resolve its WAV, hand it to the machine, close the menu, show the
 result.
 
 It is **not wired**.  Wiring it - the struct in C, the five glue functions
-replaced by shims - built cleanly but the Spectral Chop device test failed twice,
-so the port is wrong somewhere the compiler cannot see.  The module and its tests
-stay; the glue keeps doing the work until the difference is understood.
+replaced by shims - built cleanly but the Spectral Chop device test failed three
+times: the app restarts (one auto-restart) and the run never completes.
+
+Ruled out so far: the toast was handed a `&str` without a NUL and grew a
+terminator (fixed, no change); the path helper is the same Rust function the glue
+calls (`hpss_path_for` is declared in `paths_ffi.h`, implemented in `paths`); the
+sample reader is the same `minimod_sample_now`; the menu struct matches.
+
+What is left is the difference between the glue's two-step read (`hpss_read_sample`
+then `hpss_path_for` then `wav_read_f32`, all from `screen_paint`) and the module's
+one-step version.  The next probe is to log which stage completes.
 
 ## What the last 3 287 lines are
 
