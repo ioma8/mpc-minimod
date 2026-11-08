@@ -15,9 +15,9 @@ Verified by `mod/tests/emulator_spectral.py` with the release build, one boot,
 release library digest checked on the device:
 
 ```
-PASS boot 1: first from Trim; exact 10 boundaries, Manual, pid=13416
-PASS boot 1: repeat;         exact 10 boundaries, Manual, pid=13416
-PASS boot 1: repeat again;   exact 10 boundaries, Manual, pid=13416
+PASS boot 1: first from Trim; exact 5 boundaries, Manual, pid=61243
+PASS boot 1: repeat;         exact 5 boundaries, Manual, pid=61243
+PASS boot 1: repeat again;   exact 5 boundaries, Manual, pid=61243
 boot 1: regions initial type=0     PASS boot 1: regions
 boot 1: threshold initial type=1   PASS boot 1: threshold
 PASS boot 1: after pad playback
@@ -25,8 +25,7 @@ PASS: menu, model, repeat, modes, playback, re-entry and restart checks
 ```
 
 The test pins the fixture's exact boundaries:
-`[0, 1536, 12288, 24064, 36352, 48128, 60416, 67584, 72192, 84480]` with the
-last slice ending at `88200`. It also asserts the chop type is Manual (`0`),
+`[264, 14187, 30059, 45419, 54635]` with the last slice ending at `62259`. It also asserts the chop type is Manual (`0`),
 that the pid does not change, that `NRestarts` does not change, and that
 re-entering the Chop view keeps the markers.
 

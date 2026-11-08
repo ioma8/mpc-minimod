@@ -102,21 +102,22 @@ script via `sh "<script>"`.
 
 ### 2.3 `autorun.check`
 
-**[VALIDATED]** A 64-character lowercase hex digest with no trailing newline:
+**[VALIDATED]** A 64-character lowercase hex digest with no trailing newline.
+
+**[VALIDATED] The digest is**
 
 ```
-304a89b27a79b49f51e006349c21e150267bd7a4304817124ed222233e45c1cd
+sha256( bytes(autorun.json) || bytes(autorun.sh) || "f7bed1c9-7e90-4731-9194-c996666b4331" )
 ```
 
-**[DISPROVED]** It is not a plain hash of the obvious inputs. Fifteen
-constructions were tried and none matched: `sha256` of `autorun.json` (raw,
-stripped, re-serialised compact, sorted keys), of `autorun.sh`, double-hashing
-either, concatenating the folder's file hashes, or `sha256sum`-formatted text.
-The app links no OpenSSL, so it carries its own digest implementation.
+i.e. the two files followed by a fixed 36-byte salt. This reproduces the shipped
+SampQOL package exactly (`5e2803df…`) and matches
+`mpc-ui-toolkit/tools/pack-autorun.sh`; [`../mod/pack.sh`](../mod/pack.sh)
+regenerates it for minimod. The salt is why fifteen earlier constructions
+failed — none of them included it. Changing either file therefore requires
+recomputing the check; nothing else about the folder is covered.
 
-**[INFERRED]** The device hashes the manifest (or the whole folder) and compares
-it with `autorun.check`. The manual is explicit: *"the MPC checks them and
-ignores a changed folder."*
+**[INFERRED]** The app builds the digest itself (it links no OpenSSL).
 
 ### 2.4 What the shipped script does about it
 
@@ -135,38 +136,17 @@ script's own `sha256sum -c` on its payload.
 
 ---
 
-## 3. The gate: can we run our own code?
+## 3. The gate: solved
 
-To run our own script we must either
+**[VALIDATED]** The check is a plain SHA-256 with a fixed salt (§2.3), so **any**
+script boots as long as the folder carries a matching `autorun.check`. No
+experiment and no "change only the files the check does not cover" workaround is
+needed: [`../mod/pack.sh`](../mod/pack.sh) writes a valid package from scratch,
+and that is how minimod ships.
 
-* **A.** pass the device's check with our own files — needs the `autorun.check`
-  algorithm, or
-* **B.** change only files the check does not cover.
-
-**[INFERRED] B is plausible and costs one experiment.** The manifest names the
-script by path; `.check` sits next to `.json`. If the device only verifies the
-**manifest**, then:
-
-1. keep `autorun.json` **byte-identical** (it already says
-   `"path": "autorun.sh"`, `askQuestion: false`);
-2. keep `autorun.check` untouched;
-3. replace only `autorun.sh`.
-
-The manifest still validates, and our script runs.
-
-**The experiment** (one boot on hardware): replace `autorun.sh` with
-
-```sh
-#!/bin/sh
-DIR="$(cd "$(dirname "$0")" && pwd)"
-echo "$(date '+%F %T') custom autorun ran" >> "$DIR/custom.log"
-```
-
-Boot with the card, then look for `custom.log`. If it appears, arbitrary code
-execution is available with no forgery. If not, the check covers the whole
-folder and the next step is decompiling the comparison at `0x2416cc0`.
-
-**This was never run** — it needs the device.
+The bypass experiment that this section used to propose (keep `autorun.json`
+byte-identical, replace only `autorun.sh`) was never run on hardware and is now
+moot — it is recorded in [`ECOSYSTEM.md`](ECOSYSTEM.md) §1.1 as solved instead.
 
 ---
 
@@ -320,7 +300,7 @@ proper sysroot or a `buildroot`/`crosstool-ng` toolchain is worth the setup.
 | Firmware lock | first 4 KB of the app pinned to 1.3.0 (`44507c7a…`); any other firmware needs every patch site re-derived |
 | No flash | the mod exists only in RAM; power off restores stock |
 | Card format | exFAT, folder named exactly `autorun` at the card root |
-| Autorun gate | unproven (§3); everything depends on it |
+| Autorun gate | solved: `sha256(autorun.json + autorun.sh + salt)` (§2.3); recompute it whenever either file changes |
 | SSH is not a shortcut | `sshd` exists but login goes through `/usr/bin/az01-ssh-login`, a `ForceCommand` wrapper validating a product string from the key certificate; `debug-shell.service` only fires on a failed boot |
 | ASLR | already disabled by the stock launcher, so fixed addresses are stable |
 
@@ -370,11 +350,10 @@ useless with a single drum track.
 
 ## 8. If this is resumed, start here
 
-1. **Run the bypass experiment** (§3). Everything else is blocked on it.
-2. If it fails, decompile the compare at `0x2416cc0` in the app — the digest
-   input is decided in that function.
-3. Pin the SD mount path from the rootfs rather than guessing it.
-4. Decide the architecture before writing code: `mute+re-render` is days and
+1. ~~Run the bypass experiment~~ — moot: the gate is solved (§2.3) and
+   [`../mod/pack.sh`](../mod/pack.sh) generates a valid package.
+2. Pin the SD mount path from the rootfs rather than guessing it.
+3. Decide the architecture before writing code: `mute+re-render` is days and
    ~6 min per song; `single-pass tap` is weeks and <30 s.
 
 ---

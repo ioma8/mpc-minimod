@@ -283,7 +283,8 @@ host object: its constructor calls `FUN_03cedde0`, which queries `H3pp`
 (`0x48337070`) through host vtable slot 4. The effect audio-context struct does
 not implement this host interface; using it for FMBass construction crashed
 the emulator. The current **Bass Synth** menu item therefore renders a local
-plucked C2 tone in `mod/src/bass_sample.c` and uses native Extract to assign its
+plucked C2 tone in `mod/src/bass_sample.cpp` (DaisySP `StringVoice` + SVF) and uses
+native Extract to assign its
 WAV to the next empty pad. K1/K2/K3 control harmonic brightness, drive, and
 low-pass cutoff. Details and validation are in [BASS-SAMPLE.md](BASS-SAMPLE.md).
 
@@ -340,7 +341,7 @@ FMBass.
 Direct event dispatch remains intermittent even with non-null queue closure
 and invoker. Direct calls to the FMBass part renderer have not been proven safe.
 Do not link `fmbass_sample.c` into the release build. Current Bass Synth
-production uses the local C2 renderer in `mod/src/bass_sample.c`, assigns
+production uses the local C2 renderer in `mod/src/bass_sample.cpp`, assigns
 through native Extract, and restores original source audio bytes after Extract
 to defeat one-LSB PCM dither. The November 6 production emulator rerun passed
 with a 65 Hz peak, 66,150 stereo frames at 44.1 kHz, source audio preserved,

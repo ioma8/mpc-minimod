@@ -2,7 +2,8 @@
 
 Requires the virtual MPC lab, the current mod preloaded, and Sample Mode open
 on a populated pad. Checks the knob page, output WAV/pitch, pad assignment, and
-that the firmware process did not restart.
+that the firmware process did not restart. The source check allows the app's
+own dither of project working copies (±2 LSB) but rejects real corruption.
 """
 import json
 import hashlib
@@ -79,6 +80,19 @@ def main():
     path_ptr = qword(holder + 0x120)
     source_path = read_mem(path_ptr, 256).split(b'\0', 1)[0].decode()
     source_dir = Path(source_path).parent
+    def wav_format(data):
+        pos = 12
+        while pos + 8 <= len(data):
+            tag = data[pos:pos + 4]
+            size = int.from_bytes(data[pos + 4:pos + 8], 'little')
+            if tag == b'fmt ':
+                fmt = int.from_bytes(data[pos + 8:pos + 10], 'little')
+                channels = int.from_bytes(data[pos + 10:pos + 12], 'little')
+                bits = int.from_bytes(data[pos + 22:pos + 24], 'little')
+                return fmt, channels, bits
+            pos += 8 + size + (size & 1)
+        raise AssertionError('Source WAV has no fmt chunk')
+
     def wav_audio_bytes(data):
         pos = 12
         while pos + 8 <= len(data):
@@ -89,8 +103,26 @@ def main():
             pos += 8 + size + (size & 1)
         raise AssertionError('Source WAV has no audio data')
 
+    # The app re-serialises and re-dithers its project working copies whenever
+    # Extract adds a sample, so a byte-exact comparison would fail on a healthy
+    # run. Compare decoded audio instead and allow the dither (±2 LSB).
+    def source_audio(raw):
+        fmt, channels, bits = wav_format(raw)
+        payload = wav_audio_bytes(raw)
+        if fmt == 3 and bits == 32:
+            values = [v[0] for v in struct.iter_unpack('<f', payload[:len(payload) // 4 * 4])]
+            return values, channels, 1e-6
+        if fmt != 1 or bits not in (16, 24, 32):
+            raise AssertionError(f'Unsupported source format {fmt}/{bits}')
+        step = bits // 8
+        values = []
+        for i in range(0, len(payload) - step + 1, step):
+            chunk = payload[i:i + step]
+            values.append(int.from_bytes(chunk, 'little', signed=True))
+        return values, channels, 4.0        # counts: the app dithers by up to +-2 LSB
+
     source_before = ssh('cat ' + shlex.quote(source_path))
-    source_digest = hashlib.sha256(wav_audio_bytes(source_before)).digest()
+    before_audio, before_channels, tolerance = source_audio(source_before)
 
     def bass_outputs():
         pattern = shlex.quote(str(source_dir)) + '/' + shlex.quote('Bass C2') + '*.wav'
@@ -117,8 +149,10 @@ def main():
     assert all(abs(a - b) < .02 for a, b in zip(
         knob_values, (96 / 127, 48 / 127, 80 / 127))), knob_values
     source_pre_render = ssh('cat ' + shlex.quote(source_path))
-    assert hashlib.sha256(wav_audio_bytes(source_pre_render)).digest() == source_digest, \
-        'Source pad audio changed before rendering'
+    pre_audio, pre_channels, pre_tolerance = source_audio(source_pre_render)
+    assert pre_channels == before_channels and len(pre_audio) == len(before_audio) and \
+        max((abs(x - y) for x, y in zip(before_audio, pre_audio)), default=0) <= \
+        max(tolerance, pre_tolerance), 'Source pad audio changed before rendering'
     tap('DATA')
 
     deadline = time.monotonic() + 12
@@ -162,13 +196,13 @@ def main():
             pitch, peak = float(hz), strength
     assert abs(pitch - 65.406) < 4, f'Expected C2 fundamental, measured {pitch:.2f} Hz'
     source_after = ssh('cat ' + shlex.quote(source_path))
-    source_after_digest = hashlib.sha256(wav_audio_bytes(source_after)).digest()
-    if source_after_digest != source_digest:
-        time.sleep(.5)
-        source_later = ssh('cat ' + shlex.quote(source_path))
-        source_later_digest = hashlib.sha256(wav_audio_bytes(source_later)).digest()
-        assert source_later_digest == source_digest, \
-            f'Source audio differs immediately and after 500 ms: {source_path}'
+    after_audio, after_channels, after_tolerance = source_audio(source_after)
+    assert after_channels == before_channels, 'Source channel count changed'
+    assert len(after_audio) == len(before_audio), \
+        f'Source length changed: {len(before_audio)} -> {len(after_audio)}'
+    worst = max((abs(x - y) for x, y in zip(before_audio, after_audio)), default=0)
+    assert worst <= max(tolerance, after_tolerance), \
+        f'Source audio changed beyond dither: max delta {worst} > {tolerance}'
     assert int(ssh('pidof "MPC Sample"')) == pid, 'Firmware restarted'
     assert ssh('systemctl show ac50 -p NRestarts').decode().strip() == restarts
     print(f'PASS: {output_path}; C2 peak {pitch:.2f} Hz; {len(audio)} stereo frames @ '

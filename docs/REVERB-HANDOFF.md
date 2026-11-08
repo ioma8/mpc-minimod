@@ -49,6 +49,25 @@ and concrete writer decompilations are in
 [`read-loop.txt`](re/hpss/read-loop.txt) and
 [`wav-write-block.txt`](re/hpss/wav-write-block.txt).
 
+## Source preservation
+
+The mod never writes a sample file. An earlier implementation backed up the
+selected sample's `data` chunk and wrote it back after Extract; that block was
+removed, for two reasons:
+
+* it ran for every effect, but only the Bass path ever took a backup, so
+  Reverb/Vinyl/Lo-Fi always ended with the misleading status
+  `<name>: source restore failed` even though the copy had been created;
+* restoring at remembered offsets is unsafe. When Extract adds a sample the app
+  re-serialises its project working copies (the `JUNK` chunk shrinks by a few
+  bytes) and re-dithers the PCM by up to ±2 LSB, so a stale `data` offset
+  wrote audio into the wrong place and corrupted the working copy.
+
+Preservation is now verified where it belongs: `emulator_bass_sample.py`
+decodes the source's audio before and after the action and allows the app's
+dither (measured: max 2 LSB) while still rejecting real damage. The
+user-content file under `/data/UserContent/` is never touched by any path.
+
 ## Emulator validation
 
 Validated on 2026-11-05 through the real SAMPLE OPTIONS menu with

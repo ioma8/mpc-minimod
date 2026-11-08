@@ -94,6 +94,8 @@ def main():
 
     screen = qword(mod_base + symbol('g_screen'))
     assert qword(screen) == app_base + 0x6e212a0, 'Sample page must be visible'
+    tap('PAD 1')          # the action runs on the selected pad; select before modelling
+    time.sleep(.4)
     binding = qword(screen + 0x178)
     state = qword(binding + 0x60)
     sample = qword(qword(state + 0x22e8) + 0x4a8)
@@ -120,7 +122,6 @@ def main():
     before = output_hashes()
     baseline_restarts = ssh('systemctl show ac50 -p NRestarts').decode().strip()
 
-    tap('PAD 1')
     control('SHIFT', 'press', 127)
     tap('DATA')
     control('SHIFT', 'release')

@@ -131,11 +131,15 @@ MPCLAB_PORT_OFFSET=100 python3 lab.py preload /path/to/mod/build/minimod.so
 MPCLAB_PORT_OFFSET=100 python3 lab.py ssh 'tail -f /run/minimod.log'
 ```
 
-Extra switches (off by default): `MINIMOD_HOOKS` (bitmask: 2 proc, 16 buttons,
-32 note_on, 64 cs, 128 note_off), `MINIMOD_DEBUG=1`, `MINIMOD_PROBE=1` with
-`MINIMOD_PROBES=<bits>`, `MINIMOD_TESTTRIM=0.09,0.45`. Chromatic MIDI is
-handled by the native hook in the default release build; it has no separate
-thread or environment switch.
+Release builds run the fixed hook set and honour **no** environment switches
+except `MINIMOD_TRIM_DB` (the AutoTrim threshold, described under Controls). A
+`-DMINIMOD_DEBUG=1` build additionally reads `MINIMOD_HOOKS` (bitmask: 2 proc,
+16 buttons, 32 note_on, 64 cs, 128 note_off), `MINIMOD_PROBE=1`, and the
+investigation switches `MINIMOD_VIS`, `MINIMOD_BTNLOG`, `MINIMOD_NOOVERLAY`,
+`MINIMOD_DUMP`, `MINIMOD_SNAPDIFF`, `MINIMOD_CCINJECT`, `MINIMOD_ONESHOT`,
+`MINIMOD_CTL` and `MINIMOD_ENV`. The release build ignores all of those.
+Chromatic MIDI is handled by the native hook in the default release build; it
+has no separate thread or environment switch.
 
 ## How it hooks
 

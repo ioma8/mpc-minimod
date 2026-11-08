@@ -47,10 +47,9 @@ sha256( bytes(autorun.json) || bytes(autorun.sh) || "f7bed1c9-7e90-4731-9194-c99
 ```
 
 verified against the shipped SampQOL package (`5e2803df…` reproduces exactly)
-and against `mpc-ui-toolkit/tools/pack-autorun.sh`. So the older "unproven
-gate" in `docs/MODDING.md` §2.3/§3 is closed: **any** script can be booted,
-the folder just needs a matching check. Changing either file requires
-recomputing it.
+and against `mpc-ui-toolkit/tools/pack-autorun.sh`. So **any** script can be
+booted, the folder just needs a matching check; changing either file requires
+recomputing it. [`MODDING.md`](MODDING.md) §2.3 records the same recipe.
 
 ### 1.2 What a package may do
 

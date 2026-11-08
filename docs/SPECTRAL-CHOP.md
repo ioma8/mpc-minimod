@@ -87,15 +87,16 @@ checks the deployed library's digest, locates the module base and the
 boundaries:
 
 ```
-PASS boot 1: first from Trim; exact 10 boundaries, Manual, pid=13416
+PASS boot 1: first from Trim; exact 5 boundaries, Manual, pid=61243
 PASS boot 1: repeat / repeat again
 PASS boot 1: regions / threshold / after pad playback
 PASS: menu, model, repeat, modes, playback, re-entry and restart checks
 ```
 
-The fixture (`A03`, `Drums 2s`, 88200 frames) must produce
-`[0, 1536, 12288, 24064, 36352, 48128, 60416, 67584, 72192, 84480]` with the
-last slice ending at 88200.
+The fixture (`A13`, `GuitPh-Grove3 E85 91V`, 62259 frames) must produce
+`[264, 14187, 30059, 45419, 54635]` with the last slice ending at 62259. A
+different pad or project makes the test stop with "Load GuitPh-Grove3 on A13
+first" rather than compare against the wrong numbers.
 
 ```sh
 ./mod/build.sh

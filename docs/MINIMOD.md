@@ -13,8 +13,15 @@ for current AutoTrim reverse-engineering findings see
 | AutoTrim | SHIFT + B3 | Trims the selected pad's sample using native app control commands. Three presses while holding SHIFT use 3%, 6%, and 9% peak thresholds; the fourth clears trim. Releasing SHIFT resets the cycle. |
 | AutoTrim caption | Hold SHIFT on the Sample page | Replaces the third soft-key caption with AutoTrim; suppressed in Chop mode. |
 | External MIDI chromatic playback | Select a sample, enable Pad MIDI In, turn on 16 LEVELS | Transposes external MIDI note-ons in the native event path from C3; firmware routing and note-offs remain native. |
+| SAMPLE OPTIONS → HPSS | SHIFT + DATA, choose HPSS, DATA | Splits the selected sample into `HPSS Harmonic` and `HPSS Percussive` on the next two free pads through stock Extract; the source is untouched. |
+| SAMPLE OPTIONS → Spectral Chop | SHIFT + DATA, choose Spectral Chop, DATA | Chops the selected pad in place at up to 16 detected frames, via the native slice API; every boundary is read back before it reports. |
+| SAMPLE OPTIONS → Add Reverb / Vinyl / Lo-Fi | SHIFT + DATA, choose, DATA | Renders the selected sample through one of the firmware's own H3 effects and assigns the copy to the next free pad; Reverb also appends its tail. |
+| SAMPLE OPTIONS → Bass Synth | SHIFT + DATA, choose, DATA | Auditions C2–D#3 from pads 1–16 and saves a DaisySP C2 pluck to the next free pad; K1–K3 shape it live. |
 
-Implementation evidence, setup and limits are in
+SAMPLE OPTIONS mechanics and validation: [`SPECTRAL-CHOP.md`](SPECTRAL-CHOP.md),
+[`REVERB-HANDOFF.md`](REVERB-HANDOFF.md), [`re/BASS-SAMPLE.md`](re/BASS-SAMPLE.md),
+and [`re/FIRMWARE-MECHANISMS.md`](re/FIRMWARE-MECHANISMS.md) §9–10.
+Implementation evidence, setup and limits for the MIDI path are in
 [`MIDI-CHROMATIC.md`](MIDI-CHROMATIC.md).
 
 ## AutoTrim behavior
@@ -56,13 +63,41 @@ path; a separate firmware branch in the renderer remains unhooked.
 cd mod
 ./build.sh
 ./pack.sh
-python3 tests/wav_edges.py
+
+# host-side checks (no emulator, no device) — all four must pass
+python3 tests/wav_edges.py      # WAV parser: PCM 16/24/32 + IEEE float32 edges
+python3 tests/hpss_dsp.py       # HPSS C port against the Python reference
+python3 tests/spectral_onsets.py # onset detector fixtures
+python3 tests/menu_input.py     # native DATA events, menu ownership, knob filter
 ```
 
-The emulator AutoTrim scenario is `python3 mod/tests/emulator_autotrim.py`
-from the repository root. Release builds are the default; investigation hooks
-are enabled only with `MINIMOD_DEBUG=1`. See [`EMULATOR.md`](EMULATOR.md) for
-emulator setup.
+The emulator scenarios live in `mod/tests/`, need the sibling
+`virtual-mpc-sample` checkout, and expect the built library to be preloaded
+(`cd ../virtual-mpc-sample && python3 lab.py preload <repo>/mod/build/minimod.so`):
+
+```sh
+python3 mod/tests/emulator_menu.py --panel http://127.0.0.1:8765
+python3 mod/tests/emulator_autotrim.py --lab ../virtual-mpc-sample --pad 1
+python3 mod/tests/emulator_spectral.py --lab ../virtual-mpc-sample --boots 1
+python3 mod/tests/emulator_reverb.py --lab ../virtual-mpc-sample
+python3 mod/tests/emulator_bass_sample.py --lab ../virtual-mpc-sample
+python3 mod/tests/emulator_midi_chromatic.py --lab ../virtual-mpc-sample   # needs Pad MIDI In = On, MIDI Port = External
+```
+
+`emulator_autotrim` reads the pad's trim bounds straight out of the app's
+memory, so it works with the release build (no logging needed) and only
+requires a pad that has a sample. `emulator_spectral` and `emulator_reverb`
+pin a demo fixture and say so when it is missing.
+
+Run each scenario after a fresh `systemctl restart ac50` in the guest: while
+SAMPLE OPTIONS is open the mod owns the panel, so a menu left open by a failed
+run swallows the next test's keys (the symptom is an empty status
+`Reverb: `).
+
+Release builds are the default; a `MINIMOD_DEBUG=1` build enables the
+investigation hooks (and is the only build that reads the debug environment
+switches — see [`../mod/README.md`](../mod/README.md)). See
+[`EMULATOR.md`](EMULATOR.md) for emulator setup.
 
 ## Repository notes
 

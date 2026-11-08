@@ -6,8 +6,10 @@
 > below as review history, not as a current list of open defects. Current status
 > is in [`AUTOTRIM-HANDOFF.md`](../AUTOTRIM-HANDOFF.md).
 
-Scope: the whole shipped module (~3 900 lines), reviewed against the binary it
-targets (firmware 1.3.0.12, sha256 `b6584cba…3b508`).
+Scope: the whole shipped module (~3 900 lines at the time of the review; it has
+since grown to ~6 400, of which ~1 700 are `#if MINIMOD_DEBUG` probe code that a
+release build does not compile), reviewed against the binary it targets
+(firmware 1.3.0.12, sha256 `b6584cba…3b508`).
 
 **Verdict:** the feature works, but the file is *not* in a shippable state. It
 still carries every debugging facility that was used while reverse-engineering —

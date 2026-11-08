@@ -68,7 +68,10 @@ def main():
         pid = int(ssh('pidof "MPC Sample"'))
         baseline_restarts = ssh('systemctl show ac50 -p NRestarts')
         maps = ssh(f'cat /proc/{pid}/maps').decode().splitlines()
-        mapping = next(x for x in maps if x.endswith('/' + args.library.name))
+        mapping = next((x for x in maps if x.endswith('/' + args.library.name)), None)
+        assert mapping is not None, (
+            f'{args.library.name} is not mapped into the app; preload it first with '
+            '`python3 lab.py preload <repo>/mod/build/minimod.so`')
         base = int(mapping.split('-')[0], 16)
         remote = mapping.split()[-1]
         digest = ssh('sha256sum ' + shlex.quote(remote)).decode().split()[0]

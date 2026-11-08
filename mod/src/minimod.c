@@ -94,19 +94,22 @@
 #define FN(off, type) ((type)(base + (off)))
 
 /* ---------------------------------------------------------------- state */
+#if MINIMOD_LOG
 static int log_fd = -1;
+#endif /* MINIMOD_LOG */
 static uintptr_t base;
 static unsigned char *relay_page;
 static unsigned char *tramp_page;
 static int nslots, ntramp;
 static int relay_used;
-static int hook_mask = 0xf2; /* 2 proc, 16 buttons, 32 note_on, 64 cs, 128 note_off */ /* 1 ctor (crashes, disabled), 2 proc, 16 buttons,
-                                32 note_on, 64 cs_event, 128 note_off */ /* 1 ctor, 2 proc, 4 plus, 8 minus, 16 buttons,
-                                32 note_on, 64 cs_event, 128 note_off */
+/* Release hook set: 16-Levels proc, buttons, pad note-on, control-surface
+ * events, pad note-off. Bit 0 (the 16-Levels constructor) is off because it
+ * crashes; the MIDI dispatcher is installed lazily by midi_hook_set(), never
+ * from this mask. */
+static int hook_mask = 0xf2;
 static int safe_mode;
 static int debug_mode;
 static int probe_mode;
-static int probe_bits = 0x7f;
 
 static volatile int g_cc_recover;
 static sigjmp_buf g_cc_jmp;
@@ -115,15 +118,18 @@ static void mlog(const char *fmt, ...);
 static void toast(const char *text);
 static long long now_ms(void);
 static void *g_screen;
-static void *g_trim_page;
 static int prop_references(uintptr_t P, uintptr_t param);
+#if MINIMOD_DEBUG
 static int find_screens(uintptr_t *out, int max);
+#endif /* MINIMOD_DEBUG */
 
-static uintptr_t g_watch_page;
+#if MINIMOD_DEBUG
 #define MAXW 12
 static uintptr_t g_wpages[MAXW];
 static int g_nwpage;
+#endif /* MINIMOD_DEBUG */
 
+#if MINIMOD_DEBUG
 static int watch_has(uintptr_t page)
 {
     for (int i = 0; i < g_nwpage; ++i)
@@ -131,7 +137,9 @@ static int watch_has(uintptr_t page)
             return 1;
     return 0;
 }
+#endif /* MINIMOD_DEBUG */
 
+#if MINIMOD_DEBUG
 static void watch_arm(uintptr_t addr, const char *why)
 {
     uintptr_t page = addr & ~(uintptr_t)0xfff;
@@ -146,8 +154,10 @@ static void watch_arm(uintptr_t addr, const char *why)
              (void *)page, strerror(errno));
     }
 }
+#endif /* MINIMOD_DEBUG */
 
 
+#if MINIMOD_DEBUG
 static void fault_handler(int sig, siginfo_t *si, void *ucv)
 {
     ucontext_t *u = (ucontext_t *)ucv;
@@ -204,14 +214,21 @@ static void fault_handler(int sig, siginfo_t *si, void *ucv)
         raise(sig);
     }
 }
+#endif /* MINIMOD_DEBUG */
 
 static volatile int g_cc_recover;
 static sigjmp_buf g_cc_jmp;
 
 #define LOG_CAP (256u * 1024u)
+#if MINIMOD_LOG
 static pthread_mutex_t g_log_mtx = PTHREAD_MUTEX_INITIALIZER;
+#endif /* MINIMOD_LOG */
+#if MINIMOD_LOG
 static unsigned long g_log_bytes;
+#endif /* MINIMOD_LOG */
+#if MINIMOD_LOG
 static int g_log_full;
+#endif /* MINIMOD_LOG */
 
 static void mlog(const char *fmt, ...)
 {
@@ -242,6 +259,22 @@ static void mlog(const char *fmt, ...)
         g_log_bytes += (unsigned long)n;
     }
     pthread_mutex_unlock(&g_log_mtx);
+#endif
+}
+
+/* ------------------------------------------------------- debug switches */
+/* Investigation-only environment switches. A release build ignores all of
+ * them: the only override a shipped binary honours is MINIMOD_TRIM_DB (the
+ * documented AutoTrim threshold knob), plus whatever a MINIMOD_DEBUG build
+ * enables. Keeping them behind one helper means the release binary has no
+ * memory-write, overlay or injection switches to discover. */
+static const char *dbg_env(const char *name)
+{
+#if MINIMOD_DEBUG
+    return getenv(name);
+#else
+    (void)name;
+    return NULL;
 #endif
 }
 
@@ -553,10 +586,6 @@ static int levels_active(void)
     return g_levels;
 }
 
-static int sixteen_tune_active(void)
-{
-    return g_octave != 0;
-}
 
 static int bump_octave(int d)
 {
@@ -720,8 +749,11 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
             thr = (short)t;
             mlog("minimod: trim threshold ratio %.4f peak %d -> %d\n", ratio,
                  (int)peak, (int)thr);
+#if MINIMOD_DEBUG
+            /* Debug-only level dump: 32 windows on the same scale as the
+             * threshold. Kept out of release so `wav_edges` stays a plain
+             * helper (the host test extracts this function verbatim). */
             if (getenv("MINIMOD_ENV")) {
-                /* level envelope in 32 windows, same scale as the threshold */
                 unsigned step = frames / 32 ? frames / 32 : 1;
                 for (unsigned w = 0; w < 32; ++w) {
                     unsigned a = w * step, b = a + step;
@@ -744,6 +776,7 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
                     mlog("minimod: env %2u/%02u peak %5d\n", w, 32, (int)wp);
                 }
             }
+#endif
         }
     }
     unsigned f = 0;
@@ -815,55 +848,7 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
 }
 
 /* --------------------------------------------------------- trim parameter */
-static struct {
-    void *p;
-    float val;
-    unsigned mn, mx;
-    int bound;
-} g_tp[256];
-static int g_ntp;
 
-static void scan_trim_params(void)
-{
-    if (g_ntp)
-        return;
-    ranges_load();
-    uintptr_t want = base + A_TRIM_PARAM_VT;
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return;
-    for (int r = 0; r < g_nrng && g_ntp < 256; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ntp < 256;
-             a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && g_ntp < 256; o += 8) {
-                uintptr_t v;
-                memcpy(&v, buf + o, 8);
-                if (v != want)
-                    continue;
-                uintptr_t p = a + o;
-                float val = 0;
-                unsigned mn = 0, mx = 0;
-                rd(p + T_VALUE, &val, 4);
-                rd(p + T_MIN, &mn, 4);
-                rd(p + T_MAX, &mx, 4);
-                g_tp[g_ntp].p = (void *)p;
-                g_tp[g_ntp].val = val;
-                g_tp[g_ntp].mn = mn;
-                g_tp[g_ntp].mx = mx;
-                g_tp[g_ntp].bound = 0;
-                g_ntp++;
-            }
-        }
-    }
-    free(buf);
-    mlog("minimod: trimparams found=%d\n", g_ntp);
-}
 
 static unsigned frames_of_sample(uintptr_t sample)
 {
@@ -1038,55 +1023,6 @@ static int wav_path_of(uintptr_t obj, unsigned want, char *out, size_t n)
 /* Last resort that is still exact: the app keeps its loaded copy in
  * /data/TempProjects/<project>/<name>.wav. Match by frame count, which the
  * TrimParameter reports; only accept a unique match. */
-static int wav_by_frames(unsigned want, char *out, size_t n)
-{
-    const char *root = "/data/TempProjects";
-    DIR *d = opendir(root);
-    if (!d)
-        return 0;
-    struct dirent *de;
-    char path[512];
-    int found = 0;
-    while ((de = readdir(d))) {
-        if (de->d_name[0] == '.')
-            continue;
-        char sub[512];
-        snprintf(sub, sizeof sub, "%s/%s", root, de->d_name);
-        DIR *d2 = opendir(sub);
-        if (!d2)
-            continue;
-        struct dirent *f;
-        while ((f = readdir(d2))) {
-            size_t len = strlen(f->d_name);
-            if (len < 5 || strcasecmp(f->d_name + len - 4, ".wav"))
-                continue;
-            snprintf(path, sizeof path, "%s/%s", sub, f->d_name);
-            unsigned fr = 0, rt = 0, ch = 0, doff = 0, bps = 2;
-            int ok = wav_info(path, &fr, &rt, &ch, &doff, &bps, NULL);
-            static int logged;
-            if (logged < 10) {
-                logged++;
-                mlog("minimod: wav '%s' ok=%d frames=%u ch=%u\n", f->d_name, ok,
-                     fr, ch);
-            }
-            if (!ok || fr != want)
-                continue;
-            if (found) {
-                closedir(d2);
-                closedir(d);
-                mlog("minimod: autotrim: %u frames matches more than one wav\n", want);
-                return 0;
-            }
-            snprintf(out, n, "%s", path);
-            found = 1;
-        }
-        closedir(d2);
-    }
-    closedir(d);
-    if (found)
-        mlog("minimod: autotrim: wav by frames -> %s\n", out);
-    return found;
-}
 
 /* Decode a whole WAV into interleaved float32.  This is intentionally stricter
  * than wav_info(): HPSS must read exactly the sample the app has loaded, so the
@@ -1206,51 +1142,6 @@ bad:
  * vtable is app+0x6e08a10 and which keeps the property pointer at +0x20. */
 #define A_BINDING_VT 0x6e08a10
 
-static uintptr_t find_prop_by_binding(float cur)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    uintptr_t want = base + A_BINDING_VT, hit = 0;
-    for (int r = 0; r < g_nrng && !hit; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && !hit; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && !hit; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (q != want)
-                    continue;
-                uintptr_t obj = a + o, p20 = 0;
-                if (!rd(obj + 0x20, &p20, 8) || !p20)
-                    continue;
-                uintptr_t cands[2] = {p20 & ~(uintptr_t)0xf,
-                                      (p20 & ~(uintptr_t)0xf) - 0x10};
-                for (int k = 0; k < 2 && !hit; ++k) {
-                    uintptr_t c = cands[k];
-                    float v50 = 0;
-                    if ((c & 7) || !c || !mapped((void *)c))
-                        continue;
-                    if (!rd(c + 0x50, &v50, 4) ||
-                        !(v50 >= -0.001f && v50 <= 1.001f))
-                        continue;
-                    float d = v50 - cur;
-                    if (d < 0)
-                        d = -d;
-                    if (d <= 0.02f)
-                        hit = c;
-                }
-            }
-        }
-    }
-    free(buf);
-    return hit;
-}
 
 /* Properties seen in a real broadcast; the newest 256 are kept. */
 static struct {
@@ -1299,100 +1190,14 @@ static uintptr_t broadcast_prop(uintptr_t param, float cur)
 }
 
 /* ------------------------------------------------------------ app screens */
-static int is_info_struct(uintptr_t info)
-{
-    unsigned short ch = 0;
-    unsigned fr = 0, rt = 0;
-    if (!info || !rd(info, &ch, 2))
-        return 0;
-    rd(info + 4, &fr, 4);
-    rd(info + 8, &rt, 4);
-    return (ch == 1 || ch == 2) && fr > 0 && rt >= 8000 && rt <= 192000;
-}
 
-static int holder_wav_path(uintptr_t obj, char *out, size_t n)
-{
-    char buf[512];
-    if (!rd(obj, buf, sizeof buf - 1))
-        return 0;
-    buf[sizeof buf - 1] = 0;
-    return path_from_buffer(buf, 0, out, n) || 0;
-}
 
-static int find_displayed_sample(unsigned *frames, char *path, size_t pathsz);
-static void *find_sample_screen(void)
-{
-    ranges_load();
-    uintptr_t want = base + 0x6e212a0; /* SampleModeScreen vtable */
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    void *found = 0;
-    for (int r = 0; r < g_nrng && !found; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && !found; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && g_ntp < 256; o += 8) {
-                uintptr_t v;
-                memcpy(&v, buf + o, 8);
-                if (v == want) {
-                    found = (void *)(a + o);
-                    break;
-                }
-            }
-        }
-    }
-    free(buf);
-    return found;
-}
 
-static int find_displayed_sample(unsigned *frames, char *path, size_t pathsz)
-{
-    void *screen = find_sample_screen();
-    if (!screen) {
-        mlog("minimod: no Sample screen found\n");
-        return 0;
-    }
-    for (int off = 0; off < 0x800; off += 8) {
-        uintptr_t child = 0;
-        if (!rd((uintptr_t)screen + off, &child, 8) || !child)
-            continue;
-        if (!mapped((void *)child) || child < 0x10000)
-            continue;
-        uintptr_t info = 0;
-        if (!rd(child + 0x130, &info, 8) || !is_info_struct(info))
-            continue;
-        char p2[512] = {0};
-        for (int f = 0; f < 0x1000; f += 8) {
-            uintptr_t cand = 0;
-            if (!rd(child + f, &cand, 8) || !cand || !mapped((void *)cand))
-                continue;
-            if (holder_wav_path(cand, p2, sizeof p2))
-                break;
-        }
-        unsigned fr = 0, rate = 0;
-        rd(info + 4, &fr, 4);
-        rd(info + 8, &rate, 4);
-        *frames = fr;
-        snprintf(path, pathsz, "%s", p2);
-        mlog("minimod: sample obj=%p info=%p frames=%u path='%s'\n", (void *)child,
-             (void *)info, fr, p2[0] ? p2 : "?");
-        return p2[0] ? 1 : 0;
-    }
-    mlog("minimod: displayed sample struct not found (screen=%p)\n", screen);
-    return 0;
-}
 
 /* ------------------------------------------------------------- app hooks */
 static void *(*orig_sixteen_ctor)(void *, void *, void *, void *);
 static void (*orig_sixteen_proc)(void *, int, void *);
 static void (*orig_pitch_off)(void *, uint64_t, uint64_t, int);
-static void (*orig_plus)(void *);
-static void (*orig_minus)(void *);
 static void (*orig_buttons)(void *);
 static void (*orig_note_on)(void *, int, int, void *, float);
 static void (*orig_note_off)(void *, int, int);
@@ -1402,19 +1207,17 @@ static volatile int g_midi_chromatic_note = -1;
 static volatile int g_midi_chromatic_delta;
 static void (*orig_bass_audio_writer)(void *, void *, size_t, int);
 static void (*orig_cs)(void *, int, void *);
-static void (*orig_trim_write)(void *, long, long);
-static void (*orig_frames)(void *);
 static void (*orig_trim)(void *, float);
-static void (*orig_resized)(void *, long, long, long);
-static void (*orig_reg)(void *, void *);
-static void *(*orig_prog_inst)(void *, int);
 /* The Sample page (0x2468 bytes) captured from SamplePage_Ctor; it owns the
  * Start/End widgets and is what must be repainted after a property change. */
 static void *g_page;
 typedef void (*pagector_fn)(void *, void *, void *, void *, void *, void *,
                             void *, void *, void *, void *, void *, void *);
+#if MINIMOD_DEBUG
 static pagector_fn orig_pagector;
+#endif /* MINIMOD_DEBUG */
 
+#if MINIMOD_DEBUG
 static void pagector_probe(void *a0, void *a1, void *a2, void *a3, void *a4, void *a5,
                            void *a6, void *a7, void *a8, void *a9, void *a10, void *a11)
 {
@@ -1424,6 +1227,7 @@ static void pagector_probe(void *a0, void *a1, void *a2, void *a3, void *a4, voi
     if (orig_pagector)
         orig_pagector(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
 }
+#endif /* MINIMOD_DEBUG */
 
 /* The app's own "apply a control value" entry - exactly what a knob turn calls
  * (FUN_01a68020(0, surface, controlId, value, mode)). Capturing the surface lets
@@ -1446,8 +1250,11 @@ static void setctl_probe(void *a0, void *a1, int a2, int a3, float v)
 /* The page object, captured from the control handler FUN_02904e90(page, id, ...)
  * - refreshed on every knob turn, so it is always a live pointer. */
 static void *g_livepage;
+#if MINIMOD_DEBUG
 static void (*orig_ctlhandler)(void *, uint64_t, uint64_t);
+#endif /* MINIMOD_DEBUG */
 
+#if MINIMOD_DEBUG
 static void ctlhandler_probe(void *a0, uint64_t a1, uint64_t a2)
 {
     uintptr_t vt = 0;
@@ -1461,12 +1268,18 @@ static void ctlhandler_probe(void *a0, uint64_t a1, uint64_t a2)
     if (orig_ctlhandler)
         orig_ctlhandler(a0, a1, a2);
 }
+#endif /* MINIMOD_DEBUG */
 
 /* FUN_02912f10(padBlock) returns the object the page reads its trim from
  * (Start at +0x78, End at +0xd0). Capturing it in-process avoids stale pointers. */
+#if MINIMOD_DEBUG
 static void *g_trimobj;
+#endif /* MINIMOD_DEBUG */
+#if MINIMOD_DEBUG
 static void *(*orig_gettrim)(void *);
+#endif /* MINIMOD_DEBUG */
 
+#if MINIMOD_DEBUG
 static void *gettrim_probe(void *blk)
 {
     void *r = orig_gettrim ? orig_gettrim(blk) : 0;
@@ -1484,15 +1297,20 @@ static void *gettrim_probe(void *blk)
     }
     return r;
 }
+#endif /* MINIMOD_DEBUG */
 
 /* PadState_CopyIntoPage(page, padState): the pad is the source of the page's
  * Start/End widgets (pad+0x1588 -> widget value, pad+0x15e0 -> End). */
+#if MINIMOD_DEBUG
 static void *g_padstate;
+#endif /* MINIMOD_DEBUG */
+#if MINIMOD_DEBUG
 static void (*orig_copypad)(void *, void *);
+#endif /* MINIMOD_DEBUG */
 
+#if MINIMOD_DEBUG
 static void copypad_probe(void *page, void *pad)
 {
-    uintptr_t vt = 0;
     if (pad && (uintptr_t)pad > 0xffff00000000ULL && (uintptr_t)pad < 0xffffff000000ULL) {
         float f0 = -1, f1 = -1;
         rd((uintptr_t)pad + 0x1588, &f0, 4);
@@ -1503,6 +1321,7 @@ static void copypad_probe(void *page, void *pad)
     if (orig_copypad)
         orig_copypad(page, pad);
 }
+#endif /* MINIMOD_DEBUG */
 
 static void (*orig_bcast)(void *, float);
 static void (*orig_cc)(void *, unsigned, float, float);
@@ -1569,7 +1388,6 @@ static void set_filter_text(const char *t);
 static void do_autotrim(void);
 
 static volatile int g_shift;
-static volatile int g_trim_req;
 static volatile int g_last_pad = -1;
 static volatile int g_core_hit;
 static void *g_props;
@@ -1604,49 +1422,15 @@ static void pitch_off(void *a0, uint64_t a1, uint64_t a2, int a3)
         orig_pitch_off(a0, a1, a2, off);
 }
 
+#if MINIMOD_DEBUG
 static void heap_snapshot(const char *tag);
 static void heap_diff(const char *tag);
-static uintptr_t g_last_press_obj;
 static void find_float_pair(float v);
-/* "findv <float>" - every address in the small writable ranges holding exactly
- * this float. Run with two knob values and intersect to find the stored state. */
-static void find_value(float v)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return;
-    unsigned char pat[4];
-    memcpy(pat, &v, 4);
-    int shown = 0;
-    for (int r = 0; r < g_nrng; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        if (g_rng[r].lo >= base && g_rng[r].hi <= base + 0x9000000)
-            continue;
-        if (g_rng[r].hi - g_rng[r].lo > 0x8000000)
-            continue; /* skip only the very large buffers */
-        for (uintptr_t a = g_rng[r].lo; a + 4 < g_rng[r].hi; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)3;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 4 <= n && shown < 60; o += 4) {
-                if (memcmp(buf + o, pat, 4) == 0) {
-                    mlog("minimod: fv %#llx %.6f\n",
-                         (unsigned long long)(a + o), (double)v);
-                    shown++;
-                }
-            }
-        }
-    }
-    mlog("minimod: fv done %d\n", shown);
-    free(buf);
-}
-
 static void byte_snap(void);
 static void byte_diff(void);
-static void find_value(float v);
+static void who_points_at(uintptr_t target);
+#endif /* MINIMOD_DEBUG */
+static uintptr_t g_last_press_obj;
 static void (*orig_screen_paint)(void *, void *);
 static volatile int g_pending_ctl;
 static float g_pending_v0, g_pending_v1;
@@ -1654,30 +1438,10 @@ static int g_pending_r0, g_pending_r1;
 static void (*orig_setctl2)(void *, void *, int, int, float);
 static void *g_surface2;
 
-static void *g_pend_prop0, *g_pend_prop1;
-static float g_pend_pv0, g_pend_pv1;
-static volatile int g_pending_prop;
 
+#if MINIMOD_DEBUG
 /* Write the property values immediately before the app paints, so the paint
  * reads the trim we computed. */
-static void apply_pending_props(void)
-{
-    float v;
-    if (!g_pending_prop)
-        return;
-    g_pending_prop = 0;
-    if (g_pend_prop0) {
-        v = g_pend_pv0;
-        wr((uintptr_t)g_pend_prop0 + 0x50, &v, 4);
-    }
-    if (g_pend_prop1) {
-        v = g_pend_pv1;
-        wr((uintptr_t)g_pend_prop1 + 0x50, &v, 4);
-    }
-    mlog("minimod: props written in paint %.4f/%.4f\n",
-         (double)g_pend_pv0, (double)g_pend_pv1);
-}
-
 static void apply_pending_ctl(void)
 {
     if (!g_pending_ctl)
@@ -1694,12 +1458,18 @@ static void apply_pending_ctl(void)
     orig_setctl2(g_control_context, g_surface2, 0, 0x462, g_pending_v0);
     mlog("minimod: paint-time setctl %d/%d\n", g_pending_r0, g_pending_r1);
 }
+#endif /* MINIMOD_DEBUG */
 static void *g_paint_comp;
 static void *g_paint_gfx;
-static void who_points_at(uintptr_t target);
+#if MINIMOD_DEBUG
 static uintptr_t g_reg_base;
+#endif /* MINIMOD_DEBUG */
+#if MINIMOD_DEBUG
 static unsigned char g_reg_buf[0x40000];
+#endif /* MINIMOD_DEBUG */
+#if MINIMOD_DEBUG
 static int g_reg_have;
+#endif /* MINIMOD_DEBUG */
 static volatile int g_poke_which = -1;
 static void do_poke(void);
 static volatile int g_sdump;
@@ -1726,6 +1496,15 @@ static void commit_trim(void);
 #define A_HPSS_PAD_BUSY 0x28047b0
 #define HPSS_RANGE_START 0x78
 #define HPSS_RANGE_END 0xd0
+
+/* Native Extract hands the write to an executor thread after the handler
+ * returns, so its caller polls until the pad changes (and until the writer has
+ * consumed the substituted buffer). Both polls exit on the first satisfied
+ * check, so this budget is spent only when something went wrong — and because
+ * the caller is the UI thread, a larger budget would freeze the screen. Keep
+ * the numbers in one place and report a timeout; never retry the command. */
+#define HPSS_WAIT_STEP_US 1000
+#define HPSS_WAIT_STEPS 3000 /* ~3 s, the observed worst case on the emulator */
 
 static void (*orig_hpss_ctor)(void *, void *, int, void *, void *, void *, void *,
                               void *, void *);
@@ -1890,8 +1669,8 @@ static void hpss_exec_hook(void *cmd)
         /* The native writer may run on an executor thread.  Wait for it so the
          * buffer stays alive and the next extraction starts from a clean state. */
         int spins = 0;
-        while (g_hpss_sub_pos < g_hpss_sub_frames && spins++ < 3000)
-            usleep(1000);
+        while (g_hpss_sub_pos < g_hpss_sub_frames && spins++ < HPSS_WAIT_STEPS)
+            usleep(HPSS_WAIT_STEP_US);
         g_hpss_sub_on = 0;
         g_hpss_write_ok = (g_hpss_sub_pos == g_hpss_sub_frames);
         mlog("HPSS exec: cmd=%p writer consumed %zu/%zu frames%s\n", cmd,
@@ -2182,8 +1961,8 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
     /* The command may be executed on an executor thread after the handler
      * returns.  Wait for the pad to change before starting the next one. */
     int after = before;
-    for (int i = 0; i < 3000 && after == before; ++i) {
-        usleep(1000);
+    for (int i = 0; i < HPSS_WAIT_STEPS && after == before; ++i) {
+        usleep(HPSS_WAIT_STEP_US);
         after = hpss_free_pad((void *)program);
     }
     int write_ok = buf ? g_hpss_write_ok : 1;
@@ -2191,66 +1970,6 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
     mlog("HPSS extract: pad %d -> free %d (%s, write %s) range %u..%u\n", before,
          after, after != before ? "assigned" : "NO ASSIGNMENT",
          write_ok ? "complete" : "INCOMPLETE", start, end);
-    return ok;
-}
-
-static int bass_source_backup(const char *path, off_t *data_offset,
-                              unsigned char **data, size_t *data_size)
-{
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return 0;
-    unsigned char header[12];
-    int ok = 0;
-    if (pread(fd, header, sizeof header, 0) != (ssize_t)sizeof header ||
-        memcmp(header, "RIFF", 4) || memcmp(header + 8, "WAVE", 4))
-        goto done;
-    off_t pos = 12;
-    for (int chunks = 0; chunks < 64; ++chunks) {
-        unsigned char chunk[8];
-        if (pread(fd, chunk, sizeof chunk, pos) != (ssize_t)sizeof chunk)
-            break;
-        uint32_t size = (uint32_t)chunk[4] | (uint32_t)chunk[5] << 8 |
-                        (uint32_t)chunk[6] << 16 | (uint32_t)chunk[7] << 24;
-        if (!memcmp(chunk, "data", 4)) {
-            unsigned char *copy = malloc(size ? size : 1);
-            if (!copy)
-                break;
-            if (pread(fd, copy, size, pos + 8) != (ssize_t)size) {
-                free(copy);
-                break;
-            }
-            *data_offset = pos + 8;
-            *data = copy;
-            *data_size = size;
-            ok = 1;
-            break;
-        }
-        pos += 8 + (off_t)size + (size & 1);
-    }
-done:
-    close(fd);
-    return ok;
-}
-
-static int bass_source_restore(const char *path, off_t data_offset,
-                               const unsigned char *data, size_t data_size)
-{
-    int fd = open(path, O_WRONLY);
-    if (fd < 0)
-        return 0;
-    size_t written = 0;
-    while (written < data_size) {
-        ssize_t n = pwrite(fd, data + written, data_size - written,
-                           data_offset + (off_t)written);
-        if (n <= 0) {
-            close(fd);
-            return 0;
-        }
-        written += (size_t)n;
-    }
-    int ok = fdatasync(fd) == 0;
-    close(fd);
     return ok;
 }
 
@@ -2270,10 +1989,6 @@ struct hpss_job {
     unsigned rendered_ch;
     int action;
     int rc;
-    char source_path[512];
-    off_t source_data_offset;
-    unsigned char *source_audio_backup;
-    size_t source_audio_bytes;
 };
 
 static struct hpss_job *volatile g_hpss_job;
@@ -2382,7 +2097,6 @@ static void hpss_free_job(struct hpss_job *job)
     free(job->harmonic);
     free(job->percussive);
     free(job->rendered);
-    free(job->source_audio_backup);
     free(job);
 }
 
@@ -2480,15 +2194,6 @@ static void fmbass_start(void)
         sample_action_status(4, "out of memory");
         return;
     }
-    if (!hpss_path_for(sample, frames, ch, rate, job->source_path,
-                       sizeof job->source_path) ||
-        !bass_source_backup(job->source_path, &job->source_data_offset,
-                            &job->source_audio_backup, &job->source_audio_bytes)) {
-        hpss_free_job(job);
-        sample_action_status(4, "cannot preserve source sample");
-        toast("Bass: source read failed");
-        return;
-    }
     uintptr_t program = 0;
     if (!rd(state + 0x2310, &program, 8) || !program || hpss_free_count((void *)program) < 1) {
         hpss_free_job(job);
@@ -2526,7 +2231,6 @@ static void fmbass_start(void)
 }
 
 static void hpss_close(void);
-static void cc_replay_k3(unsigned raw);
 
 /* ------------------------------------------------------- spectral markers */
 /* The input hook is NOT the UI thread. Publish only a request there; all
@@ -3721,15 +3425,6 @@ static void hpss_finalize(void)
                                       job->rendered_ch ? job->rendered_ch : job->ch,
                                       job->action + 1, &pad);
             hpss_restore_chop();
-            int source_ok = bass_source_restore(job->source_path,
-                                                job->source_data_offset,
-                                                job->source_audio_backup,
-                                                job->source_audio_bytes);
-            if (!source_ok) {
-                sample_action_status(job->action, "source restore failed");
-                toast("Bass: source restore failed");
-                goto out;
-            }
             if (!ok) {
                 sample_action_status(job->action, "output failed");
                 toast("Effect: write failed");
@@ -3769,12 +3464,6 @@ static void hpss_finalize(void)
     g_hpss_menu = 0;
     g_bass_edit = 0;
 out:
-    if (job->action == 4 && job->source_audio_backup &&
-        !bass_source_restore(job->source_path, job->source_data_offset,
-                             job->source_audio_backup, job->source_audio_bytes)) {
-        sample_action_status(4, "source restore failed");
-        toast("Bass: source restore failed");
-    }
     hpss_free_job(job);
     g_hpss_busy = 0;
     g_hpss_menu = 0;
@@ -3963,7 +3652,7 @@ static void buttons(void *event)
             return;
         }
     }
-    if (getenv("MINIMOD_VIS") && g_screen)
+    if (dbg_env("MINIMOD_VIS") && g_screen)
         mlog("minimod: vis code=0x%02x chopA=%d chopB=%d\n", code,
              FN(0x112fd50, int (*)(void *))((char *)g_screen + 0x15e0),
              FN(0x112fd50, int (*)(void *))((char *)g_screen + 0x1ee0));
@@ -3998,7 +3687,7 @@ static void buttons(void *event)
     /* PLUS / MINUS move the 16 Levels row by an octave. The pitch hook only
      * runs for that screen, so bumping unconditionally is safe - and the old
      * guard (g_octave != 0) made the first press a no-op. */
-    if (getenv("MINIMOD_BTNLOG")) {
+    if (dbg_env("MINIMOD_BTNLOG")) {
         static int n;
         if (n < 24) {
             n++;
@@ -4206,34 +3895,10 @@ static void cs_event(void *self, int code, void *payload)
         orig_cs(self, code, payload);
 }
 
-static void trim_write_probe(void *self, long a, long b)
-{
-    if (orig_trim_write)
-        orig_trim_write(self, a, b);
-}
 
-static void frames_probe(void *self)
-{
-    if (orig_frames)
-        orig_frames(self);
-}
 
-static void screen_resized(void *a, long b, long c, long d)
-{
-    if (orig_resized)
-        orig_resized(a, b, c, d);
-}
 
-static void trim_reg(void *a, void *b)
-{
-    if (orig_reg)
-        orig_reg(a, b);
-}
 
-static void *prog_inst(void *a, int b)
-{
-    return orig_prog_inst ? orig_prog_inst(a, b) : 0;
-}
 
 /* The trim core is called by the broadcaster's listener loop, which keeps the
  * property in x20: learning that pair is what lets autotrim drive the page. */
@@ -4489,71 +4154,17 @@ static void bcast_hook(void *self, float v)
 }
 
 /* ------------------------------------------------------- message-thread pump */
-static volatile int g_trim_pending;
 static void *g_trim_param0, *g_trim_param1;
 static float g_trim_v0, g_trim_v1;
-static float g_trim_cur0, g_trim_cur1;
 static unsigned g_trim_frames;
-static uintptr_t g_trim_layer, g_trim_screen;
+static uintptr_t g_trim_layer;
 
 /* Broadcast a unique value to one candidate property: if the app's own
  * listener chain reaches the trim core for *our* parameter, that property owns
  * it. The original value is restored right after. */
-static uintptr_t g_cand[24];
-static int g_ncand;
 
 /* The page keeps a small binding object per parameter (vtable app+0x6e08a10)
  * that holds the property at +0x20. Collect those as probe candidates. */
-static void collect_binding_props(void)
-{
-    if (g_ncand)
-        return;
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return;
-    uintptr_t want = base + A_BINDING_VT;
-    for (int r = 0; r < g_nrng && g_ncand < 24; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ncand < 24;
-             a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && g_ncand < 24; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (q != want)
-                    continue;
-                uintptr_t p20 = 0;
-                if (!rd(a + o + 0x20, &p20, 8) || !p20)
-                    continue;
-                uintptr_t cs[2] = {p20 & ~(uintptr_t)0xf, (p20 & ~(uintptr_t)0xf) - 0x10};
-                for (int k = 0; k < 2; ++k) {
-                    uintptr_t c = cs[k];
-                    float f = 0;
-                    if (!c || (c & 7) || !mapped((void *)c))
-                        continue;
-                    if (!rd(c + 0x50, &f, 4) || !(f >= -0.001f && f <= 1.001f))
-                        continue;
-                    /* statics in the app image pass the float test but are not
-                     * properties; a property lives on the heap */
-                    if (c >= base && c < base + 0x9000000)
-                        continue;
-                    int dup = 0;
-                    for (int i = 0; i < g_ncand; ++i)
-                        if (g_cand[i] == c) { dup = 1; break; }
-                    if (!dup)
-                        g_cand[g_ncand++] = c;
-                }
-            }
-        }
-    }
-    free(buf);
-    mlog("minimod: %d property candidates from bindings\n", g_ncand);
-}
 
 /* Read-only ownership test: the property's listener chain must reference the
  * parameter (or its model) somewhere within two hops. No broadcasting, so a
@@ -4608,324 +4219,37 @@ static int prop_references(uintptr_t P, uintptr_t param)
 /* The object in x20 at a trim-core call is the *listener*, not the property.
  * The property that owns it is the one whose list contains a node whose target
  * is exactly that object. */
-static uintptr_t owner_of_listener(uintptr_t lis)
-{
-    if (!lis)
-        return 0;
-    for (int i = 0; i < g_ncand; ++i) {
-        uintptr_t P = g_cand[i];
-        uintptr_t node = 0;
-        if (!rd(P + 0x10, &node, 8) || !node || !mapped((void *)node))
-            continue;
-        for (int n = 0; n < 16; ++n) {
-            uintptr_t tgt = 0;
-            if (!rd(node + 0x18, &tgt, 8))
-                break;
-            tgt &= ~(uintptr_t)3;
-            if (tgt == lis)
-                return P;
-            uintptr_t next = 0;
-            if (!rd(node + 8, &next, 8) || next == P + 8 || !next)
-                break;
-            node = next;
-        }
-    }
-    return 0;
-}
 
-static uintptr_t listener_of_param(uintptr_t param)
-{
-    for (int i = 0; i < g_nlis; ++i)
-        if (g_lis[i].param == param)
-            return g_lis[i].listener;
-    return 0;
-}
 
-static int probe_property(uintptr_t param)
-{
-    collect_binding_props();
-    for (int i = 0; i < g_ncand; ++i)
-        if (prop_references(g_cand[i], param)) {
-            int slot = g_npm;
-            if (slot < 8) {
-                g_pm[slot].param = param;
-                g_pm[slot].prop = g_cand[i];
-                g_npm = slot + 1;
-            }
-            mlog("minimod: owner of param=%p is prop=%p\\n", (void *)param,
-                 (void *)g_cand[i]);
-            return 1;
-        }
-    return 0;
-}
 
 /* am-mod's lesson: don't write the model, drive the app's own input path.
  * The Trim knobs are control-surface events 0x10 (Start) / 0x11 (End) with an
  * absolute 7-bit position, so the app updates parameter, page and audio. */
-static int inject_cc(unsigned code, unsigned value)
-{
-    if (!orig_buttons)
-        return 0;
-    unsigned char ev[16] = {0};
-    ev[8] = (unsigned char)code;
-    /* sweep like the physical encoder: the app treats these as movements */
-    for (unsigned v = 0; v <= 127; v += 1) {
-        ev[9] = (unsigned char)v;
-        orig_buttons(ev);
-    }
-    ev[9] = (unsigned char)(value > 127 ? 127 : value);
-    orig_buttons(ev);
-    return 1;
-}
 
 /* am-mod sets native properties through the command at 0x1671650 with a pointer
  * to the value; the property lives inside SamplePadControls (root+0x178) and
  * has guards at +0x38/+0x78/+0x80/+0x88. Find the one that references our trim
  * parameter, then set it the same way. */
-static uintptr_t find_controls_prop(uintptr_t param)
-{
-    if (!g_screen)
-        return 0;
-    /* am-mod's SamplePadControls offset belongs to its firmware; ours differs.
-     * Scan the screen object itself for the same property shape. */
-    uintptr_t controls = (uintptr_t)g_screen;
-    for (long o = 0; o < 0x12000; o += 8) {
-        uintptr_t p = controls + (uintptr_t)o;
-        uintptr_t f38 = 0, f78 = 0, f80 = 0, f88 = 0;
-        if (!rd(p + 0x38, &f38, 8) || !rd(p + 0x78, &f78, 8) ||
-            !rd(p + 0x80, &f80, 8) || !rd(p + 0x88, &f88, 8))
-            break;
-        if (!f38 || !f78 || !f80 || !f88)
-            continue;
-        if (!mapped((void *)f38) || !mapped((void *)f78))
-            continue;
-        unsigned char buf[0x100];
-        if (!rd(p, buf, sizeof buf))
-            continue;
-        for (size_t k = 0; k + 8 <= sizeof buf; k += 8) {
-            uintptr_t q;
-            memcpy(&q, buf + k, 8);
-            if (q == param) {
-                mlog("minimod: controls prop +0x%lx references %p\n", (unsigned long)o,
-                     (void *)param);
-                return p;
-            }
-        }
-    }
-    return 0;
-}
 
 /* The page draws its locators from the trim **slider widget**: a ui::Slider
  * embedded in the screen holds its position as a percentage at +0x1b4
  * (measured: +0x6758 = 49.0 right after K1 was set to 50). Writing that value
  * and repainting is what a knob move does to the widget. */
-static int set_slider_percent(float from, float to)
-{
-    if (!g_screen)
-        return 0;
-    uintptr_t want = base + 0x706e5d0;
-    for (long o = 0; o < 0x20000; o += 8) {
-        uintptr_t q = 0;
-        if (!rd((uintptr_t)g_screen + o, &q, 8))
-            break;
-        if (q != want)
-            continue;
-        uintptr_t s = (uintptr_t)g_screen + (uintptr_t)o;
-        float v = 0;
-        if (!rd(s + 0x1b4, &v, 4))
-            continue;
-        float d = v - from;
-        if (d < 0)
-            d = -d;
-        if (d <= 0.75f) {
-            wr(s + 0x1b4, &to, 4);
-            mlog("minimod: slider +0x%lx %.2f -> %.2f\n", o, (double)v, (double)to);
-            return 1;
-        }
-    }
-    return 0;
-}
 
 /* Apply the trim to one screen instance: find the two trim sliders by the
  * instance's own cached percentages, write ours into their +0x1b4 and repaint.
  * Returns 1 when both were found. */
-static int apply_to_instance(uintptr_t S, float p0, float p1)
-{
-    float c0 = 0, c1 = 0;
-    if (!rd(S + 0x1f4c, &c0, 4) || !rd(S + 0x1f50, &c1, 4))
-        return 0;
-    if (!(c0 >= -0.5f && c0 <= 100.5f && c1 >= -0.5f && c1 <= 100.5f))
-        return 0;
-    uintptr_t want = base + 0x706e5d0, s0 = 0, s1 = 0;
-    for (long o = 0; o < 0x20000; o += 8) {
-        uintptr_t q = 0;
-        if (!rd(S + o, &q, 8))
-            break;
-        if (q != want)
-            continue;
-        uintptr_t sl = S + (uintptr_t)o;
-        float v = 0;
-        if (!rd(sl + 0x1b4, &v, 4))
-            continue;
-        float d0 = v - c0, d1 = v - c1;
-        if (d0 < 0) d0 = -d0;
-        if (d1 < 0) d1 = -d1;
-        if (!s0 && d0 <= 0.6f)
-            s0 = sl;
-        else if (!s1 && d1 <= 0.6f)
-            s1 = sl;
-    }
-    if (!s0 || !s1 || s0 == s1)
-        return 0;
-    wr(s0 + 0x1b4, (void *)&p0, 4);
-    wr(s1 + 0x1b4, (void *)&p1, 4);
-    mlog("minimod: instance %p sliders %p/%p -> %.2f/%.2f (was %.2f/%.2f)\n",
-         (void *)S, (void *)s0, (void *)s1, (double)p0, (double)p1, (double)c0,
-         (double)c1);
-    FN(0x1149880, void (*)(void *, uint64_t, uint64_t))((void *)S, 0,
-                                                        FIELD(S, 0x28, uint64_t));
-    return 1;
-}
 
 /* The page paints from the *model*. Find the TrimParameter instances whose
  * value matches the page's own cached percentages (screen+0x1f4c / +0x1f50):
  * those are the parameters the page is actually showing. */
-static uintptr_t param_by_value(float frac)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    uintptr_t want = base + A_TRIM_PARAM_VT, best = 0;
-    float bestd = 0.02f;
-    for (int r = 0; r < g_nrng; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ntp < 256; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && g_ntp < 256; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (q != want)
-                    continue;
-                uintptr_t p = a + o;
-                float v = 0;
-                if (!rd(p + T_VALUE, &v, 4))
-                    continue;
-                float d = v - frac;
-                if (d < 0)
-                    d = -d;
-                if (d < bestd) {
-                    bestd = d;
-                    best = p;
-                }
-            }
-        }
-    }
-    free(buf);
-    return best;
-}
 
 /* Find the page object by its own cached percentage: a float equal to the
  * End percent whose address-0x1f50 starts with a vtable pointer. Works for any
  * screen subclass, which is what the enumeration by one vptr misses. */
-static uintptr_t find_page_by_cache(float pct)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    uintptr_t hit = 0;
-    for (int r = 0; r < g_nrng && !hit; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && !hit; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 4 <= n && !hit; o += 4) {
-                float v;
-                memcpy(&v, buf + o, 4);
-                if (v < 0.5f || v > 100.5f)
-                    continue;
-                float d = v - pct;
-                if (d < 0) d = -d;
-                if (d > 0.75f)
-                    continue;
-                uintptr_t addr = a + o;
-                uintptr_t b = addr - 0x1f50;
-                /* the page is a heap object, not a static in the image */
-                if (b >= base && b < base + 0x9000000)
-                    continue;
-                uintptr_t vt = 0;
-                if (b < 0x10000 || !rd(b, &vt, 8))
-                    continue;
-                if (vt < base + 0x6ddf910 || vt > base + 0x7162018)
-                    continue;
-                float chk = 0;
-                if (!rd(b + 0x1f4c, &chk, 4))
-                    continue;
-                if (chk < -0.5f || chk > 100.5f)
-                    continue;
-                hit = b;
-                mlog("minimod: page base %p vptr=%p (vt+0x%lx)\n", (void *)b,
-                     (void *)vt, (unsigned long)(vt - base));
-            }
-        }
-    }
-    free(buf);
-    return hit;
-}
 
 /* Enumerate objects of the Trim page class and pick the one whose cached
  * percentages match what the layer currently holds. */
-static uintptr_t find_trim_page(float c0, float c1)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    uintptr_t want = base + A_TRIM_PAGE_VT, best = 0;
-    float bestscore = 3.0f;
-    for (int r = 0; r < g_nrng; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ntp < 256; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && g_ntp < 256; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (q != want)
-                    continue;
-                uintptr_t p = a + o;
-                float x = 0, y = 0;
-                if (!rd(p + 0x1f4c, &x, 4) || !rd(p + 0x1f50, &y, 4))
-                    continue;
-                if (!(x >= -0.5f && x <= 100.5f && y >= -0.5f && y <= 100.5f))
-                    continue;
-                float d0 = x - c0, d1 = y - c1;
-                if (d0 < 0) d0 = -d0;
-                if (d1 < 0) d1 = -d1;
-                float score = d0 + d1;
-                if (score < bestscore) {
-                    bestscore = score;
-                    best = p;
-                }
-            }
-        }
-    }
-    free(buf);
-    if (best)
-        mlog("minimod: trim page %p (score %.2f)\n", (void *)best, (double)bestscore);
-    return best;
-}
 
 /* Find the listener node that points at `param` and report what looks like its
  * owner property. A property P keeps its list head at P+0x10 and its sentinel
@@ -5159,19 +4483,6 @@ static void cc_replay(unsigned cc, unsigned raw)
     g_in_cc_replay = 0;
 }
 
-static void cc_replay_k3(unsigned raw)
-{
-    if (!g_cc_k3_valid)
-        return;
-    unsigned char ev[32];
-    memcpy(ev, g_cc_k3_ev, sizeof ev);
-    ev[8] = 0x12;
-    g_in_cc_replay = 1;
-    if (orig_cc)
-        orig_cc(ev, raw, 0.0f, 127.0f);
-    g_in_cc_replay = 0;
-    mlog("Spectral: replayed K3=%u (valid=%d)\n", raw, g_cc_k3_valid);
-}
 
 static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
 {
@@ -5201,14 +4512,16 @@ static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
  * not just the parameter), which is what the page reloads from. */
 #define HP_PAGE 4096
 #define HP_MAX 200000
+#if MINIMOD_DEBUG
 static struct {
     uintptr_t addr;
     uint64_t hash;
 } g_hp[HP_MAX];
 static volatile int g_nhp;
+#endif /* MINIMOD_DEBUG */
 
-static unsigned char *g_hp_bytes; /* optional byte copy for diffs */
 
+#if MINIMOD_DEBUG
 static void heap_snapshot(const char *tag)
 {
     ranges_load();
@@ -5240,7 +4553,9 @@ static void heap_snapshot(const char *tag)
     free(buf);
     mlog("minimod: heap snapshot '%s': %d pages\n", tag, g_nhp);
 }
+#endif /* MINIMOD_DEBUG */
 
+#if MINIMOD_DEBUG
 static void heap_diff(const char *tag)
 {
     ranges_load();
@@ -5263,36 +4578,12 @@ static void heap_diff(const char *tag)
     }
     free(buf);
 }
+#endif /* MINIMOD_DEBUG */
 
 /* The three knobs' properties are consecutive objects 0x58 apart (K1 at
  * base+0x1ac0, K2 at +0x1b18, K3 at +0x1b70). Finding that triple identifies
  * the control surface without needing a knob move first. */
-static int prop_like(uintptr_t x)
-{
-    uintptr_t head = 0;
-    float v = 0;
-    if (!rd(x + 0x10, &head, 8) || !head || !mapped((void *)head))
-        return 0;
-    if (!rd(x + 0x50, &v, 4) || !(v >= -2.0f && v <= 2.0f))
-        return 0;
-    return 1;
-}
 
-static int prop_listeners(uintptr_t x)
-{
-    uintptr_t head = 0;
-    if (!rd(x + 0x10, &head, 8) || !head || head == x + 8)
-        return 0;
-    int n = 0;
-    for (int i = 0; i < 32 && head && head != x + 8 && n < 99; ++i) {
-        uintptr_t next = 0;
-        n++;
-        if (!rd(head + 8, &next, 8) || !next || !mapped((void *)next))
-            break;
-        head = next;
-    }
-    return n;
-}
 
 static uintptr_t find_knob_props(void)
 {
@@ -5441,7 +4732,7 @@ static void commit_trim(void)
     /* A learned property broadcasts exactly like a knob; the others are
      * written through the trim core. Broadcasting even one of them is what
      * makes the page repaint. */
-    if (getenv("MINIMOD_NODEPROBE"))
+    if (dbg_env("MINIMOD_NODEPROBE"))
         probe_node((uintptr_t)p0);
 
     /* A property seen broadcasting the parameter's *current* value is the one
@@ -5484,7 +4775,7 @@ static void commit_trim(void)
      * result of a manual trim (verified pixel-identical), but it crashes the
      * app when called from inside the button dispatch, so it is deferred to the
      * paint hook (opt-in). */
-    if (getenv("MINIMOD_CCINJECT") && !g_in_inject) {
+    if (dbg_env("MINIMOD_CCINJECT") && !g_in_inject) {
         g_cc_step = 0;
         g_pending_cc = 1;
     }
@@ -5561,7 +4852,7 @@ static void commit_trim(void)
             /* Default: one control per paint (safe, but the page does not
              * update). MINIMOD_ONESHOT delivers both in one turn, which does
              * update the model - and leaves the app faulting afterwards. */
-            if (getenv("MINIMOD_ONESHOT")) {
+            if (dbg_env("MINIMOD_ONESHOT")) {
                 if (g_cc_ev_valid) {
                     cc_replay(0x11, r1);
                     cc_replay(0x10, r0);
@@ -5707,7 +4998,6 @@ static void commit_trim(void)
     mlog("minimod: commit core done p0=%.4f p1=%.4f (want %.4f/%.4f)\n",
          (double)check, (double)check2, (double)v0, (double)v1);
 
-done:
     /* Re-press the last control so the page reloads: it only redraws its trim
      * when the pad is (re)selected. Off by default - the object recorded from a
      * press is not always the pad and pressing it can open a menu. */
@@ -5759,7 +5049,7 @@ done:
      * the surface (it dispatches through surface->vtable+0x160). */
     /* The control-path call is experimental: it executes cleanly but does not
      * move the app's display, so it stays behind an env flag. */
-    if (getenv("MINIMOD_CTL")) {
+    if (dbg_env("MINIMOD_CTL")) {
         g_surface2 = g_surface;
         orig_setctl2 = orig_setctl;
         g_pending_r0 = (int)(v0 * 127.0f + 0.5f);
@@ -5947,14 +5237,14 @@ static void screen_paint(void *p, void *g)
     }
     {
         static int dumped;
-        if (!dumped && getenv("MINIMOD_DUMP")) {
+        if (!dumped && dbg_env("MINIMOD_DUMP")) {
             dumped = 1;
             dump_sliders(p);
         }
     }
     /* Diff the painting screen between paints: whatever changes when a knob
      * turns is exactly what the page stores for its markers. */
-    if (getenv("MINIMOD_SNAPDIFF")) {
+    if (dbg_env("MINIMOD_SNAPDIFF")) {
         static unsigned char prev[0x8000], cur[0x8000];
         static uintptr_t prev_p;
         static size_t snap_len;
@@ -6010,7 +5300,7 @@ static void screen_paint(void *p, void *g)
         draw_colour(g, 0xffffffff);
         draw_text(g, g_toast_text, x + 4, y + 6, w - 8, h - 12, 18.0f);
     }
-    if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f && !getenv("MINIMOD_NOOVERLAY")) {
+    if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f && !dbg_env("MINIMOD_NOOVERLAY")) {
         int x0 = 10 + (int)(g_mark_v0 * 295.0f + 0.5f);
         int x1 = 10 + (int)(g_mark_v1 * 295.0f + 0.5f);
         /* The page fills the trimmed-out parts with the waveform background
@@ -6071,74 +5361,10 @@ static void *g_filter_dest;
  * so the char* assign hook never sees "Filter". Label::getText (0x11bae00)
  * returns the live juce::String by reference; mutating that string in place
  * renames the key without touching the layout of anything else. */
-static void *g_label_str;
 
-static const char *string_text(void *str, char *buf, size_t n)
-{
-    uintptr_t h = 0;
-    if (!str || !rd((uintptr_t)str, &h, 8) || !h)
-        return 0;
-    int len = 0;
-    if (rd(h + 4, &len, 4) && len > 0 && len < 200) { /* {ref, len, chars[]} */
-        if (rd(h + 8, buf, (size_t)len < n - 1 ? (size_t)len : n - 1)) {
-            buf[len < (int)n ? len : (int)n - 1] = 0;
-            int ok = 1;
-            for (int i = 0; i < len; ++i)
-                if ((unsigned char)buf[i] < 32) { ok = 0; break; }
-            if (ok)
-                return buf;
-        }
-    }
-    uintptr_t data = 0;
-    size_t l = 0;
-    if (rd(h, &data, 8) && rd(h + 8, &l, 8) && data && l > 0 && l < 200) {
-        if (rd(data, buf, l < n - 1 ? l : n - 1)) {
-            buf[l < n ? l : n - 1] = 0;
-            return buf;
-        }
-    }
-    return 0;
-}
 
-/* The soft-key captions are not juce::Label (Label::getText is never called),
- * so find the live juce::String that holds "Filter" once, and rename it in
- * place with the app's own String::operator=(const char*). */
-static void *g_filter_strs[6];
-static int g_nfilter_strs;
-
-static void find_filter_strings(void)
-{
-    if (g_nfilter_strs)
-        return;
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return;
-    char txt[64];
-    for (int r = 0; r < g_nrng && g_nfilter_strs < 6; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ntp < 256; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && g_nfilter_strs < 6; o += 8) {
-                uintptr_t str = a + o;
-                const char *t = string_text((void *)str, txt, sizeof txt);
-                if (t && !strcmp(t, "Filter")) {
-                    g_filter_strs[g_nfilter_strs++] = (void *)str;
-                    mlog("minimod: filter string at %p\n", (void *)str);
-                }
-            }
-        }
-    }
-    free(buf);
-}
-
-/* Scanning the heap on the UI thread froze the app (one /proc/self/mem open
- * per read), so the rename is done by a worker that only touches the cached
- * strings afterwards. */
+/* The AutoTrim caption is drawn by the paint hook, not by renaming a label, so
+ * the SHIFT handler only asks for a repaint of the Sample page. */
 static void set_filter_text(const char *t)
 {
     (void)t;
@@ -6249,29 +5475,8 @@ static void midi_note_event(void *app, void *context, void *event,
 }
 
 /* -------------------------------------------------------- probe threads */
-static void *needle_thread(void *arg)
-{
-    (void)arg;
-    return 0;
-}
-static void *layer_needle(void *arg)
-{
-    (void)arg;
-    return 0;
-}
 
 /* -------------------------------------------------- probe bookkeeping */
-static void *g_setter[32];
-static long g_setter_val[32];
-static long g_setter_seq[32];
-static long g_seq;
-static int g_nsetter;
-static unsigned char g_ev[16];
-static volatile int g_have_ev;
-static struct {
-    void *val2;
-} g_sl[64];
-static int g_nsl;
 /* Trim the sample the Sample page is showing to its silent edges.
  *
  * Everything is taken from the app: the length from the live TrimParameter
@@ -6344,6 +5549,7 @@ static void do_autotrim(void)
 
 /* every SampleModeScreen instance in the heap (the page paints from one of
  * them, the Trim knobs may drive another) */
+#if MINIMOD_DEBUG
 static int find_screens(uintptr_t *out, int max)
 {
     ranges_load();
@@ -6371,10 +5577,12 @@ static int find_screens(uintptr_t *out, int max)
     free(buf);
     return n;
 }
+#endif /* MINIMOD_DEBUG */
 
 /* Probe: /run/minimod.slider holds "N,V" - write percent V into the N-th
  * ui::Slider of the painting screen and repaint. Used to identify which slider
  * drives which locator. */
+#if MINIMOD_DEBUG
 static void *slider_probe_thread(void *arg)
 {
     (void)arg;
@@ -6424,8 +5632,10 @@ static void *slider_probe_thread(void *arg)
     }
     return 0;
 }
+#endif /* MINIMOD_DEBUG */
 
 /* Probe: /run/minimod.heap holds "snap" or "diff" for the heap fingerprint. */
+#if MINIMOD_DEBUG
 static void *heap_probe_thread(void *arg)
 {
     (void)arg;
@@ -6550,9 +5760,11 @@ static void *heap_probe_thread(void *arg)
     }
     return 0;
 }
+#endif /* MINIMOD_DEBUG */
 
 /* Probe: find every place in writable memory where the float pair
  * (0.0, value) sits adjacent - the trim model would keep Start/End that way. */
+#if MINIMOD_DEBUG
 static void find_float_pair(float v)
 {
     ranges_load();
@@ -6590,15 +5802,19 @@ static void find_float_pair(float v)
     mlog("minimod: pair search done, %d hits\n", shown);
     free(buf);
 }
+#endif /* MINIMOD_DEBUG */
 
 /* Byte-level snapshot of the small writable ranges: a knob move changes the
  * pad's stored trim, and this names it exactly. */
 #define BS_MAX (48u << 20)
+#if MINIMOD_DEBUG
 static unsigned char *g_bs;
 static size_t g_bs_len;
+#endif /* MINIMOD_DEBUG */
 
 /* "findv <float>" - every address in the small writable ranges holding exactly
  * this float. Run with two knob values and intersect to find the stored state. */
+#if MINIMOD_DEBUG
 static void byte_snap(void)
 {
     ranges_load();
@@ -6631,7 +5847,9 @@ static void byte_snap(void)
     g_bs_len = used;
     mlog("minimod: byte snapshot %zu bytes\n", used);
 }
+#endif /* MINIMOD_DEBUG */
 
+#if MINIMOD_DEBUG
 static void byte_diff(void)
 {
     if (!g_bs)
@@ -6666,9 +5884,11 @@ static void byte_diff(void)
     free(cur);
     mlog("minimod: byte diff done\n");
 }
+#endif /* MINIMOD_DEBUG */
 
 /* Probe: "who <addr>" - every object that holds a pointer to <addr>, with the
  * holder's offset and whether it looks like an object (vtable in the image). */
+#if MINIMOD_DEBUG
 static void who_points_at(uintptr_t target)
 {
     ranges_load();
@@ -6702,9 +5922,11 @@ static void who_points_at(uintptr_t target)
     mlog("minimod: who done, %d holders\n", shown);
     free(buf);
 }
+#endif /* MINIMOD_DEBUG */
 
 /* Probe: /run/minimod.bcast holds "i,v" - broadcast g_bp[i] with value v, so we
  * can find which recorded property drives the page. */
+#if MINIMOD_DEBUG
 static void *bcast_probe_thread(void *arg)
 {
     (void)arg;
@@ -6736,9 +5958,11 @@ static void *bcast_probe_thread(void *arg)
     }
     return 0;
 }
+#endif /* MINIMOD_DEBUG */
 
 /* Re-arms the software watchpoint from /run/minimod.watch (hex address), so the
  * address can be set after the app has started and picked a new heap. */
+#if MINIMOD_DEBUG
 static void *watch_thread(void *arg)
 {
     (void)arg;
@@ -6779,6 +6003,7 @@ static void *watch_thread(void *arg)
     }
     return 0;
 }
+#endif /* MINIMOD_DEBUG */
 
 static int find_main(struct dl_phdr_info *info, size_t size, void *out)
 {
@@ -6855,18 +6080,19 @@ __attribute__((constructor)) static void load(void)
         return;
     }
     mlog("minimod: relay at %p (site %p)\n", relay_page, (void *)(base + A_SIXTEEN_PROC));
+    /* Release builds run the fixed hook set with no probes. The switches that
+     * used to be readable here are now ignored unless this is a debug build. */
+#if MINIMOD_DEBUG
     const char *env = getenv("MINIMOD_HOOKS");
     if (env && *env)
         hook_mask = atoi(env);
     const char *safe_env = getenv("MINIMOD_SAFE");
-    const char *dbg_env = getenv("MINIMOD_DEBUG");
-    safe_mode = safe_env && atoi(safe_env) != 0;
-    debug_mode = dbg_env && atoi(dbg_env) != 0;
+    const char *debug_flag = getenv("MINIMOD_DEBUG");
     const char *probe_env = getenv("MINIMOD_PROBE");
+    safe_mode = safe_env && atoi(safe_env) != 0;
+    debug_mode = debug_flag && atoi(debug_flag) != 0;
     probe_mode = probe_env && atoi(probe_env) != 0;
-    const char *bits_env = getenv("MINIMOD_PROBES");
-    if (bits_env && *bits_env)
-        probe_bits = atoi(bits_env);
+#endif
     void *t_ctor = (hook_mask & 1) ? install_hook(base + A_SIXTEEN_CTOR, (void *)sixteen_ctor) : 0;
     void *t_proc = (hook_mask & 2) ? install_hook(base + A_SIXTEEN_PROC, (void *)sixteen_proc) : 0;
     void *t_sync = install_hook(base + 0x2822260, (void *)sync_probe);

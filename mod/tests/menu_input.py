@@ -12,9 +12,15 @@ harness = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #define MINIMOD_DEBUG 0
 #define mlog(...) ((void)0)
 static int g_spectral_active, g_hpss_menu, g_hpss_busy, g_hpss_sel;
+static int g_bass_edit;                 /* Bass Synth page state, stubbed off */
+static float g_bass_knob[3];
+static void bass_preview_set_params(float a, float b, float c) {
+    (void)a; (void)b; (void)c;
+}
 static int paints, forwarded, cc_forwarded;
 static void hpss_repaint(void) { ++paints; }
 static void (*orig_cc)(void *, unsigned, float, float);
@@ -31,11 +37,11 @@ int main(void) {
     /* Same direction repeated is a sequence of events, not one changed value. */
     for (int i=1; i<=100; ++i) {
         data_signal((void*)0x1000, 1);
-        assert(g_hpss_sel == i%3);
+        assert(g_hpss_sel == i%7);   /* SAMPLE OPTIONS has 7 rows */
     }
     for (int i=1; i<=100; ++i) {
         data_signal((void*)0x1000, -1);
-        assert(g_hpss_sel == (100-i)%3);
+        assert(g_hpss_sel == (100-i)%7);
     }
     assert(paints == 200 && forwarded == 0);
     data_signal((void*)0x1000, 0);

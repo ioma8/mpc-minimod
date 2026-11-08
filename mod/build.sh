@@ -13,6 +13,9 @@ zig cc $common -c src/hpss.c -o build/hpss.o
 zig cc $common -c src/spectral.c -o build/spectral.o
 zig cc $common -c src/h3m_effect.c -o build/h3m_effect.o
 zig c++ $common -fno-exceptions -fno-rtti -I"$daisy" -c src/bass_sample.cpp -o build/bass_sample.o
+# fmbass_sample.c is an investigation probe, compiled out by default and never
+# linked here: the native FMBass host lifecycle is unresolved
+# (docs/re/BASS-SAMPLE.md).
 zig c++ $common -fno-exceptions -fno-rtti -fvisibility=hidden -I"$daisy" -I"$daisy/Utility" -c "$daisy/PhysicalModeling/stringvoice.cpp" -o build/daisy_stringvoice.o
 zig c++ $common -fno-exceptions -fno-rtti -fvisibility=hidden -I"$daisy" -I"$daisy/Utility" -c "$daisy/PhysicalModeling/karplusstring.cpp" -o build/daisy_karplusstring.o
 zig c++ $common -fno-exceptions -fno-rtti -fvisibility=hidden -I"$daisy" -I"$daisy/Utility" -c "$daisy/Filters/svf.cpp" -o build/daisy_svf.o

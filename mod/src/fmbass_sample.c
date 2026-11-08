@@ -1,3 +1,21 @@
+/* NOT SHIPPED — an investigation probe, compiled out by default.
+ *
+ * Builds the firmware's native FMBass instrument through its H3 graph. The host
+ * lifecycle is incomplete: the graph has no FMBass render node, dispatch is
+ * intermittent, and successful dispatch renders digital silence. Details and
+ * the probe chronology are in docs/re/BASS-SAMPLE.md.
+ *
+ * The guard makes an accidental link a no-op translation unit, so a stray
+ * `src/fmbass_sample.c` in an object list cannot pull an unfinished probe into
+ * the release. To run the probe, build with -DMINIMOD_FMBASS_PROBE=1 and link
+ * this file *instead of* bass_sample.cpp — never both.
+ */
+#ifndef MINIMOD_FMBASS_PROBE
+#define MINIMOD_FMBASS_PROBE 0
+#endif
+
+#if MINIMOD_FMBASS_PROBE
+
 #include "fmbass_sample.h"
 
 #include <math.h>
@@ -278,3 +296,5 @@ fail_alloc:
     free(audio); free(context); free(graph);
     return -1;
 }
+
+#endif /* MINIMOD_FMBASS_PROBE */

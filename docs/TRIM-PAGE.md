@@ -318,6 +318,10 @@ testing before any further heap scanning.
 | pick the sample by on-screen name | wrong by design; the name is not the pad's sample |
 | reuse `g_setter[]` pointers captured at startup | they are freed objects (§5) |
 
+> The probe functions and caches named in this table were deleted once they had
+> served their purpose (they were dead in every build). The table records what
+> was disproved, not code that still exists.
+
 ---
 
 ## 11. Reproducing any claim here

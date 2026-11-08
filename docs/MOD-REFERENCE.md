@@ -19,17 +19,22 @@ Anything not measured is marked as such.
 ## 1. What the mod is
 
 An `LD_PRELOAD` shared object (`minimod.so`) for the stock MPC Sample app. The
-release build currently ships pitch shifting in 16 Levels, native-command
-AutoTrim, the temporary AutoTrim soft-key caption, and external chromatic MIDI
-in 16 Levels. See [`MIDI-CHROMATIC.md`](MIDI-CHROMATIC.md) for its native event
-hook and emulator evidence.
+release build ships eight features: pitch shifting in 16 Levels, native-command
+AutoTrim with its caption, the SAMPLE OPTIONS menu (HPSS, Spectral Chop,
+Add Reverb, Vinyl, Lo-Fi, Bass Synth), and external chromatic MIDI in 16 Levels.
+User-facing documentation is in [`../README.md`](../README.md) and
+[`../mod/README.md`](../mod/README.md); this file is the firmware-side reference.
 
 | feature | trigger | current state |
 |---|---|---|
 | Pitch shift | PLUS / MINUS in 16 Levels; both reset | verified on hardware; keys are swallowed only in 16 Levels |
-| External chromatic MIDI | select a pad, enable Pad MIDI In, turn on 16 Levels | native MIDI event hook; C3 root; emulator-verified |
+| External chromatic MIDI | select a pad, enable Pad MIDI In, turn on 16 Levels | native MIDI event hook; C3 root; verified on hardware |
 | AutoTrim | SHIFT + B3 on the Sample page | native control path and marker refresh verified in emulator |
 | AutoTrim caption | hold SHIFT on the Sample page | drawn in the paint hook; hidden in Chop mode |
+| SAMPLE OPTIONS → HPSS | SHIFT + DATA, choose HPSS, DATA | harmonic + percussive float32 WAVs on the next two free pads; emulator-verified |
+| SAMPLE OPTIONS → Spectral Chop | SHIFT + DATA, choose Spectral Chop, DATA | in-place chop, ≤16 slices on detected frames; emulator-verified |
+| SAMPLE OPTIONS → Add Reverb / Vinyl / Lo-Fi | SHIFT + DATA, choose, DATA | native H3 render on a free pad, Reverb with an appended tail; emulator-verified |
+| SAMPLE OPTIONS → Bass Synth | SHIFT + DATA, choose, DATA | DaisySP C2 pluck on the next free pad, K1–K3 shape it; emulator-verified |
 
 AutoTrim uses the most recently triggered pad index (A01 before the first pad
 note). Real hardware, save/reload, non-first layers, selection by other routes,
@@ -323,7 +328,7 @@ Operational lessons (all learned the hard way):
 
 | path | contents |
 |---|---|
-| `mod/src/minimod.c` | the mod (~3 900 lines) |
+| `mod/src/minimod.c` | the mod (~6 400 lines; ~1 700 of them are `#if MINIMOD_DEBUG` probe code that a release build does not compile) |
 | `mod/build.sh`, `mod/pack.sh` | build and package |
 | `mod/build/minimod.zip` | **the deliverable** |
 | `docs/TRIM-PAGE.md` | the long-form investigation log (§1–32) |
