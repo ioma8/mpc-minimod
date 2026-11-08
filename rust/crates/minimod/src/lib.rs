@@ -11,6 +11,7 @@
 
 #![deny(clippy::panic, clippy::todo, clippy::unimplemented)]
 
+pub mod audio;
 pub mod bass_ffi;
 pub mod cfg;
 pub mod cfg_ffi;

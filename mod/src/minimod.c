@@ -73,6 +73,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "audio_ffi.h"
 #include "substitute_ffi.h"
 #include "hooks_ffi.h"
 #include "levels_ffi.h"
@@ -2013,24 +2014,7 @@ static void note_off(void *input, int src, int pad)
    up to 4096 and falls through for anything bigger. */
 static int audio_channels(void *self, int input_side)
 {
-    int count;
-    if (input_side) {
-        count = FIELD(self, 0xd4, int32_t);
-        if (count < 0)
-            count = FIELD(self, 0xe0, int32_t);
-        if (count < 1 || count > 8) {
-            count = FIELD(self, 0xd8, int32_t);
-            if (count < 0)
-                count = FIELD(self, 0xe4, int32_t);
-        }
-    } else {
-        count = FIELD(self, 0xd8, int32_t);
-        if (count < 0)
-            count = FIELD(self, 0xe4, int32_t);
-    }
-    if (count < 1 || count > 8)
-        count = 2;
-    return count;
+    return minimod_audio_channels((uintptr_t)self, input_side);
 }
 
 /* The firmware's input stream is RW_INTERLEAVED S32_LE. Rather than chase the
