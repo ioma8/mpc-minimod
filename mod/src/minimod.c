@@ -73,6 +73,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "page_ffi.h"
 #include "selection_ffi.h"
 #include "chop_ffi.h"
 #include "pads_ffi.h"
@@ -442,10 +443,7 @@ static void *g_sixteen; /* the live 16 Levels screen, if seen             */
  * against the panel's CHOP LED: LED bright <=> +0x1ee0 visible. */
 static int in_chop_mode(void)
 {
-    void *s = g_screen;
-    if (!s || FIELD(s, 0, uintptr_t) != base + 0x6e212a0) /* SampleModeScreen */
-        return 0;
-    return FN(0x112fd50, int (*)(void *))((char *)s + 0x1ee0) != 0;
+    return minimod_page_chop_mode(base, (uintptr_t)g_screen);
 }
 
 /* 16 LEVELS has no readable state field we could find; the only way in or out
@@ -1105,17 +1103,12 @@ static void hpss_repaint(void)
 
 static int sample_page_visible(void)
 {
-    void *s = g_screen;
-    return s && FIELD(s, 0, uintptr_t) == base + A_SCREEN_VT &&
-           FN(0x112fd50, int (*)(void *))(s) != 0;
+    return minimod_page_visible(base, (uintptr_t)g_screen);
 }
 
 static int hpss_chop_mode(void)
 {
-    void *s = g_screen;
-    if (!s || FIELD(s, 0, uintptr_t) != base + A_SCREEN_VT)
-        return 0;
-    return FN(0x112fd50, int (*)(void *))((char *)s + 0x1ee0) != 0;
+    return minimod_page_chop_mode(base, (uintptr_t)g_screen);
 }
 
 /* Stock Extract can leave the Sample page in Chop mode.  Replay the CHOP

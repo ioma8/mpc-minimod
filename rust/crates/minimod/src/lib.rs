@@ -22,6 +22,7 @@ pub mod firmware;
 pub mod hooks;
 pub mod looper_ffi;
 pub mod pads;
+pub mod page;
 pub mod paths;
 pub mod paths_ffi;
 pub mod sample;
