@@ -62,7 +62,8 @@ slice.
 | Bass synth: Karplus string, SVF, DC blocker, crossfade, dust | ported | golden fixture, **bit-identical** over 132 300 samples; emulator bass test |
 | Realtime bass preview (4 voices, 16 pads) | ported | unit test: a strike is audible, decays, both channels match |
 | `fmbass_sample.c` (FM bass preset renderer) | removed | never compiled and never called; the Bass Synth action renders with `bass_sample_render` |
-| `minimod.c` (hooks, features, UI glue) | C | — |
+| WAV reading, source backup/restore | ported | 5 host tests over synthetic files; the effects and bass device tests run on it |
+| `minimod.c` (hooks, features, UI glue) | C, shrinking | — |
 
 The looper, the effects and the whole bass synth are already what the device
 runs: `mod/build.sh` links the Rust static library instead of the C engines, and
@@ -90,6 +91,17 @@ compares:
 That is the strongest check available without hardware: if the engine made a
 different decision, mixed at a different level, captured one frame less of the
 latency tail or quantised a length differently, the trace differs.
+
+## How the glue moves
+
+`minimod.c` is one translation unit with shared state, so it cannot be split
+along module lines.  Instead, self-contained areas move out one at a time and the
+C keeps calling them through a small header of C prototypes
+(`src/wav_ffi.h` is the first): the call sites do not change, the C definitions
+are deleted, and the header disappears with the file.  Each area is chosen so an
+existing emulator test already covers it — the WAV layer, for instance, is on the
+path of every sample action, so the Reverb and Bass Synth tests validate it on
+the device.
 
 ## Findings from the port
 
@@ -142,6 +154,13 @@ object references `_Unwind_Resume` and friends from its panic hook's backtrace
 path.  Without `-lunwind` the library links but the firmware refuses to start the
 app (`undefined symbol: _Unwind_Resume`, exit 127).  Linking it costs ~20 KB
 after `--gc-sections` and strip.
+
+**The sampler's own recordings are not at fixed offsets.** They carry a `JUNK`
+chunk in front of `fmt `, so both the format and the data chunk have to be found
+by walking the RIFF chunks, and the `fmt ` payload can be 16 or 40 bytes
+(`WAVE_FORMAT_EXTENSIBLE` stores the real tag in its sub-format GUID).  The Rust
+parser shares one walk between the header question and the decode, which is what
+makes the two answers impossible to disagree.
 
 **Linker noise.** rustc asks the linker for `-Wl,-O1`; lld has deprecated it and
 zig forwards it verbatim, so every cross build printed a warning. The cross

@@ -17,3 +17,5 @@ pub mod effect_ffi;
 pub mod firmware;
 pub mod hooks;
 pub mod looper_ffi;
+pub mod wav;
+pub mod wav_ffi;

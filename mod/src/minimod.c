@@ -76,6 +76,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "wav_ffi.h"
 #include "bass_sample.h"
 #include "looper.h"
 
@@ -574,62 +575,6 @@ static int bump_octave(int d)
     return 1;
 }
 
-/* ------------------------------------------------------------- WAV helpers */
-static int wav_info(const char *path, unsigned *frames, unsigned *rate,
-                    unsigned *ch, unsigned *dataoff, unsigned *bps, unsigned *format)
-{
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return 0;
-    unsigned char h[12];
-    if (pread(fd, h, 12, 0) != 12 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4)) {
-        close(fd);
-        return 0;
-    }
-    /* Walk the chunks and take fmt where it actually is: recordings carry a
-     * JUNK chunk first, so the fmt fields are not at fixed offsets. */
-    unsigned encoding = 0, chn = 0, bits = 0, rt = 0, dof = 0, len = 0;
-    off_t off = 12;
-    for (int guard = 0; guard < 64; ++guard) {
-        unsigned char ck[8];
-        if (pread(fd, ck, 8, off) != 8)
-            break;
-        unsigned sz = (unsigned)ck[4] | ((unsigned)ck[5] << 8) |
-                      ((unsigned)ck[6] << 16) | ((unsigned)ck[7] << 24);
-        if (!memcmp(ck, "fmt ", 4) && sz >= 16 && sz <= 40) {
-            unsigned char f[40] = {0};
-            if (pread(fd, f, sz, off + 8) != (ssize_t)sz)
-                break;
-            encoding = (unsigned)f[0] | ((unsigned)f[1] << 8);
-            chn = (unsigned)f[2] | ((unsigned)f[3] << 8);
-            rt = (unsigned)f[4] | ((unsigned)f[5] << 8) |
-                 ((unsigned)f[6] << 16) | ((unsigned)f[7] << 24);
-            bits = (unsigned)f[14] | ((unsigned)f[15] << 8);
-            if (encoding == 0xfffe && sz >= 40)   /* EXTENSIBLE: subformat GUID */
-                encoding = (unsigned)f[24] | ((unsigned)f[25] << 8);
-        } else if (!memcmp(ck, "data", 4)) {
-            dof = (unsigned)off + 8;
-            len = sz;
-            if (encoding)
-                break;
-        }
-        off += 8 + (off_t)sz + (off_t)(sz & 1);
-    }
-    close(fd);
-    if (!dof || !len || !chn || !rt || !encoding)
-        return 0;
-    if (encoding != 1 && !(encoding == 3 && bits == 32))
-        return 0;
-    if (bits != 16 && bits != 24 && bits != 32)
-        return 0;
-    *frames = len / ((bits / 8u) * chn);
-    *rate = rt;
-    *ch = chn;
-    *dataoff = dof;
-    *bps = bits / 8u;
-    if (format) *format = encoding;
-    return 1;
-}
 
 static int pcm_at(const unsigned char *p, unsigned bps, unsigned format)
 {
@@ -1084,119 +1029,6 @@ static int wav_by_frames(unsigned want, char *out, size_t n)
     return found;
 }
 
-/* Decode a whole WAV into interleaved float32.  This is intentionally stricter
- * than wav_info(): HPSS must read exactly the sample the app has loaded, so the
- * frame count, channel count and rate all have to match the native metadata.
- * Supports PCM16/24/32 and IEEE float32/64, including WAVE_FORMAT_EXTENSIBLE. */
-static int wav_read_f32(const char *path, unsigned want_frames, unsigned want_ch,
-                        unsigned want_rate, float **out, unsigned *got_ch,
-                        unsigned *got_rate)
-{
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return 0;
-    unsigned char h[12];
-    if (pread(fd, h, 12, 0) != 12 || memcmp(h, "RIFF", 4) ||
-        memcmp(h + 8, "WAVE", 4)) {
-        close(fd);
-        return 0;
-    }
-    unsigned encoding = 0, ch = 0, bits = 0, rate = 0, dof = 0, len = 0;
-    off_t off = 12;
-    for (int guard = 0; guard < 64; ++guard) {
-        unsigned char ck[8];
-        if (pread(fd, ck, 8, off) != 8)
-            break;
-        unsigned sz = (unsigned)ck[4] | ((unsigned)ck[5] << 8) |
-                      ((unsigned)ck[6] << 16) | ((unsigned)ck[7] << 24);
-        if (!memcmp(ck, "fmt ", 4) && sz >= 16 && sz <= 40) {
-            unsigned char f[40] = {0};
-            if (sz > sizeof f || pread(fd, f, sz, off + 8) != (ssize_t)sz)
-                break;
-            encoding = (unsigned)f[0] | ((unsigned)f[1] << 8);
-            ch = (unsigned)f[2] | ((unsigned)f[3] << 8);
-            rate = (unsigned)f[4] | ((unsigned)f[5] << 8) |
-                   ((unsigned)f[6] << 16) | ((unsigned)f[7] << 24);
-            bits = (unsigned)f[14] | ((unsigned)f[15] << 8);
-            if (encoding == 0xfffe && sz >= 40)
-                encoding = (unsigned)f[24] | ((unsigned)f[25] << 8);
-        } else if (!memcmp(ck, "data", 4)) {
-            dof = (unsigned)off + 8;
-            len = sz;
-            if (encoding)
-                break;
-        }
-        off += 8 + (off_t)sz + (off_t)(sz & 1);
-    }
-    if (!dof || !len || !ch || ch > 2 || !rate || !bits)
-        goto bad;
-    if (!((encoding == 1 && (bits == 16 || bits == 24 || bits == 32)) ||
-          (encoding == 3 && (bits == 32 || bits == 64))))
-        goto bad;
-    unsigned bps = bits / 8;
-    unsigned frames = len / (bps * ch);
-    if (frames != want_frames || ch != want_ch || rate != want_rate)
-        goto bad;
-
-    size_t cells = (size_t)frames * ch;
-    if (cells > SIZE_MAX / sizeof(float))
-        goto bad;
-    float *buf = malloc(cells * sizeof(float));
-    if (!buf)
-        goto bad;
-    unsigned char tmp[8192];
-    size_t at = 0;
-    while (at < cells) {
-        size_t want = cells - at;
-        if (want > sizeof tmp / bps)
-            want = sizeof tmp / bps;
-        ssize_t n = pread(fd, tmp, want * bps, (off_t)dof + (off_t)at * bps);
-        if (n <= 0)
-            break;
-        size_t got = (size_t)n / bps;
-        for (size_t i = 0; i < got; ++i) {
-            const unsigned char *p = tmp + i * bps;
-            if (encoding == 3 && bits == 32) {
-                float v;
-                memcpy(&v, p, 4);
-                buf[at + i] = v;
-            } else if (encoding == 3 && bits == 64) {
-                double v;
-                memcpy(&v, p, 8);
-                buf[at + i] = (float)v;
-            } else if (bits == 16) {
-                int16_t v;
-                memcpy(&v, p, 2);
-                buf[at + i] = (float)v / 32768.0f;
-            } else if (bits == 24) {
-                int v = (int)p[0] | ((int)p[1] << 8) |
-                        ((int)(signed char)p[2] << 16);
-                buf[at + i] = (float)v / 8388608.0f;
-            } else {
-                int32_t v;
-                memcpy(&v, p, 4);
-                buf[at + i] = (float)((double)v / 2147483648.0);
-            }
-        }
-        at += got;
-        if (got != want)
-            break;
-    }
-    close(fd);
-    if (at != cells) {
-        free(buf);
-        return 0;
-    }
-    *out = buf;
-    if (got_ch)
-        *got_ch = ch;
-    if (got_rate)
-        *got_rate = rate;
-    return 1;
-bad:
-    close(fd);
-    return 0;
-}
 
 /* The page binds each trim parameter through a small binding object whose
  * vtable is app+0x6e08a10 and which keeps the property pointer at +0x20. */
@@ -2194,65 +2026,7 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
     return ok;
 }
 
-static int bass_source_backup(const char *path, off_t *data_offset,
-                              unsigned char **data, size_t *data_size)
-{
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return 0;
-    unsigned char header[12];
-    int ok = 0;
-    if (pread(fd, header, sizeof header, 0) != (ssize_t)sizeof header ||
-        memcmp(header, "RIFF", 4) || memcmp(header + 8, "WAVE", 4))
-        goto done;
-    off_t pos = 12;
-    for (int chunks = 0; chunks < 64; ++chunks) {
-        unsigned char chunk[8];
-        if (pread(fd, chunk, sizeof chunk, pos) != (ssize_t)sizeof chunk)
-            break;
-        uint32_t size = (uint32_t)chunk[4] | (uint32_t)chunk[5] << 8 |
-                        (uint32_t)chunk[6] << 16 | (uint32_t)chunk[7] << 24;
-        if (!memcmp(chunk, "data", 4)) {
-            unsigned char *copy = malloc(size ? size : 1);
-            if (!copy)
-                break;
-            if (pread(fd, copy, size, pos + 8) != (ssize_t)size) {
-                free(copy);
-                break;
-            }
-            *data_offset = pos + 8;
-            *data = copy;
-            *data_size = size;
-            ok = 1;
-            break;
-        }
-        pos += 8 + (off_t)size + (size & 1);
-    }
-done:
-    close(fd);
-    return ok;
-}
 
-static int bass_source_restore(const char *path, off_t data_offset,
-                               const unsigned char *data, size_t data_size)
-{
-    int fd = open(path, O_WRONLY);
-    if (fd < 0)
-        return 0;
-    size_t written = 0;
-    while (written < data_size) {
-        ssize_t n = pwrite(fd, data + written, data_size - written,
-                           data_offset + (off_t)written);
-        if (n <= 0) {
-            close(fd);
-            return 0;
-        }
-        written += (size_t)n;
-    }
-    int ok = fdatasync(fd) == 0;
-    close(fd);
-    return ok;
-}
 
 /* ------------------------------------------------------------ HPSS job/menu */
 struct hpss_job {
