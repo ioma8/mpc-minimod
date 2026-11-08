@@ -74,8 +74,8 @@ looper before this was fixed.
     truncated. The tail is padded with silence, so `length` is always a multiple
     of the pulse even when the take was shorter (`rec < length`).
 * **MAIN VOLUME** scales the loops exactly like the rest of the app: the knob's
-  CC (19) is tracked and applied as a gain on the loop mix, and the value is
-  stored in `/data/minimod-looper.cfg` so it survives a restart.
+  CC (19) is applied both to the app's own mix and to the loop gain, and the
+  value is stored in `/data/minimod-looper.cfg` so it survives a restart.
 * **Overdub** clamps each sample to full scale, so an input that hears the
   output cannot grow a loop without bound.
 * **Closing** the view stops all playback and clears the pulse but keeps the
@@ -138,8 +138,8 @@ output that has been written but not yet played. That is the number the sampler
 itself works with, and the looper reads it straight from ALSA with
 `snd_pcm_hw_params_get_buffer_size` on both of the firmware's handles — no probe,
 no return path, so **headphones, USB audio and a silent instrument input all get
-the right value**. The sizes are re-read every few seconds in case the device
-reopens with a different buffer (USB, headphones).
+the right value**. The sizes are read on the stream's own audio thread the first
+time the view opens (and again on every reopen), never from another thread.
 
 In the lab the firmware uses 1024 frames per ring, so the looper applies
 `2048` frames (46 ms); a click recorded through the loop cable lands **69 frames
@@ -147,9 +147,10 @@ In the lab the firmware uses 1024 frames per ring, so the looper applies
 
 The sizes are read with `snd_pcm_hw_params_current` **on the stream's own audio
 thread** (the first write/read after the view opens) and the channel count used
-for mixing comes from the same query, never from a guess: touching the app's pcm
-from the repaint thread is exactly the kind of thing that can wedge ALSA and take
-the whole app down when the view closes.
+for mixing comes from the same query; if the device cannot be queried, or the
+stream is not `S32_LE`, the mod leaves the buffer alone instead of guessing.
+Touching the app's pcm from the repaint thread is exactly the kind of thing that
+can wedge ALSA and take the whole app down when the view closes.
 
 `K1` adds a trim of ±400 ms on top for the room or personal preference, stored in
 `/data/minimod-looper.cfg` and reused at the next start (the strip then shows
@@ -158,8 +159,10 @@ the mod falls back to `snd_pcm_delay` + `snd_pcm_avail` (`EST`), and
 `MINIMOD_LOOP_LAT=<frames>` forces a fixed value for experiments.
 
 The compensation is snapshotted when a take starts and used for the whole take:
-a new recording drops its first `lat` frames (they belong before the loop start)
-and overdubs write `lat` frames earlier, wrapping inside the loop.
+a new recording drops its first `lat` frames (they belong before the loop start),
+and when the take is closed it keeps capturing for `lat` frames more, so the last
+moments before the closing press are written to the end of the loop instead of
+being lost. Overdubs write `lat` frames earlier, wrapping inside the loop.
 
 ### Clock and threads
 
@@ -191,8 +194,8 @@ The test drives the panel and reads the mod's own state and output tap from
 Last run on the release build:
 
 ```
-live looper: loop 51968 frames (1.18s), 0.150 rms at 441 Hz, ring 2048 frames,
-take latency 2048 frames, sync 51968, quantized 25600 -> 51968
+live looper: loop 51712 frames (1.17s), 0.150 rms at 435 Hz, ring 2048 frames,
+take latency 2048 frames, sync 51712, quantized 27648 -> 51712
 ```
 
 What that covers, in order: opening the view reads the firmware's ring geometry

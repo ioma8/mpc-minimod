@@ -369,6 +369,46 @@ static int pc_relative(uint32_t insn)
  * body runs on its own frame) and then branches into the body; the body's
  * epilogue returns straight to the hook, which returns to the app with all
  * callee-saved registers intact. */
+/* First instruction of every site this build hooks, read from firmware
+ * 1.3.0.12. If any of them does not match, nothing is installed: patching an
+ * offset in a different build would overwrite a random instruction. */
+static int firmware_ok(void)
+{
+    static const struct {
+        uintptr_t off;
+        uint32_t word;
+    } sites[] = {
+        {0x00f535c0, 0xd503233f}, {0x01149880, 0xd503233f},
+        {0x013bb930, 0xd503233f}, {0x0140dbc0, 0xd503233f},
+        {0x0143ed40, 0xd503233f}, {0x0143f0b0, 0xd503233f},
+        {0x014a7580, 0xd503233f}, {0x01545a50, 0xd503233f},
+        {0x0159f230, 0x39402003}, {0x0159f2f0, 0xd503245f},
+        {0x015e70c0, 0xd503233f}, {0x016b6060, 0xd503245f},
+        {0x0192d040, 0xd503233f}, {0x0195cf40, 0xd503233f},
+        {0x0195d1c0, 0xd503233f}, {0x01960af0, 0xd503233f},
+        {0x01960d50, 0xd503233f}, {0x01968020, 0xd503233f},
+        {0x01d8aff0, 0xd503233f}, {0x01e270d0, 0xd503233f},
+        {0x01e27360, 0xd503233f}, {0x020a3b10, 0xd503233f},
+        {0x020a7140, 0xd503233f}, {0x020a9fa0, 0xd503233f},
+        {0x020aa9e0, 0xd503233f}, {0x0211b090, 0xd503233f},
+        {0x021472f0, 0xd503233f}, {0x023aff60, 0xd503233f},
+        {0x027e4400, 0xd503233f}, {0x02804e90, 0xd503233f},
+        {0x0280dca0, 0xd503233f}, {0x028100c0, 0xd503233f},
+        {0x02812f10, 0xd503245f}, {0x02814ec0, 0xd503233f},
+        {0x02822260, 0xd503233f}, {0x02941ff0, 0xd503245f},
+        {0x03f398f0, 0xd503233f},
+    };
+    for (unsigned i = 0; i < sizeof sites / sizeof sites[0]; ++i) {
+        uint32_t w = 0;
+        if (!rd(base + sites[i].off, &w, 4) || w != sites[i].word) {
+            mlog("minimod: site %#lx is %08x, expected %08x - firmware mismatch\n",
+                 (unsigned long)sites[i].off, w, sites[i].word);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void *install_hook(uintptr_t site, void *hook)
 {
     if (!relay_page || !tramp_page || nslots >= 60 || ntramp >= 60)
@@ -413,13 +453,15 @@ static void *install_hook(uintptr_t site, void *hook)
     memcpy(tr + n * 4, &b_body, 4);
 
     uintptr_t page = site & ~(uintptr_t)0xfff;
-    if (mprotect((void *)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+    uintptr_t last = (site + 3) & ~(uintptr_t)0xfff;
+    size_t span = (size_t)(last - page) + 0x1000; /* only the pages we patch */
+    if (mprotect((void *)page, span, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
         mlog("minimod: mprotect(%p) failed: %s\n", (void *)page, strerror(errno));
         return 0;
     }
     int ok = wr(site, &b_slot, 4);
     __builtin___clear_cache((char *)site, (char *)(site + 4));
-    mprotect((void *)page, 0x2000, PROT_READ | PROT_EXEC);
+    mprotect((void *)page, span, PROT_READ | PROT_EXEC);
     if (!ok) {
         mlog("minimod: patch of %p failed\n", (void *)site);
         return 0;
@@ -441,7 +483,6 @@ static void *install_hook(uintptr_t site, void *hook)
 static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
 static void midi_note_event(void *app, void *context, void *event,
                             uintptr_t source);
-static unsigned char g_midi_orig[4], g_midi_patch[4];
 static int g_midi_ready, g_midi_on;
 /* A physical pad press identifies its pad through property 0 of the note event
  * (event+0x16), whose value is the bank's pad-note base plus the pad index.
@@ -463,61 +504,11 @@ static int midi_hook_site_ok(void)
            !memcmp(got, want, sizeof want);
 }
 
-static void midi_site_bytes(const void *p)
-{
-    uintptr_t site = base + A_MIDI_NOTE_EVENT;
-    uintptr_t page = site & ~(uintptr_t)0xfff;
-    if (mprotect((void *)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
-        return;
-    wr(site, p, 4);
-    __builtin___clear_cache((char *)site, (char *)site + 4);
-    mprotect((void *)page, 0x2000, PROT_READ | PROT_EXEC);
-}
-
 static void midi_hook_set(int on)
 {
-    if (!base || !relay_page || !tramp_page || nslots >= 60 || ntramp >= 60)
-        return;
-    on = on ? 1 : 0;
-    if (on == g_midi_on)
-        return;
-    if (on) {
-        if (!g_midi_ready) {
-            if (!midi_hook_site_ok()) {
-                mlog("minimod: MIDI dispatcher mismatch; not hooking\n");
-                toast("MIDI hook: firmware?");
-                return;
-            }
-            if (!rd(base + A_MIDI_NOTE_EVENT, g_midi_orig, 4))
-                return;
-            /* The relay/trampoline pages are RX after load; reopen them for
-             * the one-time slot build. */
-            mprotect(relay_page, 4096, PROT_READ | PROT_WRITE);
-            mprotect(tramp_page, 4096, PROT_READ | PROT_WRITE);
-            void *t = install_hook(base + A_MIDI_NOTE_EVENT,
-                                   (void *)midi_note_event);
-            mprotect(relay_page, 4096, PROT_READ | PROT_EXEC);
-            mprotect(tramp_page, 4096, PROT_READ | PROT_EXEC);
-            if (!t)
-                return;
-            orig_midi_note_event =
-                (void (*)(void *, void *, void *, uintptr_t))t;
-            g_midi_ready = 1;
-            if (!rd(base + A_MIDI_NOTE_EVENT, g_midi_patch, 4))
-                return;
-            mlog("minimod: MIDI hook installed\n");
-        } else {
-            midi_site_bytes(g_midi_patch);
-            mlog("minimod: MIDI hook on\n");
-        }
-        g_midi_on = 1;
-    } else {
-        if (g_midi_ready) {
-            midi_site_bytes(g_midi_orig);
-            mlog("minimod: MIDI hook off (stock)\n");
-        }
-        g_midi_on = 0;
-    }
+    /* The dispatcher is hooked once at load; this only changes behaviour, so no
+     * code is rewritten while the MIDI thread may be running it. */
+    g_midi_on = on ? 1 : 0;
 }
 
 /* -------------------------------------------------------- 16 Levels state */
@@ -723,6 +714,7 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
             thr = (short)t;
             mlog("minimod: trim threshold ratio %.4f peak %d -> %d\n", ratio,
                  (int)peak, (int)thr);
+#if MINIMOD_DEBUG
             if (getenv("MINIMOD_ENV")) {
                 /* level envelope in 32 windows, same scale as the threshold */
                 unsigned step = frames / 32 ? frames / 32 : 1;
@@ -747,6 +739,7 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
                     mlog("minimod: env %2u/%02u peak %5d\n", w, 32, (int)wp);
                 }
             }
+#endif
         }
     }
     unsigned f = 0;
@@ -3872,9 +3865,10 @@ static volatile unsigned g_buf_out;
 static volatile unsigned g_buf_in;
 static volatile unsigned g_out_ch; /* channels of the device buffer, from ALSA */
 static volatile unsigned g_in_ch;
-static volatile void *g_out_pcm;
+static volatile int g_out_s32;      /* output stream is S32_LE */
+static volatile int g_in_s32;       /* input stream is S32_LE */
 static volatile void *g_in_pcm;
-static unsigned stream_buffer_frames(void *pcm, unsigned *channels);
+static unsigned stream_geometry(void *pcm, unsigned *channels, int *s32);
 
 static void *looper_pump_thread(void *arg)
 {
@@ -4115,6 +4109,8 @@ static void hpss_draw_menu(void *g)
     }
 }
 
+static void release_held_pads(void);
+
 static void buttons(void *event)
 {
 
@@ -4141,6 +4137,7 @@ static void buttons(void *event)
         if (was && !looper_is_open()) {
             g_shift = 0;
             g_erase_down = 0;
+            release_held_pads();
             hpss_repaint();
         }
         return;
@@ -4311,10 +4308,33 @@ static struct {
     int valid;
 } g_pad_rec[128];
 
+/* Pads whose note-on the app may have seen; a note-off that arrives while the
+ * looper owns the pads is replayed when the view closes. */
+static unsigned char g_held_on[128];
+static void *g_held_input[128];
+static int g_held_src[128];
+
+static void release_held_pads(void)
+{
+    for (int p = 0; p < 128; ++p) {
+        if (!g_held_on[p])
+            continue;
+        g_held_on[p] = 0;
+        if (orig_note_off)
+            orig_note_off(g_held_input[p], g_held_src[p], p);
+    }
+}
+
 static void note_on(void *input, int src, int pad, void *props, float vel)
 {
-    if (looper_is_open() && pad >= 0 && pad < LOOPER_PADS) {
-        looper_pad(pad, g_shift, g_erase_down); /* the looper owns the pads while it is open */
+    if (pad >= 0 && pad < 128) {
+        g_held_on[pad] = 1;
+        g_held_input[pad] = input;
+        g_held_src[pad] = src;
+    }
+    if (looper_is_open() && pad >= 0) {
+        if (pad < LOOPER_PADS)
+            looper_pad(pad, g_shift, g_erase_down); /* the looper owns the pads */
         return;
     }
     if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
@@ -4351,7 +4371,9 @@ static void note_on(void *input, int src, int pad, void *props, float vel)
 
 static void note_off(void *input, int src, int pad)
 {
-    if (looper_is_open() && pad >= 0 && pad < LOOPER_PADS)
+    if (pad >= 0 && pad < 128)
+        g_held_on[pad] = 0;
+    if (looper_is_open() && pad >= 0)
         return;
     if (g_hpss_menu && g_bass_edit && pad >= 0 && pad < 16)
         return;
@@ -4399,11 +4421,18 @@ static unsigned (*real_hw_malloc)(void **);
 static int (*real_hw_current)(void *, void *);
 static int (*real_hw_bufsize)(void *, unsigned long *);
 static int (*real_hw_channels)(void *, unsigned *);
+static int (*real_hw_format)(void *, int *);
 static void (*real_hw_free)(void *);
+
+/* ALSA's SND_PCM_FORMAT_S32_LE; minimod has no ALSA headers. */
+#define MM_FMT_S32_LE 10
 
 /* Frames in one ALSA ring, and the channel count the device really uses.
  * Called only from the audio thread that owns the stream. */
-static unsigned stream_buffer_frames(void *pcm, unsigned *channels)
+/* Frames in the ring, the channel count and whether the stream is S32_LE -
+ * all from the stream's own hw params. Returns 0 when the device cannot be
+ * queried, and callers must then leave the buffer alone. */
+static unsigned stream_geometry(void *pcm, unsigned *channels, int *s32)
 {
     if (!pcm || !real_hw_malloc)
         return 0;
@@ -4419,6 +4448,10 @@ static unsigned stream_buffer_frames(void *pcm, unsigned *channels)
             unsigned c = 0;
             if (real_hw_channels(hw, &c) >= 0 && c > 0 && c <= 32)
                 *channels = c;
+        }
+        if (s32 && real_hw_format) {
+            int f = -1;
+            *s32 = real_hw_format(hw, &f) >= 0 && f == MM_FMT_S32_LE;
         }
     }
     if (real_hw_free)
@@ -4462,15 +4495,19 @@ long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size)
             (long (*)(void *, const void *, unsigned long))dlsym(RTLD_NEXT, "snd_pcm_writei");
     if (!real_snd_pcm_writei)
         return -1;
-    unsigned ch = g_out_ch ? g_out_ch : (g_pcm_channels ? g_pcm_channels : 4);
     int looper = looper_is_open();
-    g_out_pcm = pcm;
     if (looper && (!g_buf_out || g_buf_dirty)) {
         unsigned c = 0;
-        g_buf_out = stream_buffer_frames(pcm, &c);
-        if (c)
+        int s32 = 0;
+        g_buf_out = stream_geometry(pcm, &c, &s32);
+        if (c) {
             g_out_ch = c;
+            g_out_s32 = s32;
+        }
+        if (g_buf_out && g_buf_in)
+            g_buf_dirty = 0;
     }
+    unsigned ch = g_out_ch;
     if (looper) {
         long delay = 0;
         if (!real_snd_pcm_delay)
@@ -4484,22 +4521,27 @@ long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size)
             looper_set_latency_ex((unsigned)g_lat_fixed, 'F');
         } else {
             unsigned bo = g_buf_out, bi = g_buf_in;
-            unsigned total;
+            long total;
+            char src;
             if (bo > 0 && bi > 0) {
                 /* The firmware keeps one full ring in each direction; that is
                  * the latency its own sampler works with. */
-                total = bo + bi;
-                looper_set_latency_ex(total + (unsigned)g_lat_extra, 'B');
+                total = (long)bo + (long)bi;
+                src = 'B';
             } else {
-                int est = (int)(g_out_delay_avg + (unsigned)size + g_in_delay +
-                                looper_input_backlog());
-                if (est < 0)
-                    est = 0;
-                looper_set_latency_ex((unsigned)(est + g_lat_extra), 'E');
+                total = (long)g_out_delay_avg + (long)size + (long)g_in_delay +
+                        (long)looper_input_backlog();
+                src = 'E';
             }
+            total += (long)g_lat_extra;
+            if (total < 0)
+                total = 0;
+            if (total > 16384) /* looper.c's LP_LAT_MAX */
+                total = 16384;
+            looper_set_latency_ex((unsigned)total, src);
         }
     }
-    if (looper && buffer && size)
+    if (looper && buffer && size && ch && g_out_s32)
         looper_render_s32((int32_t *)buffer, ch, (unsigned)size);
 #if MINIMOD_LOG
     {
@@ -4566,22 +4608,26 @@ long snd_pcm_readi(void *pcm, void *buffer, unsigned long size)
         }
     }
 #endif
-    g_in_pcm = pcm;
+    if (!g_in_pcm)
+        g_in_pcm = pcm; /* the first capture stream is the source */
     if (!g_buf_in || g_buf_dirty) {
         unsigned c = 0;
-        g_buf_in = stream_buffer_frames(pcm, &c);
-        if (c)
+        int s32 = 0;
+        g_buf_in = stream_geometry(pcm, &c, &s32);
+        if (c) {
             g_in_ch = c;
-        if (g_buf_dirty && g_buf_out)
+            g_in_s32 = s32;
+        }
+        if (g_buf_in && g_buf_out)
             g_buf_dirty = 0;
     }
     long got = real_snd_pcm_readi(pcm, buffer, size);
     if (got > 0) {
 
         __atomic_add_fetch(&g_audio_in_calls, 1, __ATOMIC_RELAXED);
-        if (looper_is_open() && buffer)
-            looper_input_s32_interleaved((const int32_t *)buffer,
-                                         g_in_ch ? g_in_ch : g_pcm_channels,
+        if (looper_is_open() && buffer && g_in_ch && g_in_s32 &&
+            pcm == g_in_pcm)
+            looper_input_s32_interleaved((const int32_t *)buffer, g_in_ch,
                                          (unsigned)got);
     }
     return got;
@@ -4597,9 +4643,9 @@ long snd_pcm_readn(void *pcm, void **bufs, unsigned long size)
     long got = real_snd_pcm_readn(pcm, bufs, size);
     if (got > 0) {
         __atomic_add_fetch(&g_audio_in_calls, 1, __ATOMIC_RELAXED);
-        if (looper_is_open() && bufs && bufs[0])
-            looper_input_s32((const int32_t *const *)bufs, (int)g_pcm_channels,
-                             (unsigned)got);
+        if (looper_is_open() && bufs && bufs[0] && g_in_s32 &&
+            (!g_in_pcm || pcm == g_in_pcm))
+            looper_input_s32((const int32_t *const *)bufs, 1, (unsigned)got);
     }
     return got;
 }
@@ -4619,10 +4665,20 @@ static void looper_cfg_load(void)
         return;
     int trim = 0, master = 127;
     int got = sscanf(buf, "%d %d", &trim, &master);
-    if (got >= 1)
+    if (got >= 1) {
+        if (trim < -400)
+            trim = -400;
+        if (trim > 400)
+            trim = 400;
         g_lat_extra = trim * 44;
-    if (got >= 2)
+    }
+    if (got >= 2) {
+        if (master < 0)
+            master = 0;
+        if (master > 127)
+            master = 127;
         looper_set_master((unsigned)master);
+    }
 }
 
 static void looper_cfg_save(void)
@@ -4857,7 +4913,7 @@ static void trim_probe(void *self, float v)
     }
     g_core_hit = 1;
     {
-        uintptr_t sl = slider_for_value(v * 100.0f);
+        uintptr_t sl = probe_mode ? slider_for_value(v * 100.0f) : 0;
         if (sl) {
             int i;
             for (i = 0; i < g_nps; ++i)
@@ -4979,10 +5035,9 @@ static void trim_probe(void *self, float v)
 
 static void bcast_hook(void *self, float v)
 {
-    int i = g_nbc;
+    unsigned i = __atomic_fetch_add(&g_nbc, 1, __ATOMIC_RELAXED);
     g_bc[i & 255].p = (uintptr_t)self;
     g_bc[i & 255].v = v;
-    g_nbc = i + 1;
     if (probe_mode && i < 64)
         mlog("minimod: bcast %p v=%.4f\n", self, (double)v);
 
@@ -5325,7 +5380,7 @@ static uintptr_t param_by_value(float frac)
     for (int r = 0; r < g_nrng; ++r) {
         if (!g_rng[r].w)
             continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ntp < 256; a += 65536) {
+        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi; a += 65536) {
             size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
             n &= ~(size_t)7;
             if (!rd(a, buf, n))
@@ -5609,33 +5664,40 @@ static int g_in_cc_replay;
 static void cc_capture(void *ev, unsigned raw, float lo, float range)
 {
     if (!g_in_cc_replay && ev && ((unsigned char *)ev)[8] == 0x13) {
-        looper_set_master(raw); /* MAIN VOLUME */
+        looper_set_master(raw); /* MAIN VOLUME drives the loops ... */
         if (now_ms() > g_cfg_saved_at + 5000) {
             g_cfg_saved_at = now_ms();
             looper_cfg_save();
         }
+        /* ... and the app's own mix, so fall through to orig_cc */
     }
     if (!g_in_cc_replay && ev && looper_is_open()) {
         unsigned cc = ((unsigned char *)ev)[8];
-        if (cc == 0x10) { /* K1: trim the record latency, 1 ms per step */
+        if (cc == 0x10) { /* K1: 1 ms per step, clamped to +-400 ms */
             static int k1_last = -1;
             if (k1_last < 0) {
                 k1_last = (int)raw;
             } else if ((int)raw != k1_last) {
-                int ms = (g_lat_extra + (int)raw - k1_last) / 44;
-                if (ms < -400)
-                    ms = -400;
-                if (ms > 400)
-                    ms = 400;
-                g_lat_extra = ms * 44;
-                looper_cfg_save();
+                long frames = (long)g_lat_extra +
+                              ((long)raw - (long)k1_last) * 44L;
+                if (frames < -400L * 44)
+                    frames = -400L * 44;
+                if (frames > 400L * 44)
+                    frames = 400L * 44;
+                g_lat_extra = (int)frames;
+                if (now_ms() > g_cfg_saved_at + 5000) {
+                    g_cfg_saved_at = now_ms();
+                    looper_cfg_save();
+                }
                 k1_last = (int)raw;
                 char line[40];
-                snprintf(line, sizeof line, "LAT %+d ms", ms);
+                snprintf(line, sizeof line, "TRIM %+d ms", (int)(frames / 44));
                 looper_notice(line);
             }
+            return;
         }
-        return; /* the looper owns every control while it is open */
+        if (cc != 0x13)
+            return; /* the looper owns the other controls while it is open */
     }
     if (!g_in_cc_replay && ev && g_hpss_menu && g_bass_edit && !g_hpss_busy) {
         unsigned cc = ((unsigned char *)ev)[8];
@@ -6729,6 +6791,10 @@ static void str_assign_hook(void *dest, const char *text)
 static void midi_note_event(void *app, void *context, void *event,
                             uintptr_t source)
 {
+    if (!g_midi_on && orig_midi_note_event) {
+        orig_midi_note_event(app, context, event, source);
+        return;
+    }
     if (event) {
         uint32_t type = 0;
         float velocity = 0.0f;
@@ -7388,6 +7454,10 @@ __attribute__((constructor)) static void load(void)
         return;
     }
     base = found;
+    if (!firmware_ok()) {
+        mlog("minimod: firmware does not match this build; not installing\n");
+        return;
+    }
 
     /* The B at each site reaches only +-128 MB, so the relay must live near
      * the app. The stock binary ends at ~0x71b0000; try just above it. */
@@ -7426,6 +7496,7 @@ __attribute__((constructor)) static void load(void)
     real_hw_current = (int (*)(void *, void *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_current");
     real_hw_bufsize = (int (*)(void *, unsigned long *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_get_buffer_size");
     real_hw_channels = (int (*)(void *, unsigned *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_get_channels");
+    real_hw_format = (int (*)(void *, int *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_get_format");
     real_hw_free = (void (*)(void *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_free");
     looper_cfg_load();
     {
@@ -7445,6 +7516,16 @@ __attribute__((constructor)) static void load(void)
     if (t_sync)
         orig_sync = (void (*)(void *, void *, void *, void *))t_sync;
     void *t_data = install_hook(base + A_DATA_SIGNAL, (void *)data_signal);
+    if (midi_hook_site_ok()) {
+        void *t_midi = install_hook(base + A_MIDI_NOTE_EVENT, (void *)midi_note_event);
+        if (t_midi) {
+            orig_midi_note_event =
+                (void (*)(void *, void *, void *, uintptr_t))t_midi;
+            g_midi_ready = 1;
+        }
+    } else {
+        mlog("minimod: MIDI dispatcher mismatch; not hooking\n");
+    }
     if (t_data)
         orig_data_signal = (void (*)(void *, int))t_data;
     void *t_cc = install_hook(base + 0x159f230, (void *)cc_capture);

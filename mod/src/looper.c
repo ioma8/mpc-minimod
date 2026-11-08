@@ -3,24 +3,22 @@
  * Records pad loops from the firmware's audio input stream (the source the
  * sampler itself hears) and mixes them into the firmware's audio output. Both
  * hooks run on audio threads, so nothing here allocates, locks or touches the
- * app's model: the loop pool is mapped once when the view opens and the state
- * machine is a handful of atomics.
+ * app's model: the loop pool is mapped once when the view opens and every
+ * cross-thread field is published with release/acquire atomics.
  *
  * The output side is the clock: every played frame advances one transport
  * counter, and a loop is an exact count of those frames. That keeps playback
  * and recording in the same time base even when the two audio streams drift.
  *
- * Latency: a frame written to the output is heard `out_delay` frames later, and
- * a frame read from the input was captured `in_delay` frames ago (plus whatever
- * waits in our own ring). Recording without correcting for that places the
- * performance late in the loop, which is exactly what makes overdubs and synced
- * loops sound behind. The write position is therefore shifted back by the
- * measured total, and the first frames of a take are dropped instead of landing
- * before the loop start.
+ * Latency: the firmware keeps a full ALSA ring in each direction, so an input
+ * frame read now was captured one input ring ago and an output frame written
+ * now is heard one output ring later. The write position is shifted back by
+ * that total; the first frames of a take are dropped (they belong before the
+ * loop start) and the closing press is followed by a short drain so the last
+ * ring of the performance is not lost either.
  */
 #include <math.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <time.h>
@@ -31,7 +29,7 @@
 #define LP_SECONDS 8u
 #define LP_MAX_FRAMES (LP_RATE * LP_SECONDS)
 #define LP_RING 32768u
-#define LP_BLOCK 2048u
+#define LP_BLOCK 512u
 #define LP_GAIN 0.85f
 #define LP_CLICK 420u
 #define LP_LAT_MAX 16384u
@@ -39,21 +37,20 @@
 static float *g_pool; /* LOOPER_PADS * LP_MAX_FRAMES mono floats */
 static volatile int g_open;
 
-static volatile int g_shift;
-static volatile int g_erase;
 static volatile int g_click; /* metronome click on the sync pulse */
 static volatile int g_sync;
 static volatile unsigned g_sync_frames;
 static volatile uint64_t g_pulse_epoch;
-static volatile uint64_t g_t; /* played frames since open */
-static volatile unsigned g_lat; /* measured record latency, frames */
+static volatile uint64_t g_t;    /* played frames since open */
+static volatile unsigned g_lat;  /* record latency, frames */
 static volatile unsigned g_master = 127; /* MAIN VOLUME, 0..127 */
 
 static volatile unsigned g_lat_used; /* latency snapshotted for the last take */
-static volatile char g_lat_src = 'E'; /* E estimate, C chirp, A correlation, S seeded */
+static volatile char g_lat_src = 'E'; /* E estimate, B ring geometry, F fixed */
 
-/* Keep this at 32 bytes: the emulator test reads the array by stride, and the
- * offsets are state 0, len 4, rec 8, lat 12, origin 16, skip 24. */
+/* offsets: state 0, len 4, rec 8, lat 12, origin 16, skip 24, touched 32,
+ * drain 36; stride 40. The emulator test reads this array through
+ * g_pad_stride, so keep that symbol in sync with the struct. */
 struct pad {
     volatile int state;
     volatile unsigned len;   /* closed length, frames */
@@ -61,8 +58,10 @@ struct pad {
     volatile unsigned lat;   /* latency applied to this take */
     volatile uint64_t origin;
     volatile unsigned skip;  /* frames still to drop at the start of a take */
-    volatile int touched;
+    volatile int touched;    /* during DRAIN: 1 when the take was an overdub */
+    volatile unsigned drain; /* DRAIN: frames still to capture after the press */
 };
+volatile unsigned g_pad_stride = sizeof(struct pad);
 
 static struct pad g_pads[LOOPER_PADS];
 
@@ -70,14 +69,9 @@ static struct pad g_pads[LOOPER_PADS];
 static float g_ring[LP_RING];
 static volatile unsigned g_ring_w;
 static volatile unsigned g_ring_r;
-static volatile int g_ring_over;
 
-static volatile int g_rec_count; /* pads in REC or DUB */
+static volatile int g_rec_count; /* pads in REC, DUB or DRAIN */
 static volatile unsigned g_input_level; /* float bits */
-static volatile unsigned g_rec_total;   /* frames captured, for telemetry */
-static volatile unsigned g_blocks;      /* mixed blocks, for telemetry */
-static volatile unsigned g_mix_peak;    /* float bits, for telemetry */
-static volatile unsigned g_input_blocks;
 
 static volatile long long g_msg_until;
 static char g_msg[40];
@@ -128,52 +122,79 @@ static unsigned quantize(unsigned frames)
 
 static void drop_rec(void)
 {
-    long v = __atomic_sub_fetch(&g_rec_count, 1, __ATOMIC_SEQ_CST);
+    long v = __atomic_sub_fetch(&g_rec_count, 1, __ATOMIC_ACQ_REL);
     if (v < 0)
-        __atomic_store_n(&g_rec_count, 0, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&g_rec_count, 0, __ATOMIC_RELEASE);
 }
 
+/* Give a finished take its musical length: the transport span, snapped to a
+ * whole number of pulses while the sync pulse is running. The loop starts at
+ * the press, not at a pulse: moving the origin would shift the performance
+ * itself, which is worse than starting off the beat. */
+static void close_length(struct pad *p)
+{
+    unsigned span = (unsigned)(g_t - p->origin);
+    unsigned len = quantize(span ? span : p->rec);
+    p->len = len ? len : p->rec;
+}
+
+/* One thread wins the transition out of REC/DUB; the loser returns without
+ * touching the recording count. */
 static void finish_pad(struct pad *p)
 {
-    int st = p->state;
+    int st = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
     if (st != LOOP_REC && st != LOOP_DUB)
         return;
-    if (st == LOOP_REC) {
-        /* the musical length is the transport span, not the frames that fit
-         * after the latency skip */
-        unsigned span = (unsigned)(g_t - p->origin);
-        unsigned len = quantize(span ? span : p->rec);
-        p->len = len ? len : p->rec;
-        p->state = LOOP_PLAY;
-    } else {
-        p->state = LOOP_PLAY;
-    }
+    int expected = st;
+    int next = p->lat ? LOOP_DRAIN : LOOP_PLAY;
+    if (!__atomic_compare_exchange_n(&p->state, &expected, next, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;
+    if (st == LOOP_REC)
+        close_length(p);
+    p->touched = (st == LOOP_DUB);
+    p->drain = p->lat;
     p->skip = 0;
-    drop_rec();
+    if (!p->drain)
+        drop_rec();
 }
 
 void looper_stop_all(void)
 {
     for (int i = 0; i < LOOPER_PADS; ++i) {
         struct pad *p = &g_pads[i];
-        if (p->state == LOOP_REC || p->state == LOOP_DUB)
-            finish_pad(p);
-        if (p->state == LOOP_PLAY)
-            p->state = LOOP_STOP;
+        int st = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
+        if (st == LOOP_REC || st == LOOP_DUB || st == LOOP_DRAIN) {
+            int expected = st;
+            if (__atomic_compare_exchange_n(&p->state, &expected, LOOP_STOP, 0,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                if (st == LOOP_REC)
+                    close_length(p);
+                p->drain = 0;
+                p->skip = 0;
+                drop_rec();
+            }
+        } else if (st == LOOP_PLAY) {
+            __atomic_store_n(&p->state, LOOP_STOP, __ATOMIC_RELEASE);
+        }
     }
-    g_rec_count = 0;
 }
 
 static void clear_pad(int pad)
 {
     struct pad *p = &g_pads[pad];
-    int st = p->state;
-    if (st == LOOP_REC || st == LOOP_DUB)
-        drop_rec();
-    p->state = LOOP_IDLE;
+    int st = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
+    if (st == LOOP_REC || st == LOOP_DUB || st == LOOP_DRAIN) {
+        int expected = st;
+        if (__atomic_compare_exchange_n(&p->state, &expected, LOOP_IDLE, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            drop_rec();
+    }
+    __atomic_store_n(&p->state, LOOP_IDLE, __ATOMIC_RELEASE);
     p->len = 0;
     p->rec = 0;
     p->skip = 0;
+    p->drain = 0;
     p->origin = 0;
     p->lat = 0;
 }
@@ -195,20 +216,22 @@ int looper_activate(void)
         g_pool = m;
     }
     for (int i = 0; i < LOOPER_PADS; ++i) {
-        g_pads[i].state = g_pads[i].len ? LOOP_STOP : LOOP_IDLE;
+        int st = g_pads[i].state;
+        __atomic_store_n(&g_pads[i].state,
+                         g_pads[i].len ? LOOP_STOP : LOOP_IDLE, __ATOMIC_RELEASE);
+        (void)st;
         g_pads[i].rec = 0;
         g_pads[i].skip = 0;
+        g_pads[i].drain = 0;
         g_pads[i].origin = 0;
         g_pads[i].lat = 0;
         g_pads[i].touched = 0;
     }
-    g_ring_w = g_ring_r = 0;
-    g_ring_over = 0;
-    g_rec_count = 0;
+    __atomic_store_n(&g_ring_w, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_ring_r, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_rec_count, 0, __ATOMIC_RELEASE);
     g_input_level = 0;
     g_t = 0;
-    g_shift = 0;
-    g_erase = 0;
     g_sync = 0;
     g_sync_frames = 0;
     g_pulse_epoch = 0;
@@ -224,10 +247,17 @@ void looper_close(void)
     if (!g_open)
         return;
     looper_stop_all();
-    g_rec_count = 0;
     g_sync = 0;
     g_input_level = 0;
     g_open = 0;
+}
+
+/* A new take starts from the newest input frame: anything older in the ring
+ * belongs to the previous take and would play as a ghost at the start. */
+static void flush_input(void)
+{
+    unsigned w = __atomic_load_n(&g_ring_w, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&g_ring_r, w, __ATOMIC_RELEASE);
 }
 
 static void start_record(struct pad *p, int pad)
@@ -237,17 +267,20 @@ static void start_record(struct pad *p, int pad)
         return;
     /* Silence the previous take before the audio thread can see the new state,
      * and touch the pages on this (non-audio) thread. */
-    p->state = LOOP_IDLE;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    __atomic_store_n(&p->state, LOOP_IDLE, __ATOMIC_RELEASE);
     memset(buf, 0, (size_t)LP_MAX_FRAMES * sizeof(float));
     p->len = 0;
     p->rec = 0;
+    p->skip = 0;
+    p->drain = 0;
+    p->touched = 0;
     p->origin = g_t;
     p->lat = g_lat > LP_LAT_MAX ? LP_LAT_MAX : g_lat;
     g_lat_used = p->lat;
     p->skip = p->lat;
-    p->state = LOOP_REC;
-    __atomic_add_fetch(&g_rec_count, 1, __ATOMIC_SEQ_CST);
+    flush_input();
+    __atomic_add_fetch(&g_rec_count, 1, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&p->state, LOOP_REC, __ATOMIC_RELEASE);
 }
 
 static void start_overdub(struct pad *p)
@@ -256,8 +289,11 @@ static void start_overdub(struct pad *p)
         return;
     p->lat = g_lat > LP_LAT_MAX ? LP_LAT_MAX : g_lat;
     g_lat_used = p->lat;
-    p->state = LOOP_DUB;
-    __atomic_add_fetch(&g_rec_count, 1, __ATOMIC_SEQ_CST);
+    p->drain = 0;
+    p->skip = 0;
+    flush_input();
+    __atomic_add_fetch(&g_rec_count, 1, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&p->state, LOOP_DUB, __ATOMIC_RELEASE);
 }
 
 int looper_pad(int pad, int shift, int erase)
@@ -272,11 +308,11 @@ int looper_pad(int pad, int shift, int erase)
         say("PAD CLEARED");
         return 1;
     }
-    int st = p->state;
+    int st = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
     if (shift) {
         if (st == LOOP_PLAY || st == LOOP_STOP)
             start_overdub(p);
-        else if (st == LOOP_DUB || st == LOOP_REC)
+        else if (st == LOOP_DUB || st == LOOP_REC || st == LOOP_DRAIN)
             finish_pad(p);
         else if (st == LOOP_IDLE)
             start_record(p, pad);
@@ -291,12 +327,14 @@ int looper_pad(int pad, int shift, int erase)
         finish_pad(p);
         break;
     case LOOP_PLAY:
-        p->state = LOOP_STOP;
+        __atomic_store_n(&p->state, LOOP_STOP, __ATOMIC_RELEASE);
         break;
     case LOOP_STOP:
         p->origin = g_t;
-        p->state = LOOP_PLAY;
+        __atomic_store_n(&p->state, LOOP_PLAY, __ATOMIC_RELEASE);
         break;
+    case LOOP_DRAIN:
+        break; /* the take is already closing */
     }
     return 1;
 }
@@ -305,8 +343,6 @@ int looper_button(unsigned code, int down, int shift, int erase)
 {
     if (!g_open)
         return 0;
-    g_shift = shift;
-    g_erase = erase;
     if (code == 0x6f) { /* DATA: SHIFT+DATA closes */
         if (down && shift)
             looper_close();
@@ -369,11 +405,6 @@ unsigned looper_master(void)
     return g_master;
 }
 
-void looper_set_latency(unsigned frames)
-{
-    g_lat = frames > LP_LAT_MAX ? LP_LAT_MAX : frames;
-}
-
 void looper_set_latency_ex(unsigned frames, char source)
 {
     g_lat = frames > LP_LAT_MAX ? LP_LAT_MAX : frames;
@@ -382,12 +413,9 @@ void looper_set_latency_ex(unsigned frames, char source)
 
 unsigned looper_input_backlog(void)
 {
-    return g_ring_w - g_ring_r;
-}
-
-int looper_click_enabled(void)
-{
-    return g_click;
+    unsigned w = __atomic_load_n(&g_ring_w, __ATOMIC_ACQUIRE);
+    unsigned r = __atomic_load_n(&g_ring_r, __ATOMIC_ACQUIRE);
+    return w - r;
 }
 
 void looper_notice(const char *text)
@@ -396,99 +424,82 @@ void looper_notice(const char *text)
 }
 
 /* ------------------------------------------------------------ audio input */
-/* Shared tail: one block of mono input, already in float. */
+/* Append one mono block to the ring. Only the selected input stream feeds it
+ * (the ALSA interposer gates on the pcm handle), so this is single-producer. */
 static void input_block(const float *mono, unsigned n, float peak)
 {
-    __atomic_add_fetch(&g_input_blocks, 1, __ATOMIC_RELAXED);
     int rec = __atomic_load_n(&g_rec_count, __ATOMIC_ACQUIRE);
-    unsigned w = g_ring_w;
-    for (unsigned i = 0; i < n; ++i) {
-        if (rec) {
-            unsigned next = w + 1;
-            if (next - g_ring_r < LP_RING) {
+    if (rec) {
+        unsigned w = g_ring_w;
+        for (unsigned i = 0; i < n; ++i) {
+            unsigned r = __atomic_load_n(&g_ring_r, __ATOMIC_RELAXED);
+            if (w + 1 - r < LP_RING) {
                 g_ring[w % LP_RING] = mono[i];
-                w = next;
+                w++;
             } else {
-                g_ring_over = 1;
+                break;
             }
         }
+        __atomic_store_n(&g_ring_w, w, __ATOMIC_RELEASE);
     }
-    if (rec)
-        g_ring_w = w;
+    /* peak with a decay, so the meter falls back after the source stops */
     float prev;
     unsigned pb = g_input_level;
     memcpy(&prev, &pb, sizeof prev);
-    if (peak > prev * 0.98f) {
-        unsigned nb;
-        memcpy(&nb, &peak, sizeof nb);
-        g_input_level = nb;
-    }
+    float level = prev * 0.9f;
+    if (peak > level)
+        level = peak;
+    if (level > 1.f)
+        level = 1.f;
+    unsigned nb;
+    memcpy(&nb, &level, sizeof nb);
+    __atomic_store_n(&g_input_level, nb, __ATOMIC_RELAXED);
 }
 
-void looper_input(const float *const *channels, int count, unsigned frames)
-{
-    if (!g_open || !channels || count < 1 || !frames)
-        return;
-    const float *l = channels[0];
-    const float *r = count > 1 ? channels[1] : 0;
-    if (!l)
-        return;
-    unsigned n = frames > LP_BLOCK ? LP_BLOCK : frames;
-    float tmp[LP_BLOCK];
-    float peak = 0.f;
-    for (unsigned i = 0; i < n; ++i) {
-        float v = r ? (l[i] + r[i]) * 0.5f : l[i];
-        float a = v < 0.f ? -v : v;
-        if (a > peak)
-            peak = a;
-        tmp[i] = v;
-    }
-    input_block(tmp, n, peak);
-}
-
-/* The firmware's input thread reads S32 planar from ALSA; convert it the same
- * way the app does and feed the same path. */
+/* Convert `frames` mono frames of one planar S32 channel and feed the ring in
+ * LP_BLOCK chunks, so a large read is never truncated. */
 void looper_input_s32(const int32_t *const *channels, int count, unsigned frames)
 {
     if (!g_open || !channels || count < 1 || !channels[0] || !frames)
         return;
     const int32_t *l = channels[0];
-    unsigned n = frames > LP_BLOCK ? LP_BLOCK : frames;
-    float tmp[LP_BLOCK];
-    float peak = 0.f;
-    for (unsigned i = 0; i < n; ++i) {
-        float v = (float)l[i] * (1.0f / 2147483648.0f);
-        float a = v < 0.f ? -v : v;
-        if (a > peak)
-            peak = a;
-        tmp[i] = v;
+    for (unsigned off = 0; off < frames; off += LP_BLOCK) {
+        unsigned n = frames - off > LP_BLOCK ? LP_BLOCK : frames - off;
+        float tmp[LP_BLOCK];
+        float peak = 0.f;
+        for (unsigned i = 0; i < n; ++i) {
+            float v = (float)l[off + i] * (1.0f / 2147483648.0f);
+            float a = v < 0.f ? -v : v;
+            if (a > peak)
+                peak = a;
+            tmp[i] = v;
+        }
+        input_block(tmp, n, peak);
     }
-    input_block(tmp, n, peak);
 }
 
-/* Interleaved S32 capture (snd_pcm_readi): the firmware's input stream is
- * RW_INTERLEAVED 4-channel S32_LE. Channels 0/1 carry the selected source. */
+/* Interleaved S32 capture (snd_pcm_readi): channels 0/1 carry the source. */
 void looper_input_s32_interleaved(const int32_t *buf, unsigned channels,
                                   unsigned frames)
 {
     if (!g_open || !buf || !channels || !frames)
         return;
-    unsigned n = frames > LP_BLOCK ? LP_BLOCK : frames;
-    float tmp[LP_BLOCK];
-    float peak = 0.f;
-    for (unsigned i = 0; i < n; ++i) {
-        float v;
-        if (channels >= 2)
-            v = ((float)buf[i * channels] + (float)buf[i * channels + 1]) *
-                (0.5f / 2147483648.0f);
-        else
-            v = (float)buf[i * channels] * (1.0f / 2147483648.0f);
-        float a = v < 0.f ? -v : v;
-        if (a > peak)
-            peak = a;
-        tmp[i] = v;
+    for (unsigned off = 0; off < frames; off += LP_BLOCK) {
+        unsigned n = frames - off > LP_BLOCK ? LP_BLOCK : frames - off;
+        float tmp[LP_BLOCK];
+        float peak = 0.f;
+        for (unsigned i = 0; i < n; ++i) {
+            const int32_t *f = buf + (size_t)(off + i) * channels;
+            float v = channels >= 2 ? ((float)f[0] + (float)f[1]) *
+                                          (0.5f / 2147483648.0f)
+                                    : (float)f[0] * (1.0f / 2147483648.0f);
+            float a = v < 0.f ? -v : v;
+            if (a > peak)
+                peak = a;
+            tmp[i] = v;
+        }
+        input_block(tmp, n, peak);
     }
-    input_block(tmp, n, peak);
 }
 
 /* ----------------------------------------------------------- audio output */
@@ -500,6 +511,22 @@ static float click_sample(uint64_t phase)
     return sinf(6.2831853f * 1000.f * (float)phase / (float)LP_RATE) * env * 0.35f;
 }
 
+/* Mix one sample into a loop (overdub position, latency shifted, wrapped). */
+static void dub_add(float *b, unsigned len, unsigned lat, uint64_t pos, float v)
+{
+    int64_t at = (int64_t)(pos % len) - (int64_t)lat;
+    if (at < 0)
+        at += len;
+    if (at < 0 || (unsigned)at >= len)
+        return; /* lp_lat < len, so this is unreachable; kept as a guard */
+    float sum = b[at] + v;
+    if (sum > 1.f)
+        sum = 1.f;
+    else if (sum < -1.f)
+        sum = -1.f;
+    b[at] = sum;
+}
+
 /* Mix the loops into the interleaved S32 block the firmware is about to hand to
  * the device. This is the one point every audio path goes through, so it does
  * not matter which device object renders the app's own sound. */
@@ -507,84 +534,77 @@ void looper_render_s32(int32_t *buf, unsigned channels, unsigned frames)
 {
     if (!g_open || !buf || !channels || !frames)
         return;
-    __atomic_add_fetch(&g_blocks, 1, __ATOMIC_RELAXED);
-    unsigned done = 0;
     int rec = __atomic_load_n(&g_rec_count, __ATOMIC_ACQUIRE);
+    unsigned done = 0;
     while (done < frames) {
         unsigned n = frames - done;
         if (n > LP_BLOCK)
             n = LP_BLOCK;
         float in[LP_BLOCK];
+        float add[LP_BLOCK];
         unsigned got = 0;
         if (rec) {
-            unsigned r = g_ring_r;
+            unsigned r = __atomic_load_n(&g_ring_r, __ATOMIC_ACQUIRE);
             unsigned w = __atomic_load_n(&g_ring_w, __ATOMIC_ACQUIRE);
             unsigned avail = w - r;
             if (avail > n * 4) {
-                unsigned skip = avail - n * 2;
-                r += skip;
-                avail -= skip;
-                g_ring_over = 1;
+                r += avail - n * 2; /* keep the ring shallow */
+                avail = n * 2;
             }
             got = avail < n ? avail : n;
             for (unsigned i = 0; i < got; ++i)
                 in[i] = g_ring[(r + i) % LP_RING];
-            g_ring_r = r + got;
+            __atomic_store_n(&g_ring_r, r + got, __ATOMIC_RELEASE);
         }
         for (unsigned i = got; i < n; ++i)
             in[i] = 0.f;
-
-        uint64_t t = g_t;
-        float add[LP_BLOCK];
         for (unsigned i = 0; i < n; ++i)
             add[i] = 0.f;
+
+        uint64_t t = g_t;
         for (int p = 0; p < LOOPER_PADS; ++p) {
             struct pad *pd = &g_pads[p];
-            int st = pd->state;
-            if (st == LOOP_PLAY || st == LOOP_DUB) {
-                unsigned len = pd->len;
-                float *b = pad_buf(p);
-                if (len && b) {
-                    uint64_t base = t - pd->origin;
-                    for (unsigned i = 0; i < n; ++i)
-                        add[i] += b[(base + i) % len] * LP_GAIN;
-                }
-                if (st == LOOP_DUB && len && b) {
-                    unsigned lat = pd->lat % len;
-                    for (unsigned i = 0; i < n; ++i) {
-                        int64_t pos = (int64_t)((t + i - pd->origin) % len) - (int64_t)lat;
-                        if (pos < 0)
-                            pos += len;
-                        float v = b[pos] + in[i];
-                        /* a source that hears the output would otherwise grow the
-                         * loop without bound */
-                        if (v > 1.f)
-                            v = 1.f;
-                        else if (v < -1.f)
-                            v = -1.f;
-                        b[pos] = v;
+            int st = __atomic_load_n(&pd->state, __ATOMIC_ACQUIRE);
+            if (st != LOOP_PLAY && st != LOOP_DUB && st != LOOP_DRAIN &&
+                st != LOOP_REC)
+                continue;
+            unsigned len = pd->len;
+            float *b = pad_buf(p);
+            if (!b)
+                continue;
+            int play = st == LOOP_PLAY || st == LOOP_DUB || st == LOOP_DRAIN;
+            if (play && len) {
+                uint64_t base = t - pd->origin;
+                for (unsigned i = 0; i < n; ++i)
+                    add[i] += b[(base + i) % len] * LP_GAIN;
+            }
+            if (st == LOOP_DUB || (st == LOOP_DRAIN && pd->touched)) {
+                unsigned lat = len ? pd->lat % len : 0;
+                for (unsigned i = 0; i < n; ++i)
+                    dub_add(b, len, lat, t + i - pd->origin, in[i]);
+            } else if (st == LOOP_REC || (st == LOOP_DRAIN && !pd->touched)) {
+                unsigned rn = pd->rec;
+                unsigned skip = pd->skip;
+                for (unsigned i = 0; i < n; ++i) {
+                    if (skip) {
+                        --skip;
+                        continue;
                     }
-                }
-            } else if (st == LOOP_REC) {
-                float *b = pad_buf(p);
-                if (b) {
-                    unsigned before = pd->rec;
-                    unsigned rn = before;
-                    unsigned skip = pd->skip;
-                    for (unsigned i = 0; i < n; ++i) {
-                        if (skip) {
-                            --skip;
-                            continue;
-                        }
-                        if (rn >= LP_MAX_FRAMES)
-                            break;
-                        b[rn++] = in[i];
-                    }
-                    pd->skip = skip;
-                    pd->rec = rn;
-                    __atomic_add_fetch(&g_rec_total, rn - before, __ATOMIC_RELAXED);
                     if (rn >= LP_MAX_FRAMES)
-                        finish_pad(pd); /* auto-close at the limit */
+                        break;
+                    b[rn++] = in[i];
+                }
+                pd->skip = skip;
+                pd->rec = rn;
+            }
+            if (st == LOOP_DRAIN) {
+                unsigned d = pd->drain;
+                d = d > n ? d - n : 0;
+                pd->drain = d;
+                if (!d) {
+                    pd->skip = 0;
+                    __atomic_store_n(&pd->state, LOOP_PLAY, __ATOMIC_RELEASE);
+                    drop_rec();
                 }
             }
         }
@@ -598,30 +618,22 @@ void looper_render_s32(int32_t *buf, unsigned channels, unsigned frames)
         }
         float peak = 0.f;
         float gain = (float)g_master * (1.0f / 127.0f);
-        for (unsigned i = 0; i < n; ++i)
-            add[i] *= gain;
         for (unsigned i = 0; i < n; ++i) {
             int32_t *frame = buf + (size_t)(done + i) * channels;
+            float a = add[i] * gain;
             for (unsigned c = 0; c < channels; ++c) {
-                float v = (float)frame[c] * (1.0f / 2147483648.0f) + add[i];
+                float v = (float)frame[c] * (1.0f / 2147483648.0f) + a;
                 if (v > 1.f)
                     v = 1.f;
                 else if (v < -1.f)
                     v = -1.f;
-                float a = v < 0.f ? -v : v;
-                if (a > peak)
-                    peak = a;
+                float m = v < 0.f ? -v : v;
+                if (m > peak)
+                    peak = m;
                 frame[c] = (int32_t)(v * 2147483647.0f);
             }
         }
-        unsigned pb = g_mix_peak;
-        float prev;
-        memcpy(&prev, &pb, sizeof prev);
-        if (peak > prev) {
-            unsigned nb;
-            memcpy(&nb, &peak, sizeof nb);
-            g_mix_peak = nb;
-        }
+        (void)peak;
         g_t = t + n;
         done += n;
     }
@@ -653,12 +665,16 @@ int looper_snapshot(struct looper_view *view)
     for (int i = 0; i < LOOPER_PADS; ++i) {
         struct pad *p = &g_pads[i];
         struct looper_pad_view *v = &view->pads[i];
-        v->state = (unsigned char)p->state;
+        int st = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
+        /* a draining take is still a take to the user */
+        if (st == LOOP_DRAIN)
+            st = p->touched ? LOOP_DUB : LOOP_REC;
+        v->state = (unsigned char)st;
         v->len_frames = p->len;
         v->rec_frames = p->rec;
-        if ((p->state == LOOP_PLAY || p->state == LOOP_DUB) && p->len)
+        if ((st == LOOP_PLAY || st == LOOP_DUB) && p->len)
             v->pos = (unsigned)((t - p->origin) % p->len);
-        if (p->state == LOOP_REC || p->state == LOOP_DUB)
+        if (st == LOOP_REC || st == LOOP_DUB)
             if (view->recording_pad < 0)
                 view->recording_pad = i;
     }

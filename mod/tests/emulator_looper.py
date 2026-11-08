@@ -86,11 +86,14 @@ def main():
     def u32(offset):
         return struct.unpack('<I', read(offset, 4))[0]
 
+    stride = u32(symbol('g_pad_stride'))
+
     def snapshot():
-        raw = read(symbol('g_pads'), 16 * 32)
+        raw = read(symbol('g_pads'), 16 * stride)
         pads = []
         for i in range(16):
-            state, length, rec, lat = struct.unpack('<IIII', raw[i * 32:i * 32 + 16])
+            state, length, rec, lat = struct.unpack(
+                '<IIII', raw[i * stride:i * stride + 16])
             pads.append((state, length, rec, lat))
         return pads
 
@@ -171,7 +174,8 @@ def main():
     state, length, rec, lat = snapshot()[0]
     assert length > 40000, (state, length, rec)
     assert abs(length - rec) < 4000, (length, rec)
-    assert lat == cal_frames, f'take latency {lat} != ring geometry {cal_frames}'
+    assert lat == cal_frames + u32(symbol('g_lat_extra')), \
+        f'take latency {lat} != ring geometry {cal_frames} + trim'
 
     # --- MAIN VOLUME scales the loops like the rest of the app
     control('MAIN VOLUME', 'set', 127)
@@ -256,8 +260,20 @@ def main():
     time.sleep(0.2)
     assert u32(symbol('g_click')) == 0, 'SHIFT + LOOP did not disable the click'
 
+    # --- K1 trims the record latency, 1 ms per step
+    control('K1', 'set', 0)
+    time.sleep(0.2)
+    trim0 = u32(symbol('g_lat_extra'))
+    control('K1', 'set', 10)
+    time.sleep(0.2)
+    assert u32(symbol('g_lat_extra')) == trim0 + 440, u32(symbol('g_lat_extra'))
+    control('K1', 'set', 0)
+    time.sleep(0.2)
+    assert u32(symbol('g_lat_extra')) == trim0, u32(symbol('g_lat_extra'))
+
     # --- SHIFT + DATA closes; loops survive and the app does not restart
     close_looper()
+    time.sleep(8)                          # the reported crash comes "after a few seconds"
     after = snapshot()
     assert after[0][1] == loop_length, after[0]
     assert ssh('systemctl show ac50 -p NRestarts').strip().endswith('0'), 'app restarted'

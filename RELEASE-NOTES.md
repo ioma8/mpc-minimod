@@ -57,13 +57,20 @@ The release supports MPC Sample firmware **1.3.0.12** only.
   off by default (`SHIFT` + `LOOP` toggles it).
 - The loops follow `MAIN VOLUME`: the knob's CC is tracked and applied as a gain
   on the loop mix, and the level is remembered in `/data/minimod-looper.cfg`.
+- Record the latency tail after the closing press, flush the input ring at the
+  start of every take, and finish a pad atomically so a take can never be closed
+  twice and starve the recording counter.
 - Keep the audio device untouched from the repaint thread: the ring sizes and the
   channel count now come from `snd_pcm_hw_params_current` on the stream's own
   audio thread, and the loop mix uses the device's real channel count. This
   removes the cross-thread ALSA calls and the stride guess that could corrupt the
-  output buffer and take the app down after closing the view.
+  output buffer and take the app down after closing the view. The MIDI dispatcher
+  is hooked once at load instead of being re-patched while it may be executing,
+  and the loader refuses to install anything unless every hooked site's first
+  instruction matches the firmware it was built for.
 - `SHIFT` + pad overdubs into the loop and the next press returns to playback;
-  `SHIFT` + `LOOP` clears everything; `SHIFT` + `DATA` closes the view.
+  `SHIFT` + `LOOP` toggles the click, `ERASE` + `LOOP` clears everything;
+  `SHIFT` + `DATA` closes the view.
 - `LOOP` starts an audible sync pulse whose period is the most recent loop's
   length, and every new loop is quantized to a whole multiple of it (padded with
   silence, never truncated silently).

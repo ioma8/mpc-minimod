@@ -36,9 +36,9 @@ else
 fi
 # The preload library must not leave one of its own symbols unresolved: the
 # firmware's loader would fail the whole process (exit 127).
-if nm -D build/minimod.elf | grep -qE '^ +U (looper_|minimod)'; then
+if nm -D build/minimod.elf | grep -qE '^ +U (looper_|minimod|snd_pcm_|snd_pcm)'; then
     echo "unresolved minimod/looper symbol in the build:" >&2
-    nm -D build/minimod.elf | grep -E '^ +U (looper_|minimod)' >&2
+    nm -D build/minimod.elf | grep -E '^ +U (looper_|minimod|snd_pcm)' >&2
     exit 1
 fi
 "$objcopy" --strip-all build/minimod.elf build/minimod.so

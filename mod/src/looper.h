@@ -8,11 +8,12 @@
  * input stream and mixed into its audio output.
  *
  * Threads
- *   input hook   looper_input()   audio input thread; copies mono frames and
+ *   input hook   looper_input_s32*() audio input thread; copies mono frames and
  *                                 the input level, never allocates or locks
  *   output hook  looper_render()  audio output thread; mixes loops, records,
  *                                 all buffers are preallocated on open
  *   pad/buttons  looper_pad()     control-surface thread; state changes only
+ *                                 (published with release atomics)
  *   paint        looper_snapshot() any thread; pure reads of the volatile state
  *
  * Timing is counted in output frames (the output hook is the clock), so a loop
@@ -26,7 +27,8 @@ enum {
     LOOP_REC = 1,    /* recording from the input source */
     LOOP_PLAY = 2,   /* looping */
     LOOP_DUB = 3,    /* looping and adding input */
-    LOOP_STOP = 4    /* loop kept, not playing */
+    LOOP_STOP = 4,   /* loop kept, not playing */
+    LOOP_DRAIN = 5   /* take closed, still capturing the latency tail */
 };
 
 struct looper_pad_view {
@@ -68,22 +70,18 @@ int looper_button(unsigned code, int down, int shift, int erase);
 /* Stop playback of every loop, keeping the material. */
 void looper_stop_all(void);
 
-/* Record latency compensation, in frames: the measured output + input delay
- * plus whatever waits in the input ring. Snapshotted when a take starts. */
-void looper_set_latency(unsigned frames);
+/* Record latency, in frames (the firmware's two ALSA rings). Snapshotted when
+ * a take starts; `source` is B (ring geometry), E (estimate) or F (fixed). */
 /* MAIN VOLUME (0..127): the loops follow the master knob. */
 void looper_set_master(unsigned value);
 unsigned looper_master(void);
 void looper_set_latency_ex(unsigned frames, char source);
 unsigned looper_input_backlog(void);
-int looper_click_enabled(void);
 /* Show a short status line in the view. */
 void looper_notice(const char *text);
 
 
-/* Audio hooks. `channels` is planar float as the firmware passes it. */
-void looper_input(const float *const *channels, int count, unsigned frames);
-/* Same, from the firmware's S32 planar input buffers (snd_pcm_readn). */
+/* S32 planar input buffers (snd_pcm_readn). */
 void looper_input_s32(const int32_t *const *channels, int count, unsigned frames);
 /* Same, from interleaved S32 frames (snd_pcm_readi). */
 void looper_input_s32_interleaved(const int32_t *buf, unsigned channels,
