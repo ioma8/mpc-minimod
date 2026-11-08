@@ -328,6 +328,24 @@ temporary String/Font objects are laid out or destroyed.
 It stays unwired until that is understood; the C draws with its own calls, which
 is verified by every device run.
 
+## What the last 3 287 lines are
+
+The glue that is left is one unit, and it is worth being precise about why it
+cannot be taken a function at a time:
+
+* the trim cluster (`commit_trim`, `trim_probe`, `do_autotrim`, `find_knob_props`,
+  `prop_of_param`, `param_from_prop`, `prop_references`) reads the broadcast
+  records that `bcast_hook` captures.  Removing `bcast_hook` as "debug
+  scaffolding" breaks the trim - tried, reverted;
+* `ranges_load` and `rd`/`wr` (the `/proc/self/mem` window) are used by both the
+  trim probes and `firmware_ok`;
+* the constructor installs ~30 hooks over handlers that still live in this file,
+  so it can only move once they all have Rust counterparts.
+
+So the remaining work is: move the last state structs (trim, spectral, hooks),
+port the trim cluster against them, port the small hook bodies and the
+constructor, then delete the file and link the crate as the cdylib.
+
 ## Certified after the paint port
 
 `453b866` is the last fully device-certified build: all six device tests pass with
