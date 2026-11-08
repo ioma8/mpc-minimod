@@ -278,21 +278,25 @@ Rust static library in its place, and the emulator test for that feature becomes
 the acceptance gate. The C sources stay in `mod/src` until the whole mod is Rust
 because they are the reference the golden fixtures are recorded from.
 
-## The spectral state machine: ported, not wired
+## The spectral state machine
 
-`spectral_machine.rs` holds the three-phase machine (open Manual chop, write the
-boundaries, verify them) as one Rust function with a `Step` result.  Wiring it
-failed on the device in the "repeat again" case: the boundaries came back
-starting at 886 instead of 264.
+`spectral_machine.rs` owns the three-phase machine (open Manual chop, write the
+boundaries through the app's slice calls, verify what it kept) and returns a
+`Step`: idle, started, continue, done with the slice count, or failed with a
+message.
 
-The cause is path resolution, not the machine: `paths::for_sample` falls back to
-`unique(TEMP_PROJECTS, frames, channels, rate)` when the sample object's path does
-not match, and on a repeat run that fallback picks a different file with the same
-geometry.  The C `hpss_path_for` is stricter, which is why the C passes.
+The first wiring resolved the sample's path *inside* the machine and failed on
+the device in the "repeat again" case - boundaries starting at 886 instead of
+264 - because `paths::for_sample` falls back to `unique(TEMP_PROJECTS, ...)` and
+on a repeat that picks another file with the same geometry.  The fix was not to
+tighten the resolver but to move the read out: the glue keeps doing
+`hpss_sample_now` + `hpss_path_for` + `wav_read_f32` (exactly what the C did) and
+hands the samples to `minimod_spectral_begin`.  The machine then detects, opens
+Manual chop and keeps the state; `minimod_spectral_step` advances it.
 
-Wiring it needs the path (or the samples) supplied by the caller instead of
-resolved inside, so the machine reads exactly what the C read.  Reverted until
-then; the C remains in charge.
+General lesson, from two reverts now: **a port inherits its dependencies'
+behaviour, so diff the helpers it calls, not only its own body** - or, better,
+pass the data in so the port cannot resolve it differently.
 
 ## Running the device suite
 

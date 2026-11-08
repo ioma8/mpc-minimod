@@ -9,9 +9,7 @@
 use crate::chop;
 use crate::firmware;
 use crate::page;
-use crate::paths;
 use crate::selection;
-use crate::wav;
 use minimod_dsp::spectral;
 
 /// How many boundaries the app can take.
@@ -65,49 +63,35 @@ pub fn reset() {
 ///
 /// `active` is the caller's flag: 1 means a run was requested.
 #[must_use]
-pub fn step(
-    base: usize,
-    now: i64,
-    active: i32,
-    screen: usize,
-    press_chop: Option<unsafe extern "C" fn()>,
-) -> Step {
+pub fn step(base: usize, now: i64, active: i32) -> Step {
     if active != 1 {
         return Step::Idle;
     }
     // SAFETY: only the UI thread touches the machine.
     let slot = unsafe { &mut *core::ptr::addr_of_mut!(MACHINE) };
     match slot.as_mut() {
-        None => start(base, now, screen, press_chop, slot),
+        None => Step::Idle,
         Some(running) => advance(base, now, running),
     }
 }
 
-/// Phase 0: find the sample, read it, detect the boundaries, open Manual chop.
+/// Begin a run: detect the boundaries in the samples the caller read, open
+/// Manual chop and store the machine.
 fn start(
     base: usize,
     now: i64,
-    screen: usize,
+    selected: &selection::Selection,
+    samples: &[f32],
     press_chop: Option<unsafe extern "C" fn()>,
     slot: &mut Option<Machine>,
 ) -> Step {
-    let Some(selected) = selection::current(base, screen) else {
-        return Step::Failed("no sample on this pad");
-    };
-    let Some(path) = paths::for_sample(
-        selected.sample,
-        selected.frames,
-        selected.channels,
-        selected.rate,
-    ) else {
+    if samples.len()
+        != usize::try_from(selected.frames).unwrap_or(0) * usize::from(selected.channels)
+    {
         return Step::Failed("cannot read sample WAV");
-    };
-    let Some(samples) = wav::read_f32(&path, selected.frames, selected.channels, selected.rate)
-    else {
-        return Step::Failed("cannot read sample WAV");
-    };
+    }
     let Ok(onsets) = spectral::detect(
-        &samples,
+        samples,
         usize::from(selected.channels),
         selected.rate,
         MAX_SLICES,
@@ -125,13 +109,13 @@ fn start(
         }
         positions[index] = *position;
     }
-    if !page::chop_mode(base, screen)
+    if !page::chop_mode(base, selected.screen)
         && let Some(press) = press_chop
     {
         // SAFETY: the caller's callback replays the CHOP button.
         unsafe { press() };
     }
-    if !chop::set_manual(base, screen) {
+    if !chop::set_manual(base, selected.screen) {
         return Step::Failed("cannot select Manual chop");
     }
     *slot = Some(Machine {
@@ -197,30 +181,85 @@ fn advance(base: usize, now: i64, running: &mut Machine) -> Step {
     }
     Step::Continue
 }
-/// The state machine's step, for the C glue.
+
+/// Begin a run, for the C glue.
 ///
-/// Returns 0 idle, 1 started, 2 continue, 3 done (with `slices`), 4 failed
-/// (with `error` set to a static string).
+/// The caller has already read the sample's audio (with the same path it uses
+/// for the other actions), so the machine only detects, opens Manual chop and
+/// keeps the state.
+///
+/// Returns 0 started, 1 failed (with `error` set).
 ///
 /// # Safety
 ///
-/// `slices` and `error` must be writable when non-null, and `press_chop` must be
-/// a callback that replays the CHOP button.
+/// `samples` must be readable for `frames * channels` values and `error` must be
+/// writable when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_spectral_begin(
+    base: usize,
+    now: i64,
+    screen: usize,
+    state: usize,
+    sample: usize,
+    frames: u32,
+    channels: u32,
+    rate: u32,
+    samples: *const f32,
+    press_chop: Option<unsafe extern "C" fn()>,
+    error: *mut *const u8,
+) -> i32 {
+    let Ok(channels16) = u16::try_from(channels) else {
+        return 1;
+    };
+    let Some(count) = usize::try_from(frames)
+        .ok()
+        .and_then(|frames| frames.checked_mul(usize::from(channels16)))
+    else {
+        return 1;
+    };
+    if samples.is_null() {
+        return 1;
+    }
+    let selected = selection::Selection {
+        screen,
+        state,
+        sample,
+        frames,
+        channels: channels16,
+        rate,
+    };
+    // SAFETY: the caller promises the samples are readable for that many values.
+    let buffer = unsafe { core::slice::from_raw_parts(samples, count) };
+    // SAFETY: only the UI thread touches the machine.
+    let slot = unsafe { &mut *core::ptr::addr_of_mut!(MACHINE) };
+    match start(base, now, &selected, buffer, press_chop, slot) {
+        Step::Failed(message) => {
+            if !error.is_null() {
+                // SAFETY: the caller promises this is writable.
+                unsafe { *error = message.as_ptr() };
+            }
+            1
+        }
+        Step::Idle | Step::Started | Step::Continue | Step::Done(_) => 0,
+    }
+}
+
+/// One frame of a run already begun, for the C glue.
+///
+/// Returns 2 continue, 3 done (with `slices`), 4 failed (with `error`).
+///
+/// # Safety
+///
+/// `slices` and `error` must be writable when non-null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_spectral_step(
     base: usize,
     now: i64,
-    active: i32,
-    screen: usize,
-    press_chop: Option<unsafe extern "C" fn()>,
     slices: *mut u32,
     error: *mut *const u8,
 ) -> i32 {
-    let step = step(base, now, active, screen, press_chop);
-    match step {
-        Step::Idle => 0,
-        Step::Started => 1,
-        Step::Continue => 2,
+    match step(base, now, 1) {
+        Step::Idle | Step::Started | Step::Continue => 2,
         Step::Done(count) => {
             if !slices.is_null() {
                 // SAFETY: the caller promises this is writable.
@@ -230,8 +269,7 @@ pub unsafe extern "C" fn minimod_spectral_step(
         }
         Step::Failed(message) => {
             if !error.is_null() {
-                // SAFETY: the caller promises this is writable; the message is
-                // a static string that outlives the call.
+                // SAFETY: the caller promises this is writable.
                 unsafe { *error = message.as_ptr() };
             }
             4

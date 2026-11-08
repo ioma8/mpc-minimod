@@ -73,6 +73,7 @@
 #include "hpss_ffi.h"
 #include "spectral_ffi.h"
 #include "h3m_effect.h"
+#include "spectral_machine_ffi.h"
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 #include "audio_ffi.h"
@@ -1177,18 +1178,8 @@ static void spectral_finish(const char *error)
 /* Same binding path used by the stock Split handler (Ghidra 0x1756728).
  * Manual is enum 0. Calling the binding's model callback preserves the pad's
  * chop type; assigning the view's cached enum alone does not. */
-static int spectral_manual(void)
-{
-    return minimod_spectral_manual(base, (uintptr_t)g_screen);
-}
 
 
-static int spectral_write_markers(void)
-{
-    return minimod_spectral_write_markers(base, g_spectral.sample, g_spectral.pos,
-                                          (unsigned)g_spectral.n, g_spectral.frames,
-                                          (uintptr_t)g_screen);
-}
 
 static void spectral_start(void)
 {
@@ -1204,20 +1195,42 @@ static void spectral_start(void)
 
 /* One phase per UI pass: a CHOP press schedules a page switch, so it cannot
  * be followed by a sleep/poll or by another toggle in the same callback. */
+/* The three-phase dance (open Manual chop, write the boundaries, verify them)
+ * lives in Rust; the glue keeps the sample read and applies each frame's result. */
+static void spectral_press_chop(void)
+{
+    if (!orig_buttons)
+        return;
+    g_spectral_event[8] = 0x4b;
+    g_spectral_event[9] = 0x7f;
+    orig_buttons(g_spectral_event);
+    g_spectral_event[9] = 0;
+    orig_buttons(g_spectral_event);
+}
+
+static void spectral_apply(int step, const unsigned char *error)
+{
+    if (step == 3)
+        spectral_finish(NULL);
+    else if (step == 4)
+        spectral_finish((const char *)error);
+    hpss_repaint();
+}
+
 static void spectral_tick(void)
 {
     if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE) != 1)
         return;
+    const unsigned char *error = NULL;
+    unsigned slices = 0;
     if (!g_spectral.phase) {
-        g_hpss_menu = 0;
-        g_hpss_busy = 1;
+        char path[512] = {0};
+        float *input = NULL;
         if (!hpss_sample_now(&g_spectral.screen, &g_spectral.state, &g_spectral.sample,
                              &g_spectral.frames, &g_spectral.ch, &g_spectral.rate)) {
             spectral_finish("no sample on this pad");
             return;
         }
-        char path[512] = {0};
-        float *input = NULL;
         if (!hpss_path_for(g_spectral.sample, g_spectral.frames, g_spectral.ch,
                            g_spectral.rate, path, sizeof path) ||
             !wav_read_f32(path, g_spectral.frames, g_spectral.ch, g_spectral.rate,
@@ -1225,66 +1238,28 @@ static void spectral_tick(void)
             spectral_finish("cannot read sample WAV");
             return;
         }
-        unsigned detected = 0;
-        g_spectral.n = spectral_onsets(input, g_spectral.frames, g_spectral.ch,
-                                       g_spectral.rate, g_spectral.pos, 16, &detected);
+        int begun = minimod_spectral_begin(base, minimod_now_ms(),
+                                           (uintptr_t)g_spectral.screen,
+                                           g_spectral.state, g_spectral.sample,
+                                           g_spectral.frames, g_spectral.ch,
+                                           g_spectral.rate, input,
+                                           spectral_press_chop, &error);
         free(input);
-        if (g_spectral.n < 2) {
-            spectral_finish("no onsets");
+        if (begun) {
+            spectral_finish((const char *)error);
             return;
         }
-        for (int i = 0; i < g_spectral.n; ++i) {
-            if (g_spectral.pos[i] >= g_spectral.frames ||
-                (i && g_spectral.pos[i] <= g_spectral.pos[i - 1])) {
-                spectral_finish("invalid onsets");
-                return;
-            }
-        }
-        mlog("Spectral: source=%p frames=%u onsets=%d detected=%u\n",
-             (void *)g_spectral.sample, g_spectral.frames, g_spectral.n, detected);
-        if (!hpss_chop_mode() && orig_buttons) {
-            g_spectral_event[8] = 0x4b;
-            g_spectral_event[9] = 0x7f;
-            orig_buttons(g_spectral_event);
-            g_spectral_event[9] = 0;
-            orig_buttons(g_spectral_event);
-        }
-        if (!spectral_manual()) {
-            spectral_finish("cannot select Manual chop");
-            return;
-        }
+        g_hpss_menu = 0;
+        g_hpss_busy = 1;
         g_spectral.phase = 1;
         g_spectral.deadline = minimod_now_ms() + 3000;
-    } else {
-        void *screen = 0;
-        uintptr_t state = 0, sample = 0;
-        unsigned frames = 0, ch = 0, rate = 0;
-        if (!hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate) ||
-            screen != g_spectral.screen || state != g_spectral.state ||
-            sample != g_spectral.sample || frames != g_spectral.frames ||
-            ch != g_spectral.ch || rate != g_spectral.rate) {
-            spectral_finish("sample changed; cancelled");
-            return;
-        }
-        uintptr_t binding = 0;
-        int type = -1;
-        rd((uintptr_t)screen + 0x168, &binding, 8);
-        if (binding) rd(binding + 0x9c, &type, 4);
-        if (!hpss_chop_mode() || type != 0) {
-            if (minimod_now_ms() >= g_spectral.deadline)
-                spectral_finish("Manual chop did not open");
-        } else if (g_spectral.phase == 1) {
-            if (!spectral_write_markers()) {
-                spectral_finish("native marker write failed");
-                return;
-            }
-            g_spectral.phase = 2;
-            g_spectral.deadline = minimod_now_ms() + 150;
-        } else if (minimod_now_ms() >= g_spectral.deadline) {
-            spectral_finish(minimod_spectral_verify(g_spectral.sample, g_spectral.pos, (unsigned)g_spectral.n, g_spectral.frames) ? NULL : "marker verification failed");
-        }
+        hpss_repaint();
+        return;
     }
-    hpss_repaint();
+    int step = minimod_spectral_step(base, minimod_now_ms(), &slices, &error);
+    if (step == 3)
+        g_spectral.n = (int)slices;
+    spectral_apply(step, error);
 }
 
 
