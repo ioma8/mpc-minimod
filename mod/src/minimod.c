@@ -73,6 +73,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "pads_ffi.h"
 #include "cfg_ffi.h"
 #include "sample_ffi.h"
 #include "status_ffi.h"
@@ -97,7 +98,6 @@
 #define FN(off, type) ((type)(base + (off)))
 
 /* ---------------------------------------------------------------- state */
-static int log_fd = -1;
 static uintptr_t base;
 static unsigned char *relay_page;
 static unsigned char *tramp_page;
@@ -120,13 +120,9 @@ static long long now_ms(void);
 static void *g_screen;
 static void looper_draw(void *g);
 static void looper_pump(void);
-static void *g_trim_page;
 static int prop_references(uintptr_t P, uintptr_t param);
 
-static uintptr_t g_watch_page;
 #define MAXW 12
-static uintptr_t g_wpages[MAXW];
-static int g_nwpage;
 
 
 
@@ -136,9 +132,6 @@ static volatile int g_cc_recover;
 static sigjmp_buf g_cc_jmp;
 
 #define LOG_CAP (256u * 1024u)
-static pthread_mutex_t g_log_mtx = PTHREAD_MUTEX_INITIALIZER;
-static unsigned long g_log_bytes;
-static int g_log_full;
 
 static void mlog(const char *fmt, ...)
 {
@@ -503,14 +496,6 @@ static double g_trim_ratio;
 static int g_b3_down;      /* edge detection: the button auto-repeats while held */
 
 
-/* --------------------------------------------------------- trim parameter */
-static struct {
-    void *p;
-    float val;
-    unsigned mn, mx;
-    int bound;
-} g_tp[256];
-static int g_ntp;
 
 
 
@@ -578,11 +563,10 @@ static uintptr_t broadcast_prop(uintptr_t param, float cur)
 
 
 /* ------------------------------------------------------------- app hooks */
+static uintptr_t g_trim_layer; /* layer the trim page is editing */
 static void *(*orig_sixteen_ctor)(void *, void *, void *, void *);
 static void (*orig_sixteen_proc)(void *, int, void *);
 static void (*orig_pitch_off)(void *, uint64_t, uint64_t, int);
-static void (*orig_plus)(void *);
-static void (*orig_minus)(void *);
 static void (*orig_buttons)(void *);
 static void (*orig_note_on)(void *, int, int, void *, float);
 static void (*orig_note_off)(void *, int, int);
@@ -594,18 +578,12 @@ static void (*orig_bass_audio_writer)(void *, void *, size_t, int);
 static volatile unsigned g_audio_in_calls;
 static volatile unsigned g_audio_out_calls;
 static void (*orig_cs)(void *, int, void *);
-static void (*orig_trim_write)(void *, long, long);
-static void (*orig_frames)(void *);
 static void (*orig_trim)(void *, float);
-static void (*orig_resized)(void *, long, long, long);
-static void (*orig_reg)(void *, void *);
-static void *(*orig_prog_inst)(void *, int);
 /* The Sample page (0x2468 bytes) captured from SamplePage_Ctor; it owns the
  * Start/End widgets and is what must be repainted after a property change. */
 static void *g_page;
 typedef void (*pagector_fn)(void *, void *, void *, void *, void *, void *,
                             void *, void *, void *, void *, void *, void *);
-static pagector_fn orig_pagector;
 
 
 /* The app's own "apply a control value" entry - exactly what a knob turn calls
@@ -629,19 +607,14 @@ static void setctl_probe(void *a0, void *a1, int a2, int a3, float v)
 /* The page object, captured from the control handler FUN_02904e90(page, id, ...)
  * - refreshed on every knob turn, so it is always a live pointer. */
 static void *g_livepage;
-static void (*orig_ctlhandler)(void *, uint64_t, uint64_t);
 
 
 /* FUN_02912f10(padBlock) returns the object the page reads its trim from
  * (Start at +0x78, End at +0xd0). Capturing it in-process avoids stale pointers. */
-static void *g_trimobj;
-static void *(*orig_gettrim)(void *);
 
 
 /* PadState_CopyIntoPage(page, padState): the pad is the source of the page's
  * Start/End widgets (pad+0x1588 -> widget value, pad+0x15e0 -> End). */
-static void *g_padstate;
-static void (*orig_copypad)(void *, void *);
 
 
 static void (*orig_bcast)(void *, float);
@@ -711,7 +684,6 @@ static void do_autotrim(void);
 static volatile int g_shift;
 static volatile int g_erase_down;
 static volatile int g_buf_dirty; /* re-read the device rings on the audio thread */
-static volatile int g_trim_req;
 static volatile int g_last_pad = -1;
 static volatile int g_core_hit;
 static void *g_props;
@@ -757,18 +729,12 @@ static int g_pending_r0, g_pending_r1;
 static void (*orig_setctl2)(void *, void *, int, int, float);
 static void *g_surface2;
 
-static void *g_pend_prop0, *g_pend_prop1;
-static float g_pend_pv0, g_pend_pv1;
-static volatile int g_pending_prop;
 
 /* Write the property values immediately before the app paints, so the paint
  * reads the trim we computed. */
 
 static void *g_paint_comp;
 static void *g_paint_gfx;
-static uintptr_t g_reg_base;
-static unsigned char g_reg_buf[0x40000];
-static int g_reg_have;
 static volatile int g_poke_which = -1;
 static void do_poke(void);
 static volatile int g_sdump;
@@ -1064,34 +1030,9 @@ static int hpss_read_sample(void *s, void **screen, uintptr_t *state,
 
 
 
-static int hpss_free_pad(void *program)
-{
-    if (!program)
-        return -1;
-    return FN(A_HPSS_FREE_PAD, int (*)(void *))(program);
-}
 
 /* Count empty pads with the same two checks the native finder uses: a null pad
  * state, or a pad state whose layers are all empty. */
-static int hpss_free_count(void *program)
-{
-    uintptr_t lo = 0, hi = 0;
-    if (!program || !rd((uintptr_t)program + 0x2808, &lo, 8) ||
-        !rd((uintptr_t)program + 0x2810, &hi, 8) || !lo || hi < lo)
-        return 0;
-    int count = 0;
-    size_t n = (size_t)((hi - lo) / 8);
-    if (n > 128)
-        n = 128;
-    for (size_t i = 0; i < n; ++i) {
-        uintptr_t st = 0;
-        if (!rd(lo + i * 8, &st, 8))
-            break;
-        if (!st || !FN(A_HPSS_PAD_BUSY, int (*)(void *))((void *)st))
-            count++;
-    }
-    return count;
-}
 
 /* Run one native Extract over source frames [start,end).  If `buf` is non-null
  * the writer callback substitutes it; otherwise the native reader copies the
@@ -1107,7 +1048,7 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
     if (!screen || start >= end || !ch ||
         !rd(state + 0x2310, &program, 8) || !program)
         return 0;
-    int before = hpss_free_pad((void *)program);
+    int before = minimod_pads_free_pad(base, (uintptr_t)program);
     if (before < 0)
         return 0;
     if (dest)
@@ -1131,7 +1072,7 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
     int after = before;
     for (int i = 0; i < 3000 && after == before; ++i) {
         usleep(1000);
-        after = hpss_free_pad((void *)program);
+        after = minimod_pads_free_pad(base, (uintptr_t)program);
     }
     int write_ok = buf ? g_hpss_write_ok : 1;
     int ok = after != before && write_ok;
@@ -1347,7 +1288,7 @@ static void fmbass_start(void)
         return;
     }
     uintptr_t program = 0;
-    if (!rd(state + 0x2310, &program, 8) || !program || hpss_free_count((void *)program) < 1) {
+    if (!rd(state + 0x2310, &program, 8) || !program || minimod_pads_free_estimate(base, (uintptr_t)program) < 1) {
         hpss_free_job(job);
         sample_action_status(4, "need 1 empty pad");
         toast("Bass: need 1 pad");
@@ -1627,7 +1568,7 @@ static void hpss_finalize(void)
         uintptr_t program = 0;
         int required = effect ? 1 : 2;
         if (!rd(job->state + 0x2310, &program, 8) || !program ||
-            hpss_free_count((void *)program) < required) {
+            minimod_pads_free_estimate(base, (uintptr_t)program) < required) {
             sample_action_status(job->action, effect ? "need 1 empty pad" : "need 2 empty pads");
             toast(effect ? "Effect: need 1 pad" : "HPSS: need 2 pads");
             goto out;
@@ -2932,18 +2873,13 @@ static void bcast_hook(void *self, float v)
 }
 
 /* ------------------------------------------------------- message-thread pump */
-static volatile int g_trim_pending;
 static void *g_trim_param0, *g_trim_param1;
 static float g_trim_v0, g_trim_v1;
-static float g_trim_cur0, g_trim_cur1;
 static unsigned g_trim_frames;
-static uintptr_t g_trim_layer, g_trim_screen;
 
 /* Broadcast a unique value to one candidate property: if the app's own
  * listener chain reaches the trim core for *our* parameter, that property owns
  * it. The original value is restored right after. */
-static uintptr_t g_cand[24];
-static int g_ncand;
 
 /* The page keeps a small binding object per parameter (vtable app+0x6e08a10)
  * that holds the property at +0x20. Collect those as probe candidates. */
@@ -3322,13 +3258,7 @@ static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
  * not just the parameter), which is what the page reloads from. */
 #define HP_PAGE 4096
 #define HP_MAX 200000
-static struct {
-    uintptr_t addr;
-    uint64_t hash;
-} g_hp[HP_MAX];
-static volatile int g_nhp;
-
-static unsigned char *g_hp_bytes; /* optional byte copy for diffs */
+ /* optional byte copy for diffs */
 
 
 
@@ -3750,7 +3680,6 @@ static void commit_trim(void)
     mlog("minimod: commit core done p0=%.4f p1=%.4f (want %.4f/%.4f)\n",
          (double)check, (double)check2, (double)v0, (double)v1);
 
-done:
     /* Re-press the last control so the page reloads: it only redraws its trim
      * when the pad is (re)selected. Off by default - the object recorded from a
      * press is not always the pad and pressing it can open a menu. */
@@ -4116,14 +4045,11 @@ static void *g_filter_dest;
  * so the char* assign hook never sees "Filter". Label::getText (0x11bae00)
  * returns the live juce::String by reference; mutating that string in place
  * renames the key without touching the layout of anything else. */
-static void *g_label_str;
 
 
 /* The soft-key captions are not juce::Label (Label::getText is never called),
  * so find the live juce::String that holds "Filter" once, and rename it in
  * place with the app's own String::operator=(const char*). */
-static void *g_filter_strs[6];
-static int g_nfilter_strs;
 
 
 /* Scanning the heap on the UI thread froze the app (one /proc/self/mem open
@@ -4244,18 +4170,6 @@ static void midi_note_event(void *app, void *context, void *event,
 
 /* -------------------------------------------------------- probe threads */
 
-/* -------------------------------------------------- probe bookkeeping */
-static void *g_setter[32];
-static long g_setter_val[32];
-static long g_setter_seq[32];
-static long g_seq;
-static int g_nsetter;
-static unsigned char g_ev[16];
-static volatile int g_have_ev;
-static struct {
-    void *val2;
-} g_sl[64];
-static int g_nsl;
 /* Trim the sample the Sample page is showing to its silent edges.
  *
  * Everything is taken from the app: the length from the live TrimParameter
@@ -4342,8 +4256,6 @@ static void do_autotrim(void)
 /* Byte-level snapshot of the small writable ranges: a knob move changes the
  * pad's stored trim, and this names it exactly. */
 #define BS_MAX (48u << 20)
-static unsigned char *g_bs;
-static size_t g_bs_len;
 
 /* "findv <float>" - every address in the small writable ranges holding exactly
  * this float. Run with two knob values and intersect to find the stored state. */

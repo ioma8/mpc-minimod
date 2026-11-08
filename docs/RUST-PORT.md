@@ -68,6 +68,8 @@ slice.
 | Sample/instrument geometry accessors | ported | rate-range test; Reverb device test runs the paint path that uses them |
 | Trim sample scale (`pcm_at`) | ported | 6 assertions over 16/24/float scaling and clamping; Vinyl and Bass Synth device tests run the paths around it |
 | Trim edge scan (`wav_edges`) | ported | 3 host tests over synthesised takes (padded, silent, over-threshold); Bass Synth device test runs on the build |
+| Looper settings file | ported | 4 host tests; the device writes and reloads its own trim |
+| Pad occupancy (`hpss_free_pad`, `hpss_free_count`) | ported | offset test; the Bass Synth device test waits on the pad count to detect the assignment |
 | `minimod.c` (hooks, features, UI glue) | C, shrinking | 7 683 -> 4 564 lines; dead code removed only where the compiler proved it, each pass verified by an identical binary |
 
 The looper, the effects and the whole bass synth are already what the device
@@ -187,6 +189,11 @@ fixture the reference is compiled with `-ffp-contract=off` so both sides evaluat
 the same expression, which is what makes a bit-exact comparison meaningful.  (The
 looper fixture goes the other way: its reference *is* contracted, and the Rust
 mix uses `mul_add` to match it.)
+
+**Firmware calls need one careful helper.** `firmware::int_of_pointer` is the
+single place that turns an address into a callable `extern "C"` function.  Every
+remaining glue port that talks to the app goes through it, so the unsafe
+transmute exists once and is documented once, instead of at each call site.
 
 **The unwinder is needed even with `panic = "abort"`.** The Rust standard library
 object references `_Unwind_Resume` and friends from its panic hook's backtrace

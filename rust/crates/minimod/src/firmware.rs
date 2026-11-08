@@ -188,6 +188,24 @@ pub fn write(address: usize, bytes: &[u8]) -> bool {
 }
 
 /// Read one 32-bit word of process memory.
+/// A firmware function taking one pointer and returning an `int`.
+pub type IntOfPointer = unsafe extern "C" fn(usize) -> i32;
+
+/// Call the firmware function at `address` with one pointer argument.
+///
+/// # Safety
+///
+/// `address` must be the entry point of a function with this exact signature,
+/// and `argument` must be a valid argument for it.
+#[must_use]
+pub unsafe fn int_of_pointer(address: usize, argument: usize) -> i32 {
+    // SAFETY: the caller guarantees the address and the signature.
+    let function: IntOfPointer = unsafe { core::mem::transmute(address) };
+    // SAFETY: see above.
+    unsafe { function(argument) }
+}
+
+/// Read one 32-bit word of process memory.
 #[must_use]
 pub fn read_u32(address: usize) -> Option<u32> {
     let mut buffer = [0_u8; 4];
