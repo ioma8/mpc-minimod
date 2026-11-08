@@ -123,6 +123,20 @@ Both passes were checked by rebuilding: the resulting `.so` is **byte-identical*
 instruction changed. The device artifact is the same binary the round-6 tests ran
 against.
 
+## Open issue
+
+The Live Looper acceptance test's MAIN VOLUME assertion fails on the current
+build: after `MAIN VOLUME 127` then `64` the output ratio is 0.78, where 0.35 to
+0.65 is expected.  It is the same measurement that passed twice at the end of the
+looper work, so something between then and now moved - but the looper's audio
+path has not been touched since (the changes were the WAV layer, path
+resolution, status line, geometry accessors, `pcm_at` and `wav_edges`).  The
+next step is a bisect over the saved artifacts, starting from the round-3 build,
+and instrumenting `cc_capture` to log the `raw` value it receives for CC 0x13.
+
+Everything else passes on the same build: Reverb, Vinyl, Lo-Fi, Bass Synth,
+chromatic MIDI (on a freshly restarted app) and Spectral Chop.
+
 ## Findings from the port
 
 **Fused multiply-add.** The C build contracts `add[i] += sample * gain` into an
