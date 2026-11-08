@@ -76,6 +76,7 @@ slice.
 | Slice writer (`spectral_write_markers`) | ported | the Spectral Chop device test writes and verifies its 5 boundaries through it |
 | Manual chop mode (`spectral_manual`) | ported | the spectral test asserts "Manual" after the chop |
 | Page predicates (`sample_page_visible`, chop mode) | ported | the looper and spectral tests both gate on them |
+| Hook-site guard (`midi_hook_site_ok`) | ported | the MIDI prologue is a documented constant; the chromatic test runs the hook it guards |
 | `minimod.c` (hooks, features, UI glue) | C, shrinking | 7 683 -> 4 564 lines; dead code removed only where the compiler proved it, each pass verified by an identical binary |
 
 The looper, the effects and the whole bass synth are already what the device

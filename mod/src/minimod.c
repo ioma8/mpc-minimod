@@ -73,6 +73,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "hooks_ffi.h"
 #include "page_ffi.h"
 #include "selection_ffi.h"
 #include "chop_ffi.h"
@@ -415,13 +416,7 @@ static unsigned char g_midi_replayed[128];
 
 static int midi_hook_site_ok(void)
 {
-    /* The first four instructions of the dispatcher in firmware 1.3.0.12. */
-    static const unsigned char want[16] = {
-        0x3f, 0x23, 0x03, 0xd5, 0xff, 0x03, 0x03, 0xd1,
-        0xfd, 0x7b, 0x06, 0xa9, 0xfd, 0x83, 0x01, 0x91 };
-    unsigned char got[16];
-    return rd(base + A_MIDI_NOTE_EVENT, got, sizeof got) &&
-           !memcmp(got, want, sizeof want);
+    return minimod_midi_site_ok(base);
 }
 
 static void midi_hook_set(int on)
