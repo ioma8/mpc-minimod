@@ -278,6 +278,22 @@ Rust static library in its place, and the emulator test for that feature becomes
 the acceptance gate. The C sources stay in `mod/src` until the whole mod is Rust
 because they are the reference the golden fixtures are recorded from.
 
+## The spectral state machine: ported, not wired
+
+`spectral_machine.rs` holds the three-phase machine (open Manual chop, write the
+boundaries, verify them) as one Rust function with a `Step` result.  Wiring it
+failed on the device in the "repeat again" case: the boundaries came back
+starting at 886 instead of 264.
+
+The cause is path resolution, not the machine: `paths::for_sample` falls back to
+`unique(TEMP_PROJECTS, frames, channels, rate)` when the sample object's path does
+not match, and on a repeat run that fallback picks a different file with the same
+geometry.  The C `hpss_path_for` is stricter, which is why the C passes.
+
+Wiring it needs the path (or the samples) supplied by the caller instead of
+resolved inside, so the machine reads exactly what the C read.  Reverted until
+then; the C remains in charge.
+
 ## Running the device suite
 
 Every test drives the app from a fresh start; running one straight after another

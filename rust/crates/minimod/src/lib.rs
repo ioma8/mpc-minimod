@@ -32,6 +32,7 @@ pub mod paths_ffi;
 pub mod routing;
 pub mod sample;
 pub mod selection;
+pub mod spectral_machine;
 pub mod status;
 pub mod status_ffi;
 pub mod substitute;
