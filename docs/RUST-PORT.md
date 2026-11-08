@@ -125,22 +125,28 @@ Both passes were checked by rebuilding: the resulting `.so` is **byte-identical*
 instruction changed. The device artifact is the same binary the round-6 tests ran
 against.
 
-## Reopened: the looper volume, with a sharper symptom
+## The looper volume: mechanism found, and it is the measurement
 
-After the settings-file port the Live Looper test failed its volume assertion
-again (ratio 0.936 where 0.35..0.65 is expected) - and this time the new,
-direct assertion on `g_looper_master` **passed**: the master really is 64 in the
-mixer, yet the output level barely moved.
+The volume assertion failed again (ratio 0.936) while the new direct assertion on
+`g_looper_master` passed, so the mixer really had 64.  Tracing the tap explains
+why that did not show up in the audio:
 
-So the CC path is fine and the problem is downstream: either the mixer does not
-apply `MASTER` on that path, or the test's output tap is not where the master is
-applied.  The next probe is to log `MASTER` and the first output sample inside
-the mix loop for a few blocks while the test drives the volume - that separates
-"the mixer ignores it" from "the tap measures before it".
+* `g_outtap` is filled inside the interposed `snd_pcm_writei`, from the buffer
+  the **app** produced - after the app's own MAIN VOLUME has been applied to it;
+* the looper's mix adds its output *into that same buffer*
+  (`value = s32_to_f32(*sample) + mixed`, with `mixed = add[i] * master/127`),
+  so the tap holds **both** the app's playback and the loop.
 
-It is intermittent (three consecutive passes in round 12, one failure since), and
-the settings-file port is the newest change on that path, so the loader's
-`looper_set_master` at startup is the first thing to check.
+`MAIN VOLUME 64` therefore scales the loop by ~0.5 but the app's own playback by
+its own curve, and the measured ratio is a weighted average of the two.  When the
+app's playback dominates the window, the ratio stays near 1.  In the earlier
+passing runs the loop dominated, which is why the same code could pass three
+times and fail later.
+
+It is a test-design issue, not a mod bug: to measure the loop's response to MAIN
+VOLUME, the app's own playback of that pad has to be out of the picture - either
+by selecting an empty pad before measuring, or by measuring the loop's
+contribution relative to a baseline taken with the loop stopped.
 
 ## Closed: the looper volume "regression"
 
