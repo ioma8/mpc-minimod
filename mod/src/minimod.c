@@ -3997,14 +3997,19 @@ static void midi_note_event(void *app, void *context, void *event,
         return;
     }
     if (event) {
-        uint32_t type = 0;
-        float velocity = 0.0f;
-        uint8_t note = 0xff;
-        memcpy(&type, (char *)event + 8, sizeof type);
-        memcpy(&velocity, (char *)event + 0x10, sizeof velocity);
-        memcpy(&note, (char *)event + 0x30, sizeof note);
-        int32_t source_id = (int32_t)(uint32_t)source;
-        int external = source_id <= 0x7fffffef || source_id == 0x7ffffff6;
+        /* Decoding lives in Rust: the external-source rule and the
+         * note-on/off rules are the part worth testing. */
+        struct minimod_note decoded;
+        if (!minimod_midi_decode((const unsigned char *)event, (uint64_t)source,
+                                 &decoded))
+            decoded = (struct minimod_note){0};
+        uint32_t type = decoded.kind;
+        float velocity = decoded.velocity;
+        uint8_t note = (uint8_t)decoded.note;
+        int external = decoded.external;
+        int note_on = decoded.note_on;
+        int note_off = decoded.note_off;
+        int row = decoded.row;
         unsigned char *e = (unsigned char *)event;
         mlog("ev ext=%d src=%llx ctx=%llx app=%llx type=%u note=%u vel=%.3f lv=%d\n",
              external, (unsigned long long)source, (unsigned long long)(uintptr_t)context,
@@ -4026,13 +4031,8 @@ static void midi_note_event(void *app, void *context, void *event,
                 g_pad_prop_pending = 1;
             }
         }
-        int note_on = (type & 0xffu) == 3 && velocity > 0.0f;
-        int note_off = note <= 127 &&
-                       (((type & 0xffu) == 3 && velocity <= 0.0f) ||
-                        (type & 0xffu) == 2);
         if (levels_active() && external && note <= 127 &&
             ((type & 0xffu) == 3 || note_off)) {
-            int row = (int)note - 60;
             if (note_on || g_midi_replayed[note]) {
                 /* Re-send the note as the selected pad's event: clear the
                  * property mask, put the selected pad in event+0x30, then apply

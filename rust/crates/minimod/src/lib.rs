@@ -21,6 +21,7 @@ pub mod effect_ffi;
 pub mod firmware;
 pub mod hooks;
 pub mod looper_ffi;
+pub mod midi;
 pub mod pads;
 pub mod page;
 pub mod paths;
