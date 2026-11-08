@@ -66,7 +66,10 @@ slice.
 
 The looper, the effects and the whole bass synth are already what the device
 runs: `mod/build.sh` links the Rust static library instead of the C engines, and
-the emulator acceptance test for each passes against it.
+the emulator acceptance test for each passes against it.  HPSS and Spectral Chop
+have Rust implementations validated by their fixtures, but the device still calls
+the C ones — they share `minimod.c`'s worker and are wired in when that glue
+moves.
 
 ## How the looper is proven
 
