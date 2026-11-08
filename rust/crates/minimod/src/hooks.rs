@@ -179,6 +179,20 @@ impl HookEngine {
         make_executable(self.trampoline)
     }
 
+    /// An engine with no pages, so a failed mapping is reported per hook
+    /// instead of aborting the whole installation.
+    #[must_use]
+    pub const fn disabled(firmware: Firmware) -> Self {
+        Self {
+            firmware,
+            relay: core::ptr::null_mut(),
+            trampoline: core::ptr::null_mut(),
+            slots: 0,
+            trampolines: 0,
+            used: false,
+        }
+    }
+
     /// Install a hook at `offset` in the image.
     ///
     /// On success the site branches to `hook`, and the returned address is the
@@ -407,6 +421,46 @@ pub extern "C" fn minimod_midi_site_ok(base: usize) -> i32 {
         MIDI_DISPATCHER,
         &MIDI_DISPATCHER_PROLOGUE,
     ))
+}
+
+/// The hook engine for the loaded app, created on first use.
+static ENGINE: std::sync::OnceLock<std::sync::Mutex<HookEngine>> = std::sync::OnceLock::new();
+
+/// Install a hook at the absolute address `site`, returning the trampoline the
+/// caller must call to run the displaced prologue.
+///
+/// # Safety
+///
+/// `site` must be an executable address inside the image at `base` and `hook`
+/// must be a function with the same ABI as the hooked one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_install_hook(base: usize, site: usize, hook: usize) -> *mut u8 {
+    if base == 0 || site <= base {
+        return core::ptr::null_mut();
+    }
+    let engine = ENGINE.get_or_init(|| {
+        let firmware = Firmware::from_base(base);
+        std::sync::Mutex::new(
+            HookEngine::new(firmware).unwrap_or_else(|_| HookEngine::disabled(firmware)),
+        )
+    });
+    let Ok(mut engine) = engine.lock() else {
+        return core::ptr::null_mut();
+    };
+    match engine.install(site - base, hook) {
+        Ok(trampoline) => trampoline as *mut u8,
+        Err(_) => core::ptr::null_mut(),
+    }
+}
+
+/// Mark the hook pages executable once every hook is in place.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_seal_hooks() {
+    if let Some(engine) = ENGINE.get()
+        && let Ok(engine) = engine.lock()
+    {
+        let _ = engine.seal();
+    }
 }
 
 #[cfg(test)]
