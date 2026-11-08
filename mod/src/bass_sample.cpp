@@ -181,7 +181,7 @@ extern "C" void bass_preview_set_params(float brightness, float excite,
 
 extern "C" void bass_preview_note(unsigned pad, float velocity)
 {
-    if (pad >= kPadCount || velocity <= 0.f)
+    if (pad >= kPadCount || velocity <= 0.f || !std::isfinite(velocity))
         return;
     pending_velocity[pad].store(float_bits(clamp01(velocity)),
                                 std::memory_order_release);

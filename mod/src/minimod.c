@@ -497,7 +497,8 @@ static void *install_hook(uintptr_t site, void *hook)
         mlog("minimod: mprotect(%p) failed: %s\n", (void *)page, strerror(errno));
         return 0;
     }
-    int ok = wr(site, &b_slot, 4);
+    uint32_t applied = 0;
+    int ok = wr(site, &b_slot, 4) && rd(site, &applied, 4) && applied == b_slot;
     __builtin___clear_cache((char *)site, (char *)(site + 4));
     mprotect((void *)page, 0x2000, PROT_READ | PROT_EXEC);
     if (!ok) {
@@ -1687,6 +1688,7 @@ static unsigned g_hpss_arm_end;
 static unsigned g_hpss_arm_ch;
 static int g_hpss_arm_name;
 static volatile int g_hpss_sub_on;
+static volatile int g_hpss_writer_busy;
 static const float *g_hpss_sub_buf;
 static volatile size_t g_hpss_sub_pos;
 static size_t g_hpss_sub_frames;
@@ -1769,7 +1771,8 @@ static void hpss_ctor_hook(void *cmd, void *name, int dest, void *settings,
                            void *padstate, void *project, void *s1, void *s2,
                            void *s3)
 {
-    if (g_hpss_arm && (uintptr_t)padstate == g_hpss_arm_source) {
+    if (__atomic_load_n(&g_hpss_arm, __ATOMIC_ACQUIRE) &&
+        (uintptr_t)padstate == g_hpss_arm_source) {
         hpss_make_names();
         int ni = g_hpss_arm_name;
         if (ni < 0 || ni >= 6)
@@ -1793,7 +1796,7 @@ static void hpss_exec_hook(void *cmd)
     uintptr_t settings = 0;
     uint64_t old_start = 0, old_end = 0;
     int patched = 0, wrote_start = 0, wrote_end = 0;
-    if (armed && g_hpss_arm) {
+    if (armed && __atomic_load_n(&g_hpss_arm, __ATOMIC_ACQUIRE)) {
         g_hpss_write_ok = 0;
         g_hpss_sub_on = 0;
         if (g_hpss_arm_buf) {
@@ -1842,13 +1845,19 @@ static void hpss_exec_hook(void *cmd)
             usleep(HPSS_WAIT_STEP_US);
         g_hpss_sub_on = 0;
         g_hpss_write_ok = (g_hpss_sub_pos == g_hpss_sub_frames);
+        /* Wait for an in-flight callback before the job (and its buffer) may be
+         * freed by the finalizer. */
+        for (int i = 0; i < HPSS_WAIT_STEPS &&
+                        __atomic_load_n(&g_hpss_writer_busy, __ATOMIC_ACQUIRE);
+             ++i)
+            usleep(HPSS_WAIT_STEP_US);
         mlog("HPSS exec: cmd=%p writer consumed %zu/%zu frames%s\n", cmd,
              g_hpss_sub_pos, g_hpss_sub_frames,
              g_hpss_write_ok ? "" : " (INCOMPLETE)");
     }
 }
 
-static void hpss_writer_hook(void *closure, void *block)
+static void hpss_writer_body(void *closure, void *block)
 {
     if (!g_hpss_sub_on || !block) {
         if (orig_hpss_writer)
@@ -1893,6 +1902,13 @@ static void hpss_writer_hook(void *closure, void *block)
         if (orig_hpss_writer)
             orig_hpss_writer(closure, block);
     }
+}
+
+static void hpss_writer_hook(void *closure, void *block)
+{
+    __atomic_add_fetch(&g_hpss_writer_busy, 1, __ATOMIC_ACQ_REL);
+    hpss_writer_body(closure, block);
+    __atomic_sub_fetch(&g_hpss_writer_busy, 1, __ATOMIC_ACQ_REL);
 }
 
 static int hpss_read_sample(void *s, void **screen, uintptr_t *state,
@@ -2127,9 +2143,11 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
     g_hpss_arm_end = end;
     g_hpss_arm_ch = ch;
     g_hpss_arm_name = name;
-    g_hpss_arm = 1;
+    /* Publish the whole snapshot, then keep it armed until the command has
+     * executed (or this extraction gives up): the constructor and execute
+     * hooks may run on an executor thread after the handler returns. */
+    __atomic_store_n(&g_hpss_arm, 1, __ATOMIC_RELEASE);
     FN(A_HPSS_EXTRACT_HANDLER, void (*)(void *))(screen);
-    g_hpss_arm = 0;
 
     /* The command may be executed on an executor thread after the handler
      * returns.  Wait for the pad to change before starting the next one. */
@@ -2138,6 +2156,7 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
         usleep(HPSS_WAIT_STEP_US);
         after = hpss_free_pad((void *)program);
     }
+    __atomic_store_n(&g_hpss_arm, 0, __ATOMIC_RELEASE);
     int write_ok = buf ? g_hpss_write_ok : 1;
     int ok = after != before && write_ok;
     mlog("HPSS extract: pad %d -> free %d (%s, write %s) range %u..%u\n", before,
@@ -2593,7 +2612,7 @@ static void spectral_tick(void)
         }
         mlog("Spectral: source=%p frames=%u onsets=%d detected=%u\n",
              (void *)g_spectral.sample, g_spectral.frames, g_spectral.n, detected);
-        if (!hpss_chop_mode() && orig_buttons) {
+        if (!hpss_chop_mode() && orig_buttons && g_hpss_btn_valid) {
             g_spectral_event[8] = 0x4b;
             g_spectral_event[9] = 0x7f;
             orig_buttons(g_spectral_event);
@@ -4133,15 +4152,19 @@ static void bass_audio_writer(void *self, void *input, size_t frames, int offset
 
     float **source = input;
     for (int i = 0; i < count; ++i) {
-        /* The array length is not known; at least make sure every pointer is
-         * readable, aligned and covers the whole block before copying it. */
-        if (!source[i] || ((uintptr_t)source[i] & 3) ||
-            !mapped(source[i]) ||
-            !mapped((const char *)source[i] + (frames - 1) * 4)) {
+        /* The array length is not known; require the slot itself to be mapped
+         * before reading it, then validate the pointer it holds. */
+        if (!mapped(&source[i])) {
             orig_bass_audio_writer(self, input, frames, offset);
             return;
         }
-        memcpy(scratch[i], source[i], frames * sizeof(float));
+        float *p = source[i];
+        if (!p || ((uintptr_t)p & 3) || !mapped(p) ||
+            !mapped((const char *)p + (frames - 1) * 4)) {
+            orig_bass_audio_writer(self, input, frames, offset);
+            return;
+        }
+        memcpy(scratch[i], p, frames * sizeof(float));
         channels[i] = scratch[i];
     }
     float peak = bass_preview_mix(channels, frames, (unsigned)count, 44100);

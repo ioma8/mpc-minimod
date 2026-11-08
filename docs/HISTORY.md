@@ -386,5 +386,13 @@ A full read of `mod/src` with sanitizer runs and targeted repros found and fixed
 10. **Hygiene** — the `FIELD` macro uses `memcpy` instead of an alignment cast,
     WAV path candidates must match the sample's channels and rate, the maps
     snapshot is published atomically, and the debug command buffer is mutexed.
+11. **Arm lifetime and writer quiescence** — the extraction snapshot used to be
+    cleared as soon as the handler returned, so a command constructed later on
+    an executor thread missed its name and range patch. It stays armed until the
+    command has run (or the extraction gives up). The executor now also waits for
+    any in-flight writer callback before the rendered buffer can be freed, and
+    the bass preview checks the source pointer slot is mapped before reading it.
+    The installed hook word is read back and compared, and a non-finite preview
+    velocity is ignored.
 
 ---
