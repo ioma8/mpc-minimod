@@ -57,7 +57,8 @@ slice.
 | Spectral Chop onsets | ported | golden fixture, positions identical |
 | Live looper engine | ported | golden fixture, **bit-identical** over 122 542 frames |
 | Sample conversion (S32 ↔ f32) | ported | golden fixture, bit-identical |
-| `h3m_effect.c` (firmware effect glue) | C | — |
+| Firmware core: load base, `/proc/self/mem` access, branch hooks | ported | unit tests for the encodings; the loader walk cross-checks the C base on the device |
+| Firmware effects: reverb, vinyl, decimator | ported | all three emulator effect tests |
 | `bass_sample.cpp`, `fmbass_sample.c` | C | — |
 | DaisySP (SVF, Karplus, StringVoice, DC block, crossfade) | C++ | — |
 | `minimod.c` (hooks, features, UI glue) | C | — |
@@ -105,6 +106,19 @@ words of each 40-byte entry.
 **`char` is unsigned on aarch64 Linux.** `looper_notice(const char *)` takes
 `*const c_char`, not `*const i8`; the host build hides the difference, the cross
 build does not.
+
+**A bug the port exposed.** `hpss_finalize` demanded a *source* restore after
+every action, but only the Bass Synth path ever takes a source backup — the
+effect path left the path empty, so `open("")` failed and every Reverb, Vinyl
+and Lo-Fi action reported "source restore failed" and did nothing.  The restore
+is now guarded by the backup's presence, the same way the bass path already was,
+and all three effects pass again.
+
+**A mask fix in the hook classifier.** The reference `pc_relative` masked only
+bit 10 for `RET`, which matches `ret x0` and no real `ret` (the register field
+sits in bits 5-9).  The port masks the register field, so `ret` and `ret xN` are
+both refused as trampoline material.  That can only make the displacement window
+shorter, never wrong.
 
 **Linker noise.** rustc asks the linker for `-Wl,-O1`; lld has deprecated it and
 zig forwards it verbatim, so every cross build printed a warning. The cross

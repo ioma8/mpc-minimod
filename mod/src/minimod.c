@@ -3721,7 +3721,12 @@ static void hpss_finalize(void)
                                       job->rendered_ch ? job->rendered_ch : job->ch,
                                       job->action + 1, &pad);
             hpss_restore_chop();
-            int source_ok = bass_source_restore(job->source_path,
+            /* Only the bass path takes a source backup (fmbass_start); every
+             * other action leaves the source file untouched, so there is
+             * nothing to restore.  Demanding a restore here failed every
+             * effect with "source restore failed". */
+            int source_ok = !job->source_audio_backup ||
+                            bass_source_restore(job->source_path,
                                                 job->source_data_offset,
                                                 job->source_audio_backup,
                                                 job->source_audio_bytes);

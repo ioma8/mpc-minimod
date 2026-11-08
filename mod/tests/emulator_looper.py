@@ -182,8 +182,13 @@ def main():
     time.sleep(0.3)
     vol_full = rms(output_tail())
     control('MAIN VOLUME', 'set', 64)
-    time.sleep(0.3)
+    # The knob travels through the emulator panel asynchronously, so wait for
+    # the change to become audible instead of assuming a fixed delay.
+    deadline = time.monotonic() + 2.0
     vol_half = rms(output_tail())
+    while vol_half > 0.7 * vol_full and time.monotonic() < deadline:
+        time.sleep(0.05)
+        vol_half = rms(output_tail())
     control('MAIN VOLUME', 'set', 127)
     time.sleep(0.2)
     assert 0.35 < vol_half / vol_full < 0.65, (vol_half, vol_full)
@@ -260,15 +265,19 @@ def main():
     time.sleep(0.2)
     assert u32(symbol('g_click')) == 0, 'SHIFT + LOOP did not disable the click'
 
-    # --- K1 trims the record latency, 1 ms per step
+    # --- K1 trims the record latency, 1 ms per step.  The trim is persisted, so
+    #     the check is a delta, and K1 always goes back to zero even when an
+    #     assertion fails: a half-turned knob would skew every later run.
     control('K1', 'set', 0)
     time.sleep(0.2)
     trim0 = u32(symbol('g_lat_extra'))
-    control('K1', 'set', 10)
-    time.sleep(0.2)
-    assert u32(symbol('g_lat_extra')) == trim0 + 440, u32(symbol('g_lat_extra'))
-    control('K1', 'set', 0)
-    time.sleep(0.2)
+    try:
+        control('K1', 'set', 10)
+        time.sleep(0.2)
+        assert u32(symbol('g_lat_extra')) == trim0 + 440, u32(symbol('g_lat_extra'))
+    finally:
+        control('K1', 'set', 0)
+        time.sleep(0.2)
     assert u32(symbol('g_lat_extra')) == trim0, u32(symbol('g_lat_extra'))
 
     # --- SHIFT + DATA closes; loops survive and the app does not restart
