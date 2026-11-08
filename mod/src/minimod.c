@@ -3826,18 +3826,12 @@ static void midi_note_event(void *app, void *context, void *event,
                  * property mask, put the selected pad in event+0x30, then apply
                  * the pitch offset with the app's own setter - the same call
                  * the 16 Levels renderer makes. */
-                uint16_t old_mask;
-                uint8_t old_prop, old_note;
-                memcpy(&old_mask, e + 0x14, 2);
-                old_prop = e[0x16];
-                old_note = e[0x30];
-                uint16_t mask = 0;
-                memcpy(e + 0x14, &mask, 2);
-                e[0x30] = (unsigned char)g_pad_level_byte;
-                /* Use the app's own property setter: this is exactly the path
-                 * PLUS/MINUS uses to shift the row by octaves. */
-                if (orig_pitch_off)
-                    orig_pitch_off(e + 0x14, 0, 0, row);
+                /* Re-send the note as the selected pad's event; the rewrite and
+                 * the pitch offset are in Rust, the restore below puts the
+                 * event back for the caller. */
+                struct minimod_saved saved =
+                    minimod_midi_replay(e, (uint8_t)g_pad_level_byte, row,
+                                        (minimod_pitch_off_fn)orig_pitch_off);
                 if (note_on) {
                     g_midi_replayed[note] = 1;
                     g_midi_chromatic_note = note;
@@ -3850,9 +3844,7 @@ static void midi_note_event(void *app, void *context, void *event,
                      (unsigned long long)g_pad_ctx, e[0x16], e[0x30], g_levels);
                 if (orig_midi_note_event)
                     orig_midi_note_event(app, (void *)g_pad_ctx, event, 0x7ffffffa);
-                memcpy(e + 0x14, &old_mask, 2);
-                e[0x16] = old_prop;
-                e[0x30] = old_note;
+                minimod_midi_restore(e, saved);
                 return;
             }
         }

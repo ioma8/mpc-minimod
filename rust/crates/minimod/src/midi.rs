@@ -18,6 +18,8 @@ pub const EXTERNAL_SOURCE_LIMIT: i32 = 0x7fff_ffef;
 /// A second external source id the firmware uses.
 pub const EXTERNAL_SOURCE_ALT: i32 = 0x7fff_fff6;
 
+use crate::levels;
+
 /// `[event + 8]` is the type tag, `+0x10` the velocity, `+0x30` the note.
 const EVENT_TYPE: usize = 8;
 const EVENT_VELOCITY: usize = 0x10;
@@ -122,6 +124,84 @@ pub unsafe extern "C" fn minimod_midi_decode(
         };
     }
     1
+}
+
+/// The event fields the replay rewrites, so the caller can put them back.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Saved {
+    /// The two property-mask bytes at `+0x14`.
+    pub mask: u16,
+    /// The property value at `+0x16`.
+    pub property: u8,
+    /// The note at `+0x30`.
+    pub note: u8,
+}
+
+/// `[event + 0x14]` is the property mask, `+0x16` its value, `+0x30` the note.
+const EVENT_MASK: usize = 0x14;
+const EVENT_PROPERTY: usize = 0x16;
+
+/// Re-send a note as the selected pad's event.
+///
+/// The event is rewritten in place: the property mask is cleared, the selected
+/// pad goes into `+0x30`, and the pitch offset is applied through the app's own
+/// setter - the same call the 16 Levels renderer makes.  The caller forwards the
+/// event and then restores it.
+///
+/// # Safety
+///
+/// `event` must be writable for `EVENT_NOTE + 1` bytes, and `pitch_off` must be
+/// the app's displaced setter when present.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_midi_replay(
+    event: *mut u8,
+    pad_level_byte: u8,
+    row: i32,
+    pitch_off: Option<levels::PitchOffset>,
+) -> Saved {
+    let mut saved = Saved {
+        mask: 0,
+        property: 0,
+        note: 0xff,
+    };
+    if event.is_null() {
+        return saved;
+    }
+    // SAFETY: the caller promises the event is writable for the fields below.
+    unsafe {
+        saved.mask = core::ptr::read_unaligned(event.add(EVENT_MASK).cast::<u16>());
+        saved.property = *event.add(EVENT_PROPERTY);
+        saved.note = *event.add(EVENT_NOTE);
+        core::ptr::write_unaligned(event.add(EVENT_MASK).cast::<u16>(), 0);
+        *event.add(EVENT_NOTE) = pad_level_byte;
+    }
+    if let Some(setter) = pitch_off {
+        // SAFETY: the caller guarantees this is the app's setter, and the
+        // property triple it expects starts at `+0x14`.
+        unsafe {
+            setter(event.wrapping_add(EVENT_MASK) as usize, 0, 0, row);
+        }
+    }
+    saved
+}
+
+/// Put back what [`minimod_midi_replay`] changed.
+///
+/// # Safety
+///
+/// `event` must be the same writable event the replay was given.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_midi_restore(event: *mut u8, saved: Saved) {
+    if event.is_null() {
+        return;
+    }
+    // SAFETY: the caller promises the event is writable for these fields.
+    unsafe {
+        core::ptr::write_unaligned(event.add(EVENT_MASK).cast::<u16>(), saved.mask);
+        *event.add(EVENT_PROPERTY) = saved.property;
+        *event.add(EVENT_NOTE) = saved.note;
+    }
 }
 
 #[cfg(test)]

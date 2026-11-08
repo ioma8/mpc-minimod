@@ -26,4 +26,18 @@ struct minimod_note {
 int minimod_midi_decode(const unsigned char *event, uint64_t source,
                         struct minimod_note *out);
 
+/* The 16 Levels replay rewrite, from Rust (rust/crates/minimod/src/midi.rs). */
+struct minimod_saved {
+    uint16_t mask;
+    uint8_t property;
+    uint8_t note;
+};
+
+typedef void (*minimod_pitch_off_fn)(void *, uint64_t, uint64_t, int);
+
+struct minimod_saved minimod_midi_replay(unsigned char *event,
+                                         uint8_t pad_level_byte, int32_t row,
+                                         minimod_pitch_off_fn pitch_off);
+void minimod_midi_restore(unsigned char *event, struct minimod_saved saved);
+
 #endif
