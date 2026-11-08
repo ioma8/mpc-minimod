@@ -73,6 +73,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "sample_ffi.h"
 #include "status_ffi.h"
 #include "paths_ffi.h"
 #include "wav_ffi.h"
@@ -657,39 +658,7 @@ static struct {
 static int g_ntp;
 
 
-static unsigned frames_of_sample(uintptr_t sample)
-{
-    uintptr_t meta = 0;
-    if (!sample || !rd(sample + 0x130, &meta, 8) || !meta)
-        return 0;
-    unsigned short ch = 0;
-    unsigned fr = 0, rt = 0;
-    if (!rd(meta, &ch, 2))
-        return 0;
-    rd(meta + 4, &fr, 4);
-    rd(meta + 8, &rt, 4);
-    if (ch != 1 && ch != 2)
-        return 0;
-    if (rt < 8000 || rt > 192000)
-        return 0;
-    return fr;
-}
 
-static int page_layers(uintptr_t param, uintptr_t *layers, uintptr_t *instr)
-{
-    uintptr_t ctx = 0;
-    if (!rd(param + T_LAYER, &ctx, 8) || !ctx)
-        return 0;
-    uintptr_t ins = 0;
-    if (!rd(ctx + 0x60, &ins, 8) || !ins)
-        return 0;
-    uintptr_t lay = 0;
-    if (!rd(ins + 0x22e8, &lay, 8) || !lay)
-        return 0;
-    *layers = lay;
-    *instr = ins;
-    return 1;
-}
 
 
 

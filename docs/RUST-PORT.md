@@ -65,6 +65,7 @@ slice.
 | WAV reading, source backup/restore | ported | 5 host tests over synthetic files; the effects and bass device tests run on it |
 | Sample-path resolution (object graph, unique/newest file) | ported | 6 host tests; the effects and bass device tests run on it |
 | Status line (action names, formatted messages) | ported | 3 host tests; the bass device test reads the string out of the process |
+| Sample/instrument geometry accessors | ported | rate-range test; Reverb device test runs the paint path that uses them |
 | `minimod.c` (hooks, features, UI glue) | C, shrinking | 7 683 -> 4 774 lines; every removal verified by an identical binary |
 
 The looper, the effects and the whole bass synth are already what the device
