@@ -588,7 +588,9 @@ static int g_dbg;
 
 static void *sixteen_ctor(void *a, void *b, void *c, void *d)
 {
-    void *self = orig_sixteen_ctor ? orig_sixteen_ctor(a, b, c, d) : 0;
+    void *self = (void *)minimod_sixteen_ctor((minimod_sixteen_ctor_fn)orig_sixteen_ctor,
+                                              (uintptr_t)a, (uintptr_t)b, (uintptr_t)c,
+                                              (uintptr_t)d);
     g_sixteen = self ? self : a;
     if (debug_mode && g_dbg < 40) {
         g_dbg++;
@@ -602,17 +604,14 @@ static void sixteen_proc(void *self, int idx, void *out)
 {
     /* pure pass-through: the pitch is set by A_PITCH_OFF, not by writing
      * through the third argument (it is a context object, not a float). */
-    if (orig_sixteen_proc)
-        orig_sixteen_proc(self, idx, out);
+    minimod_sixteen_proc((minimod_sixteen_proc_fn)orig_sixteen_proc,
+                         (uintptr_t)self, idx, (uintptr_t)out);
 }
 
 static void pitch_off(void *a0, uint64_t a1, uint64_t a2, int a3)
 {
-    int off = minimod_levels_pitch_offset(a3, g_octave);
-    if (g_octave && debug_mode)
-        mlog("minimod: pitch offset %d -> %d\n", a3, off);
-    if (orig_pitch_off)
-        orig_pitch_off(a0, a1, a2, off);
+    minimod_pitch_off((minimod_pitch_off_fn)orig_pitch_off, (uintptr_t)a0, a1, a2, a3,
+                      g_octave);
 }
 
 static uintptr_t g_last_press_obj;

@@ -83,6 +83,7 @@ slice.
 | Hook-site guard (`midi_hook_site_ok`) | ported | the MIDI prologue is a documented constant; the chromatic test runs the hook it guards |
 | MIDI note decoding (`midi::decode`) | ported | 5 rule tests (external ids, note on/off, row); the chromatic test drives the hook that uses it |
 | 16 Levels octave shift (`levels`) | ported | 3 tests: clamping, 8 semitones per press, the toast text |
+| 16 Levels hook trampolines (ctor/proc/pitch) | ported | the chromatic MIDI test drives all three through the 16 Levels path |
 | `minimod.c` (hooks, features, UI glue) | C, shrinking | 7 683 -> 4 564 lines; dead code removed only where the compiler proved it, each pass verified by an identical binary |
 
 The looper, the effects and the whole bass synth are already what the device

@@ -56,6 +56,71 @@ pub extern "C" fn minimod_levels_pitch_offset(applied: i32, shift: i32) -> i32 {
     pitch_offset(applied, shift)
 }
 
+/// The 16 Levels constructor trampoline: `void *(*)(void *, void *, void *, void *)`.
+pub type Constructor = unsafe extern "C" fn(usize, usize, usize, usize) -> usize;
+/// The 16 Levels render trampoline: `void (*)(void *, int, void *)`.
+pub type Render = unsafe extern "C" fn(usize, i32, usize);
+/// The pitch-offset setter: `void (*)(void *, u64, u64, int)`.
+pub type PitchOffset = unsafe extern "C" fn(usize, u64, u64, i32);
+
+/// Call the app's 16 Levels constructor and return its result.
+///
+/// # Safety
+///
+/// `original` must be the constructor this hook displaced.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_sixteen_ctor(
+    original: Option<Constructor>,
+    first: usize,
+    second: usize,
+    third: usize,
+    fourth: usize,
+) -> usize {
+    match original {
+        // SAFETY: the caller guarantees this is the displaced constructor.
+        Some(constructor) => unsafe { constructor(first, second, third, fourth) },
+        None => 0,
+    }
+}
+
+/// Call the app's 16 Levels renderer.
+///
+/// # Safety
+///
+/// `original` must be the renderer this hook displaced.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_sixteen_proc(
+    original: Option<Render>,
+    screen: usize,
+    index: i32,
+    out: usize,
+) {
+    if let Some(render) = original {
+        // SAFETY: the caller guarantees this is the displaced renderer.
+        unsafe { render(screen, index, out) };
+    }
+}
+
+/// Call the app's pitch-offset setter with our octave shift applied.
+///
+/// # Safety
+///
+/// `original` must be the setter this hook displaced.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_pitch_off(
+    original: Option<PitchOffset>,
+    first: usize,
+    second: u64,
+    third: u64,
+    applied: i32,
+    shift: i32,
+) {
+    if let Some(setter) = original {
+        // SAFETY: the caller guarantees this is the displaced setter.
+        unsafe { setter(first, second, third, pitch_offset(applied, shift)) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SEMITONES_PER_STEP, STEP_LIMIT, describe, pitch_offset, shift};
