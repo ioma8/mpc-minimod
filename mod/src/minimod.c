@@ -2140,26 +2140,7 @@ uintptr_t find_knob_props(void)
  * broadcasting through it would jump into garbage. */
 static int prop_listeners_sane(uintptr_t P)
 {
-    uintptr_t node = 0;
-    if (!rd(P + 0x10, &node, 8) || !node)
-        return 0;
-    int n = 0;
-    for (; n < 32 && node && node != P + 8; ++n) {
-        uintptr_t tgt = 0, next = 0, vt = 0;
-        if (!rd(node + 0x18, &tgt, 8) || !rd(node + 8, &next, 8))
-            return 0;
-        tgt &= ~(uintptr_t)3;
-        if (!tgt || !mapped((void *)tgt))
-            return 0;
-        if (!rd(tgt, &vt, 8))
-            return 0;
-        if (vt < base + 0x6ddf910 || vt > base + 0x7162018)
-            return 0;
-        if (!next || !mapped((void *)next))
-            return 0;
-        node = next;
-    }
-    return n > 0;
+    return minimod_prop_listeners_sane(P, base);
 }
 
 /* The trim parameter is the listener of the knob's property whose vtable is

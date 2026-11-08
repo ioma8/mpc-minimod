@@ -412,6 +412,87 @@ pub fn slider_for_value(screen: usize, base: usize, percent: f32) -> usize {
     0
 }
 
+/// Whether a property's listener list is sane, for the C glue.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_prop_listeners_sane(property: usize, base: usize) -> i32 {
+    i32::from(listeners_sane(property, base))
+}
+
+/// The parameter node's value slot.
+const T_VALUE: usize = 0x50;
+/// How far a listener list may run.
+const LISTENERS_MAX: usize = 32;
+/// The image's range for listener vtable pointers.
+const VTABLE_LOW: usize = 0x6dd_f910;
+const VTABLE_HIGH: usize = 0x716_2018;
+
+/// Read one float from the property's value slot.
+fn value_slot(property: usize) -> Option<f32> {
+    read_f32(property + T_VALUE)
+}
+
+/// Whether a property's listener list is terminated and points at real objects.
+///
+/// A wrong control base crashes the app when its listeners are called, so this
+/// is the gate before any of them is.
+#[must_use]
+pub fn listeners_sane(property: usize, base: usize) -> bool {
+    let Some(mut node) = read_pointer(property + 0x10) else {
+        return false;
+    };
+    if node == 0 {
+        return false;
+    }
+    let mut seen = 0;
+    while seen < LISTENERS_MAX && node != 0 && node != property + 8 {
+        let (Some(target), Some(next)) = (
+            read_pointer(node + NODE_VALUE),
+            read_pointer(node + NODE_NEXT),
+        ) else {
+            return false;
+        };
+        let target = target & !3;
+        if target == 0 || !mapped(target) {
+            return false;
+        }
+        let Some(vtable) = read_pointer(target) else {
+            return false;
+        };
+        if !(base + VTABLE_LOW..=base + VTABLE_HIGH).contains(&vtable) {
+            return false;
+        }
+        if next == 0 || !mapped(next) {
+            return false;
+        }
+        node = next;
+        seen += 1;
+    }
+    seen > 0
+}
+
+/// The property a value broadcast came from, when exactly one matches.
+///
+/// Two different properties broadcasting the same value is ambiguous, and the
+/// caller gets nothing rather than a guess.
+#[must_use]
+pub fn unique_property(properties: &[usize], value: f32) -> usize {
+    let mut best = 0;
+    let mut ambiguous = false;
+    for &property in properties.iter().take(256) {
+        if property & 7 != 0 || property < 0x10000 || !mapped(property) {
+            continue;
+        }
+        if value_slot(property) != Some(value) {
+            continue;
+        }
+        if best != 0 && property != best {
+            ambiguous = true;
+        }
+        best = property;
+    }
+    if ambiguous { 0 } else { best }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Range, mapped};
