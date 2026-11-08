@@ -306,10 +306,9 @@ emulator, so everything below is build- and test-verified only:
 
 * `jobflow` owns the whole job lifecycle (start, worker, finish) and the bass
   action's source backup;
-* `paint` holds the drawing primitives and the toast, **not wired** - the glue
-  still draws with its own calls, and the wiring needs the paint hook's forward
-  declarations moved in one edit (the incremental attempt broke the file's
-  declaration block and was reverted);
+* `paint` holds the drawing primitives and the toast, and is **wired**: the glue's
+  `draw_colour`/`draw_rect`/`draw_text` and `toast` are shims, and the toast's
+  text and deadline moved into the module so the paint hook asks for them;
 * `firmware` gained the five-, eight-argument and colour call helpers plus the
   cached image base.
 
