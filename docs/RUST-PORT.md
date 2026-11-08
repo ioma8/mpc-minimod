@@ -298,6 +298,18 @@ General lesson, from two reverts now: **a port inherits its dependencies'
 behaviour, so diff the helpers it calls, not only its own body** - or, better,
 pass the data in so the port cannot resolve it differently.
 
+## The menu state, ported but not wired
+
+`menu` holds the effects menu's state machine (open, close, activate a row,
+restore the chop) as functions over a `State` struct with its own tests.  Moving
+the glue's five menu flags into that struct and pointing the old names at it with
+macros compiled and the app started, but the bass control page stopped taking the
+knobs: the menu's row selection only moves through the encoder hook, and the
+re-wired dispatcher consumed the turn before it reached it.
+
+Reverted to the flags in the glue.  Wiring this needs the encoder path and the
+flag struct moved **together**, not the flags first.
+
 ## The paint hook
 
 Drawing and the toast are ported (`paint`) but **cannot be wired yet**: every
