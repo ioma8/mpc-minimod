@@ -156,6 +156,14 @@ output path altogether, so the loop cannot be isolated that way.  The isolation
 has to come from the app (deselect the pad, or mute its monitor) or from the tap
 itself (a loop-only probe), not from the jack routing.
 
+The probe exists now: `g_looptap` / `g_looptap_w` in the Rust mixer hold exactly
+what the loops contribute after the mod's master (`add[i] * gain`), so a level
+measured there cannot contain the app's playback or monitor.  Wiring the harness
+to it is the remaining step: reading `g_looptap_w` through the existing
+`read(symbol(...))` path returned an address outside the process (0xFFFF...),
+so the harness's base/offset computation has to be checked for a symbol that sits
+32 KB past the ones it already reads.
+
 It is a test-design issue, not a mod bug: to measure the loop's response to MAIN
 VOLUME, the app's own playback of that pad has to be out of the picture - either
 by selecting an empty pad before measuring, or by measuring the loop's

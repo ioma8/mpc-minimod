@@ -284,6 +284,20 @@ static LATENCY: AtomicU32 = AtomicU32::new(0);
 static LATENCY_SOURCE: AtomicU32 = AtomicU32::new(b'E' as u32);
 /// Latency snapshotted for the last take.
 static LATENCY_USED: AtomicU32 = AtomicU32::new(0);
+/// Frames kept by the loop-only probe.
+pub const LOOPTAP_FRAMES: usize = 8192;
+
+/// The loop's contribution after the mod's master, before it is added to the
+/// app's own output.  Unlike the device tap this holds nothing but the loops,
+/// so it is the only place a level can be measured without the app's playhead
+/// and monitor in the mix.
+#[unsafe(export_name = "g_looptap")]
+pub static mut LOOPTAP: [f32; LOOPTAP_FRAMES] = [0.0; LOOPTAP_FRAMES];
+
+/// Write cursor of `g_looptap`.
+#[unsafe(export_name = "g_looptap_w")]
+pub static mut LOOPTAP_W: u32 = 0;
+
 /// MAIN VOLUME, 0..127.
 /// MAIN VOLUME, 0..127.  Exported so the acceptance harness can read the value
 /// the mixer is actually using instead of inferring it from the audio.
@@ -313,7 +327,6 @@ static MESSAGE: [AtomicU8; MESSAGE_LEN] = [const { AtomicU8::new(0) }; MESSAGE_L
 /// state rather than methods on an instance.
 #[derive(Clone, Copy, Debug)]
 pub struct Engine;
-
 impl Engine {
     /// Whether the fullscreen view is open.
     #[must_use]
@@ -650,6 +663,7 @@ impl Engine {
             let gain = f32::from(u16::try_from(Self::master()).unwrap_or(127)) * (1.0 / 127.0);
             for i in 0..count {
                 let mixed = add[i] * gain;
+                Self::tap_loop(mixed);
                 let frame = &mut buffer[(done + i) * channels..][..channels];
                 for sample in frame.iter_mut() {
                     let value = s32_to_f32(*sample) + mixed;
@@ -658,6 +672,24 @@ impl Engine {
             }
             TRANSPORT.store(transport.wrapping_add(count as u64), Ordering::Release);
             done += count;
+        }
+    }
+
+    /// Record the loop-only probe, wrapping at its capacity.
+    ///
+    /// # Safety
+    ///
+    /// Only the audio thread calls this; the acceptance harness reads the ring
+    /// through `/proc/<pid>/mem` without the language model.
+    fn tap_loop(sample: f32) {
+        // SAFETY: one writer (this thread) and a reader that only reads.
+        unsafe {
+            let index = usize::try_from(LOOPTAP_W).unwrap_or(0) % LOOPTAP_FRAMES;
+            core::ptr::write(
+                core::ptr::addr_of_mut!(LOOPTAP).cast::<f32>().add(index),
+                sample,
+            );
+            LOOPTAP_W = LOOPTAP_W.wrapping_add(1);
         }
     }
 
