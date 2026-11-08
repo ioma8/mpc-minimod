@@ -77,6 +77,7 @@
 #include "spectral.h"
 #include "h3m_effect.h"
 #include "bass_sample.h"
+#include "looper.h"
 
 #define T_LAYER 0xb0 /* -> context; [ctx+0x60] = instrument */
 #define T_MODEL 0x70
@@ -115,6 +116,8 @@ static void mlog(const char *fmt, ...);
 static void toast(const char *text);
 static long long now_ms(void);
 static void *g_screen;
+static void looper_draw(void *g);
+static void looper_pump(void);
 static void *g_trim_page;
 static int prop_references(uintptr_t P, uintptr_t param);
 static int find_screens(uintptr_t *out, int max);
@@ -1401,6 +1404,8 @@ static volatile uint32_t g_midi_chromatic_count;
 static volatile int g_midi_chromatic_note = -1;
 static volatile int g_midi_chromatic_delta;
 static void (*orig_bass_audio_writer)(void *, void *, size_t, int);
+static volatile unsigned g_audio_in_calls;
+static volatile unsigned g_audio_out_calls;
 static void (*orig_cs)(void *, int, void *);
 static void (*orig_trim_write)(void *, long, long);
 static void (*orig_frames)(void *);
@@ -1798,7 +1803,7 @@ static void data_signal(void *self, int delta)
         (g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))) {
         if (g_hpss_menu && !g_hpss_busy && delta) {
             if (!g_bass_edit) {
-                g_hpss_sel = (g_hpss_sel + (delta > 0 ? 1 : 6)) % 7;
+                g_hpss_sel = (g_hpss_sel + (delta > 0 ? 1 : 7)) % 8;
                 hpss_repaint();
                 mlog("menu DATA delta=%d sel=%d\n", delta, g_hpss_sel);
             }
@@ -3829,6 +3834,15 @@ static void hpss_activate(void)
         hpss_set_status(g_bass_preview_available ? "" : "Live preview unavailable");
         hpss_repaint();
     }
+    else if (g_hpss_sel == 6) {
+        if (looper_activate()) {
+            g_hpss_menu = 0;
+            g_bass_edit = 0;
+            bass_preview_set_active(0);
+            looper_pump();
+        }
+        hpss_repaint();
+    }
     else
         hpss_close();
 }
@@ -3837,6 +3851,162 @@ static void draw_colour(void *g, uint32_t v);
 static void draw_rect(void *g, int x, int y, int w, int h);
 static void draw_text(void *g, const char *s, int x, int y, int w, int h,
                       float size);
+
+/* ------------------------------------------------------------ live looper */
+/* The view is a fullscreen overlay: the stock page paints first, then this
+ * covers the whole 320x240 area, so the looper really is a separate screen.
+ * A small thread keeps it animating while it is open, the same way the toast
+ * forces its own repaints. */
+static volatile int g_looper_pump_started;
+
+static void *looper_pump_thread(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        struct timespec ts = {0, 60 * 1000 * 1000};
+        nanosleep(&ts, 0);
+        if (!looper_is_open())
+            continue;
+        void *comp = g_paint_comp ? g_paint_comp : g_screen;
+        if (orig_repaint && comp)
+            orig_repaint(comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
+    }
+    return 0;
+}
+
+static void looper_pump(void)
+{
+    if (__atomic_load_n(&g_looper_pump_started, __ATOMIC_ACQUIRE))
+        return;
+    __atomic_store_n(&g_looper_pump_started, 1, __ATOMIC_RELEASE);
+    pthread_t th;
+    if (pthread_create(&th, 0, looper_pump_thread, 0) == 0)
+        pthread_detach(th);
+}
+
+#define LP_MAX_HINT (44100u * 8u)
+
+static void looper_cell(void *g, int x, int y, int w, int h,
+                        const struct looper_pad_view *pad, int index,
+                        int recording)
+{
+    uint32_t bg = 0xff1a1a20, border = 0xff33333c, text = 0xff8a8a92;
+    const char *state = "--";
+    switch (pad->state) {
+    case LOOP_REC:
+        bg = 0xff3a1010; border = 0xffff4d4d; text = 0xffffb0b0; state = "REC";
+        break;
+    case LOOP_PLAY:
+        bg = 0xff10301a; border = 0xff54d06a; text = 0xffc8f5d0; state = "PLAY";
+        break;
+    case LOOP_DUB:
+        bg = 0xff352808; border = 0xffffb43c; text = 0xffffe0a8; state = "DUB";
+        break;
+    case LOOP_STOP:
+        bg = 0xff202028; border = 0xff6a6a74; text = 0xffc0c0c8; state = "STOP";
+        break;
+    }
+    draw_colour(g, bg);
+    draw_rect(g, x, y, w, h);
+    draw_colour(g, border);
+    draw_rect(g, x, y, w, 1);
+    draw_rect(g, x, y + h - 1, w, 1);
+    draw_rect(g, x, y, 1, h);
+    draw_rect(g, x + w - 1, y, 1, h);
+    if (recording) {
+        draw_colour(g, 0xffffffff);
+        draw_rect(g, x + 1, y + 1, w - 2, 1);
+    }
+    draw_colour(g, text);
+    char label[8];
+    snprintf(label, sizeof label, "%d", index + 1);
+    draw_text(g, label, x + 4, y + 2, 18, 12, 10.0f);
+    draw_text(g, state, x + 20, y + 2, w - 22, 12, 9.0f);
+    /* bottom strip: loop length (or captured amount while recording) */
+    unsigned total = pad->state == LOOP_REC ? (unsigned)(LP_MAX_HINT) : pad->len_frames;
+    unsigned done = pad->state == LOOP_REC ? pad->rec_frames : pad->pos;
+    draw_colour(g, 0xff2a2a32);
+    draw_rect(g, x + 4, y + h - 9, w - 8, 4);
+    if (total) {
+        unsigned pct = (unsigned)((uint64_t)done * (w - 8) / total);
+        if (pct > (unsigned)(w - 8))
+            pct = (unsigned)(w - 8);
+        draw_colour(g, pad->state == LOOP_REC ? 0xffff6a6a : 0xff54d06a);
+        draw_rect(g, x + 4, y + h - 9, (int)pct, 4);
+    }
+    if (pad->state != LOOP_REC && pad->len_frames) {
+        char len[12];
+        snprintf(len, sizeof len, "%.1fs", (double)pad->len_frames / 44100.0);
+        draw_colour(g, 0xffb8b8be);
+        draw_text(g, len, x + 4, y + 15, w - 8, 11, 8.0f);
+    }
+}
+
+static void looper_draw(void *g)
+{
+    struct looper_view v;
+    if (!looper_snapshot(&v))
+        return;
+    draw_colour(g, 0xff0c0c10);
+    draw_rect(g, 0, 0, 320, 240);
+    draw_colour(g, 0xff15151a);
+    draw_rect(g, 0, 0, 320, 24);
+    draw_colour(g, 0xffffb43c);
+    draw_rect(g, 0, 24, 320, 2);
+    draw_colour(g, 0xffffffff);
+    draw_text(g, "LIVE LOOPER", 8, 2, 180, 20, 15.0f);
+    /* sync pulse state and beat dot */
+    if (v.sync && v.sync_frames) {
+        char line[16];
+        snprintf(line, sizeof line, "SYNC %.2fs",
+                 (double)v.sync_frames / 44100.0);
+        draw_colour(g, 0xffffb43c);
+        draw_text(g, line, 200, 4, 100, 16, 10.0f);
+        int on = v.pulse_phase != 0xffffffffu &&
+                 v.pulse_phase < v.sync_frames / 6;
+        draw_colour(g, on ? 0xffffffff : 0xffffb43c);
+        draw_rect(g, 305, 8, 8, 8);
+        int pct = (int)((uint64_t)v.pulse_phase * 320 / v.sync_frames);
+        if (pct < 0)
+            pct = 0;
+        if (pct > 320)
+            pct = 320;
+        draw_colour(g, 0xff3a2a10);
+        draw_rect(g, 0, 237, 320, 3);
+        draw_colour(g, 0xffffb43c);
+        draw_rect(g, 0, 237, pct, 3);
+    } else {
+        draw_colour(g, 0xff8a8a92);
+        draw_text(g, "FREE", 248, 4, 60, 16, 10.0f);
+    }
+    /* input meter */
+    draw_colour(g, 0xff8a8a92);
+    draw_text(g, "IN", 4, 27, 16, 10, 7.0f);
+    draw_colour(g, 0xff2a2a32);
+    draw_rect(g, 22, 30, 290, 4);
+    draw_colour(g, v.input > 0.9f ? 0xffff4d4d : 0xff54d06a);
+    int meter = (int)(v.input * 290.0f);
+    if (meter > 290)
+        meter = 290;
+    if (meter > 0)
+        draw_rect(g, 22, 30, meter, 4);
+    /* 4x4 pad grid */
+    for (int i = 0; i < LOOPER_PADS; ++i) {
+        int col = i % 4, row = i / 4;
+        int x = 8 + col * 78, y = 40 + row * 41;
+        looper_cell(g, x, y, 75, 38, &v.pads[i], i, v.recording_pad == i);
+    }
+    /* status line and key hints */
+    if (v.message[0]) {
+        draw_colour(g, 0xff201408);
+        draw_rect(g, 8, 206, 304, 14);
+        draw_colour(g, 0xffffb43c);
+        draw_text(g, v.message, 12, 206, 296, 14, 10.0f);
+    }
+    draw_colour(g, 0xffb8b8be);
+    draw_text(g, "PAD: REC/PLAY/STOP  SHIFT+PAD: OVERDUB", 8, 219, 304, 9, 8.0f);
+    draw_text(g, "LOOP: SYNC PULSE  SHIFT+DATA: EXIT", 8, 228, 304, 9, 8.0f);
+}
 
 static void hpss_draw_menu(void *g)
 {
@@ -3894,15 +4064,15 @@ static void hpss_draw_menu(void *g)
         }
         static const char *titles[] = {
             "HPSS", "Spectral Chop", "Add Reverb", "Vinyl", "Lo-Fi (Decimator)",
-            "Bass Synth", "Close"};
-        for (int i = 0; i < 7; ++i) {
-            int row_y = y + 32 + i * 24;
+            "Bass Synth", "Live Looper", "Close"};
+        for (int i = 0; i < 8; ++i) {
+            int row_y = y + 26 + i * 20;
             if (g_hpss_sel == i) {
                 draw_colour(g, 0xff3a2a10);
-                draw_rect(g, x + 6, row_y, w - 12, 23);
+                draw_rect(g, x + 6, row_y, w - 12, 19);
                 draw_colour(g, 0xffffffff);
             }
-            draw_text(g, titles[i], x + 12, row_y + 2, w - 24, 18, 13.0f);
+            draw_text(g, titles[i], x + 12, row_y + 1, w - 24, 17, 12.0f);
         }
         if (g_hpss_status[0])
             draw_text(g, g_hpss_status, x + 10, y + 200, w - 20, 14, 10.0f);
@@ -3923,6 +4093,22 @@ static void buttons(void *event)
     /* Keep the lazy MIDI hook in sync with the visible mode: leaving the Sample
      * page restores the stock dispatcher on the very next button. */
     midi_hook_set(levels_active());
+    if (looper_is_open()) {
+        if (code == 0x31) {
+            /* Track SHIFT here but never forward it: the app pairs SHIFT with a
+             * pad press for its own shortcuts (Full Level), and the looper owns
+             * the pads. */
+            g_shift = down ? 1 : 0;
+            return;
+        }
+        int was = looper_is_open();
+        looper_button(code, (int)down, g_shift);
+        if (was && !looper_is_open()) {
+            g_shift = 0;
+            hpss_repaint();
+        }
+        return;
+    }
     if (event && rd((uintptr_t)event, g_hpss_btn, sizeof g_hpss_btn)) {
         g_hpss_btn_valid = 1;
         uintptr_t context = 0, surface = 0;
@@ -4091,6 +4277,10 @@ static struct {
 
 static void note_on(void *input, int src, int pad, void *props, float vel)
 {
+    if (looper_is_open() && pad >= 0 && pad < LOOPER_PADS) {
+        looper_pad(pad, g_shift); /* the looper owns the pads while it is open */
+        return;
+    }
     if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
         return;
     if (__atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE) &&
@@ -4125,6 +4315,8 @@ static void note_on(void *input, int src, int pad, void *props, float vel)
 
 static void note_off(void *input, int src, int pad)
 {
+    if (looper_is_open() && pad >= 0 && pad < LOOPER_PADS)
+        return;
     if (g_hpss_menu && g_bass_edit && pad >= 0 && pad < 16)
         return;
     if (orig_note_off)
@@ -4132,11 +4324,149 @@ static void note_off(void *input, int src, int pad)
 }
 
 /* The firmware's audio writer accepts planar float channels, then converts
-   them to S32 PCM. Mix the preview into private block storage so the live
-   engine buffers are never changed. The normal device block is 128 frames. */
-static void bass_audio_writer(void *self, void *input, size_t frames, int offset)
+   them to S32 PCM. Mix the preview and the live-looper loops into private
+   block storage so the live engine buffers are never changed. The normal
+   device block is 128 frames; the lab runs a larger one, so the copy allows
+   up to 4096 and falls through for anything bigger. */
+static int audio_channels(void *self, int input_side)
 {
-    static __thread float scratch[8][2048];
+    int count;
+    if (input_side) {
+        count = FIELD(self, 0xd4, int32_t);
+        if (count < 0)
+            count = FIELD(self, 0xe0, int32_t);
+        if (count < 1 || count > 8) {
+            count = FIELD(self, 0xd8, int32_t);
+            if (count < 0)
+                count = FIELD(self, 0xe4, int32_t);
+        }
+    } else {
+        count = FIELD(self, 0xd8, int32_t);
+        if (count < 0)
+            count = FIELD(self, 0xe4, int32_t);
+    }
+    if (count < 1 || count > 8)
+        count = 2;
+    return count;
+}
+
+/* The firmware's input stream is RW_INTERLEAVED S32_LE. Rather than chase the
+ * app's own read thread, the preloaded library exports the two ALSA entry
+ * points it uses and forwards to the real libasound through dlsym. LD_PRELOAD
+ * puts us ahead of libasound in the global scope, so every read in the process
+ * lands here, whichever device object owns the pcm handle. */
+static long (*real_snd_pcm_readi)(void *, void *, unsigned long);
+static long (*real_snd_pcm_writei)(void *, const void *, unsigned long);
+static volatile unsigned g_out_peak_bits;
+static volatile unsigned g_out_write_calls;
+/* In-process tap of the last two seconds of written audio (mono, channel 0).
+ * The lab's PCM socket does not always reflect what the app writes, so tests
+ * read this instead of trusting the host-side capture. */
+#define OUTTAP_FRAMES (44100u * 2u)
+static volatile float g_outtap[OUTTAP_FRAMES];
+static volatile unsigned g_outtap_w;
+static long (*real_snd_pcm_readn)(void *, void **, unsigned long);
+static int (*real_snd_pcm_set_channels)(void *, unsigned);
+static volatile unsigned g_pcm_channels = 4;
+
+int snd_pcm_hw_params_set_channels(void *params, unsigned channels)
+{
+    if (!real_snd_pcm_set_channels)
+        real_snd_pcm_set_channels =
+            (int (*)(void *, unsigned))dlsym(RTLD_NEXT, "snd_pcm_hw_params_set_channels");
+    if (channels)
+        g_pcm_channels = channels;
+    return real_snd_pcm_set_channels ? real_snd_pcm_set_channels(params, channels) : -1;
+}
+
+long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size)
+{
+    if (!real_snd_pcm_writei)
+        real_snd_pcm_writei =
+            (long (*)(void *, const void *, unsigned long))dlsym(RTLD_NEXT, "snd_pcm_writei");
+    if (!real_snd_pcm_writei)
+        return -1;
+    unsigned ch = g_pcm_channels ? g_pcm_channels : 4;
+    int looper = looper_is_open();
+    if (looper && buffer && size)
+        looper_render_s32((int32_t *)buffer, ch, (unsigned)size);
+    long got = real_snd_pcm_writei(pcm, buffer, size);
+    if (!looper || got <= 0 || !buffer)
+        return got;
+    {
+        __atomic_add_fetch(&g_out_write_calls, 1, __ATOMIC_RELAXED);
+        const int32_t *s32 = buffer;
+        float peak = 0.f;
+        for (long i = 0; i < got * (long)ch; ++i) {
+            float v = (float)s32[i] * (1.0f / 2147483648.0f);
+            float a = v < 0.f ? -v : v;
+            if (a > peak)
+                peak = a;
+        }
+        unsigned pb = g_out_peak_bits;
+        float prev;
+        memcpy(&prev, &pb, sizeof prev);
+        if (peak > prev) {
+            unsigned nb;
+            memcpy(&nb, &peak, sizeof nb);
+            g_out_peak_bits = nb;
+        }
+        unsigned w = g_outtap_w;
+        for (long i = 0; i < got; ++i)
+            g_outtap[(w++) % OUTTAP_FRAMES] = (float)s32[i * (long)ch] * (1.0f / 2147483648.0f);
+        g_outtap_w = w;
+    }
+    return got;
+}
+
+long snd_pcm_readi(void *pcm, void *buffer, unsigned long size)
+{
+    if (!real_snd_pcm_readi)
+        real_snd_pcm_readi =
+            (long (*)(void *, void *, unsigned long))dlsym(RTLD_NEXT, "snd_pcm_readi");
+    if (!real_snd_pcm_readi)
+        return -1;
+    long got = real_snd_pcm_readi(pcm, buffer, size);
+    if (got > 0) {
+        __atomic_add_fetch(&g_audio_in_calls, 1, __ATOMIC_RELAXED);
+        if (looper_is_open() && buffer)
+            looper_input_s32_interleaved((const int32_t *)buffer, g_pcm_channels,
+                                         (unsigned)got);
+    }
+    return got;
+}
+
+long snd_pcm_readn(void *pcm, void **bufs, unsigned long size)
+{
+    if (!real_snd_pcm_readn)
+        real_snd_pcm_readn =
+            (long (*)(void *, void **, unsigned long))dlsym(RTLD_NEXT, "snd_pcm_readn");
+    if (!real_snd_pcm_readn)
+        return -1;
+    long got = real_snd_pcm_readn(pcm, bufs, size);
+    if (got > 0) {
+        __atomic_add_fetch(&g_audio_in_calls, 1, __ATOMIC_RELAXED);
+        if (looper_is_open() && bufs && bufs[0])
+            looper_input_s32((const int32_t *const *)bufs, (int)g_pcm_channels,
+                             (unsigned)got);
+    }
+    return got;
+}
+
+static void audio_writer(void *self, void *input, size_t frames, int offset)
+{
+    __atomic_add_fetch(&g_audio_out_calls, 1, __ATOMIC_RELAXED);
+#if MINIMOD_LOG
+    {
+        static int n;
+        if (n < 4) {
+            n++;
+            mlog("minimod: WRITER top self=%p frames=%zu offset=%d looper=%d\n", self,
+                 frames, offset, looper_is_open());
+        }
+    }
+#endif
+    static __thread float scratch[8][4096];
     float *channels[8];
     if (!__atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE)) {
         bass_preview_mix(NULL, 0, 0, 44100); /* clear any ringing voices after close */
@@ -4144,16 +4474,24 @@ static void bass_audio_writer(void *self, void *input, size_t frames, int offset
             orig_bass_audio_writer(self, input, frames, offset);
         return;
     }
-    int count = FIELD(self, 0xd8, int32_t);
-    if (count < 0)
-        count = FIELD(self, 0xe4, int32_t);
+    int count = audio_channels(self, 0);
     if (!orig_bass_audio_writer)
         return;
-    if (count < 1 || count > 8 || frames > 2048 || !input) {
+    if (count < 1 || count > 8 || frames > 4096 || !input) {
         orig_bass_audio_writer(self, input, frames, offset);
         return;
     }
 
+#if MINIMOD_LOG
+    {
+        static int n;
+        if (n < 6) {
+            n++;
+            mlog("minimod: audio out self=%p frames=%zu count=%d offset=%d\n", self,
+                 frames, count, offset);
+        }
+    }
+#endif
     float **source = input;
     for (int i = 0; i < count; ++i) {
         if (!source[i]) {
@@ -4163,18 +4501,20 @@ static void bass_audio_writer(void *self, void *input, size_t frames, int offset
         memcpy(scratch[i], source[i], frames * sizeof(float));
         channels[i] = scratch[i];
     }
-    float peak = bass_preview_mix(channels, frames, (unsigned)count, 44100);
-    if (peak > 0.f) {
-        __atomic_add_fetch(&g_bass_preview_blocks, 1, __ATOMIC_RELAXED);
-        uint32_t previous_bits = __atomic_load_n(&g_bass_preview_peak_bits, __ATOMIC_RELAXED);
-        float previous;
-        memcpy(&previous, &previous_bits, sizeof previous);
-        if (peak > previous)
-            __atomic_store_n(&g_bass_preview_peak_bits, bass_float_bits(peak), __ATOMIC_RELAXED);
-        orig_bass_audio_writer(self, channels, frames, offset);
+    if (__atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE)) {
+        float peak = bass_preview_mix(channels, frames, (unsigned)count, 44100);
+        if (peak > 0.f) {
+            __atomic_add_fetch(&g_bass_preview_blocks, 1, __ATOMIC_RELAXED);
+            uint32_t previous_bits = __atomic_load_n(&g_bass_preview_peak_bits, __ATOMIC_RELAXED);
+            float previous;
+            memcpy(&previous, &previous_bits, sizeof previous);
+            if (peak > previous)
+                __atomic_store_n(&g_bass_preview_peak_bits, bass_float_bits(peak), __ATOMIC_RELAXED);
+        }
     } else {
-        orig_bass_audio_writer(self, input, frames, offset);
+        bass_preview_mix(NULL, 0, 0, 44100);
     }
+    orig_bass_audio_writer(self, channels, frames, offset);
 }
 
 static void *g_cs_self;
@@ -6026,6 +6366,11 @@ static void screen_paint(void *p, void *g)
         draw_rect(g, (uint64_t)x0, 88, 3, 1);
         draw_rect(g, (uint64_t)x1, 88, 3, 1);
     }
+    if (looper_is_open()) {
+        looper_pump();
+        looper_draw(g);
+        return;
+    }
     if (g_hpss_menu) {
         hpss_draw_menu(g);
         return;
@@ -6891,7 +7236,7 @@ __attribute__((constructor)) static void load(void)
     void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)note_on) : 0;
     void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)cs_event) : 0;
     void *t_off = (hook_mask & 128) ? install_hook(base + A_NOTE_OFF, (void *)note_off) : 0;
-    void *t_bass_audio = install_hook(base + A_BASS_AUDIO_WRITER, (void *)bass_audio_writer);
+    void *t_bass_audio = install_hook(base + A_BASS_AUDIO_WRITER, (void *)audio_writer);
     void *t_sc = install_hook(base + 0x1968020, (void *)setctl_probe);
     if (t_sc)
         orig_setctl = (void (*)(void *, void *, int, int, float))t_sc;

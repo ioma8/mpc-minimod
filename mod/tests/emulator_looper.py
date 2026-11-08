@@ -1,0 +1,218 @@
+"""Live looper acceptance: record from the selected input, play, overdub, sync.
+
+Requires the virtual MPC lab with a build of this mod preloaded, on the Sample
+page. It clears any loops left from an earlier run. Drives the panel, reads the mod's own output tap (the last two seconds of
+audio the firmware handed to the audio device) and the pad state machine from
+/proc/<pid>/mem, so the check does not depend on the lab's host PCM socket.
+
+What it proves, in order:
+  * SAMPLE OPTIONS has a Live Looper entry and it opens a fullscreen view
+  * a pad records from the selected input source and closes into playback
+  * the recorded loop really is on the device output (440 Hz from the tone
+    source, after the input is unplugged)
+  * pressing the pad again stops it (output goes silent)
+  * SHIFT + pad overdubs and a second press returns to playback
+  * LOOP starts the sync pulse and a new loop is quantized to a whole pulse
+  * SHIFT + DATA closes the view, keeps the loops, and pads reach the app again
+"""
+import argparse
+import json
+import math
+import struct
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+RING_FRAMES = 44100 * 2
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--lab', type=Path, required=True)
+    parser.add_argument('--panel', default='http://127.0.0.1:8765')
+    args = parser.parse_args()
+    sys.path.insert(0, str(args.lab))
+    import lab
+
+    def ssh(command, binary=False):
+        out = subprocess.check_output(['ssh', *lab.ssh_base(), 'root@' + lab.HOST,
+                                       command], timeout=40)
+        return out if binary else out.decode()
+
+    def control(name, action, value=0):
+        body = json.dumps(dict(name=name, action=action, value=value)).encode()
+        request = urllib.request.Request(args.panel + '/control', data=body,
+                                         headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert json.load(response)['ok']
+        time.sleep(0.08)
+
+    def tap(name):
+        control(name, 'press', 100)
+        control(name, 'release')
+
+    def route(source):
+        body = json.dumps(dict(jack='AUDIO IN', target=source)).encode()
+        request = urllib.request.Request(args.panel + '/route', data=body,
+                                         headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            response.read()
+        time.sleep(0.15)
+
+    def symbol(name):
+        for line in subprocess.check_output(['nm', '-a', str(ROOT / 'build/minimod.elf')],
+                                            text=True).splitlines():
+            fields = line.split()
+            if fields and fields[-1] == name:
+                return int(fields[0], 16)
+        raise AssertionError(f'missing symbol {name}')
+
+    pid = int(ssh('pidof "MPC Sample"'))
+    maps = ssh(f'cat /proc/{pid}/maps').splitlines()
+    mod_base = int(next(x for x in maps if x.endswith('/minimod.so')).split('-')[0], 16)
+    app_base = int(next(x for x in maps if x.endswith('/MPC Sample')).split('-')[0], 16)
+
+    def read(offset, size):
+        data = ssh(f'dd if=/proc/{pid}/mem bs=1 skip={mod_base + offset} count={size} '
+                   f'2>/dev/null', binary=True)
+        assert len(data) == size, f'short read at {offset:#x}'
+        return data
+
+    def u32(offset):
+        return struct.unpack('<I', read(offset, 4))[0]
+
+    def snapshot():
+        raw = read(symbol('g_pads'), 16 * 32)
+        pads = []
+        for i in range(16):
+            state, length, rec = struct.unpack('<III', raw[i * 32:i * 32 + 12])
+            pads.append((state, length, rec))
+        return pads
+
+    def output_tail(frames=4000):
+        w = u32(symbol('g_outtap_w'))
+        ring = struct.unpack(f'<{RING_FRAMES}f', read(symbol('g_outtap'), RING_FRAMES * 4))
+        return [ring[(w - frames + k) % RING_FRAMES] for k in range(frames)]
+
+    def rms(values):
+        return math.sqrt(sum(v * v for v in values) / len(values))
+
+    def zero_cross_hz(values, rate=44100):
+        crossings = sum(1 for a, b in zip(values, values[1:]) if (a < 0) != (b < 0))
+        return crossings / 2 / (len(values) / rate)
+
+    def wait_state(pad, want, timeout=1.5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if snapshot()[pad][0] == want:
+                return
+            time.sleep(0.03)
+        raise AssertionError(f'pad {pad + 1} never reached state {want}: {snapshot()[pad]}')
+
+    def open_looper():
+        control('SHIFT', 'press', 127)
+        control('DATA', 'press', 127)
+        control('DATA', 'release')
+        control('SHIFT', 'release')
+        time.sleep(0.4)
+        for _ in range(6):
+            control('DATA', 'turn', 1)
+        control('DATA', 'press', 127)
+        control('DATA', 'release')
+        time.sleep(0.6)
+
+    def close_looper():
+        control('SHIFT', 'press', 127)
+        control('DATA', 'press', 127)
+        control('DATA', 'release')
+        control('SHIFT', 'release')
+        time.sleep(0.6)
+
+    route('tone')
+    if u32(symbol('g_open')):
+        close_looper()          # a previous run may have left the view open
+    open_looper()
+    assert u32(symbol('g_open')) == 1, 'the looper view did not open'
+    # clear any loops left by an earlier run, then start from an empty looper
+    control('SHIFT', 'press', 127)
+    tap('LOOP')
+    control('SHIFT', 'release')
+    time.sleep(0.3)
+    pads = snapshot()
+    assert len(pads) == 16, pads
+    assert all(p[0] == 0 and p[1] == 0 for p in pads), pads
+
+    # --- record one second from the tone input, then close into playback
+    tap('PAD 1')
+    time.sleep(1.0)
+    tap('PAD 1')
+    wait_state(0, 2)                       # PLAY
+    state, length, rec = snapshot()[0]
+    assert length > 40000, (state, length, rec)
+    assert abs(length - rec) < 4000, (length, rec)
+
+    # --- unplug the input: what remains can only be the loop we recorded
+    route('none')
+    time.sleep(0.5)
+    tail = output_tail()
+    loop_rms = rms(tail)
+    loop_hz = zero_cross_hz(tail)
+    assert 0.05 < loop_rms < 0.5, loop_rms
+    assert 400 < loop_hz < 480, loop_hz
+    loop_length = length
+
+    # --- pressing the playing pad stops it
+    tap('PAD 1')
+    wait_state(0, 4)                       # STOP
+    time.sleep(0.3)
+    assert rms(output_tail()) < 0.01, 'output should be silent after stop'
+
+    # --- SHIFT + pad overdubs, a second press returns to playback
+    route('tone')
+    time.sleep(0.2)
+    control('SHIFT', 'press', 127)
+    tap('PAD 1')
+    control('SHIFT', 'release')
+    wait_state(0, 3)                       # DUB
+    time.sleep(0.5)
+    tap('PAD 1')
+    wait_state(0, 2)                       # PLAY
+    route('none')
+    time.sleep(0.4)
+    assert rms(output_tail()) > 0.02, 'overdub lost the loop'
+
+    # --- LOOP starts the sync pulse from the last recorded length
+    tap('LOOP')
+    time.sleep(0.3)
+    assert u32(symbol('g_sync')) == 1, 'sync pulse did not start'
+    pulse = u32(symbol('g_sync_frames'))
+    assert abs(pulse - loop_length) < 2000, (pulse, loop_length)
+
+    # --- a short recording is quantized to one whole pulse
+    route('tone')
+    time.sleep(0.2)
+    tap('PAD 2')
+    time.sleep(0.45)
+    tap('PAD 2')
+    wait_state(1, 2)                       # PLAY
+    state, length, rec = snapshot()[1]
+    assert length == pulse, (length, pulse, rec)
+    assert rec < length, (rec, length)     # padded with silence, not stretched
+
+    # --- SHIFT + DATA closes; loops survive and the pads reach the app again
+    tap('LOOP')                            # sync off
+    close_looper()
+    after = snapshot()
+    assert after[0][1] == loop_length and after[1][1] == pulse, after
+    assert ssh(f'systemctl show ac50 -p NRestarts').strip().endswith('0'), 'app restarted'
+    assert int(ssh('pidof "MPC Sample"')) == pid, 'app pid changed'
+    print(f'live looper: loop {loop_length} frames ({loop_length / 44100:.2f}s), '
+          f'{loop_rms:.3f} rms at {loop_hz:.0f} Hz, sync {pulse} frames, '
+          f'quantized {rec} -> {length}')
+
+
+if __name__ == '__main__':
+    main()

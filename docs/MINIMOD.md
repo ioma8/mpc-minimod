@@ -13,6 +13,7 @@ for current AutoTrim reverse-engineering findings see
 | AutoTrim | SHIFT + B3 | Trims the selected pad's sample using native app control commands. Three presses while holding SHIFT use 3%, 6%, and 9% peak thresholds; the fourth clears trim. Releasing SHIFT resets the cycle. |
 | AutoTrim caption | Hold SHIFT on the Sample page | Replaces the third soft-key caption with AutoTrim; suppressed in Chop mode. |
 | External MIDI chromatic playback | Select a sample, enable Pad MIDI In, turn on 16 LEVELS | Transposes external MIDI note-ons in the native event path from C3; firmware routing and note-offs remain native. |
+| Live Looper | `SHIFT`+`DATA` → **Live Looper** | Fullscreen 16-pad looper; each pad records from the selected input, plays, stops; `SHIFT`+pad overdubs; `LOOP` sync pulse quantizes new loops to whole pulse lengths; `SHIFT`+`DATA` exits. See [`LIVE-LOOPER.md`](LIVE-LOOPER.md). |
 
 Implementation evidence, setup and limits are in
 [`MIDI-CHROMATIC.md`](MIDI-CHROMATIC.md).

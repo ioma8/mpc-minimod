@@ -421,3 +421,20 @@ model out of `/proc/<pid>/mem` and asserts exact values.
   and how it reloads (§11);
 * the value and units of `chopMinSliceTime`;
 * behaviour on real hardware — everything here is emulator-verified.
+
+## 16. Live looper audio (input capture and device output)
+
+| mechanism | detail | evidence |
+|---|---|---|
+| the capture stream | `RW_INTERLEAVED`, `S32_LE`, **4 channels, 44.1 kHz**, period 128, buffer 1024 (lab) | [rt] `/proc/asound/Loopback/pcm0c/sub0/hw_params` |
+| input read site A | `FUN_04039450` (mod `0x3039450`) reads S32 with `snd_pcm_readi` and expands it to planar float; **not called** while the app monitors input | [static] + [hook] never fired |
+| input read site B | `snd_pcm_readn` call at Ghidra `0xefbaa4` (mod `0xdfbaa4`) inside the app's own input thread; **not called** either | [static] + [hook] patched to a relay stub, 0 calls |
+| what works | exporting `snd_pcm_readi`/`snd_pcm_readn` from the preload library and forwarding through `dlsym(RTLD_NEXT, ...)`: every read in the process lands there, whichever device object owns the pcm handle | [rt] ~8.5k reads in 25 s; loop recorded the tone source |
+| output writer | `FUN_040398f0` (mod `0x3f398f0`) turns planar float into interleaved S32 and calls `snd_pcm_writei`; second argument is the planar channel array, third the frame count, fourth the offset | [static] decompile |
+| output tap | interposing `snd_pcm_writei` gives the exact device block; mixing there reaches the jacks no matter which device object rendered the app's audio | [rt] mixed loop measured in the tap |
+| pad dispatch | pad events are not in the button dispatch (no `btn 06` entries); they reach the app through observer dispatch `FUN_020ce3e0` (mod `0x1fce3e0`), which calls the note handler `0x1e27360` at `0x20ce480` and the pad-grid listeners | [hook] + [rt] |
+| blocking the dispatch | dropping `FUN_020ce3e0` while the looper is open stops the pad-grid selection change, but also stops the note handler, so the looper never sees a pad; reverted | [rt] pad state stayed `IDLE` |
+| SHIFT + pad shortcut | the app pairs `SHIFT` with a pad press for **Full Level**; the shortcut is upstream of the note handler, so the looper keeps `SHIFT` from the app while open | [rt] a "Full Level / Disabled" dialog appeared over the looper before this |
+| lab PCM socket | `ws://127.0.0.1:5557` reported silence (bridge `out` levels 0.0) while the app wrote non-silent audio (in-process write peak 1.0); host-side PCM is not a trustworthy acceptance signal in this lab | [rt] |
+
+The looper itself is documented in [LIVE-LOOPER.md](../LIVE-LOOPER.md).
