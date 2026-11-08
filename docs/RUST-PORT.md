@@ -328,9 +328,15 @@ temporary String/Font objects are laid out or destroyed.
 It stays unwired until that is understood; the C draws with its own calls, which
 is verified by every device run.
 
+## Certified after the paint port
+
+`453b866` is the last fully device-certified build: all six device tests pass with
+the Rust draws and toast (Live Looper, Bass Synth, chromatic MIDI, Spectral Chop,
+HPSS, Reverb).
+
 ## Certified after the input port
 
-`2c11ef0` is the last fully device-certified build: Live Looper, Bass Synth,
+`2c11ef0` was certified: Live Looper, Bass Synth,
 chromatic MIDI, Spectral Chop, HPSS and Reverb all pass on it.
 
 Two bugs the device found in the recent ports, both fixed:
