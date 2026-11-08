@@ -17,6 +17,8 @@ The converter (`mpc2stems`) is a separate product with its own docs in
 * **Setting up the lab** — [`EMULATOR.md`](EMULATOR.md).
 * **Platform questions** — [`DEVICE-NOTES.md`](DEVICE-NOTES.md) (hardware,
   Bluetooth, WiFi, the hidden touch Preferences UI).
+* **Interop with other mods/addins** — [`ADDIN-ECOSYSTEM.md`](ADDIN-ECOSYSTEM.md)
+  (how other addins load, the shared installer rules, and what we can reuse).
 
 ## Ownership — one home per topic
 
@@ -29,6 +31,7 @@ The converter (`mpc2stems`) is a separate product with its own docs in
 | [`MODDING.md`](MODDING.md) | boot chain, autorun protocol and its digest, hooking technique, packaging, constraints, ecosystem survey | feature internals |
 | [`EMULATOR.md`](EMULATOR.md) | the QEMU lab: setup, ports, panel protocol, lifecycle | RE method |
 | [`DEVICE-NOTES.md`](DEVICE-NOTES.md) | hardware, kernel modules, Bluetooth, WiFi, Preferences/touch, what the lab lacks | mod features |
+| [`ADDIN-ECOSYSTEM.md`](ADDIN-ECOSYSTEM.md) | the 2026 addin projects, their loading/install contract, and what applies to minimod | our own mechanisms (those live in MECHANISMS) |
 | [`HISTORY.md`](HISTORY.md) | chronology, superseded approaches, disproved leads, open investigations, the code review | current contracts (those live in MECHANISMS/FEATURES) |
 | [`re/`](re/README.md) | raw evidence: Ghidra output, decompiled fragments, screenshots | prose claims |
 | [`tasks/`](tasks/README.md) | backlog of unstarted feature ideas | current behavior |

@@ -32,7 +32,8 @@ Docs: [`docs/README.md`](../docs/README.md) is the index. Feature behavior:
 [`docs/FEATURES.md`](../docs/FEATURES.md). Firmware mechanisms and anchors:
 [`docs/MECHANISMS.md`](../docs/MECHANISMS.md). Boot chain, autorun and hook
 technique: [`docs/MODDING.md`](../docs/MODDING.md). Investigations and
-disproved leads: [`docs/HISTORY.md`](../docs/HISTORY.md).
+disproved leads: [`docs/HISTORY.md`](../docs/HISTORY.md). Other addins and the
+shared installer rules: [`docs/ADDIN-ECOSYSTEM.md`](../docs/ADDIN-ECOSYSTEM.md).
 
 ## Controls
 

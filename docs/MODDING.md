@@ -136,6 +136,13 @@ first-4-KiB check is a cheap version guard, not a security boundary — the
 `lab.py preload` route (`LD_PRELOAD` by hand) has no such guard and would crash
 the app on another build.
 
+**Known interoperability gap.** `Environment=LD_PRELOAD=` *replaces* the
+variable, so this script's fixed list drops any preload the firmware or another
+addin set (the ecosystem's shared drop-in is `90-mpc-addins.conf`, which sorts
+before ours and therefore loses). The community installer composes the effective
+list instead of replacing it; see
+[`ADDIN-ECOSYSTEM.md`](ADDIN-ECOSYSTEM.md#the-shared-installer-contract).
+
 ---
 
 ## 3. The hooking technique
@@ -228,7 +235,9 @@ The build is warning-free in the shipped configuration; probe code lives behind
 
 Studied to decide what a *minimal* mod should do. Sources: `mpc-boot-thingy`,
 `SampQOL-OS` v0.1.5, `am-mod` r26/r27, `mpc-ui-toolkit`, `mpc-furnace`,
-`mpc-cavestory`, `mpc-gen1recomp`, `mpc-tic80`, and the virtual lab.
+`mpc-cavestory`, `mpc-gen1recomp`, `mpc-tic80`, and the virtual lab. The 2026
+addin wave (draw handler, remote, scale mode, rack) and its shared installer are
+documented separately in [`ADDIN-ECOSYSTEM.md`](ADDIN-ECOSYSTEM.md).
 
 ### 6.1 mpc-boot-thingy — a multi-app launcher
 

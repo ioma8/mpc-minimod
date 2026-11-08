@@ -174,6 +174,16 @@ The emulator tests use the same technique directly over SSH
 | `qmp.py`, `console.py` | QMP and serial console helpers |
 | `rsp_watch*.py` | gdbstub watchpoints (older lab) |
 
+### Device-side harnesses from other addins
+
+Two community addins are useful as *tools* on real hardware (not bundled):
+`mpc-addin-remote` exposes the screen as DRM-captured PNG and injects touch into
+the touchscreen evdev node, plus an MCP server with screenshot/tap/buttons/MIDI;
+`mpc-addin-sample-draw-handler` exposes `/snap` (raw 320×240) and `/input`
+(soft keys, dial, knobs) on `127.0.0.1:6740`. Both are documented, with their
+installation rules and the DRM-master caveat, in
+[`ADDIN-ECOSYSTEM.md`](ADDIN-ECOSYSTEM.md).
+
 ## 3. In-process probes (the mod as a microscope)
 
 The same library that ships is also the probe. Build the investigation variant:

@@ -156,7 +156,29 @@ meta   + 4     u32 frames
 meta   + 8     u32 sample rate
 meta   + 0x10  the slice container
 meta   + 0x70 / 0x78 / 0x80   vector<Slice*> begin / end / capacity
+meta   + 0x3e4 int32 root note, MIDI 0..127 (default 60)
 ```
+
+The root note is the note the sample plays at its original speed; the 16-Levels
+renderer and the app's root-note setting both use it. Measured on the emulator:
+A01 `RnB-Kik-Grove1 91V` = **88**, other pads 60. A chromatic note must be
+measured from this note, not from C3. [rt] — confirmed against
+[`ADDIN-ECOSYSTEM.md`](ADDIN-ECOSYSTEM.md) (scale mode reads the same field).
+
+### Reading the sample's audio from memory
+
+```
+sample + 0x170  -> holder object (RTTI "12MemorySample")
+holder + 0x18      the same object as sample + 0x130 (the data/meta above)
+holder + 0x28   -> sample holder
+holder[0]          the decoded float32 audio buffer
+```
+
+`meta` is `{u16 channels, u32 frames, u32 rate, u32 bits}` with `bits == 32`, so
+the buffer is interleaved float32 of `frames × channels`. This is the loaded
+sample, not a file; it also works before the sample is saved. [doc] (scale mode's
+`sample_audio()`), spot-checked here: A01 header `(2, 10501, 44100, 32)`.
+
 
 `FN(0x2943640)(sample, 1)` is the sample-validity predicate (1 for a live
 sample). [rt]
@@ -307,6 +329,7 @@ Undo/telemetry anchors: `"Insert Slice"` at file `0x46a80e0`, key
 | knob suppression | the decoded-control hook blocks non-DATA controls while the menu owns input; no read interception | [rt] |
 | button codes | CHOP `0x4b`, SHIFT `0x31`, DATA push `0x6f`, screen buttons `0x0c/0x0d/0x0e`, B3 `0x0e` | [rt] |
 | panel feedback | `/state?since=0`: LED 75 = CHOP, LED 82 = PLAY | [rt] |
+| control-surface transport | `/dev/snd/midiC0D0`, ALSA timestamped framing: 32-byte frames, MIDI bytes at `+0x10`, one button per frame, note on/off on channel 1 | [rt] + [doc] |
 
 The decoded-control dispatcher's decisive branch at Ghidra `0x169f280`:
 

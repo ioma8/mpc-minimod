@@ -75,6 +75,7 @@ Release description format and the complete feature overview are in
 - [`docs/EMULATOR.md`](docs/EMULATOR.md) — the virtual MPC Sample
 - [`docs/DEVICE-NOTES.md`](docs/DEVICE-NOTES.md) — hardware, Bluetooth, WiFi, the hidden touch Preferences UI
 - [`docs/HISTORY.md`](docs/HISTORY.md) — investigations, reversals and open work
+- [`docs/ADDIN-ECOSYSTEM.md`](docs/ADDIN-ECOSYSTEM.md) — the 2026 addin projects, their loading rules and what we can reuse
 - [`mod/README.md`](mod/README.md) — controls, anchors, build
 - [`tools/hpss/`](tools/hpss/) — Python reference implementations and WAV helpers
 - [`converter/`](converter/) — separate tool: project → per-pad stems

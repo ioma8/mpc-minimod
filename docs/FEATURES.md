@@ -111,9 +111,13 @@ of stock 4256/16269). With 16 Levels off the dispatcher's first word is the
 stock `d503233f` (hook installed: `155f947c`). Verified on hardware;
 `mod/tests/emulator_midi_chromatic.py` is the automated check.
 
-**Limits.** The root is fixed at C3; per-pad roots are not exposed. Pad MIDI In
-is not persisted by the app and must be re-enabled after every start (this is
-the most common false "it does not work"). The SampQOL reference also has a
+**Limits.** The root is C3 by construction: the transform uses `note − 60` and
+does **not** yet read the sample's own root note (`data+0x3e4`; see
+[`MECHANISMS.md`](MECHANISMS.md#4-the-sample)). A sample whose root is not 60
+therefore plays transposed by `60 − root` — measured on A01, whose root is 88, it
+is 28 semitones off. Pad MIDI In is not persisted by the app and must be
+re-enabled after every start (this is the most common false "it does not
+work"). The SampQOL reference also has a
 separate chopped-pad mode; MiniMod applies chromatic pitch without a
 slice-versus-pitch setting.
 

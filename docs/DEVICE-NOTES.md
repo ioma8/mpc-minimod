@@ -21,6 +21,7 @@ platform.
 | kernel | `6.12.60-imb-2025-12-03-rt13` (PREEMPT_RT), Bluetooth and brcmfmac modules ship |
 | launcher | `/usr/bin/launch-ac50` → `setarch -R -- "/usr/bin/MPC Sample"`, 1 MiB stack, `MALLOC_ARENA_MAX=1` |
 | network managers | ConnMan (WiFi/Ethernet), BlueZ (Bluetooth), both enabled; D-Bus only |
+| project inserts | four insert slots per channel, one instance of a plugin per project; edited only by the rack addin (claimed; not verified here) |
 | update image | `AZ0x` container: `BOOT` raw, other partitions xz; partitions `part1`/`part2`/`parr` |
 
 The device tree carries both combo bindings as `compatible` entries:
@@ -196,6 +197,12 @@ bottom right, all `H-30`. Tab switch `FUN_03336d10` (clears the content
 container, validates the index, calls the tab's `+0x168`, adds the component);
 Apply `FUN_03336c70`; close `FUN_03336c10` / `FUN_03336c20`; host removal
 `FUN_02f8ee00` walks parents and closes through the native screen host.
+
+**A possible way in.** The remote addin reaches a device's touchscreen by
+writing `struct input_event` records into the touchscreen's evdev node (see
+[`ADDIN-ECOSYSTEM.md`](ADDIN-ECOSYSTEM.md#remote--drm-capture-evdev-touch-injection-mcp)).
+If the Sample's panel accepts injected events, that is a hardware route to this
+overlay; it is untested here.
 
 **Activation is not implemented.** The constructor and factory identify a
 construction path, not a safe runtime call site: ownership of the constructed
