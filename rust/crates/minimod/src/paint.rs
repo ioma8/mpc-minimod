@@ -148,6 +148,16 @@ fn redraw(repaint: Option<Repaint>, component: usize) {
     }
 }
 
+/// The toast's text, or an empty string.
+#[must_use]
+pub fn toast_text() -> &'static [u8] {
+    // SAFETY: only the UI thread reads this, and the buffer lives for the
+    // process; the caller stops at the NUL.
+    let toast = unsafe { &*core::ptr::addr_of!(TOAST) };
+    let end = toast.text.iter().position(|&byte| byte == 0).unwrap_or(0);
+    &toast.text[..end]
+}
+
 /// Whether a toast is still on screen.
 #[must_use]
 pub fn toast_visible(now: i64) -> bool {

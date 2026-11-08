@@ -88,6 +88,7 @@
 #include "pads_ffi.h"
 #include "cfg_ffi.h"
 #include "buttons_ffi.h"
+#include "overlay_ffi.h"
 #include "paint_ffi.h"
 #include "menu_ffi.h"
 #include "input_ffi.h"
@@ -128,7 +129,6 @@ static sigjmp_buf g_cc_jmp;
 
 static void mlog(const char *fmt, ...);
 static void toast(const char *text);
-static int toast_visible(void);
 #include "clock_ffi.h"
 static void *g_screen;
 static struct minimod_menu g_menu __attribute__((used));
@@ -139,7 +139,6 @@ static struct minimod_menu g_menu __attribute__((used));
 #define g_hpss_restore_pending g_menu.restore_pending
 static struct minimod_input g_input;
 static void input_context(struct minimod_input_context *ctx);
-static void looper_draw(void *g);
 static void looper_pump(void);
 static int prop_references(uintptr_t P, uintptr_t param);
 
@@ -1260,10 +1259,7 @@ static void looper_pump(void)
 #define LP_MAX_HINT (44100u * 8u)
 
 
-static void looper_draw(void *g)
-{
-    minimod_looper_draw((uintptr_t)g);
-}
+
 
 static void hpss_draw_menu(void *g)
 {
@@ -2959,11 +2955,6 @@ static void toast(const char *text)
                   (uintptr_t)comp);
 }
 
-static int toast_visible(void)
-{
-    return minimod_toast_visible(minimod_now_ms());
-}
-
 static void draw_colour(void *g, uint32_t v)
 {
     minimod_paint_colour((uintptr_t)g, v);
@@ -2980,136 +2971,33 @@ static void draw_text(void *g, const char *s, int x, int y, int w, int h,
     minimod_paint_text((uintptr_t)g, s, x, y, w, h, size);
 }
 
+static void paint_commit_trim(void)
+{
+    g_in_inject = 1;
+    commit_trim();
+    g_in_inject = 0;
+}
+
 static void screen_paint(void *p, void *g)
 {
-    static int logged;
     g_paint_comp = p;
     g_paint_gfx = g;
-    if (!logged && p) {
-        uintptr_t vt = 0;
-        if (rd((uintptr_t)p, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
-            logged = 1;
-            mlog("minimod: paint comp=%p vt=%#lx file=%#lx\n",
-                 p, (unsigned long)vt, (unsigned long)(vt - base));
-            for (int i = 24; i < 32; ++i) {
-                uintptr_t fn = 0;
-                if (rd(vt + i * 8, &fn, 8) && fn >= base && fn <= base + 0x12000000ULL)
-                    mlog("minimod:   vt[%d] -> %#lx\n", i, (unsigned long)(fn - base));
-            }
-        }
-    }
-    if (orig_screen_paint)
-        orig_screen_paint(p, g);
-    /* The knob replay runs here, on the UI thread at a safe point, instead of
-     * inside the button dispatch where it corrupted the app's state. */
-    if (g_pending_cc) {
-        g_pending_cc = 0;
-        g_in_inject = 1;
-        commit_trim();
-        g_in_inject = 0;
-    }
-    if (FIELD(p, 0, uintptr_t) != base + A_SCREEN_VT)
-        return;
-    if (g_screen != p) {
-        g_screen = p;
-        mlog("minimod: screen=%p\n", p);
-    }
-    spectral_tick();
-    if (__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE))
-        hpss_finalize();
-    if (g_hpss_restore_pending && !g_shift && sample_page_visible()) {
-        g_hpss_restore_pending = 0;
-        hpss_restore_chop();
-    }
-    /* Diff the painting screen between paints: whatever changes when a knob
-     * turns is exactly what the page stores for its markers. */
-    if (getenv("MINIMOD_SNAPDIFF")) {
-        static unsigned char prev[0x8000], cur[0x8000];
-        static uintptr_t prev_p;
-        static size_t snap_len;
-        static int have;
-        if (prev_p != (uintptr_t)p) {
-            size_t got = 0;
-            for (size_t off = 0; off < sizeof prev; off += 0x1000) {
-                if (!rd((uintptr_t)p + off, prev + off, 0x1000))
-                    break;
-                got += 0x1000;
-            }
-            if (got) {
-                snap_len = got;
-                prev_p = (uintptr_t)p;
-                have = 1;
-                mlog("minimod: snapdiff baseline %p (%zu bytes)\n", p, got);
-            }
-        } else if (have) {
-            size_t got = 0;
-            for (size_t off = 0; off < snap_len; off += 0x1000) {
-                if (!rd((uintptr_t)p + off, cur + off, 0x1000))
-                    break;
-                got = off + 0x1000;
-            }
-            int shown = 0;
-            for (size_t i = 0; i + 4 <= got && shown < 24; i += 4) {
-                if (memcmp(cur + i, prev + i, 4) == 0)
-                    continue;
-                float a, b;
-                memcpy(&a, prev + i, 4);
-                memcpy(&b, cur + i, 4);
-                mlog("minimod: diff +0x%zx %.4f -> %.4f\n", i, (double)a, (double)b);
-                memcpy(prev + i, cur + i, 4);
-                shown++;
-            }
-        }
-    }
-    /* Trim edges of the last autotrim, drawn where the page's own markers would
-     * be: the page itself only re-reads its trim when the pad is re-selected, so
-     * without this the result of SHIFT+B3 would be invisible. */
-    if (toast_visible()) {
-        /* Cover the Start/End/Loop bar. Near-black fill, an amber rule top and
-         * bottom (the colour the page already uses for the waveform) and white
-         * 18 pt text, so it reads at a glance without looking like a dialog. */
-        int x = 0, y = 194, w = 320, h = 46;
-        draw_colour(g, 0xff15151a);
-        draw_rect(g, x, y, w, h);
-        draw_colour(g, 0xffffb43c);
-        draw_rect(g, x, y, w, 2);
-        draw_rect(g, x, y + h - 2, w, 2);
-        draw_colour(g, 0xffffffff);
-        draw_text(g, (const char *)minimod_toast_text(), x + 4, y + 6, w - 8,
-                  h - 12, 18.0f);
-    }
-    if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f && !getenv("MINIMOD_NOOVERLAY")) {
-        int x0 = 10 + (int)(g_mark_v0 * 295.0f + 0.5f);
-        int x1 = 10 + (int)(g_mark_v1 * 295.0f + 0.5f);
-        /* The page fills the trimmed-out parts with the waveform background
-         * (27,27,30); draw the same so the picture matches a manual trim. */
-        draw_colour(g, 0xff1b1b1e);
-        if (x0 > 10)
-            draw_rect(g, 10, 88, (uint64_t)(x0 - 10), 98);
-        if (x1 < 305)
-            draw_rect(g, (uint64_t)x1, 88, (uint64_t)(305 - x1), 98);
-        draw_colour(g, 0xffffffff);
-        draw_rect(g, (uint64_t)x0, 88, 1, 98);
-        draw_rect(g, (uint64_t)x1, 88, 1, 98);
-        draw_rect(g, (uint64_t)x0, 88, 3, 1);
-        draw_rect(g, (uint64_t)x1, 88, 3, 1);
-    }
-    if (looper_is_open()) {
-        looper_pump();
-        looper_draw(g);
-        return;
-    }
-    if (g_hpss_menu) {
-        hpss_draw_menu(g);
-        return;
-    }
-    if (!g_shift || in_chop_mode())
-        return;
-    /* third soft-key cell of the Sample page */
-    draw_colour(g, 0xff000000);
-    draw_rect(g, 213, 0, 107, 38);
-    draw_colour(g, 0xffffffff);
-    draw_text(g, "AutoTrim", 215, 5, 103, 28, 18.0f);
+    struct minimod_overlay_hooks hooks = {0};
+    hooks.original = (void (*)(void *, void *))orig_screen_paint;
+    hooks.commit_trim = paint_commit_trim;
+    hooks.spectral_tick = spectral_tick;
+    hooks.finalize = hpss_finalize;
+    hooks.restore_chop = hpss_restore_chop;
+    hooks.looper_pump = looper_pump;
+    hooks.menu_draw = (void (*)(void *))hpss_draw_menu;
+    struct minimod_overlay_flags flags = {g_pending_cc, g_hpss_restore_pending};
+    float marks[2] = {g_mark_v0, g_mark_v1};
+    minimod_overlay_paint((uintptr_t)p, (uintptr_t)g, base, &hooks, &flags,
+                          (uintptr_t *)&g_screen,
+                          g_shift, in_chop_mode(), looper_is_open(), g_hpss_menu,
+                          marks);
+    g_pending_cc = flags.pending_cc;
+    g_hpss_restore_pending = flags.restore_pending;
 }
 
 static int install_screen_paint(void)

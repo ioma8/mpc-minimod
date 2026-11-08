@@ -31,6 +31,7 @@ pub mod looper_ffi;
 pub mod looper_view;
 pub mod menu;
 pub mod midi;
+pub mod overlay;
 pub mod pads;
 pub mod page;
 pub mod paint;
