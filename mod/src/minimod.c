@@ -3840,7 +3840,6 @@ static void hpss_activate(void)
             g_hpss_menu = 0;
             g_bass_edit = 0;
             bass_preview_set_active(0);
-            looper_calibrate(); /* measure the round trip once the view is up */
             looper_pump();
         }
         hpss_repaint();
@@ -3861,11 +3860,17 @@ static void draw_text(void *g, const char *s, int x, int y, int w, int h,
  * forces its own repaints. */
 static volatile int g_looper_pump_started;
 
-static void looper_autocal_step(void);
-static void looper_cal_retry(void);
 static void looper_cfg_save(void);
-static int g_cfg_meas;
-static long long g_cfg_saved_at;
+static int g_cfg_meas; /* kept for the config format, unused */
+
+/* Buffer geometry of the two streams, read once from ALSA. The firmware keeps
+ * both of its rings full, so one buffer per direction is the latency it works
+ * with - the number the sampler itself uses, no probe needed. */
+static volatile unsigned g_buf_out;
+static volatile unsigned g_buf_in;
+static volatile void *g_out_pcm;
+static volatile void *g_in_pcm;
+static unsigned stream_buffer_frames(void *pcm);
 
 static void *looper_pump_thread(void *arg)
 {
@@ -3875,21 +3880,20 @@ static void *looper_pump_thread(void *arg)
         nanosleep(&ts, 0);
         if (!looper_is_open())
             continue;
-        looper_autocal_step();
-        looper_cal_retry();
-        if (looper_calibration_pending())
-            looper_calibration_finish();
+        /* The counters move in bursts inside each audio callback, so a single
+         * sample depends on the phase. Average a short burst of samples that
+         * spans several callbacks to get the level itself. */
+        /* the device can reopen with a different ring size (USB, headphones) */
         {
-            unsigned cal = looper_calibrated_latency();
-            if (cal && now_ms() > g_cfg_saved_at + 10000) {
-                int d = (int)cal - g_cfg_meas;
-                if (d > 32 || d < -32) {
-                    g_cfg_meas = (int)cal;
-                    g_cfg_saved_at = now_ms();
-                    looper_cfg_save();
-                }
+            static int tick;
+            if ((++tick % 50) == 0) {
+                if (g_out_pcm)
+                    g_buf_out = stream_buffer_frames((void *)g_out_pcm);
+                if (g_in_pcm)
+                    g_buf_in = stream_buffer_frames((void *)g_in_pcm);
             }
         }
+
         void *comp = g_paint_comp ? g_paint_comp : g_screen;
         if (orig_repaint && comp)
             orig_repaint(comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
@@ -3968,8 +3972,6 @@ static void looper_cell(void *g, int x, int y, int w, int h,
 static void looper_draw(void *g)
 {
     struct looper_view v;
-    if (looper_calibration_pending())
-        looper_calibration_finish();
     if (!looper_snapshot(&v))
         return;
     draw_colour(g, 0xff0c0c10);
@@ -4030,8 +4032,7 @@ static void looper_draw(void *g)
         draw_text(g, v.message, 12, 202, 296, 12, 10.0f);
     } else if (v.lat_frames) {
         char lat[28];
-        const char *src = v.lat_src == 'C' ? "CAL" : v.lat_src == 'A' ? "AUTO" :
-                          v.lat_src == 'S' ? "SAVED" : "EST";
+        const char *src = v.lat_src == 'B' ? "BUF" : v.lat_src == 'F' ? "FIX" : "EST";
         snprintf(lat, sizeof lat, "%s %ums", src,
                  (unsigned)((uint64_t)v.lat_frames * 1000 / 44100));
         draw_colour(g, 0xff5a5a64);
@@ -4401,6 +4402,30 @@ static long (*real_snd_pcm_readi)(void *, void *, unsigned long);
 static long (*real_snd_pcm_writei)(void *, const void *, unsigned long);
 static long (*real_snd_pcm_delay)(void *, long *);
 static long (*real_snd_pcm_avail)(void *);
+static unsigned (*real_hw_malloc)(void **);
+static int (*real_hw_current)(void *, void *);
+static int (*real_hw_bufsize)(void *, unsigned long *);
+static void (*real_hw_free)(void *);
+
+/* Frames in one ALSA ring. Called once per stream. */
+static unsigned stream_buffer_frames(void *pcm)
+{
+    if (!pcm || !real_hw_malloc)
+        return 0;
+    void *hw = 0;
+    unsigned frames = 0;
+    if (real_hw_malloc(&hw) < 0 || !hw)
+        return 0;
+    if (real_hw_current(pcm, hw) >= 0) {
+        unsigned long f = 0;
+        if (real_hw_bufsize(hw, &f) >= 0 && f < 65536)
+            frames = (unsigned)f;
+    }
+    if (real_hw_free)
+        real_hw_free(hw);
+    return frames;
+}
+
 static volatile unsigned g_out_delay; /* last output delay sample, frames */
 static volatile unsigned g_out_delay_avg; /* smoothed, what a take uses */
 static volatile unsigned g_in_delay;
@@ -4415,14 +4440,7 @@ static volatile unsigned g_out_write_calls;
 static volatile float g_outtap[OUTTAP_FRAMES];
 static volatile unsigned g_outtap_w;
 
-/* Input history for the continuous auto-calibration: the same monotonic frame
- * counter as the output tap, so a lag between a sample written to the device
- * and its echo in the input is directly the round-trip delay. */
-#define INHIST_FRAMES 32768u
-static volatile float g_inhist[INHIST_FRAMES];
-static volatile unsigned g_inhist_w;
-static volatile int g_auto_ok;
-static unsigned g_auto_lag;
+
 static long (*real_snd_pcm_readn)(void *, void **, unsigned long);
 static int (*real_snd_pcm_set_channels)(void *, unsigned);
 static volatile unsigned g_pcm_channels = 4;
@@ -4446,6 +4464,9 @@ long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size)
         return -1;
     unsigned ch = g_pcm_channels ? g_pcm_channels : 4;
     int looper = looper_is_open();
+    g_out_pcm = pcm;
+    if (looper && !g_buf_out)
+        g_buf_out = stream_buffer_frames(pcm);
     if (looper) {
         long delay = 0;
         if (!real_snd_pcm_delay)
@@ -4456,20 +4477,22 @@ long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size)
             g_out_delay_avg = avg ? (avg * 7 + g_out_delay) / 8 : g_out_delay;
         }
         if (g_lat_fixed >= 0) {
-            looper_set_latency((unsigned)g_lat_fixed);
+            looper_set_latency_ex((unsigned)g_lat_fixed, 'F');
         } else {
-            /* A finished round-trip calibration wins; otherwise estimate from
-             * the device buffers: one period of output is queued after this
-             * write, and the capture side adds the frames already buffered when
-             * we read them. */
-            unsigned cal = looper_calibrated_latency();
-            int total = cal ? (int)cal
-                            : (int)(g_out_delay_avg + (unsigned)size + g_in_delay +
-                                    looper_input_backlog());
-            total += g_lat_extra;
-            if (total < 0)
-                total = 0;
-            looper_set_latency((unsigned)total);
+            unsigned bo = g_buf_out, bi = g_buf_in;
+            unsigned total;
+            if (bo > 0 && bi > 0) {
+                /* The firmware keeps one full ring in each direction; that is
+                 * the latency its own sampler works with. */
+                total = bo + bi;
+                looper_set_latency_ex(total + (unsigned)g_lat_extra, 'B');
+            } else {
+                int est = (int)(g_out_delay_avg + (unsigned)size + g_in_delay +
+                                looper_input_backlog());
+                if (est < 0)
+                    est = 0;
+                looper_set_latency_ex((unsigned)(est + g_lat_extra), 'E');
+            }
         }
     }
     if (looper && buffer && size)
@@ -4539,24 +4562,13 @@ long snd_pcm_readi(void *pcm, void *buffer, unsigned long size)
         }
     }
 #endif
+    g_in_pcm = pcm;
+    if (!g_buf_in)
+        g_buf_in = stream_buffer_frames(pcm);
     long got = real_snd_pcm_readi(pcm, buffer, size);
     if (got > 0) {
+
         __atomic_add_fetch(&g_audio_in_calls, 1, __ATOMIC_RELAXED);
-        if (looper_is_open() && buffer) {
-            unsigned c = g_pcm_channels ? g_pcm_channels : 4;
-            const int32_t *s32 = buffer;
-            unsigned w = g_inhist_w;
-            for (long i = 0; i < got; ++i) {
-                float v;
-                if (c >= 2)
-                    v = ((float)s32[i * (long)c] + (float)s32[i * (long)c + 1]) *
-                        (0.5f / 2147483648.0f);
-                else
-                    v = (float)s32[i * (long)c] * (1.0f / 2147483648.0f);
-                g_inhist[(w++) % INHIST_FRAMES] = v;
-            }
-            g_inhist_w = w;
-        }
         if (looper_is_open() && buffer)
             looper_input_s32_interleaved((const int32_t *)buffer, g_pcm_channels,
                                          (unsigned)got);
@@ -4594,13 +4606,9 @@ static void looper_cfg_load(void)
     close(fd);
     if (n <= 0)
         return;
-    int trim = 0, meas = 0;
-    if (sscanf(buf, "%d %d", &trim, &meas) >= 1)
+    int trim = 0;
+    if (sscanf(buf, "%d", &trim) == 1)
         g_lat_extra = trim * 44;
-    if (meas > 0) {
-        g_cfg_meas = meas;
-        looper_seed_latency((unsigned)meas);
-    }
 }
 
 static void looper_cfg_save(void)
@@ -4609,91 +4617,10 @@ static void looper_cfg_save(void)
     if (fd < 0)
         return;
     char buf[32];
-    int n = snprintf(buf, sizeof buf, "%d %d\n", g_lat_extra / 44, g_cfg_meas);
+    int n = snprintf(buf, sizeof buf, "%d\n", g_lat_extra / 44);
     if (n > 0)
         (void)!write(fd, buf, (size_t)n);
     close(fd);
-}
-
-/* Continuous auto-calibration: correlate the last stretch of device output
- * against the input history. Whenever the input hears the output - a loop
- * cable, the resample source, a microphone picking up the speaker - the lag is
- * the true round trip and is adopted directly. Runs on the repaint thread. */
-static void looper_autocal_step(void)
-{
-    enum { M = 2048, MAXLAG = 4096 };
-    static long long next_at;
-    if (now_ms() < next_at)
-        return;
-    unsigned O = g_outtap_w, I = g_inhist_w;
-    if (O < M + MAXLAG + 2000 || I < M + MAXLAG + 2000)
-        return;
-    next_at = now_ms() + 2500;
-
-    static float outw[M];
-    unsigned o0 = O - MAXLAG - M;
-    float eo = 0.f;
-    for (unsigned k = 0; k < M; ++k) {
-        float v = g_outtap[(o0 + k) % OUTTAP_FRAMES];
-        outw[k] = v;
-        eo += v * v;
-    }
-    if (eo < 1e-4f)
-        return;
-    long base = (long)I - (long)O;
-    unsigned i0 = (unsigned)((long)o0 + base);
-    float best = 0.f;
-    unsigned best_lag = 0;
-    for (unsigned lag = 0; lag < MAXLAG; lag += 2) {
-        float acc = 0.f, ei = 0.f;
-        unsigned idx = i0 + lag;
-        for (unsigned k = 0; k < M; k += 2) {
-            float b = g_inhist[(idx + k) & (INHIST_FRAMES - 1)];
-            acc += outw[k] * b;
-            ei += b * b;
-        }
-        float norm = sqrtf(eo * ei);
-        if (norm > 1e-6f) {
-            float c = acc / norm;
-            if (c > best) {
-                best = c;
-                best_lag = lag;
-            }
-        }
-    }
-    if (best > 0.45f) {
-        if (g_auto_ok && best_lag + 128 > g_auto_lag && best_lag < g_auto_lag + 128)
-            g_auto_lag = (g_auto_lag * 3 + best_lag) / 4;
-        else
-            g_auto_lag = best_lag;
-        g_auto_ok = 1;
-        looper_force_latency(g_auto_lag);
-        mlog("minimod: autocal lag=%u conf=%.2f\n", g_auto_lag, (double)best);
-    } else {
-        g_auto_ok = 0;
-    }
-}
-
-/* If the chirp found no return path, try again a few times: the user may have
- * switched the input source after opening the view. */
-static void looper_cal_retry(void)
-{
-    static long long next_at;
-    static int tries;
-    if (!looper_is_open()) {
-        tries = 0;
-        return;
-    }
-    if (looper_calibration_state() != 5 || tries >= 5)
-        return;
-    if (now_ms() < next_at)
-        return;
-    struct looper_view v;
-    if (looper_snapshot(&v) && v.recording_pad >= 0)
-        return;
-    tries++;
-    next_at = now_ms() + 4000;
-    looper_calibrate();
 }
 
 static void audio_writer(void *self, void *input, size_t frames, int offset)
@@ -7474,6 +7401,10 @@ __attribute__((constructor)) static void load(void)
     debug_mode = dbg_env && atoi(dbg_env) != 0;
     const char *probe_env = getenv("MINIMOD_PROBE");
     probe_mode = probe_env && atoi(probe_env) != 0;
+    real_hw_malloc = (unsigned (*)(void **))dlsym(RTLD_NEXT, "snd_pcm_hw_params_malloc");
+    real_hw_current = (int (*)(void *, void *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_current");
+    real_hw_bufsize = (int (*)(void *, unsigned long *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_get_buffer_size");
+    real_hw_free = (void (*)(void *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_free");
     looper_cfg_load();
     {
         const char *lat = getenv("MINIMOD_LOOP_LAT");

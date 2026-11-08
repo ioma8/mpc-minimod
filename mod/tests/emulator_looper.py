@@ -5,7 +5,8 @@ page. It clears any loops left from an earlier run.
 
 What it proves, in order:
   * SAMPLE OPTIONS has a Live Looper entry and it opens a fullscreen view
-  * opening it measures the round-trip latency from a chirp (loop cable here)
+  * the record latency is the firmware's own ALSA ring geometry (one buffer
+    per direction), read from the device without any probe
   * the metronome click is off by default
   * a pad records from the selected input source and closes into playback,
     with a measured latency compensation on the take
@@ -142,21 +143,18 @@ def main():
         tap(other)
         control(name, 'release')
 
-    # --- the view calibrates itself on open: with the loop cable in, the
-    #     chirp it plays comes back and the measured delay is used
-    route('loop')
+    # --- the record latency is the firmware's own ring geometry, read from the
+    #     device: one full ALSA buffer per direction, no probe involved
+    route('tone')
     if u32(symbol('g_open')):
         close_looper()          # a previous run may have left the view open
     open_looper()
     assert u32(symbol('g_open')) == 1, 'the looper view did not open'
-    deadline = time.monotonic() + 4
-    while time.monotonic() < deadline and u32(symbol('g_cal_state')) in (1, 2, 3):
-        time.sleep(0.05)
-    cal_state = u32(symbol('g_cal_state'))
-    cal_frames = u32(symbol('g_cal_result'))
-    assert cal_state == 4, f'round-trip calibration failed (state {cal_state})'
-    assert 300 < cal_frames < 6000, f'implausible calibrated latency {cal_frames}'
-
+    time.sleep(0.5)
+    buf_out = u32(symbol('g_buf_out'))
+    buf_in = u32(symbol('g_buf_in'))
+    assert buf_out > 0 and buf_in > 0, (buf_out, buf_in)
+    cal_frames = buf_out + buf_in
     route('tone')
     clear_all()
     time.sleep(0.3)
@@ -173,7 +171,7 @@ def main():
     state, length, rec, lat = snapshot()[0]
     assert length > 40000, (state, length, rec)
     assert abs(length - rec) < 4000, (length, rec)
-    assert lat > 0, f'no latency compensation on the take: {lat}'
+    assert lat == cal_frames, f'take latency {lat} != ring geometry {cal_frames}'
 
     # --- unplug the input: what remains can only be the loop we recorded
     route('none')
@@ -254,7 +252,7 @@ def main():
     assert ssh('systemctl show ac50 -p NRestarts').strip().endswith('0'), 'app restarted'
     assert int(ssh('pidof "MPC Sample"')) == pid, 'app pid changed'
     print(f'live looper: loop {loop_length} frames ({loop_length / 44100:.2f}s), '
-          f'{loop_rms:.3f} rms at {loop_hz:.0f} Hz, calib {cal_frames} frames, '
+          f'{loop_rms:.3f} rms at {loop_hz:.0f} Hz, ring {cal_frames} frames, '
           f'take latency {take_lat} frames, sync {pulse}, '
           f'quantized {quant_rec} -> {quant_len}')
 

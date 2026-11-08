@@ -71,20 +71,12 @@ void looper_stop_all(void);
 /* Record latency compensation, in frames: the measured output + input delay
  * plus whatever waits in the input ring. Snapshotted when a take starts. */
 void looper_set_latency(unsigned frames);
+void looper_set_latency_ex(unsigned frames, char source);
 unsigned looper_input_backlog(void);
 int looper_click_enabled(void);
 /* Show a short status line in the view. */
 void looper_notice(const char *text);
 
-/* Round-trip latency calibration: arm a chirp when the view opens, finish the
- * correlation on the UI thread once the capture window is full. */
-void looper_calibrate(void);
-int looper_calibration_pending(void);
-void looper_calibration_finish(void);
-int looper_calibration_state(void);
-void looper_force_latency(unsigned frames);
-void looper_seed_latency(unsigned frames);
-unsigned looper_calibrated_latency(void);
 
 /* Audio hooks. `channels` is planar float as the firmware passes it. */
 void looper_input(const float *const *channels, int count, unsigned frames);

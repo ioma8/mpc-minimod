@@ -48,20 +48,6 @@ static volatile uint64_t g_pulse_epoch;
 static volatile uint64_t g_t; /* played frames since open */
 static volatile unsigned g_lat; /* measured record latency, frames */
 
-/* Round-trip calibration: a short chirp is mixed into the output when the view
- * opens and the input is captured for a moment afterwards. If the chirp comes
- * back (loop cable, resample, a microphone hearing the speaker) the measured
- * delay is used directly; if it does not, the buffer-based estimate stays. */
-#define LP_CAL_PROBE 1323u  /* 30 ms chirp */
-#define LP_CAL_CAP 32768u   /* capture window, 0.74 s */
-static volatile int g_cal_state;      /* 0 idle, 1 arm, 2 capture, 3 ready, 4 done, 5 failed */
-static volatile uint64_t g_cal_probe_t;
-static volatile uint64_t g_cal_in_t;
-static volatile unsigned g_cal_w;
-static volatile unsigned g_cal_emit;
-static float g_cal_cap[LP_CAL_CAP];
-static int g_cal_result;
-static float g_cal_conf;
 static volatile unsigned g_lat_used; /* latency snapshotted for the last take */
 static volatile char g_lat_src = 'E'; /* E estimate, C chirp, A correlation, S seeded */
 
@@ -377,6 +363,12 @@ void looper_set_latency(unsigned frames)
     g_lat = frames > LP_LAT_MAX ? LP_LAT_MAX : frames;
 }
 
+void looper_set_latency_ex(unsigned frames, char source)
+{
+    g_lat = frames > LP_LAT_MAX ? LP_LAT_MAX : frames;
+    g_lat_src = source;
+}
+
 unsigned looper_input_backlog(void)
 {
     return g_ring_w - g_ring_r;
@@ -392,140 +384,11 @@ void looper_notice(const char *text)
     say(text);
 }
 
-/* -------------------------------------------------------- calibration */
-static float probe_sample(unsigned i)
-{
-    if (i >= LP_CAL_PROBE)
-        return 0.f;
-    float u = (float)i / (float)LP_CAL_PROBE;
-    float f = 1000.f + 3000.f * u;                 /* 1 kHz -> 4 kHz chirp */
-    float win = 0.5f - 0.5f * cosf(6.2831853f * u);
-    return sinf(6.2831853f * f * (float)i / (float)LP_RATE) * win * 0.4f;
-}
-
-void looper_calibrate(void)
-{
-    if (!g_open)
-        return;
-    g_cal_w = 0;
-    g_cal_emit = 0;
-    g_cal_in_t = 0;
-    g_cal_result = 0;
-    g_cal_conf = 0.f;
-    g_cal_state = 1;
-}
-
-int looper_calibration_pending(void)
-{
-    return g_cal_state == 3;
-}
-
-/* Run on the UI thread when the capture window is full. Correlates the known
- * chirp against the capture and keeps the result only when the peak is
- * clearly above the surrounding energy. */
-void looper_calibration_finish(void)
-{
-    if (g_cal_state != 3)
-        return;
-    unsigned cap = g_cal_w;
-    if (cap < LP_CAL_PROBE * 4) {
-        g_cal_state = 5;
-        return;
-    }
-    float ep = 0.f;
-    for (unsigned i = 0; i < LP_CAL_PROBE; i += 2)
-        ep += probe_sample(i) * probe_sample(i);
-    if (ep < 1e-9f) {
-        g_cal_state = 5;
-        return;
-    }
-    float best = 0.f;
-    unsigned best_lag = 0;
-    unsigned limit = cap - LP_CAL_PROBE;
-    for (unsigned lag = 0; lag + LP_CAL_PROBE <= cap; ++lag) {
-        float acc = 0.f, ei = 0.f;
-        for (unsigned i = 0; i < LP_CAL_PROBE; i += 2) {
-            float v = g_cal_cap[lag + i];
-            acc += v * probe_sample(i);
-            ei += v * v;
-        }
-        if (ei < 1e-9f)
-            continue;
-        float c = acc / sqrtf(ei * ep);
-        if (c > best) {
-            best = c;
-            best_lag = lag;
-        }
-    }
-    (void)limit;
-    g_cal_conf = best;
-    if (best < 0.3f) {
-        g_cal_state = 5;
-        say("CALIB: no return, using estimate");
-        return;
-    }
-    int64_t d = (int64_t)best_lag + ((int64_t)g_cal_in_t - (int64_t)g_cal_probe_t);
-    if (d < 0)
-        d = 0;
-    if (d > 8000)
-        d = 8000;
-    g_cal_result = (int)d;
-    g_lat = (unsigned)d;
-    g_cal_state = 4;
-    g_lat_src = 'C';
-    char line[40];
-    snprintf(line, sizeof line, "CALIB %d ms", (int)(d * 1000 / LP_RATE));
-    say(line);
-}
-
-/* Adopt a latency measured earlier (persisted at startup) without pretending a
- * calibration just ran. */
-void looper_seed_latency(unsigned frames)
-{
-    if (frames > LP_LAT_MAX)
-        frames = LP_LAT_MAX;
-    g_cal_result = (int)frames;
-    g_lat = frames;
-    g_lat_src = 'S';
-}
-
-/* Adopt a latency measured by the continuous input/output correlation. */
-void looper_force_latency(unsigned frames)
-{
-    if (frames > LP_LAT_MAX)
-        frames = LP_LAT_MAX;
-    g_cal_result = (int)frames;
-    g_lat = frames;
-    g_cal_state = 4;
-    g_lat_src = 'A';
-}
-
-int looper_calibration_state(void)
-{
-    return g_cal_state;
-}
-
-unsigned looper_calibrated_latency(void)
-{
-    return g_cal_result > 0 ? (unsigned)g_cal_result : 0;
-}
-
 /* ------------------------------------------------------------ audio input */
 /* Shared tail: one block of mono input, already in float. */
 static void input_block(const float *mono, unsigned n, float peak)
 {
     __atomic_add_fetch(&g_input_blocks, 1, __ATOMIC_RELAXED);
-    if (g_cal_state == 2) {
-        if (!g_cal_in_t)
-            g_cal_in_t = g_t;
-        for (unsigned i = 0; i < n; ++i) {
-            if (g_cal_w >= LP_CAL_CAP) {
-                g_cal_state = 3;
-                break;
-            }
-            g_cal_cap[g_cal_w++] = mono[i];
-        }
-    }
     int rec = __atomic_load_n(&g_rec_count, __ATOMIC_ACQUIRE);
     unsigned w = g_ring_w;
     for (unsigned i = 0; i < n; ++i) {
@@ -713,15 +576,6 @@ void looper_render_s32(int32_t *buf, unsigned channels, unsigned frames)
                         finish_pad(pd); /* auto-close at the limit */
                 }
             }
-        }
-        if (g_cal_state == 1) {
-            g_cal_probe_t = t;
-            g_cal_emit = 0;
-            g_cal_state = 2; /* capture starts on the same block */
-        }
-        if (g_cal_state == 2 && g_cal_emit < LP_CAL_PROBE) {
-            for (unsigned i = 0; i < n && g_cal_emit < LP_CAL_PROBE; ++i)
-                add[i] += probe_sample(g_cal_emit++);
         }
         if (g_sync && g_click) {
             unsigned q = g_sync_frames;

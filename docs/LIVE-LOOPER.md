@@ -126,46 +126,31 @@ Mixing there instead of in the planar writer hook means the loops land on the
 device no matter which device object rendered the app's own sound, and it is the
 same block a hardware jack would receive.
 
-### Latency: measured on open, applied per take
+### Latency: the firmware's own ring geometry
 
-A frame written to the output is heard `out` frames later; a frame read from the
-input was captured `in` frames ago (plus whatever waits in the mod's ring).
-Recording without correcting that writes the performance late in the loop, which
-is exactly what makes overdubs and synced loops feel behind.
+The firmware opens its capture and playback streams as one linked duplex device
+on the same clock, so what it has buffered is exactly the recording latency: one
+full ring of input that was captured but not yet consumed, plus one full ring of
+output that has been written but not yet played. That is the number the sampler
+itself works with, and the looper reads it straight from ALSA with
+`snd_pcm_hw_params_get_buffer_size` on both of the firmware's handles — no probe,
+no return path, so **headphones, USB audio and a silent instrument input all get
+the right value**. The sizes are re-read every few seconds in case the device
+reopens with a different buffer (USB, headphones).
 
-Latency is measured in three layers, so it works even when the simple case does
-not:
+In the lab the firmware uses 1024 frames per ring, so the looper applies
+`2048` frames (46 ms); a click recorded through the loop cable lands **69 frames
+(1.6 ms)** from the expected pulse grid. The strip shows `BUF 46ms`.
 
-1. **Chirp on open.** The view plays a 30 ms 1→4 kHz chirp, captures 0.74 s of
-   input and cross-correlates the two with a normalised score (`CAL`). If the chirp comes
-   back — a loop cable, the resample source, a microphone that hears the speaker
-   — the measured round trip becomes the compensation. It repeats up to five
-   times, 4 s apart, while no take is running, so switching the input source
-   after opening still calibrates.
-2. **Continuous correlation while playing (`AUTO`).** The mod keeps the last two seconds
-   of what it sent to the device and the same span of input, and every 2.5 s
-   cross-correlates them. Whenever the input contains any of the output (bleed,
-   resample, cable) the lag is the true round trip, and it is adopted directly —
-   this tracks changes and corrects a bad chirp.
-3. **Buffer estimate (`EST`).** With no return path at all (a silent instrument input),
-   it falls back to the device buffers: `snd_pcm_delay` of the output (smoothed)
-   plus the block being written, `snd_pcm_avail` of the capture stream and the
-   frames waiting in the input ring.
+`K1` adds a trim of ±400 ms on top for the room or personal preference, stored in
+`/data/minimod-looper.cfg` and reused at the next start (the strip then shows
+`BUF` with the trimmed total). If the firmware ever reports no buffer geometry,
+the mod falls back to `snd_pcm_delay` + `snd_pcm_avail` (`EST`), and
+`MINIMOD_LOOP_LAT=<frames>` forces a fixed value for experiments.
 
-A successful measurement is written to `/data/minimod-looper.cfg` and seeded at
-the next start (`SAVED`), so one calibration lasts until the hardware setup changes. `K1`
-adds a trim of ±400 ms (stored in the same file) for the room or personal
-preference.
-
-The value is snapshotted when a take starts and used for the whole take: a new
-recording drops its first `lat` frames (they belong before the loop start) and
-overdubs write `lat` frames earlier, wrapping inside the loop.
-
-Measured in the emulator with the loop cable in: the chirp calibrates
-consistently (1808 frames over five open/close cycles), the continuous
-correlation locks at 1844 while a loop plays, and clicks recorded through the
-cable land **45 frames** from the expected pulse grid (1 ms). A fixed
-`MINIMOD_LOOP_LAT=<frames>` overrides the whole thing for experiments.
+The compensation is snapshotted when a take starts and used for the whole take:
+a new recording drops its first `lat` frames (they belong before the loop start)
+and overdubs write `lat` frames earlier, wrapping inside the loop.
 
 ### Clock and threads
 
@@ -197,14 +182,14 @@ The test drives the panel and reads the mod's own state and output tap from
 Last run on the release build:
 
 ```
-live looper: loop 51968 frames (1.18s), 0.150 rms at 441 Hz, calib 1621 frames,
-take latency 1621 frames, sync 51968, quantized 25643 -> 51968
+live looper: loop 51968 frames (1.18s), 0.150 rms at 441 Hz, ring 2048 frames,
+take latency 2048 frames, sync 51968, quantized 25600 -> 51968
 ```
 
-What that covers, in order: opening the view calibrates the round-trip latency
-from the chirp with the loop cable in; the menu entry opens a fullscreen view
+What that covers, in order: opening the view reads the firmware's ring geometry
+for the latency; the menu entry opens a fullscreen view
 with 16 empty pads and the click off; a pad records ~1 s from the tone input and
-closes into `PLAY` with a compensation equal to the calibration; after the input
+closes into `PLAY` with a compensation equal to the ring geometry; after the input
 is unplugged the device output still carries the recorded 440 Hz at 0.15 rms
 (`441 Hz` by zero crossings); a second press stops it and the output goes silent;
 `SHIFT`+pad reaches `DUB` and the next press returns to `PLAY` with the length
@@ -226,11 +211,9 @@ in-process tap is.
 
 * Mono loops, 8 s maximum, no undo. The 44.1 kHz constant is only used for the
   seconds readout; looping itself is frame-based.
-* Both automatic measurements need the selected input to hear the output (loop
-  cable, resample, speaker + microphone). With a silent instrument input the
-  buffer estimate is used, seeded by the last stored measurement, and `K1` is
-  the trim. A measured value is a property of the device's audio path, so it
-  applies to every source.
+* The ring geometry is a property of the device's audio path, so it applies to
+  every source. `K1` covers acoustic round trips outside the firmware (a room
+  mic, an external converter) and is remembered in `/data/minimod-looper.cfg`.
 * **The app's hidden page selection still follows the last pad press.** Pad
   events are dispatched to the app's observer listeners upstream of the note
   handler, and the pad-grid selection is one of those siblings. Blocking the
