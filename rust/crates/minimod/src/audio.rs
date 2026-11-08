@@ -56,10 +56,18 @@ pub const MAX_CHANNELS: usize = 8;
 /// The app's writer: closure, channel array, frames, offset.
 pub type Writer = unsafe extern "C" fn(usize, usize, usize, i32);
 
-thread_local! {
-    /// The copy the mod hands to the app when it mixed something in.
-    static SCRATCH: core::cell::UnsafeCell<[[f32; MAX_FRAMES]; MAX_CHANNELS]> =
-        const { core::cell::UnsafeCell::new([[0.0; MAX_FRAMES]; MAX_CHANNELS]) };
+/// The copy the mod hands to the app when it mixed something in.
+///
+/// Flat and heap-allocated on first use rather than a thread-local: a 128 KiB
+/// thread-local lands in `.tbss` and pushed `.bss` outside the loader's last
+/// segment, so the mod's own globals were addressed past the end of its image.
+static SCRATCH: std::sync::Mutex<Option<Box<[f32]>>> = std::sync::Mutex::new(None);
+
+/// Run `body` with the scratch buffer, allocating it on first use.
+fn with_scratch<T>(body: impl FnOnce(&mut [f32]) -> T) -> Option<T> {
+    let mut guard = SCRATCH.lock().ok()?;
+    let buffer = guard.get_or_insert_with(|| vec![0.0_f32; MAX_FRAMES * MAX_CHANNELS].into());
+    Some(body(buffer))
 }
 
 /// Mix the preview into the app's block and forward it.
@@ -93,10 +101,7 @@ pub unsafe fn write(
         forward(orig, self_address, input, frames, offset);
         return None;
     }
-    let peak = SCRATCH.with(|scratch| {
-        // SAFETY: the scratch buffer is thread-local, so this is the only user,
-        // and the bounds were checked above.
-        let scratch = unsafe { &mut *scratch.get() };
+    let peak = with_scratch(|scratch| {
         let mut pointers: [*mut f32; MAX_CHANNELS] = [core::ptr::null_mut(); MAX_CHANNELS];
         for (index, slot) in pointers.iter_mut().enumerate().take(count) {
             // SAFETY: the caller promises each channel pointer is readable.
@@ -104,18 +109,20 @@ pub unsafe fn write(
             if source.is_null() {
                 return None;
             }
-            // SAFETY: `frames` was checked against the scratch capacity.
+            let channel = &mut scratch[index * MAX_FRAMES..][..frames];
+            // SAFETY: the source is readable for `frames` samples and the
+            // destination is a slice of exactly that length.
             unsafe {
-                core::ptr::copy_nonoverlapping(source, scratch[index].as_mut_ptr(), frames);
+                core::ptr::copy_nonoverlapping(source, channel.as_mut_ptr(), frames);
             }
-            *slot = scratch[index].as_mut_ptr();
+            *slot = channel.as_mut_ptr();
         }
         // SAFETY: every pointer in the array points at `frames` writable samples.
         let peak =
             unsafe { minimod_dsp::bass::preview_mix(&mut pointers[..count], frames, 44_100) };
         Some((pointers, peak))
     });
-    let Some((mut pointers, peak)) = peak else {
+    let Some(Some((mut pointers, peak))) = peak else {
         forward(orig, self_address, input, frames, offset);
         return None;
     };
