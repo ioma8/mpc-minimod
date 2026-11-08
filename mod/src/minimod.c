@@ -87,7 +87,6 @@
 #include "chop_ffi.h"
 #include "pads_ffi.h"
 #include "cfg_ffi.h"
-#include "paint_ffi.h"
 #include "sample_ffi.h"
 #include "status_ffi.h"
 #include "paths_ffi.h"
@@ -125,7 +124,6 @@ static sigjmp_buf g_cc_jmp;
 
 static void mlog(const char *fmt, ...);
 static void toast(const char *text);
-static int toast_visible(void);
 #include "clock_ffi.h"
 static void *g_screen;
 static void looper_draw(void *g);
@@ -632,6 +630,8 @@ static void *g_paint_comp;
 static void *g_paint_gfx;
 static volatile int g_poke_which = -1;
 static void do_poke(void);
+static volatile int g_sdump;
+static void dump_sliders(void *p);
 static volatile float g_poke_value;
 static float g_mark_v0 = -1.0f, g_mark_v1 = -1.0f;
 static volatile int g_pending_cc;
@@ -3200,33 +3200,90 @@ static void repaint_hook(void *comp, uint64_t a, uint64_t b)
 
 static void (*orig_screen_paint)(void *, void *);
 
-/* The toast's text and deadline live in Rust; the paint hook asks for them. */
-static void toast(const char *text)
+/* One-second toast after a trim: text plus a monotonic deadline, drawn by the
+ * paint hook so it costs nothing when idle. */
+static volatile long long g_toast_until;
+static char g_toast_text[48];
+
+static void *toast_expiry(void *arg)
 {
-    void *comp = g_paint_comp ? g_paint_comp : g_screen;
-    minimod_toast((const unsigned char *)text, (minimod_repaint_fn)orig_repaint,
-                  (uintptr_t)comp);
+    (void)arg;
+    struct timespec ts = {.tv_sec = 1, .tv_nsec = 120 * 1000 * 1000};
+    nanosleep(&ts, 0);
+    /* the app only repaints on change, so the last frame would keep the box up */
+    mlog("minimod: toast expiry comp=%p repaint=%p\n", g_paint_comp, orig_repaint);
+    if (orig_repaint && g_paint_comp) {
+        /* the entry takes two packed pairs: (x,y) and (w,h) */
+        orig_repaint(g_paint_comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
+        mlog("minimod: toast expiry repainted the screen\n");
+    }
+    return 0;
 }
 
-static int toast_visible(void)
+static void toast(const char *text)
 {
-    return minimod_toast_visible(minimod_now_ms());
+    size_t n = strlen(text);
+    if (n >= sizeof g_toast_text)
+        n = sizeof g_toast_text - 1;
+    memcpy(g_toast_text, text, n);
+    g_toast_text[n] = 0;
+    g_toast_until = minimod_now_ms() + 1000;
+    {
+        void *comp = g_paint_comp ? g_paint_comp : g_screen;
+        if (orig_repaint && comp)
+            orig_repaint(comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
+    }
+    pthread_t th;
+    int cr = pthread_create(&th, 0, toast_expiry, 0);
+    if (cr == 0)
+        pthread_detach(th);
+    else
+        mlog("minimod: toast thread failed %d\n", cr);
 }
 
 static void draw_colour(void *g, uint32_t v)
 {
-    minimod_paint_colour((uintptr_t)g, v);
+    FN(0x102d5e0, void (*)(void *, uint32_t))(g, v);
 }
-
 static void draw_rect(void *g, int x, int y, int w, int h)
 {
-    minimod_paint_rect((uintptr_t)g, x, y, w, h);
+    FN(0x102e000, void (*)(void *, int, int, int, int))(g, x, y, w, h);
 }
-
 static void draw_text(void *g, const char *s, int x, int y, int w, int h,
                       float size)
 {
-    minimod_paint_text((uintptr_t)g, s, x, y, w, h, size);
+    uint64_t str = 0, font = 0;
+    FN(0xf535c0, void (*)(uint64_t *, const char *))(&str, s);
+    FN(0x1082810, void (*)(uint64_t *, int, float))(&font, 0, size);
+    FN(0x102dca0, void (*)(void *, const uint64_t *))(g, &font);
+    FN(0x10817b0, void (*)(void *, const uint64_t *, int, int, int, int, int, int,
+                           float))(g, &str, x, y, w, h, 0x24, 1, 0.7f);
+    FN(0x1070d60, void (*)(uint64_t *))(&font);
+    FN(0xf0a290, void (*)(uint64_t *))(&str);
+}
+
+static void dump_sliders(void *p)
+{
+    uintptr_t want = base + 0x706e5d0;
+    unsigned n = 0;
+    for (long o = 0; o < 0x20000; o += 8) {
+        uintptr_t q = 0;
+        if (!rd((uintptr_t)p + o, &q, 8))
+            break;
+        if (q != want)
+            continue;
+        uintptr_t s = (uintptr_t)p + (uintptr_t)o;
+        n++;
+        mlog("minimod: slider +0x%lx\n", o);
+        for (long k = 0x160; k < 0x230; k += 4) {
+            float f = 0;
+            if (!rd(s + k, &f, 4))
+                break;
+            if (f > -0.01f && f < 100.5f && f != 0.0f)
+                mlog("minimod:   +0x%lx = %.4f\n", k, (double)f);
+        }
+    }
+    mlog("minimod: dump done, %u sliders\n", n);
 }
 
 static void screen_paint(void *p, void *g)
@@ -3251,6 +3308,10 @@ static void screen_paint(void *p, void *g)
         orig_screen_paint(p, g);
     /* The knob replay runs here, on the UI thread at a safe point, instead of
      * inside the button dispatch where it corrupted the app's state. */
+    if (g_sdump) {
+        g_sdump = 0;
+        dump_sliders(p);
+    }
     if (g_pending_cc) {
         g_pending_cc = 0;
         g_in_inject = 1;
@@ -3269,6 +3330,13 @@ static void screen_paint(void *p, void *g)
     if (g_hpss_restore_pending && !g_shift && sample_page_visible()) {
         g_hpss_restore_pending = 0;
         hpss_restore_chop();
+    }
+    {
+        static int dumped;
+        if (!dumped && getenv("MINIMOD_DUMP")) {
+            dumped = 1;
+            dump_sliders(p);
+        }
     }
     /* Diff the painting screen between paints: whatever changes when a knob
      * turns is exactly what the page stores for its markers. */
@@ -3313,20 +3381,20 @@ static void screen_paint(void *p, void *g)
     /* Trim edges of the last autotrim, drawn where the page's own markers would
      * be: the page itself only re-reads its trim when the pad is re-selected, so
      * without this the result of SHIFT+B3 would be invisible. */
-    if (toast_visible()) {
+    if (g_toast_until > minimod_now_ms() && g_toast_text[0]) {
         /* Cover the Start/End/Loop bar. Near-black fill, an amber rule top and
          * bottom (the colour the page already uses for the waveform) and white
          * 18 pt text, so it reads at a glance without looking like a dialog. */
         int x = 0, y = 194, w = 320, h = 46;
-
+        mlog("minimod: toast draw '%s' comp=%p vt=%#lx\n", g_toast_text, p,
+             (unsigned long)(FIELD(p, 0, uintptr_t) - base));
         draw_colour(g, 0xff15151a);
         draw_rect(g, x, y, w, h);
         draw_colour(g, 0xffffb43c);
         draw_rect(g, x, y, w, 2);
         draw_rect(g, x, y + h - 2, w, 2);
         draw_colour(g, 0xffffffff);
-        draw_text(g, (const char *)minimod_toast_text(), x + 4, y + 6, w - 8,
-                  h - 12, 18.0f);
+        draw_text(g, g_toast_text, x + 4, y + 6, w - 8, h - 12, 18.0f);
     }
     if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f && !getenv("MINIMOD_NOOVERLAY")) {
         int x0 = 10 + (int)(g_mark_v0 * 295.0f + 0.5f);
