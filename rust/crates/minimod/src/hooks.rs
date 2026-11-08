@@ -453,6 +453,18 @@ pub unsafe extern "C" fn minimod_install_hook(base: usize, site: usize, hook: us
     }
 }
 
+/// Whether at least one hook was installed.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_hooks_touched() -> i32 {
+    match ENGINE.get() {
+        Some(engine) => match engine.lock() {
+            Ok(engine) => i32::from(engine.touched()),
+            Err(_) => 0,
+        },
+        None => 0,
+    }
+}
+
 /// Mark the hook pages executable once every hook is in place.
 #[unsafe(no_mangle)]
 pub extern "C" fn minimod_seal_hooks() {

@@ -7,6 +7,11 @@
 
 int minimod_midi_site_ok(uintptr_t base);
 
+/* The hook engine, from Rust (rust/crates/minimod/src/hooks.rs). */
+void *minimod_install_hook(uintptr_t base, uintptr_t site, uintptr_t hook);
+int minimod_hooks_touched(void);
+void minimod_seal_hooks(void);
+
 /* A decoded MIDI note event, from Rust (rust/crates/minimod/src/midi.rs). */
 struct minimod_note {
     uint32_t kind;

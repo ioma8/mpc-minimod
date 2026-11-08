@@ -73,6 +73,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "hooks_ffi.h"
 #include "levels_ffi.h"
 #include "hooks_ffi.h"
 #include "page_ffi.h"
@@ -104,10 +105,6 @@
 
 /* ---------------------------------------------------------------- state */
 static uintptr_t base;
-static unsigned char *relay_page;
-static unsigned char *tramp_page;
-static int nslots, ntramp;
-static int relay_used;
 static int hook_mask = 0xf2; /* 2 proc, 16 buttons, 32 note_on, 64 cs, 128 note_off */ /* 1 ctor (crashes, disabled), 2 proc, 16 buttons,
                                 32 note_on, 64 cs_event, 128 note_off */ /* 1 ctor, 2 proc, 4 plus, 8 minus, 16 buttons,
                                 32 note_on, 64 cs_event, 128 note_off */
@@ -251,37 +248,7 @@ static void ranges_load(void)
  *   slot    : ldr x16, #8 ; br x16 ; .quad hook
  *   tramp   : <displaced insn> ; b entry+8
  * The trampoline is what the hook calls to run the original code. */
-static uint32_t enc_b(uintptr_t from, uintptr_t to)
-{
-    long off = (long)to - (long)from;
-    if (off < -(1L << 27) || off >= (1L << 27))
-        return 0;
-    return 0x14000000u | ((uint32_t)(off >> 2) & 0x03FFFFFFu);
-}
 
-static int pc_relative(uint32_t insn)
-{
-    if ((insn & 0x7C000000u) == 0x14000000u) /* B / BL            */
-        return 1;
-    if ((insn & 0x9F000000u) == 0x90000000u) /* ADRP              */
-        return 1;
-    if ((insn & 0x9F000000u) == 0x10000000u) /* ADR               */
-        return 1;
-    if ((insn & 0x3B000000u) == 0x18000000u) /* LDR literal       */
-        return 1;
-    if ((insn & 0x7E000000u) == 0x34000000u) /* CBZ / CBNZ        */
-        return 1;
-    if ((insn & 0x7E000000u) == 0x36000000u) /* TBZ / TBNZ        */
-        return 1;
-    /* Indirect branches and returns must not be copied into a trampoline. */
-    if ((insn & 0xFFFFFC1Fu) == 0xD61F0000u) /* BR  xN            */
-        return 1;
-    if ((insn & 0xFFFFFC1Fu) == 0xD63F0000u) /* BLR xN            */
-        return 1;
-    if ((insn & 0xFFFFFBFFu) == 0xD65F0000u) /* RET               */
-        return 1;
-    return 0;
-}
 
 /* Each hook saves the caller's stack pointer in the relay slot and the
  * trampoline restores it before running the displaced instruction, so the
@@ -331,70 +298,11 @@ static int firmware_ok(void)
     return 1;
 }
 
+/* The engine that maps the pages, displaces the prologue and patches the site
+ * lives in Rust; this is only the C name the constructor calls. */
 static void *install_hook(uintptr_t site, void *hook)
 {
-    if (!relay_page || !tramp_page || nslots >= 60 || ntramp >= 60)
-        return 0;
-    uint32_t first = 0;
-    if (!rd(site, &first, 4))
-        return 0;
-    /* paciasp/bti are the usual prologue, but many functions start with a
-     * plain instruction.  Any non-PC-relative instruction can be copied into
-     * the trampoline just as safely. */
-    if (pc_relative(first)) {
-        mlog("minimod: site %p starts PC-relative (%08x)\n", (void *)site, first);
-        return 0;
-    }
-    /* Copy as much of the prologue as is safe: everything up to the first
-     * pc-relative instruction (those compute their address from their own
-     * location, so they must run in place) but never fewer than the erased
-     * first instruction. */
-    uint32_t pro[4];
-    if (!rd(site, pro, sizeof pro))
-        return 0;
-    unsigned n = 4;
-    for (unsigned i = 1; i < 4; ++i)
-        if (pc_relative(pro[i])) {
-            n = i;
-            break;
-        }
-    unsigned char *slot = relay_page + (size_t)nslots * 32;
-    unsigned char *tr = tramp_page + (size_t)ntramp * 32;
-    uint32_t b_body = enc_b((uintptr_t)tr + n * 4, site + n * 4);
-    uint32_t b_slot = enc_b(site, (uintptr_t)slot);
-    if (!b_body || !b_slot) {
-        mlog("minimod: hook %p out of B range\n", (void *)site);
-        return 0;
-    }
-    uint32_t ldr = 0x58000050u; /* ldr x16, [pc, #8] */
-    uint32_t br = 0xD61F0200u;  /* br  x16         */
-    memcpy(slot, &ldr, 4);
-    memcpy(slot + 4, &br, 4);
-    memcpy(slot + 8, &hook, 8);
-    memcpy(tr, pro, n * 4);
-    memcpy(tr + n * 4, &b_body, 4);
-
-    uintptr_t page = site & ~(uintptr_t)0xfff;
-    uintptr_t last = (site + 3) & ~(uintptr_t)0xfff;
-    size_t span = (size_t)(last - page) + 0x1000; /* only the pages we patch */
-    if (mprotect((void *)page, span, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        mlog("minimod: mprotect(%p) failed: %s\n", (void *)page, strerror(errno));
-        return 0;
-    }
-    int ok = wr(site, &b_slot, 4);
-    __builtin___clear_cache((char *)site, (char *)(site + 4));
-    mprotect((void *)page, span, PROT_READ | PROT_EXEC);
-    if (!ok) {
-        mlog("minimod: patch of %p failed\n", (void *)site);
-        return 0;
-    }
-    nslots++;
-    ntramp++;
-    __builtin___clear_cache((char *)tr, (char *)tr + n * 4 + 4);
-    __builtin___clear_cache((char *)slot, (char *)slot + 16);
-    relay_used = 1;
-    mlog("minimod: hook %p (prologue %u)\n", (void *)site, n);
-    return tr;
+    return minimod_install_hook(base, site, (uintptr_t)hook);
 }
 
 /* ---------------------------------------------------------- MIDI hook (lazy)
@@ -4207,30 +4115,6 @@ __attribute__((constructor)) static void load(void)
         return;
     }
 
-    /* The B at each site reaches only +-128 MB, so the relay must live near
-     * the app. The stock binary ends at ~0x71b0000; try just above it. */
-    for (uintptr_t off = 0x7900000; off < 0x7f00000; off += 0x10000) {
-        relay_page = mmap((void *)(base + off), 4096, PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-        if (relay_page != MAP_FAILED)
-            break;
-    }
-    if (relay_page == MAP_FAILED) {
-        mlog("minimod: relay mmap near base failed\n");
-        return;
-    }
-    /* trampolines: the displaced instruction plus a branch back into the app */
-    for (uintptr_t off = 0x7920000; off < 0x7f80000; off += 0x10000) {
-        tramp_page = mmap((void *)(base + off), 4096, PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-        if (tramp_page != MAP_FAILED)
-            break;
-    }
-    if (tramp_page == MAP_FAILED) {
-        mlog("minimod: trampoline mmap near base failed\n");
-        return;
-    }
-    mlog("minimod: relay at %p (site %p)\n", relay_page, (void *)(base + A_SIXTEEN_PROC));
     const char *env = getenv("MINIMOD_HOOKS");
     if (env && *env)
         hook_mask = atoi(env);
@@ -4351,22 +4235,13 @@ __attribute__((constructor)) static void load(void)
              (void *)orig_hpss_writer);
     }
     install_screen_paint();
-    if (!relay_used) {
+    if (!minimod_hooks_touched()) {
         mlog("minimod: no hook installed\n");
         return;
     }
-    /* Hardening failures must never take the host app down: leave the pages
-     * writable and keep running unhooked rather than exit. */
-    if (mprotect(relay_page, 4096, PROT_READ | PROT_EXEC) != 0) {
-        mlog("minimod: relay mprotect failed: %s (continuing)\n", strerror(errno));
-        return;
-    }
-    if (mprotect(tramp_page, 4096, PROT_READ | PROT_EXEC) != 0) {
-        mlog("minimod: tramp mprotect failed: %s (continuing)\n", strerror(errno));
-        return;
-    }
-    mlog("minimod: codes relay=%p tramp=%p\n", (void *)relay_page,
-         (void *)tramp_page);
+    /* Hardening failures must never take the host app down: the engine leaves
+     * the pages writable and the app keeps running. */
+    minimod_seal_hooks();
     mlog("minimod: base=%p mask=%d safe=%d probe=%d (ctor=%d proc=%d plus=%d minus=%d)\n",
          (void *)base, hook_mask, safe_mode, probe_mode, t_ctor != 0, t_proc != 0);
 }
