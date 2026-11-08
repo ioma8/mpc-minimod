@@ -7,6 +7,9 @@
 
 int minimod_midi_site_ok(uintptr_t base);
 
+/* The image base the crate addresses firmware calls from. */
+void minimod_set_base(uintptr_t base);
+
 /* The hook engine, from Rust (rust/crates/minimod/src/hooks.rs). */
 void *minimod_install_hook(uintptr_t base, uintptr_t site, uintptr_t hook);
 int minimod_hooks_touched(void);

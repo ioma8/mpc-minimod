@@ -298,6 +298,26 @@ General lesson, from two reverts now: **a port inherits its dependencies'
 behaviour, so diff the helpers it calls, not only its own body** - or, better,
 pass the data in so the port cannot resolve it differently.
 
+## State at the "no emulator" checkpoint
+
+After round 55 the device suite was last run green on `3ccef7e` (looper, bass,
+HPSS, reverb, MIDI, spectral).  The work after that was done without the
+emulator, so everything below is build- and test-verified only:
+
+* `jobflow` owns the whole job lifecycle (start, worker, finish) and the bass
+  action's source backup;
+* `paint` holds the drawing primitives and the toast, **not wired** - the glue
+  still draws with its own calls, and the wiring needs the paint hook's forward
+  declarations moved in one edit (the incremental attempt broke the file's
+  declaration block and was reverted);
+* `firmware` gained the five-, eight-argument and colour call helpers plus the
+  cached image base.
+
+Remaining glue at this checkpoint: 2 651 lines in 91 functions, of which the big
+ones are `commit_trim` (359), `buttons` (179), `trim_probe` (154),
+`screen_paint` (143), `cc_capture` (78), `looper_draw` (76), `hpss_draw_menu`
+(75) and `do_autotrim` (62).
+
 ## Running the device suite
 
 Every test drives the app from a fresh start; running one straight after another

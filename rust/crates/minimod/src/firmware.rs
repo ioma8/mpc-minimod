@@ -61,6 +61,22 @@ pub struct Firmware {
     base: usize,
 }
 
+/// The image base the glue found, so the crate can address firmware calls
+/// without being handed it at every entry point.
+static BASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Record the image base; the constructor calls this once.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_set_base(base: usize) {
+    BASE.store(base, core::sync::atomic::Ordering::Release);
+}
+
+/// The image base the constructor recorded, or zero before it runs.
+#[must_use]
+pub fn base() -> usize {
+    BASE.load(core::sync::atomic::Ordering::Acquire)
+}
+
 impl Firmware {
     /// The app's image at `base`, as reported by the dynamic loader.
     #[must_use]
@@ -431,6 +447,93 @@ mod platform {
     pub(super) fn write(_address: usize, _bytes: &[u8]) -> bool {
         false
     }
+}
+
+/// A firmware function taking a pointer and four integers.
+pub type VoidOfFive = unsafe extern "C" fn(usize, i32, i32, i32, i32);
+/// A firmware function taking eight arguments: pointer, pointer, six numbers.
+pub type VoidOfEight = unsafe extern "C" fn(usize, usize, i32, i32, i32, i32, i32, i32, f32);
+/// A firmware function taking a pointer and a colour.
+pub type VoidOfColour = unsafe extern "C" fn(usize, u32);
+
+/// Call a firmware function taking a pointer and a colour.
+///
+/// # Safety
+///
+/// `address` must be the entry point of a function with this exact signature.
+pub unsafe fn void_of_colour(address: usize, target: usize, colour: u32) {
+    // SAFETY: the caller guarantees the address and the signature.
+    let function: VoidOfColour = unsafe { core::mem::transmute(address) };
+    // SAFETY: see above.
+    unsafe { function(target, colour) };
+}
+
+/// Call a firmware function taking a pointer and four integers.
+///
+/// # Safety
+///
+/// `address` must be the entry point of a function with this exact signature.
+pub unsafe fn void_of_five(address: usize, target: usize, x: i32, y: i32, width: i32, height: i32) {
+    // SAFETY: the caller guarantees the address and the signature.
+    let function: VoidOfFive = unsafe { core::mem::transmute(address) };
+    // SAFETY: see above.
+    unsafe { function(target, x, y, width, height) };
+}
+
+/// The arguments of a text draw: where, how big, and the glyph alignment.
+#[derive(Clone, Copy, Debug)]
+pub struct TextBox {
+    /// Left edge.
+    pub x: i32,
+    /// Top edge.
+    pub y: i32,
+    /// Width.
+    pub width: i32,
+    /// Height.
+    pub height: i32,
+    /// Glyph flags the app passes.
+    pub flags: i32,
+    /// Horizontal alignment.
+    pub align: i32,
+    /// Opacity.
+    pub opacity: f32,
+}
+
+/// Call a firmware function taking eight arguments.
+///
+/// # Safety
+///
+/// `address` must be the entry point of a function with this exact signature.
+pub unsafe fn void_of_eight(address: usize, first: usize, second: usize, text: TextBox) {
+    // SAFETY: the caller guarantees the address and the signature.
+    let function: VoidOfEight = unsafe { core::mem::transmute(address) };
+    // SAFETY: see above.
+    unsafe {
+        function(
+            first,
+            second,
+            text.x,
+            text.y,
+            text.width,
+            text.height,
+            text.flags,
+            text.align,
+            text.opacity,
+        );
+    }
+}
+
+/// Build a string object from a C string.
+///
+/// # Safety
+///
+/// `address` must be the entry point of `String(const char *)` and `out`/`text`
+/// must be valid.
+pub unsafe fn string_from_c(address: usize, out: usize, text: usize) {
+    // SAFETY: the caller guarantees the address and the signature.
+    let function: unsafe extern "C" fn(usize, usize) = unsafe { core::mem::transmute(address) };
+    // SAFETY: see above.
+    unsafe { function(out, text) };
 }
 
 #[cfg(test)]

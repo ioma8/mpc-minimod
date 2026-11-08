@@ -29,6 +29,7 @@ pub mod looper_ffi;
 pub mod midi;
 pub mod pads;
 pub mod page;
+pub mod paint;
 pub mod paths;
 pub mod paths_ffi;
 pub mod routing;
