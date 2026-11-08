@@ -223,3 +223,33 @@ When a feature moves to Rust, `mod/build.sh` drops its C object and links the
 Rust static library in its place, and the emulator test for that feature becomes
 the acceptance gate. The C sources stay in `mod/src` until the whole mod is Rust
 because they are the reference the golden fixtures are recorded from.
+
+## What is left, in the order it should be taken
+
+The glue is 4 564 lines and every remaining part has a seam, but they are not
+equally safe to cut.  In order:
+
+1. **`hpss_job` lifetime.** The structure, its allocation and `hpss_free_job` own
+   three buffers plus the source backup.  Nothing in it calls the firmware, so it
+   can move to Rust with ownership replacing the manual `malloc`/`free` pairs
+   (the preview engine already models a singleton this way).  The device tests
+   for Reverb and Bass Synth exercise both the success and the failure paths.
+2. **`hpss_worker`.** The render switch (`bass_sample_render`, `h3m_effect_render`,
+   `hpss_split`) already calls Rust; the C only owns the thread and the done flag.
+   Moving the thread to `std::thread` removes the last `pthread_create` in the
+   feature path.
+3. **`hpss_finalize` + `hpss_extract_ctx`.** The hard part: an arm structure read
+   by a firmware callback, a pad-occupancy poll, and the free-pad wait loop.  It
+   needs the callback trampoline to be built in Rust (the hook machinery already
+   is), so do this after 1 and 2 have made the surrounding state Rust-owned.
+4. **MIDI/16-levels and chop mode.** Device-tested by `emulator_midi_chromatic`
+   and the looper/spectral tests; mostly pure mapping logic once the note hook is
+   Rust-owned.
+5. **The looper/sample-options UI glue** (paint, buttons, menu tree). Last,
+   because it is mostly firmware draw calls with little logic to test.
+6. **The constructor and hook installation**, which is only glue once everything
+   it installs is Rust.
+
+The pattern for each step is fixed: move the logic, keep a `*_ffi.h` with the old
+signatures, delete the C, rebuild, run the device test that covers the feature,
+and only then remove the header.
