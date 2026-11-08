@@ -285,6 +285,19 @@ lines of superseded code from the repository - the binary is unchanged.
 `hpss.c` (153) and `spectral.c` (339) are the opposite case: still compiled, and
 their Rust ports exist and pass their golden fixtures but are **not wired**.
 
+A differential run on the sample the Spectral Chop test chops settled it: on
+`GuitPh-Grove3 E85 91V.wav` (62 259 frames, 24-bit stereo) the C detector returns
+
+    264, 14187, 30059, 45419, 54635      (detected = 5)
+
+and the Rust one
+
+    264, 30059, 45419                     (detected = 3)
+
+Both `positions` *and* `detected` differ, and `detected` is the candidate count
+after the novelty filter - so the divergence starts in candidate detection, not
+in the chroma/timbre thresholds at the end.  Two onsets are simply not found.
+
 The Rust detector was then given the case the old fixture could not express - a
 take that starts with a quarter second of silence and then hits, which is what
 the leading-boundary rule exists for.  It matches the C position for position,
