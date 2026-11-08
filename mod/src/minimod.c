@@ -73,6 +73,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "chop_ffi.h"
 #include "pads_ffi.h"
 #include "cfg_ffi.h"
 #include "sample_ffi.h"
@@ -1337,19 +1338,6 @@ static struct {
     long long deadline;
 } g_spectral;
 
-static unsigned slice_count_of(uintptr_t sample, uintptr_t *begin_out,
-                               uintptr_t *cont_out)
-{
-    uintptr_t buf = 0, begin = 0, end = 0, cap = 0;
-    if (!sample || !rd(sample + 0x130, &buf, 8) || !buf ||
-        !rd(buf + 0x70, &begin, 8) || !rd(buf + 0x78, &end, 8) ||
-        !rd(buf + 0x80, &cap, 8) || end < begin || cap < end ||
-        ((end - begin) & 7) || (end - begin) / 8 > 128)
-        return 0;
-    if (begin_out) *begin_out = begin;
-    if (cont_out) *cont_out = buf + 0x10;
-    return (unsigned)((end - begin) / 8);
-}
 
 static void spectral_finish(const char *error)
 {
@@ -1389,26 +1377,11 @@ static int spectral_manual(void)
     return 1;
 }
 
-static int spectral_verify(void)
-{
-    uintptr_t begin = 0;
-    if (slice_count_of(g_spectral.sample, &begin, 0) != (unsigned)g_spectral.n)
-        return 0;
-    for (int i = 0; i < g_spectral.n; ++i) {
-        uintptr_t slice = 0, start = 0, end = 0;
-        unsigned want_end = i + 1 < g_spectral.n ? g_spectral.pos[i + 1] : g_spectral.frames;
-        if (!rd(begin + (uintptr_t)i * 8, &slice, 8) || !slice ||
-            !rd(slice + 0x78, &start, 8) || !rd(slice + 0xd0, &end, 8) ||
-            start != g_spectral.pos[i] || end != want_end)
-            return 0;
-    }
-    return 1;
-}
 
 static int spectral_write_markers(void)
 {
     uintptr_t cont = 0, selection = 0;
-    slice_count_of(g_spectral.sample, 0, &cont);
+    minimod_slice_count(g_spectral.sample, 0, &cont);
     if (!cont || !rd((uintptr_t)g_screen + 0x180, &selection, 8) || !selection)
         return 0;
     /* Native Reset and Insert, as called by the stock Chop UI. These own the
@@ -1425,7 +1398,7 @@ static int spectral_write_markers(void)
     FN(0x2950bb0, void (*)(uintptr_t, unsigned))(cont, g_spectral.frames);
     int first = 0;
     FN(0x16680a0, void (*)(uintptr_t, const int *))(selection + 0x618, &first);
-    return spectral_verify();
+    return minimod_spectral_verify(g_spectral.sample, g_spectral.pos, (unsigned)g_spectral.n, g_spectral.frames);
 }
 
 static void spectral_start(void)
@@ -1519,7 +1492,7 @@ static void spectral_tick(void)
             g_spectral.phase = 2;
             g_spectral.deadline = minimod_now_ms() + 150;
         } else if (minimod_now_ms() >= g_spectral.deadline) {
-            spectral_finish(spectral_verify() ? NULL : "marker verification failed");
+            spectral_finish(minimod_spectral_verify(g_spectral.sample, g_spectral.pos, (unsigned)g_spectral.n, g_spectral.frames) ? NULL : "marker verification failed");
         }
     }
     hpss_repaint();
