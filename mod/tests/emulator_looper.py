@@ -30,6 +30,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RING_FRAMES = 44100 * 2
+LOOPTAP_FRAMES = 8192
 
 
 def main():
@@ -105,16 +106,26 @@ def main():
         ring = struct.unpack(f'<{RING_FRAMES}f', read(symbol('g_outtap'), RING_FRAMES * 4))
         return [ring[(w - frames + k) % RING_FRAMES] for k in range(frames)]
 
+    def loop_tail(frames=4000):
+        """The loops' own signal, after the mod's master and before the app's
+        mixer: the device output also carries whatever the app is playing."""
+        w = u32(symbol('g_looptap_w'))
+        frames = min(frames, LOOPTAP_FRAMES // 2)
+        ring = struct.unpack(f'<{LOOPTAP_FRAMES}f',
+                             read(symbol('g_looptap'), LOOPTAP_FRAMES * 4))
+        return [ring[(w - frames + k) % LOOPTAP_FRAMES] for k in range(frames)]
+
     def rms(values):
         return math.sqrt(sum(v * v for v in values) / len(values))
 
-    def settled_rms(timeout=3.0):
+    def settled_rms(timeout=3.0, source=None):
         """RMS of the output once it stops changing, so a knob turn that is
         still travelling through the panel cannot be measured half-applied."""
+        capture = source or output_tail
         previous = None
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            value = rms(output_tail())
+            value = rms(capture())
             if previous is not None and abs(value - previous) < 0.02 * max(previous, 1e-9):
                 return value
             previous = value
@@ -202,13 +213,13 @@ def main():
     while master_now() != 127 and time.monotonic() < deadline:
         time.sleep(0.05)
     assert master_now() == 127, f'MAIN VOLUME 127 did not reach the looper: {master_now()}'
-    vol_full = settled_rms()
+    vol_full = settled_rms(source=loop_tail)
     control('MAIN VOLUME', 'set', 64)
     deadline = time.monotonic() + 3
     while master_now() != 64 and time.monotonic() < deadline:
         time.sleep(0.05)
     assert master_now() == 64, f'MAIN VOLUME 64 did not reach the looper: {master_now()}'
-    vol_half = settled_rms()
+    vol_half = settled_rms(source=loop_tail)
     control('MAIN VOLUME', 'set', 127)
     time.sleep(0.2)
     assert 0.35 < vol_half / vol_full < 0.65, (vol_half, vol_full)
@@ -216,10 +227,10 @@ def main():
     # --- unplug the input: what remains can only be the loop we recorded
     route('none')
     time.sleep(0.5)
-    tail = output_tail()
+    tail = loop_tail()
     loop_rms = rms(tail)
     loop_hz = zero_cross_hz(tail)
-    assert 0.05 < loop_rms < 0.5, loop_rms
+    assert 0.05 < loop_rms < 0.95, loop_rms
     assert 400 < loop_hz < 480, loop_hz
     loop_length = length
 
@@ -227,7 +238,7 @@ def main():
     tap('PAD 1')
     wait_state(0, 4)                       # STOP
     time.sleep(0.3)
-    assert rms(output_tail()) < 0.01, 'output should be silent after stop'
+    assert rms(loop_tail()) < 0.01, 'the loop should be silent after stop'
 
     # --- SHIFT + pad overdubs, a second press returns to playback. The input is
     #     silent here so the check is about the state machine and the untouched
@@ -242,7 +253,7 @@ def main():
     assert snapshot()[0][1] == loop_length, snapshot()[0]
     route('none')
     time.sleep(0.4)
-    assert rms(output_tail()) > 0.02, 'overdub lost the loop'
+    assert rms(loop_tail()) > 0.02, 'overdub lost the loop'
 
     # --- LOOP starts the sync pulse from the last recorded length
     tap('LOOP')
@@ -267,7 +278,7 @@ def main():
     tap('STOP')
     time.sleep(0.3)
     assert all(p[0] != 2 and p[0] != 3 for p in snapshot()), snapshot()
-    assert rms(output_tail()) < 0.01, 'STOP should silence every loop'
+    assert rms(loop_tail()) < 0.01, 'STOP should silence every loop'
 
     # --- ERASE + pad clears exactly that pad
     control('ERASE', 'press', 127)

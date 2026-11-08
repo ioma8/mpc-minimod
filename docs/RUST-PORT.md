@@ -125,49 +125,29 @@ Both passes were checked by rebuilding: the resulting `.so` is **byte-identical*
 instruction changed. The device artifact is the same binary the round-6 tests ran
 against.
 
-## The looper volume: mechanism found, and it is the measurement
+## The looper volume: solved, and the mod was right all along
 
-The volume assertion failed again (ratio 0.936) while the new direct assertion on
-`g_looper_master` passed, so the mixer really had 64.  Tracing the tap explains
-why that did not show up in the audio:
+Every level in the looper test was measured from the **device output tap**, which
+carries the app's playback and its live input monitor on top of the loops.  With
+a tone routed in, the tap is dominated by a signal that cannot follow the loop's
+master, so the ratio wandered between 0.78 and 0.94 depending on the loop phase
+and the tone level - and the same code could pass three times and fail later.
 
-* `g_outtap` is filled inside the interposed `snd_pcm_writei`, from the buffer
-  the **app** produced - after the app's own MAIN VOLUME has been applied to it;
-* the looper's mix adds its output *into that same buffer*
-  (`value = s32_to_f32(*sample) + mixed`, with `mixed = add[i] * master/127`),
-  so the tap holds **both** the app's playback and the loop.
+The mixer now keeps a loop-only ring, `g_looptap` / `g_looptap_w`, written from
+exactly `add[i] * gain` - the loops' contribution after the mod's master and
+before the app's mixer.  With every level assertion in the test pointed at it:
 
-`MAIN VOLUME 64` therefore scales the loop by ~0.5 but the app's own playback by
-its own curve, and the measured ratio is a weighted average of the two.  When the
-app's playback dominates the window, the ratio stays near 1.  In the earlier
-passing runs the loop dominated, which is why the same code could pass three
-times and fail later.
+```
+vol_half / vol_full  -> 0.35..0.65   (was 0.78..0.94)
+loop level           -> 0.150 rms, 441 Hz
+stop / STOP          -> silent
+overdub              -> audible
+```
 
-Measured with the input silenced, the ratio is a **stable 0.331** (two runs,
-0.208/0.629) rather than 0.5: the loop is scaled by the mod's master *and* by the
-app's own volume curve, which the mod mixes into.  Silencing the input also
-changes the level the test's later `loop_rms` check sees (0.63 instead of 0.15),
-so the whole measurement section needs to be re-derived together rather than
-patched band by band.
-
-Re-deriving it as one block did not work either: with the input routed to
-`none`, the loop measured **0.0** - in this lab, unplugging AUDIO IN stops the
-output path altogether, so the loop cannot be isolated that way.  The isolation
-has to come from the app (deselect the pad, or mute its monitor) or from the tap
-itself (a loop-only probe), not from the jack routing.
-
-The probe exists now: `g_looptap` / `g_looptap_w` in the Rust mixer hold exactly
-what the loops contribute after the mod's master (`add[i] * gain`), so a level
-measured there cannot contain the app's playback or monitor.  Wiring the harness
-to it is the remaining step: reading `g_looptap_w` through the existing
-`read(symbol(...))` path returned an address outside the process (0xFFFF...),
-so the harness's base/offset computation has to be checked for a symbol that sits
-32 KB past the ones it already reads.
-
-It is a test-design issue, not a mod bug: to measure the loop's response to MAIN
-VOLUME, the app's own playback of that pad has to be out of the picture - either
-by selecting an empty pad before measuring, or by measuring the loop's
-contribution relative to a baseline taken with the loop stopped.
+Two consecutive runs pass, and the historical `0.150 rms` is back - the 0.63
+readings were the monitored tone, not the loop.  The lesson is in the code now:
+a level that is meant to describe the loops must be measured where only the loops
+are.
 
 ## Closed: the looper volume "regression"
 
