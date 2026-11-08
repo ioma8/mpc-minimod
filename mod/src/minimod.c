@@ -73,6 +73,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "substitute_ffi.h"
 #include "hooks_ffi.h"
 #include "levels_ffi.h"
 #include "hooks_ffi.h"
@@ -672,12 +673,6 @@ static unsigned g_hpss_arm_start;
 static unsigned g_hpss_arm_end;
 static unsigned g_hpss_arm_ch;
 static int g_hpss_arm_name;
-static volatile int g_hpss_sub_on;
-static const float *g_hpss_sub_buf;
-static volatile size_t g_hpss_sub_pos;
-static size_t g_hpss_sub_frames;
-static size_t g_hpss_sub_source_frames;
-static unsigned g_hpss_sub_ch;
 static volatile int g_hpss_write_ok;
 static void *g_hpss_cmd[4];
 static int g_hpss_cmd_n;
@@ -781,14 +776,10 @@ static void hpss_exec_hook(void *cmd)
     int patched = 0;
     if (armed && g_hpss_arm) {
         g_hpss_write_ok = 0;
-        g_hpss_sub_on = 0;
+        minimod_substitute_clear();
         if (g_hpss_arm_buf) {
-            g_hpss_sub_buf = g_hpss_arm_buf;
-            g_hpss_sub_frames = g_hpss_arm_frames;
-            g_hpss_sub_source_frames = g_hpss_arm_source_frames;
-            g_hpss_sub_ch = g_hpss_arm_ch;
-            g_hpss_sub_pos = 0;
-            g_hpss_sub_on = 1;
+            minimod_substitute_arm((uintptr_t)g_hpss_arm_buf, g_hpss_arm_frames,
+                                   g_hpss_arm_source_frames, g_hpss_arm_ch);
         }
         /* The constructor stores the settings object by pointer; the execute
          * method is what copies its range into the slice command.  Patch it
@@ -815,63 +806,27 @@ static void hpss_exec_hook(void *cmd)
         wr(settings + HPSS_RANGE_START, &old_start, 8);
         wr(settings + HPSS_RANGE_END, &old_end, 8);
     }
-    if (armed && g_hpss_sub_on) {
+    if (armed && minimod_substitute_active()) {
         /* The native writer may run on an executor thread.  Wait for it so the
          * buffer stays alive and the next extraction starts from a clean state. */
+        size_t consumed = 0, total = 0;
         int spins = 0;
-        while (g_hpss_sub_pos < g_hpss_sub_frames && spins++ < 3000)
+        minimod_substitute_progress(&consumed, &total);
+        while (consumed < total && spins++ < 3000) {
             usleep(1000);
-        g_hpss_sub_on = 0;
-        g_hpss_write_ok = (g_hpss_sub_pos == g_hpss_sub_frames);
-        mlog("HPSS exec: cmd=%p writer consumed %zu/%zu frames%s\n", cmd,
-             g_hpss_sub_pos, g_hpss_sub_frames,
-             g_hpss_write_ok ? "" : " (INCOMPLETE)");
+            minimod_substitute_progress(&consumed, &total);
+        }
+        minimod_substitute_clear();
+        g_hpss_write_ok = (consumed == total);
+        mlog("HPSS exec: cmd=%p writer consumed %zu/%zu frames%s\n", cmd, consumed,
+             total, g_hpss_write_ok ? "" : " (INCOMPLETE)");
     }
 }
 
 static void hpss_writer_hook(void *closure, void *block)
 {
-    if (!g_hpss_sub_on || !block) {
-        if (orig_hpss_writer)
-            orig_hpss_writer(closure, block);
-        return;
-    }
-    unsigned frames = 0;
-    float *ptr = NULL;
-    memcpy(&frames, block, sizeof frames);
-    memcpy(&ptr, (char *)block + 8, sizeof ptr);
-    size_t pos = g_hpss_sub_pos;
-    if (g_hpss_sub_buf && frames && pos + frames <= g_hpss_sub_source_frames) {
-        float *replacement =
-            (float *)(g_hpss_sub_buf + pos * (size_t)g_hpss_sub_ch);
-        unsigned write_frames = frames;
-        int append_tail = pos + frames == g_hpss_sub_source_frames &&
-                          g_hpss_sub_frames > g_hpss_sub_source_frames;
-        if (append_tail) {
-            size_t remaining = g_hpss_sub_frames - pos;
-            if (remaining > UINT32_MAX) {
-                if (orig_hpss_writer)
-                    orig_hpss_writer(closure, block);
-                return;
-            }
-            write_frames = (unsigned)remaining;
-            memcpy(block, &write_frames, sizeof write_frames);
-        }
-        memcpy((char *)block + 8, &replacement, sizeof replacement);
-        if (orig_hpss_writer)
-            orig_hpss_writer(closure, block);
-        if (append_tail)
-            memcpy(block, &frames, sizeof frames);
-        memcpy((char *)block + 8, &ptr, sizeof ptr);
-        g_hpss_sub_pos = append_tail ? g_hpss_sub_frames : pos + frames;
-        mlog("HPSS writer: %u frames at %zu%s\n", write_frames, pos,
-             append_tail ? " (tail appended)" : "");
-    } else {
-        mlog("HPSS writer: refusing block frames=%u pos=%zu total=%zu\n", frames,
-             pos, g_hpss_sub_frames);
-        if (orig_hpss_writer)
-            orig_hpss_writer(closure, block);
-    }
+    minimod_substitute((uintptr_t)closure, (unsigned char *)block,
+                       (minimod_writer)orig_hpss_writer);
 }
 
 static int hpss_read_sample(void *s, void **screen, uintptr_t *state,

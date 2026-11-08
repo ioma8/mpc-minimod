@@ -31,6 +31,7 @@ pub mod sample;
 pub mod selection;
 pub mod status;
 pub mod status_ffi;
+pub mod substitute;
 pub mod trim;
 pub mod wav;
 pub mod wav_ffi;
