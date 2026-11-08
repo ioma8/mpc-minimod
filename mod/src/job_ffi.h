@@ -31,4 +31,18 @@ int32_t minimod_job_run(struct minimod_job *job, const float *knobs,
                         uintptr_t app_base);
 void minimod_job_free(struct minimod_job *job);
 
+/* Finishing a job, from Rust (rust/crates/minimod/src/jobflow.rs). */
+struct minimod_job_hooks {
+    int (*extract)(uintptr_t screen, uintptr_t state, const float *buffer,
+                   uint32_t start, uint32_t end, uint32_t source_frames,
+                   uint32_t buffer_frames, uint32_t channels, int32_t name,
+                   int32_t *pad);
+    void (*restore_chop)(void);
+    void (*toast)(const char *text);
+};
+
+int32_t minimod_job_finalize(struct minimod_job *job,
+                             const struct minimod_job_hooks *hooks,
+                             uintptr_t screen, uintptr_t app_base);
+
 #endif

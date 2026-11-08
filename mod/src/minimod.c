@@ -1224,6 +1224,18 @@ static void spectral_tick(void)
 }
 
 
+static int hpss_extract_hook(uintptr_t screen, uintptr_t state, const float *buf,
+                             unsigned start, unsigned end, unsigned source_frames,
+                             unsigned buffer_frames, unsigned ch, int name, int *dest)
+{
+    return hpss_extract_ctx((void *)screen, state, buf, start, end, source_frames,
+                            buffer_frames, ch, name, dest);
+}
+
+/* The checks, the extracts and the words live in Rust; the glue supplies the
+ * app's extract, the chop restore and the toast. */
+
+
 static void hpss_finalize(void)
 {
     if (g_hpss_finalizing || !__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE))
@@ -1237,111 +1249,12 @@ static void hpss_finalize(void)
         g_hpss_finalizing = 0;
         return;
     }
-    int effect = job->action != 0;
-    if (job->rc != 0 ||
-        (effect ? (!job->rendered || job->rendered_frames > UINT32_MAX)
-                : (!job->harmonic || !job->percussive))) {
-        sample_action_status(job->action, "processing failed");
-        toast(effect ? "Effect: processing failed" : "HPSS: processing failed");
-        goto out;
-    }
-    if ((uintptr_t)g_screen != job->screen || !sample_page_visible()) {
-        sample_action_status(job->action, "cancelled (page changed)");
-        toast(effect ? "Effect cancelled" : "HPSS cancelled");
-        goto out;
-    }
-    {
-        void *s = 0;
-        uintptr_t st = 0, smp = 0;
-        unsigned fr = 0, ch = 0, rt = 0;
-        if (!hpss_read_sample((void *)job->screen, &s, &st, &smp, &fr, &ch, &rt) ||
-            st != job->state || smp != job->sample || fr != job->frames ||
-            ch != job->ch || rt != job->rate) {
-            sample_action_status(job->action, "cancelled (sample changed)");
-            toast(effect ? "Effect cancelled" : "HPSS cancelled");
-            goto out;
-        }
-    }
-    {
-        uintptr_t program = 0;
-        int required = effect ? 1 : 2;
-        if (!rd(job->state + 0x2310, &program, 8) || !program ||
-            minimod_pads_free_estimate(base, (uintptr_t)program) < required) {
-            sample_action_status(job->action, effect ? "need 1 empty pad" : "need 2 empty pads");
-            toast(effect ? "Effect: need 1 pad" : "HPSS: need 2 pads");
-            goto out;
-        }
-        if (effect) {
-            int pad = -1;
-            unsigned read_frames = job->frames;
-            if (job->action == 4 && job->rendered_frames < read_frames)
-                read_frames = (unsigned)job->rendered_frames;
-            int ok = hpss_extract_ctx((void *)job->screen, job->state, job->rendered, 0,
-                                      read_frames, read_frames,
-                                      (unsigned)job->rendered_frames,
-                                      job->rendered_ch ? job->rendered_ch : job->ch,
-                                      job->action + 1, &pad);
-            hpss_restore_chop();
-            /* Only the bass path takes a source backup (fmbass_start); every
-             * other action leaves the source file untouched, so there is
-             * nothing to restore.  Demanding a restore here failed every
-             * effect with "source restore failed". */
-            int source_ok = !job->source_audio_backup ||
-                            bass_source_restore(job->source_path,
-                                                job->source_data_offset,
-                                                job->source_audio_backup,
-                                                job->source_audio_bytes);
-            if (!source_ok) {
-                sample_action_status(job->action, "source restore failed");
-                toast("Bass: source restore failed");
-                goto out;
-            }
-            if (!ok) {
-                sample_action_status(job->action, "output failed");
-                toast("Effect: write failed");
-                goto out;
-            }
-        } else {
-            int first_pad = -1, second_pad = -1;
-            int a = hpss_extract_ctx((void *)job->screen, job->state, job->harmonic, 0,
-                                     job->frames, job->frames, job->frames,
-                                     job->ch, 0, &first_pad);
-            if (!a) {
-                hpss_restore_chop();
-                hpss_set_status("HPSS: first output failed");
-                toast("HPSS: write failed");
-                goto out;
-            }
-            int b = hpss_extract_ctx((void *)job->screen, job->state, job->percussive, 0,
-                                     job->frames, job->frames, job->frames,
-                                     job->ch, 1, &second_pad);
-            hpss_restore_chop();
-            if (!b) {
-                /* Do not attempt a destructive rollback outside the native command. */
-                hpss_set_status("HPSS: harmonic only (second failed)");
-                toast("HPSS: 1 of 2");
-                goto out;
-            }
-        }
-    }
-    if (effect) {
-        sample_action_status(job->action, "copy created");
-        toast(job->action == 1 ? "Reverb done" : job->action == 2 ? "Vinyl done" :
-              job->action == 3 ? "Lo-Fi done" : "Bass C2 done");
-    } else {
-        hpss_set_status("HPSS: harmonic + percussive created");
-        toast("HPSS done");
-    }
-    g_hpss_menu = 0;
-    g_bass_edit = 0;
-out:
-    if (job->action == 4 && job->source_audio_backup &&
-        !bass_source_restore(job->source_path, job->source_data_offset,
-                             job->source_audio_backup, job->source_audio_bytes)) {
-        sample_action_status(4, "source restore failed");
-        toast("Bass: source restore failed");
-    }
-    hpss_free_job(job);
+    struct minimod_job_hooks hooks = {
+        .extract = hpss_extract_hook,
+        .restore_chop = hpss_restore_chop,
+        .toast = toast,
+    };
+    minimod_job_finalize(job, &hooks, (uintptr_t)g_screen, base);
     g_hpss_busy = 0;
     g_hpss_menu = 0;
     bass_preview_set_active(0);
