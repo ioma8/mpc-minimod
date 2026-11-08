@@ -188,6 +188,72 @@ pub fn write(address: usize, bytes: &[u8]) -> bool {
 }
 
 /// Read one 32-bit word of process memory.
+/// A firmware function taking one pointer and returning nothing.
+pub type VoidOfPointer = unsafe extern "C" fn(usize);
+/// A firmware function taking a pointer and a value.
+pub type VoidOfPointerValue = unsafe extern "C" fn(usize, u32);
+/// A firmware function taking two pointers.
+pub type VoidOfTwoPointers = unsafe extern "C" fn(usize, usize);
+/// A firmware function taking a pointer and a slot index, returning the index
+/// the app assigned.
+pub type IntOfPointerSlots = unsafe extern "C" fn(usize, u32, u32, u32) -> i32;
+
+/// Call a firmware function taking one pointer and returning nothing.
+///
+/// # Safety
+///
+/// `address` must be the entry point of a function with this exact signature.
+pub unsafe fn void_of_pointer(address: usize, argument: usize) {
+    // SAFETY: the caller guarantees the address and the signature.
+    let function: VoidOfPointer = unsafe { core::mem::transmute(address) };
+    // SAFETY: see above.
+    unsafe { function(argument) };
+}
+
+/// Call a firmware function taking two pointers.
+///
+/// # Safety
+///
+/// `address` must be the entry point of a function with this exact signature.
+pub unsafe fn void_of_two_pointers(address: usize, first: usize, second: usize) {
+    // SAFETY: the caller guarantees the address and the signature.
+    let function: VoidOfTwoPointers = unsafe { core::mem::transmute(address) };
+    // SAFETY: see above.
+    unsafe { function(first, second) };
+}
+
+/// Call a firmware function taking a pointer and a value.
+///
+/// # Safety
+///
+/// `address` must be the entry point of a function with this exact signature.
+pub unsafe fn void_of_pointer_value(address: usize, pointer: usize, value: u32) {
+    // SAFETY: the caller guarantees the address and the signature.
+    let function: VoidOfPointerValue = unsafe { core::mem::transmute(address) };
+    // SAFETY: see above.
+    unsafe { function(pointer, value) };
+}
+
+/// Call the app's slice insert.
+///
+/// # Safety
+///
+/// `address` must be the app's insert entry and the arguments must be valid for
+/// it.
+#[must_use]
+pub unsafe fn insert_slice(
+    address: usize,
+    continuation: usize,
+    start: u32,
+    count: u32,
+    frames: u32,
+) -> i32 {
+    // SAFETY: the caller guarantees the address and the signature.
+    let function: IntOfPointerSlots = unsafe { core::mem::transmute(address) };
+    // SAFETY: see above.
+    unsafe { function(continuation, start, count, frames) }
+}
+
 /// A firmware function taking one pointer and returning an `int`.
 pub type IntOfPointer = unsafe extern "C" fn(usize) -> i32;
 

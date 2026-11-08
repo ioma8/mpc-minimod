@@ -73,6 +73,7 @@ slice.
 | Monotonic clock (`now_ms`) | ported | real-time test; every deadline the looper and spectral paths use runs on it |
 | Slice list (`slice_count_of`, `spectral_verify`) | ported | layout test; the Spectral Chop device test asserts "exact 5 boundaries" through the verifier |
 | Selected-sample walk (`hpss_read_sample`) | ported | vtable/range test; Bass Synth and Spectral Chop both start from it |
+| Slice writer (`spectral_write_markers`) | ported | the Spectral Chop device test writes and verifies its 5 boundaries through it |
 | `minimod.c` (hooks, features, UI glue) | C, shrinking | 7 683 -> 4 564 lines; dead code removed only where the compiler proved it, each pass verified by an identical binary |
 
 The looper, the effects and the whole bass synth are already what the device
@@ -216,6 +217,12 @@ fixture the reference is compiled with `-ffp-contract=off` so both sides evaluat
 the same expression, which is what makes a bit-exact comparison meaningful.  (The
 looper fixture goes the other way: its reference *is* contracted, and the Rust
 mix uses `mul_add` to match it.)
+
+**Firmware calls need one careful helper per signature.** Rust has no variadic
+FFI, so every distinct firmware signature the glue calls (void of pointer, void of
+pointer+value, four-argument insert returning an int, ...) is one documented
+`transmute` in `firmware`.  The call sites stay readable and the unsafe stays
+countable.
 
 **Firmware calls need one careful helper.** `firmware::int_of_pointer` is the
 single place that turns an address into a callable `extern "C"` function.  Every

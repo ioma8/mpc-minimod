@@ -136,6 +136,96 @@ pub unsafe extern "C" fn minimod_spectral_verify(
     i32::from(verify(sample, positions, frames))
 }
 
+/// The app's slice Reset.
+const SLICE_RESET: usize = 0x295_0aa0;
+/// The app's slice Insert.
+const SLICE_INSERT: usize = 0x295_0d20;
+/// The app's "reconcile the last slice's end" setter.
+const SLICE_SET_END: usize = 0x295_0bb0;
+/// The app's selection setter.
+const SELECT_SLICE: usize = 0x166_80a0;
+/// `[screen + 0x180]` is the view's selection object.
+const SCREEN_SELECTION: usize = 0x180;
+/// `[selection + 0x618]` is where the selection index goes.
+const SELECTION_INDEX: usize = 0x618;
+
+/// Write the requested boundaries through the app's own Reset/Insert calls and
+/// check the result back.
+///
+/// The app owns the slice allocation, its listeners and the broadcasts, so the
+/// only safe way to chop is to drive its calls in order and then read the
+/// result: a short write shows up as a mismatch in [`verify`], never as a
+/// quietly wrong pad.
+#[must_use]
+pub fn write_markers(
+    base: usize,
+    sample: usize,
+    positions: &[u32],
+    frames: u32,
+    screen: usize,
+) -> bool {
+    let Some(slices) = slice_count(sample) else {
+        return false;
+    };
+    let Some(selection) = firmware::read_pointer(screen.checked_add(SCREEN_SELECTION).unwrap_or(0))
+    else {
+        return false;
+    };
+    if selection == 0 {
+        return false;
+    }
+    // SAFETY: the offsets are the app's own entries, called the way the stock
+    // Chop UI calls them.
+    unsafe {
+        firmware::void_of_pointer(base + SLICE_RESET, slices.continuation);
+        for (index, position) in positions.iter().enumerate() {
+            let assigned = firmware::insert_slice(
+                base + SLICE_INSERT,
+                slices.continuation,
+                *position,
+                1,
+                frames,
+            );
+            if usize::try_from(assigned).unwrap_or(usize::MAX) != index {
+                return false;
+            }
+        }
+        firmware::void_of_pointer_value(base + SLICE_SET_END, slices.continuation, frames);
+        let mut first: i32 = 0;
+        firmware::void_of_two_pointers(
+            base + SELECT_SLICE,
+            selection + SELECTION_INDEX,
+            core::ptr::addr_of_mut!(first) as usize,
+        );
+    }
+    verify(sample, positions, frames)
+}
+
+/// Write the boundaries through the app and verify them, for the C glue.
+///
+/// # Safety
+///
+/// `positions` must be readable for `count` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_spectral_write_markers(
+    base: usize,
+    sample: usize,
+    positions: *const u32,
+    count: u32,
+    frames: u32,
+    screen: usize,
+) -> i32 {
+    if positions.is_null() {
+        return 0;
+    }
+    let Ok(count) = usize::try_from(count) else {
+        return 0;
+    };
+    // SAFETY: the caller promises `positions` is readable for `count` entries.
+    let positions = unsafe { core::slice::from_raw_parts(positions, count) };
+    i32::from(write_markers(base, sample, positions, frames, screen))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{MAX_SLICES, SAMPLE_METADATA, SLICE_BYTES, SLICE_END, SLICE_START};

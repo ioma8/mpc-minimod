@@ -1361,25 +1361,9 @@ static int spectral_manual(void)
 
 static int spectral_write_markers(void)
 {
-    uintptr_t cont = 0, selection = 0;
-    minimod_slice_count(g_spectral.sample, 0, &cont);
-    if (!cont || !rd((uintptr_t)g_screen + 0x180, &selection, 8) || !selection)
-        return 0;
-    /* Native Reset and Insert, as called by the stock Chop UI. These own the
-     * Slice allocation, destruction, listener links, selection and broadcasts.
-     * Never shorten its vector or poke observable Slice fields ourselves. */
-    FN(0x2950aa0, void (*)(uintptr_t))(cont);
-    for (int i = 0; i < g_spectral.n; ++i) {
-        int index = FN(0x2950d20, int (*)(uintptr_t, unsigned, unsigned, unsigned))(
-            cont, g_spectral.pos[i], 1, g_spectral.frames);
-        if (index != i)
-            return 0;
-    }
-    /* Reconcile adjacent ends through the native setters, including the tail. */
-    FN(0x2950bb0, void (*)(uintptr_t, unsigned))(cont, g_spectral.frames);
-    int first = 0;
-    FN(0x16680a0, void (*)(uintptr_t, const int *))(selection + 0x618, &first);
-    return minimod_spectral_verify(g_spectral.sample, g_spectral.pos, (unsigned)g_spectral.n, g_spectral.frames);
+    return minimod_spectral_write_markers(base, g_spectral.sample, g_spectral.pos,
+                                          (unsigned)g_spectral.n, g_spectral.frames,
+                                          (uintptr_t)g_screen);
 }
 
 static void spectral_start(void)
