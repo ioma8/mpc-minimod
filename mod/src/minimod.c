@@ -1341,21 +1341,7 @@ static void spectral_finish(const char *error)
  * chop type; assigning the view's cached enum alone does not. */
 static int spectral_manual(void)
 {
-    uintptr_t binding = 0, owner = 0, invoke = 0, manager = 0;
-    unsigned char flags = 0;
-    if (!rd((uintptr_t)g_screen + 0x168, &binding, 8) || !binding ||
-        !rd(binding + 0xe8, &flags, 1) || !rd(binding + 0xe0, &owner, 8))
-        return 0;
-    if (!(flags & 1) && owner) {
-        if (!rd(binding + 0xd0, &manager, 8) || !manager ||
-            !rd(binding + 0xd8, &invoke, 8) || !invoke)
-            return 0;
-        int manual = 0;
-        ((void (*)(uintptr_t, uintptr_t, const int *))invoke)(binding + 0xc0, owner, &manual);
-    } else {
-        FN(0x15d2840, void (*)(uintptr_t, int))(binding + 0x80, 0);
-    }
-    return 1;
+    return minimod_spectral_manual(base, (uintptr_t)g_screen);
 }
 
 

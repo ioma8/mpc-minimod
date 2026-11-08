@@ -194,6 +194,8 @@ pub type VoidOfPointer = unsafe extern "C" fn(usize);
 pub type VoidOfPointerValue = unsafe extern "C" fn(usize, u32);
 /// A firmware function taking two pointers.
 pub type VoidOfTwoPointers = unsafe extern "C" fn(usize, usize);
+/// A firmware function taking three pointers.
+pub type VoidOfThreePointers = unsafe extern "C" fn(usize, usize, usize);
 /// A firmware function taking a pointer and a slot index, returning the index
 /// the app assigned.
 pub type IntOfPointerSlots = unsafe extern "C" fn(usize, u32, u32, u32) -> i32;
@@ -220,6 +222,18 @@ pub unsafe fn void_of_two_pointers(address: usize, first: usize, second: usize) 
     let function: VoidOfTwoPointers = unsafe { core::mem::transmute(address) };
     // SAFETY: see above.
     unsafe { function(first, second) };
+}
+
+/// Call a firmware function taking three pointers.
+///
+/// # Safety
+///
+/// `address` must be the entry point of a function with this exact signature.
+pub unsafe fn void_of_three_pointers(address: usize, first: usize, second: usize, third: usize) {
+    // SAFETY: the caller guarantees the address and the signature.
+    let function: VoidOfThreePointers = unsafe { core::mem::transmute(address) };
+    // SAFETY: see above.
+    unsafe { function(first, second, third) };
 }
 
 /// Call a firmware function taking a pointer and a value.

@@ -226,6 +226,83 @@ pub unsafe extern "C" fn minimod_spectral_write_markers(
     i32::from(write_markers(base, sample, positions, frames, screen))
 }
 
+/// The view's cached chop mode callback, used when the binding is already torn
+/// down.
+const SET_CHOP_MODE: usize = 0x15d_2840;
+/// `[screen + 0x168]` is the chop binding.
+const SCREEN_BINDING: usize = 0x168;
+/// The binding's flags byte, owner, manager and invoke slot.
+const BINDING_FLAGS: usize = 0xe8;
+const BINDING_OWNER: usize = 0xe0;
+const BINDING_MANAGER: usize = 0xd0;
+const BINDING_INVOKE: usize = 0xd8;
+/// The model callback the binding is driven with, and its argument object.
+const BINDING_CALL: usize = 0xc0;
+const BINDING_FALLBACK: usize = 0x80;
+
+/// Put the page's chop mode back to Manual.
+///
+/// The stock Split handler drives the binding's model callback; assigning the
+/// view's cached enum alone does not take, which is why this goes through the
+/// callback whenever the binding is still alive.
+#[must_use]
+pub fn set_manual(base: usize, screen: usize) -> bool {
+    let Some(binding) = screen
+        .checked_add(SCREEN_BINDING)
+        .and_then(firmware::read_pointer)
+    else {
+        return false;
+    };
+    let Some(owner) = binding
+        .checked_add(BINDING_OWNER)
+        .and_then(firmware::read_pointer)
+    else {
+        return false;
+    };
+    let Some(flags) = firmware::read_u32(binding.saturating_add(BINDING_FLAGS)) else {
+        return false;
+    };
+    if flags & 1 == 0 && owner != 0 {
+        let Some(manager) = binding
+            .checked_add(BINDING_MANAGER)
+            .and_then(firmware::read_pointer)
+        else {
+            return false;
+        };
+        let Some(invoke) = binding
+            .checked_add(BINDING_INVOKE)
+            .and_then(firmware::read_pointer)
+        else {
+            return false;
+        };
+        if manager == 0 || invoke == 0 {
+            return false;
+        }
+        let mut manual: i32 = 0;
+        // SAFETY: the binding's invoke slot is the app's model callback.
+        unsafe {
+            firmware::void_of_three_pointers(
+                invoke,
+                binding + BINDING_CALL,
+                owner,
+                core::ptr::addr_of_mut!(manual) as usize,
+            );
+        }
+    } else {
+        // SAFETY: the fallback is the app's own cached-mode setter.
+        unsafe {
+            firmware::void_of_pointer_value(base + SET_CHOP_MODE, binding + BINDING_FALLBACK, 0);
+        }
+    }
+    true
+}
+
+/// Put the page's chop mode back to Manual, for the C glue.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_spectral_manual(base: usize, screen: usize) -> i32 {
+    i32::from(set_manual(base, screen))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{MAX_SLICES, SAMPLE_METADATA, SLICE_BYTES, SLICE_END, SLICE_START};
