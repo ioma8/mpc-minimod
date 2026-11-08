@@ -298,6 +298,20 @@ General lesson, from two reverts now: **a port inherits its dependencies'
 behaviour, so diff the helpers it calls, not only its own body** - or, better,
 pass the data in so the port cannot resolve it differently.
 
+## Certified after the input port
+
+`2c11ef0` is the last fully device-certified build: Live Looper, Bass Synth,
+chromatic MIDI, Spectral Chop, HPSS and Reverb all pass on it.
+
+Two bugs the device found in the recent ports, both fixed:
+
+* the audio writer's 128 KiB `thread_local!` scratch landed in `.tbss` and pushed
+  `.bss` **past the last load segment**, so the mod's globals were addressed
+  outside its image (this is what made the tests' `/proc/<pid>/mem` reads fail -
+  it was not a harness fault);
+* `jobflow` restored the bass synth's source backup only on the success path, so
+  a cancelled job left the user's sample overwritten.
+
 ## State at the "no emulator" checkpoint
 
 After round 55 the device suite was last run green on `3ccef7e` (looper, bass,
