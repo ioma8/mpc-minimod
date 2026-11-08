@@ -269,6 +269,34 @@ Rust static library in its place, and the emulator test for that feature becomes
 the acceptance gate. The C sources stay in `mod/src` until the whole mod is Rust
 because they are the reference the golden fixtures are recorded from.
 
+## Inventory after round 31
+
+`minimod.c` is 4 381 lines in 94 functions, of which the largest are:
+
+| lines | function | kind |
+| --- | --- | --- |
+| 359 | `commit_trim` | trim computation + property writes (device-untested) |
+| 179 | `buttons` | the whole modal button handler |
+| 154 | `trim_probe` | trim-page object discovery |
+| 143 | `screen_paint` | every overlay the mod draws |
+| 125 | `hpss_finalize` | extract hand-off, write, status |
+| 89 | `cc_capture` | knob/transport routing |
+| 83 | `midi_note_event` | the note hook body |
+| 82 | `spectral_tick` | the spectral state machine |
+| 76 + 75 + 55 | `looper_draw`, `hpss_draw_menu`, `looper_cell` | drawing |
+| 65 | `install_hook` | the patch itself |
+| 63 | `audio_writer` | the preview/looper mix hook |
+| 62 + 62 + 61 | `sample_transform_start`, `do_autotrim`, `fmbass_start` | action orchestration |
+
+The rest are small helpers of the kind already ported.  Two observations that
+shape the remaining rounds:
+
+* the **drawing** code is about a fifth of what is left and has no logic to test
+  beyond "the overlay appears", so it should move last and in one go;
+* `commit_trim` and `trim_probe` are the largest untested block - the autotrim
+  test does not run in this lab (it targets a different instance), so they need
+  either a new test or a careful reading before they move.
+
 ## What is left, in the order it should be taken
 
 The glue is 4 564 lines and every remaining part has a seam, but they are not
