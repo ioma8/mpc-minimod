@@ -123,19 +123,24 @@ Both passes were checked by rebuilding: the resulting `.so` is **byte-identical*
 instruction changed. The device artifact is the same binary the round-6 tests ran
 against.
 
-## Open issue
+## Closed: the looper volume "regression"
 
-The Live Looper acceptance test's MAIN VOLUME assertion fails on the current
-build: after `MAIN VOLUME 127` then `64` the output ratio is 0.78, where 0.35 to
-0.65 is expected.  It is the same measurement that passed twice at the end of the
-looper work, so something between then and now moved - but the looper's audio
-path has not been touched since (the changes were the WAV layer, path
-resolution, status line, geometry accessors, `pcm_at` and `wav_edges`).  The
-next step is a bisect over the saved artifacts, starting from the round-3 build,
-and instrumenting `cc_capture` to log the `raw` value it receives for CC 0x13.
+The Live Looper test's MAIN VOLUME assertion failed twice with a ratio of 0.78
+where 0.35 to 0.65 was expected.  It was the *test*, not the mod: it inferred the
+volume from the audio and waited for the RMS to stop changing, which is not the
+same as the knob having arrived.  The mod now exports the value the mixer
+actually uses (`g_looper_master`) and the test asserts it after each panel move:
 
-Everything else passes on the same build: Reverb, Vinyl, Lo-Fi, Bass Synth,
-chromatic MIDI (on a freshly restarted app) and Spectral Chop.
+```python
+control('MAIN VOLUME', 'set', 64)
+while master_now() != 64 and time.monotonic() < deadline: ...
+assert master_now() == 64
+```
+
+With that, two consecutive runs pass, and the CC path is proven end to end: the
+panel move reaches `cc_capture`, `looper_set_master`, and the mixer.  The lesson
+is recorded here because it is the second time a flaky assertion looked like a
+regression in the ported code.
 
 ## Findings from the port
 

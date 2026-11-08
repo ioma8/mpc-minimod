@@ -194,9 +194,20 @@ def main():
         f'take latency {lat} != ring geometry {cal_frames} + trim'
 
     # --- MAIN VOLUME scales the loops like the rest of the app
+    def master_now():
+        return struct.unpack('<I', read(symbol('g_looper_master'), 4))[0]
+
     control('MAIN VOLUME', 'set', 127)
+    deadline = time.monotonic() + 3
+    while master_now() != 127 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert master_now() == 127, f'MAIN VOLUME 127 did not reach the looper: {master_now()}'
     vol_full = settled_rms()
     control('MAIN VOLUME', 'set', 64)
+    deadline = time.monotonic() + 3
+    while master_now() != 64 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert master_now() == 64, f'MAIN VOLUME 64 did not reach the looper: {master_now()}'
     vol_half = settled_rms()
     control('MAIN VOLUME', 'set', 127)
     time.sleep(0.2)

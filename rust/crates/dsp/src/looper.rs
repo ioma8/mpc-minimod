@@ -285,7 +285,10 @@ static LATENCY_SOURCE: AtomicU32 = AtomicU32::new(b'E' as u32);
 /// Latency snapshotted for the last take.
 static LATENCY_USED: AtomicU32 = AtomicU32::new(0);
 /// MAIN VOLUME, 0..127.
-static MASTER: AtomicU32 = AtomicU32::new(127);
+/// MAIN VOLUME, 0..127.  Exported so the acceptance harness can read the value
+/// the mixer is actually using instead of inferring it from the audio.
+#[unsafe(export_name = "g_looper_master")]
+pub static MASTER: AtomicU32 = AtomicU32::new(127);
 /// Mono input ring, as raw f32 bits.
 static RING_BUFFER: [AtomicU32; RING as usize] = [const { AtomicU32::new(0) }; RING as usize];
 /// Ring write cursor; single producer (the capture hook).
