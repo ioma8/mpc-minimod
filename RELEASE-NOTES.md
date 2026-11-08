@@ -37,8 +37,8 @@ only the latest changes.
   - **Bass Synth** previews chromatic C2–D#3 from pads 1–16, shapes it with
     K1/K2/K3, and saves a C2 pluck to a new pad.
   - **Live Looper** opens a fullscreen 16-pad looper: each pad records from the
-    selected input source, plays, overdubs, and can be synced to a pulse built
-    from the last loop's length.
+    selected input source, plays, overdubs, clears with `ERASE`, and can be
+    synced to a pulse built from the last loop's length.
 
 ## Install
 
@@ -53,6 +53,8 @@ The release supports MPC Sample firmware **1.3.0.12** only.
 
 - Add a fullscreen **Live Looper** with one loop per pad: press to record from
   the selected input source, press again to play, press a playing loop to stop.
+- `ERASE` + pad clears one loop, `STOP` stops every loop, and the sync click is
+  off by default (`SHIFT` + `LOOP` toggles it).
 - `SHIFT` + pad overdubs into the loop and the next press returns to playback;
   `SHIFT` + `LOOP` clears everything; `SHIFT` + `DATA` closes the view.
 - `LOOP` starts an audible sync pulse whose period is the most recent loop's
@@ -62,6 +64,10 @@ The release supports MPC Sample firmware **1.3.0.12** only.
   (RW_INTERLEAVED S32, 4 channels, 44.1 kHz) and mix loop playback into the S32
   block just before the app's device write, so no second audio device is opened
   and the app's own rendering path is untouched.
+- Measure the round-trip latency when the view opens (a short chirp through the
+  output, cross-correlated against the capture) and apply it to every take, so
+  overdubs and synced loops line up; a buffer-based estimate is used when the
+  input cannot hear the output, and `K1` trims it.
 - Draw the loop state, length, playhead and input level as a fullscreen view,
   and block pad notes from the app while it is open.
 - Add `mod/tests/emulator_looper.py` and an in-process output tap for audio
@@ -98,10 +104,13 @@ The release supports MPC Sample firmware **1.3.0.12** only.
 
 ## Verification
 
-- Live Looper verified in the emulator: a 1.18 s loop recorded from the tone
-  input plays at 0.15 rms / 441 Hz after the input is unplugged; stop silences
-  it; overdub keeps the loop; a 0.6 s take under a 1.27 s pulse becomes exactly
-  one pulse; closing keeps the loops and does not restart the app.
+- Live Looper verified in the emulator: opening calibrates the round trip from
+  the chirp (loop cable in), and clicks recorded through the cable land within
+  6 frames of the pulse grid; a 1.17 s loop recorded from the tone input plays
+  at 0.15 rms / 441 Hz after the input is unplugged; stop silences it; overdub
+  keeps the loop length; a short take under a 1.27 s pulse becomes exactly one
+  pulse; `STOP` silences everything, `ERASE`+pad clears one, `SHIFT`+`LOOP`
+  toggles the click; closing keeps the loops and does not restart the app.
 - Built and packaged the release for the MPC Sample's ARM64 firmware.
 - Emulator checks cover the native reverb, Vinyl, Lo-Fi and Bass Synth paths,
   plus C3/C#3/G3 MIDI transposition, pass-through outside 16 Levels, and no

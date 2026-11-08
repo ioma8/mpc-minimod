@@ -9,6 +9,14 @@
  * The output side is the clock: every played frame advances one transport
  * counter, and a loop is an exact count of those frames. That keeps playback
  * and recording in the same time base even when the two audio streams drift.
+ *
+ * Latency: a frame written to the output is heard `out_delay` frames later, and
+ * a frame read from the input was captured `in_delay` frames ago (plus whatever
+ * waits in our own ring). Recording without correcting for that places the
+ * performance late in the loop, which is exactly what makes overdubs and synced
+ * loops sound behind. The write position is therefore shifted back by the
+ * measured total, and the first frames of a take are dropped instead of landing
+ * before the loop start.
  */
 #include <math.h>
 #include <stdio.h>
@@ -26,21 +34,45 @@
 #define LP_BLOCK 2048u
 #define LP_GAIN 0.85f
 #define LP_CLICK 420u
+#define LP_LAT_MAX 16384u
 
 static float *g_pool; /* LOOPER_PADS * LP_MAX_FRAMES mono floats */
 static volatile int g_open;
 
 static volatile int g_shift;
+static volatile int g_erase;
+static volatile int g_click; /* metronome click on the sync pulse */
 static volatile int g_sync;
 static volatile unsigned g_sync_frames;
 static volatile uint64_t g_pulse_epoch;
 static volatile uint64_t g_t; /* played frames since open */
+static volatile unsigned g_lat; /* measured record latency, frames */
 
+/* Round-trip calibration: a short chirp is mixed into the output when the view
+ * opens and the input is captured for a moment afterwards. If the chirp comes
+ * back (loop cable, resample, a microphone hearing the speaker) the measured
+ * delay is used directly; if it does not, the buffer-based estimate stays. */
+#define LP_CAL_PROBE 882u   /* 20 ms chirp */
+#define LP_CAL_CAP 32768u   /* capture window, 0.74 s */
+static volatile int g_cal_state;      /* 0 idle, 1 arm, 2 capture, 3 ready, 4 done, 5 failed */
+static volatile uint64_t g_cal_probe_t;
+static volatile uint64_t g_cal_in_t;
+static volatile unsigned g_cal_w;
+static volatile unsigned g_cal_emit;
+static float g_cal_cap[LP_CAL_CAP];
+static int g_cal_result;
+static float g_cal_conf;
+static volatile unsigned g_lat_used; /* latency snapshotted for the last take */
+
+/* Keep this at 32 bytes: the emulator test reads the array by stride, and the
+ * offsets are state 0, len 4, rec 8, lat 12, origin 16, skip 24. */
 struct pad {
     volatile int state;
-    volatile unsigned len; /* closed length, frames */
-    volatile unsigned rec; /* frames captured, writer: audio thread only */
+    volatile unsigned len;   /* closed length, frames */
+    volatile unsigned rec;   /* frames captured, writer: audio thread only */
+    volatile unsigned lat;   /* latency applied to this take */
     volatile uint64_t origin;
+    volatile unsigned skip;  /* frames still to drop at the start of a take */
     volatile int touched;
 };
 
@@ -106,20 +138,56 @@ static unsigned quantize(unsigned frames)
     return (unsigned)target;
 }
 
+static void drop_rec(void)
+{
+    long v = __atomic_sub_fetch(&g_rec_count, 1, __ATOMIC_SEQ_CST);
+    if (v < 0)
+        __atomic_store_n(&g_rec_count, 0, __ATOMIC_SEQ_CST);
+}
+
 static void finish_pad(struct pad *p)
 {
     int st = p->state;
     if (st != LOOP_REC && st != LOOP_DUB)
         return;
     if (st == LOOP_REC) {
-        unsigned n = p->rec;
-        unsigned len = quantize(n);
-        p->len = len ? len : n;
-        p->rec = n;
+        /* the musical length is the transport span, not the frames that fit
+         * after the latency skip */
+        unsigned span = (unsigned)(g_t - p->origin);
+        unsigned len = quantize(span ? span : p->rec);
+        p->len = len ? len : p->rec;
         p->state = LOOP_PLAY;
     } else {
         p->state = LOOP_PLAY;
     }
+    p->skip = 0;
+    drop_rec();
+}
+
+void looper_stop_all(void)
+{
+    for (int i = 0; i < LOOPER_PADS; ++i) {
+        struct pad *p = &g_pads[i];
+        if (p->state == LOOP_REC || p->state == LOOP_DUB)
+            finish_pad(p);
+        if (p->state == LOOP_PLAY)
+            p->state = LOOP_STOP;
+    }
+    g_rec_count = 0;
+}
+
+static void clear_pad(int pad)
+{
+    struct pad *p = &g_pads[pad];
+    int st = p->state;
+    if (st == LOOP_REC || st == LOOP_DUB)
+        drop_rec();
+    p->state = LOOP_IDLE;
+    p->len = 0;
+    p->rec = 0;
+    p->skip = 0;
+    p->origin = 0;
+    p->lat = 0;
 }
 
 int looper_is_open(void)
@@ -141,7 +209,9 @@ int looper_activate(void)
     for (int i = 0; i < LOOPER_PADS; ++i) {
         g_pads[i].state = g_pads[i].len ? LOOP_STOP : LOOP_IDLE;
         g_pads[i].rec = 0;
+        g_pads[i].skip = 0;
         g_pads[i].origin = 0;
+        g_pads[i].lat = 0;
         g_pads[i].touched = 0;
     }
     g_ring_w = g_ring_r = 0;
@@ -150,9 +220,11 @@ int looper_activate(void)
     g_input_level = 0;
     g_t = 0;
     g_shift = 0;
+    g_erase = 0;
     g_sync = 0;
     g_sync_frames = 0;
     g_pulse_epoch = 0;
+    g_click = 0; /* the metronome is off by default */
     g_msg[0] = 0;
     g_open = 1;
     say("PAD: record   SHIFT+PAD: overdub");
@@ -163,12 +235,7 @@ void looper_close(void)
 {
     if (!g_open)
         return;
-    for (int i = 0; i < LOOPER_PADS; ++i) {
-        if (g_pads[i].state == LOOP_REC || g_pads[i].state == LOOP_DUB)
-            finish_pad(&g_pads[i]);
-        if (g_pads[i].state == LOOP_PLAY || g_pads[i].state == LOOP_DUB)
-            g_pads[i].state = LOOP_STOP;
-    }
+    looper_stop_all();
     g_rec_count = 0;
     g_sync = 0;
     g_input_level = 0;
@@ -188,6 +255,9 @@ static void start_record(struct pad *p, int pad)
     p->len = 0;
     p->rec = 0;
     p->origin = g_t;
+    p->lat = g_lat > LP_LAT_MAX ? LP_LAT_MAX : g_lat;
+    g_lat_used = p->lat;
+    p->skip = p->lat;
     p->state = LOOP_REC;
     __atomic_add_fetch(&g_rec_count, 1, __ATOMIC_SEQ_CST);
 }
@@ -196,17 +266,24 @@ static void start_overdub(struct pad *p)
 {
     if (!p->len)
         return;
+    p->lat = g_lat > LP_LAT_MAX ? LP_LAT_MAX : g_lat;
+    g_lat_used = p->lat;
     p->state = LOOP_DUB;
     __atomic_add_fetch(&g_rec_count, 1, __ATOMIC_SEQ_CST);
 }
 
-int looper_pad(int pad, int shift)
+int looper_pad(int pad, int shift, int erase)
 {
     if (!g_open)
         return 0;
     if (pad < 0 || pad >= LOOPER_PADS)
         return 1;
     struct pad *p = &g_pads[pad];
+    if (erase) {
+        clear_pad(pad);
+        say("PAD CLEARED");
+        return 1;
+    }
     int st = p->state;
     if (shift) {
         if (st == LOOP_PLAY || st == LOOP_STOP)
@@ -222,8 +299,6 @@ int looper_pad(int pad, int shift)
         start_record(p, pad);
         break;
     case LOOP_REC:
-        finish_pad(p);
-        break;
     case LOOP_DUB:
         finish_pad(p);
         break;
@@ -238,30 +313,36 @@ int looper_pad(int pad, int shift)
     return 1;
 }
 
-int looper_button(unsigned code, int down, int shift)
+int looper_button(unsigned code, int down, int shift, int erase)
 {
     if (!g_open)
         return 0;
     g_shift = shift;
+    g_erase = erase;
     if (code == 0x6f) { /* DATA: SHIFT+DATA closes */
         if (down && shift)
             looper_close();
         return 1;
     }
-    if (code == 0x4a) { /* LOOP: sync pulse, SHIFT+LOOP: clear */
-        if (down && shift) {
-            for (int i = 0; i < LOOPER_PADS; ++i) {
-                g_pads[i].state = LOOP_IDLE;
-                g_pads[i].len = 0;
-                g_pads[i].rec = 0;
-                g_pads[i].origin = 0;
-            }
-            g_rec_count = 0;
-            g_sync = 0;
-            g_sync_frames = 0;
-            say("ALL LOOPS CLEARED");
-        } else if (down) {
-            if (g_sync) {
+    if (code == 0x51) { /* STOP: stop every loop, keep the material */
+        if (down) {
+            looper_stop_all();
+            say("ALL STOPPED");
+        }
+        return 1;
+    }
+    if (code == 0x4a) { /* LOOP: sync pulse; ERASE+LOOP clears all; SHIFT+LOOP click */
+        if (down) {
+            if (erase) {
+                for (int i = 0; i < LOOPER_PADS; ++i)
+                    clear_pad(i);
+                g_sync = 0;
+                g_sync_frames = 0;
+                say("ALL LOOPS CLEARED");
+            } else if (shift) {
+                g_click = !g_click;
+                say(g_click ? "CLICK on" : "CLICK off");
+            } else if (g_sync) {
                 g_sync = 0;
                 say("SYNC off");
             } else {
@@ -290,11 +371,129 @@ int looper_button(unsigned code, int down, int shift)
     return 1; /* every other control is blocked while the view is open */
 }
 
+void looper_set_latency(unsigned frames)
+{
+    g_lat = frames > LP_LAT_MAX ? LP_LAT_MAX : frames;
+}
+
+unsigned looper_input_backlog(void)
+{
+    return g_ring_w - g_ring_r;
+}
+
+int looper_click_enabled(void)
+{
+    return g_click;
+}
+
+void looper_notice(const char *text)
+{
+    say(text);
+}
+
+/* -------------------------------------------------------- calibration */
+static float probe_sample(unsigned i)
+{
+    if (i >= LP_CAL_PROBE)
+        return 0.f;
+    float u = (float)i / (float)LP_CAL_PROBE;
+    float f = 1000.f + 3000.f * u;                 /* 1 kHz -> 4 kHz chirp */
+    float win = 0.5f - 0.5f * cosf(6.2831853f * u);
+    return sinf(6.2831853f * f * (float)i / (float)LP_RATE) * win * 0.3f;
+}
+
+void looper_calibrate(void)
+{
+    if (!g_open)
+        return;
+    g_cal_w = 0;
+    g_cal_emit = 0;
+    g_cal_in_t = 0;
+    g_cal_result = 0;
+    g_cal_conf = 0.f;
+    g_cal_state = 1;
+}
+
+int looper_calibration_pending(void)
+{
+    return g_cal_state == 3;
+}
+
+/* Run on the UI thread when the capture window is full. Correlates the known
+ * chirp against the capture and keeps the result only when the peak is
+ * clearly above the surrounding energy. */
+void looper_calibration_finish(void)
+{
+    if (g_cal_state != 3)
+        return;
+    unsigned cap = g_cal_w;
+    if (cap < LP_CAL_PROBE * 4) {
+        g_cal_state = 5;
+        return;
+    }
+    float energy = 0.f;
+    for (unsigned i = 0; i < cap; ++i)
+        energy += g_cal_cap[i] * g_cal_cap[i];
+    float best = 0.f;
+    unsigned best_lag = 0;
+    unsigned limit = cap - LP_CAL_PROBE;
+    for (unsigned lag = 0; lag < limit; lag += 1) {
+        float acc = 0.f;
+        for (unsigned i = 0; i < LP_CAL_PROBE; i += 2)
+            acc += g_cal_cap[lag + i] * probe_sample(i);
+        float a = acc < 0.f ? -acc : acc;
+        if (a > best) {
+            best = a;
+            best_lag = lag;
+        }
+    }
+    float norm = sqrtf(energy / (float)cap * (float)LP_CAL_PROBE);
+    float conf = norm > 1e-6f ? best / norm : 0.f;
+    g_cal_conf = conf;
+    if (conf < 0.05f) {
+        g_cal_state = 5;
+        say("CALIB: no return, using estimate");
+        return;
+    }
+    int64_t d = (int64_t)best_lag + ((int64_t)g_cal_in_t - (int64_t)g_cal_probe_t);
+    if (d < 0)
+        d = 0;
+    if (d > 8000)
+        d = 8000;
+    g_cal_result = (int)d;
+    g_lat = (unsigned)d;
+    g_cal_state = 4;
+    char line[40];
+    snprintf(line, sizeof line, "CALIB %d ms", (int)(d * 1000 / LP_RATE));
+    say(line);
+}
+
+int looper_calibration_state(void)
+{
+    return g_cal_state;
+}
+
+unsigned looper_calibrated_latency(void)
+{
+    return g_cal_result > 0 ? (unsigned)g_cal_result : 0;
+}
+
 /* ------------------------------------------------------------ audio input */
 /* Shared tail: one block of mono input, already in float. */
 static void input_block(const float *mono, unsigned n, float peak)
 {
     __atomic_add_fetch(&g_input_blocks, 1, __ATOMIC_RELAXED);
+    if (g_cal_state == 2) {
+        if (!g_cal_in_t)
+            g_cal_in_t = g_t;
+        for (unsigned i = 0; i < n; ++i) {
+            if (g_cal_w >= LP_CAL_CAP) {
+                g_cal_state = 3;
+                break;
+            }
+            g_cal_cap[g_cal_w++] = mono[i];
+        }
+    }
     int rec = __atomic_load_n(&g_rec_count, __ATOMIC_ACQUIRE);
     unsigned w = g_ring_w;
     for (unsigned i = 0; i < n; ++i) {
@@ -445,25 +644,54 @@ void looper_render_s32(int32_t *buf, unsigned channels, unsigned frames)
                         add[i] += b[(base + i) % len] * LP_GAIN;
                 }
                 if (st == LOOP_DUB && len && b) {
-                    uint64_t base = t - pd->origin;
-                    for (unsigned i = 0; i < n; ++i)
-                        b[(base + i) % len] += in[i];
+                    unsigned lat = pd->lat % len;
+                    for (unsigned i = 0; i < n; ++i) {
+                        int64_t pos = (int64_t)((t + i - pd->origin) % len) - (int64_t)lat;
+                        if (pos < 0)
+                            pos += len;
+                        float v = b[pos] + in[i];
+                        /* a source that hears the output would otherwise grow the
+                         * loop without bound */
+                        if (v > 1.f)
+                            v = 1.f;
+                        else if (v < -1.f)
+                            v = -1.f;
+                        b[pos] = v;
+                    }
                 }
             } else if (st == LOOP_REC) {
                 float *b = pad_buf(p);
-                unsigned rn = pd->rec;
                 if (b) {
-                    unsigned room = LP_MAX_FRAMES - rn;
-                    unsigned cp = n < room ? n : room;
-                    memcpy(b + rn, in, (size_t)cp * sizeof(float));
-                    pd->rec = rn + cp;
-                    __atomic_add_fetch(&g_rec_total, cp, __ATOMIC_RELAXED);
-                    if (rn + cp >= LP_MAX_FRAMES)
-                        finish_pad(pd);
+                    unsigned before = pd->rec;
+                    unsigned rn = before;
+                    unsigned skip = pd->skip;
+                    for (unsigned i = 0; i < n; ++i) {
+                        if (skip) {
+                            --skip;
+                            continue;
+                        }
+                        if (rn >= LP_MAX_FRAMES)
+                            break;
+                        b[rn++] = in[i];
+                    }
+                    pd->skip = skip;
+                    pd->rec = rn;
+                    __atomic_add_fetch(&g_rec_total, rn - before, __ATOMIC_RELAXED);
+                    if (rn >= LP_MAX_FRAMES)
+                        finish_pad(pd); /* auto-close at the limit */
                 }
             }
         }
-        if (g_sync) {
+        if (g_cal_state == 1) {
+            g_cal_probe_t = t;
+            g_cal_emit = 0;
+            g_cal_state = 2; /* capture starts on the same block */
+        }
+        if (g_cal_state == 2 && g_cal_emit < LP_CAL_PROBE) {
+            for (unsigned i = 0; i < n && g_cal_emit < LP_CAL_PROBE; ++i)
+                add[i] += probe_sample(g_cal_emit++);
+        }
+        if (g_sync && g_click) {
             unsigned q = g_sync_frames;
             if (q) {
                 uint64_t e = g_pulse_epoch;
@@ -509,6 +737,7 @@ int looper_snapshot(struct looper_view *view)
     if (!g_open)
         return 0;
     view->sync = g_sync;
+    view->click = g_click;
     view->sync_frames = g_sync_frames;
     view->pulse_phase = 0xffffffffu;
     if (g_sync && g_sync_frames)
@@ -518,6 +747,7 @@ int looper_snapshot(struct looper_view *view)
     memcpy(&lv, &lb, sizeof lv);
     view->input = lv > 1.f ? 1.f : lv;
     view->recording_pad = -1;
+    view->lat_frames = g_lat_used;
     uint64_t t = g_t;
     for (int i = 0; i < LOOPER_PADS; ++i) {
         struct pad *p = &g_pads[i];

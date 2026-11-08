@@ -39,10 +39,12 @@ struct looper_pad_view {
 struct looper_view {
     int open;
     int sync;                  /* sync pulse running */
+    int click;                 /* metronome click enabled */
     unsigned sync_frames;      /* pulse period */
     unsigned pulse_phase;      /* 0..sync_frames, or 0xffffffff when idle */
     float input;               /* input level 0..1 */
     int recording_pad;         /* -1 when nothing is recording */
+    unsigned lat_frames;       /* latency applied to the last take */
     char message[40];          /* status line, empty when none */
     struct looper_pad_view pads[LOOPER_PADS];
 };
@@ -54,12 +56,32 @@ void looper_close(void);
 int looper_is_open(void);
 
 /* Pad event. Returns 1 when the looper owns the press (always, when open).
- * `shift` selects overdub. */
-int looper_pad(int pad, int shift);
+ * `shift` selects overdub, `erase` clears the pad. */
+int looper_pad(int pad, int shift, int erase);
 
 /* Button event while open. Returns 1 when consumed. Handles LOOP (sync),
- * SHIFT tracking and SHIFT+DATA (close). */
-int looper_button(unsigned code, int down, int shift);
+ * SHIFT+LOOP (click), ERASE+LOOP (clear all), STOP (all loops) and
+ * SHIFT+DATA (close). */
+int looper_button(unsigned code, int down, int shift, int erase);
+
+/* Stop playback of every loop, keeping the material. */
+void looper_stop_all(void);
+
+/* Record latency compensation, in frames: the measured output + input delay
+ * plus whatever waits in the input ring. Snapshotted when a take starts. */
+void looper_set_latency(unsigned frames);
+unsigned looper_input_backlog(void);
+int looper_click_enabled(void);
+/* Show a short status line in the view. */
+void looper_notice(const char *text);
+
+/* Round-trip latency calibration: arm a chirp when the view opens, finish the
+ * correlation on the UI thread once the capture window is full. */
+void looper_calibrate(void);
+int looper_calibration_pending(void);
+void looper_calibration_finish(void);
+int looper_calibration_state(void);
+unsigned looper_calibrated_latency(void);
 
 /* Audio hooks. `channels` is planar float as the firmware passes it. */
 void looper_input(const float *const *channels, int count, unsigned frames);

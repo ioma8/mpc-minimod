@@ -1574,6 +1574,7 @@ static void set_filter_text(const char *t);
 static void do_autotrim(void);
 
 static volatile int g_shift;
+static volatile int g_erase_down;
 static volatile int g_trim_req;
 static volatile int g_last_pad = -1;
 static volatile int g_core_hit;
@@ -3839,6 +3840,7 @@ static void hpss_activate(void)
             g_hpss_menu = 0;
             g_bass_edit = 0;
             bass_preview_set_active(0);
+            looper_calibrate(); /* measure the round trip once the view is up */
             looper_pump();
         }
         hpss_repaint();
@@ -3945,6 +3947,8 @@ static void looper_cell(void *g, int x, int y, int w, int h,
 static void looper_draw(void *g)
 {
     struct looper_view v;
+    if (looper_calibration_pending())
+        looper_calibration_finish();
     if (!looper_snapshot(&v))
         return;
     draw_colour(g, 0xff0c0c10);
@@ -3957,9 +3961,9 @@ static void looper_draw(void *g)
     draw_text(g, "LIVE LOOPER", 8, 2, 180, 20, 15.0f);
     /* sync pulse state and beat dot */
     if (v.sync && v.sync_frames) {
-        char line[16];
-        snprintf(line, sizeof line, "SYNC %.2fs",
-                 (double)v.sync_frames / 44100.0);
+        char line[24];
+        snprintf(line, sizeof line, "SYNC %.2fs%s",
+                 (double)v.sync_frames / 44100.0, v.click ? " +CLK" : "");
         draw_colour(g, 0xffffb43c);
         draw_text(g, line, 200, 4, 100, 16, 10.0f);
         int on = v.pulse_phase != 0xffffffffu &&
@@ -3972,9 +3976,9 @@ static void looper_draw(void *g)
         if (pct > 320)
             pct = 320;
         draw_colour(g, 0xff3a2a10);
-        draw_rect(g, 0, 237, 320, 3);
+        draw_rect(g, 0, 236, 320, 3);
         draw_colour(g, 0xffffb43c);
-        draw_rect(g, 0, 237, pct, 3);
+        draw_rect(g, 0, 236, pct, 3);
     } else {
         draw_colour(g, 0xff8a8a92);
         draw_text(g, "FREE", 248, 4, 60, 16, 10.0f);
@@ -3982,6 +3986,7 @@ static void looper_draw(void *g)
     /* input meter */
     draw_colour(g, 0xff8a8a92);
     draw_text(g, "IN", 4, 27, 16, 10, 7.0f);
+
     draw_colour(g, 0xff2a2a32);
     draw_rect(g, 22, 30, 290, 4);
     draw_colour(g, v.input > 0.9f ? 0xffff4d4d : 0xff54d06a);
@@ -3999,13 +4004,21 @@ static void looper_draw(void *g)
     /* status line and key hints */
     if (v.message[0]) {
         draw_colour(g, 0xff201408);
-        draw_rect(g, 8, 206, 304, 14);
+        draw_rect(g, 8, 202, 304, 12);
         draw_colour(g, 0xffffb43c);
-        draw_text(g, v.message, 12, 206, 296, 14, 10.0f);
+        draw_text(g, v.message, 12, 202, 296, 12, 10.0f);
+    } else if (v.lat_frames) {
+        char lat[24];
+        snprintf(lat, sizeof lat, "LAT %ums", (unsigned)((uint64_t)v.lat_frames * 1000 / 44100));
+        draw_colour(g, 0xff5a5a64);
+        draw_rect(g, 8, 202, 304, 12);
+        draw_colour(g, 0xffb8b8be);
+        draw_text(g, lat, 12, 202, 296, 12, 9.0f);
     }
     draw_colour(g, 0xffb8b8be);
-    draw_text(g, "PAD: REC/PLAY/STOP  SHIFT+PAD: OVERDUB", 8, 219, 304, 9, 8.0f);
-    draw_text(g, "LOOP: SYNC PULSE  SHIFT+DATA: EXIT", 8, 228, 304, 9, 8.0f);
+    draw_text(g, "PAD REC/PLAY/STOP  SHIFT OVERDUB  ERASE CLEAR", 8, 214, 304, 9, 7.0f);
+    draw_text(g, "STOP ALL  LOOP SYNC  SHIFT+LOOP CLICK  SHIFT+DATA EXIT",
+              8, 224, 304, 9, 7.0f);
 }
 
 static void hpss_draw_menu(void *g)
@@ -4101,10 +4114,15 @@ static void buttons(void *event)
             g_shift = down ? 1 : 0;
             return;
         }
+        if (code == 0x09) { /* ERASE: held while a pad is pressed clears it */
+            g_erase_down = down ? 1 : 0;
+            return;
+        }
         int was = looper_is_open();
-        looper_button(code, (int)down, g_shift);
+        looper_button(code, (int)down, g_shift, g_erase_down);
         if (was && !looper_is_open()) {
             g_shift = 0;
+            g_erase_down = 0;
             hpss_repaint();
         }
         return;
@@ -4278,7 +4296,7 @@ static struct {
 static void note_on(void *input, int src, int pad, void *props, float vel)
 {
     if (looper_is_open() && pad >= 0 && pad < LOOPER_PADS) {
-        looper_pad(pad, g_shift); /* the looper owns the pads while it is open */
+        looper_pad(pad, g_shift, g_erase_down); /* the looper owns the pads while it is open */
         return;
     }
     if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
@@ -4357,6 +4375,13 @@ static int audio_channels(void *self, int input_side)
  * lands here, whichever device object owns the pcm handle. */
 static long (*real_snd_pcm_readi)(void *, void *, unsigned long);
 static long (*real_snd_pcm_writei)(void *, const void *, unsigned long);
+static long (*real_snd_pcm_delay)(void *, long *);
+static long (*real_snd_pcm_avail)(void *);
+static volatile unsigned g_out_delay; /* last output delay sample, frames */
+static volatile unsigned g_out_delay_avg; /* smoothed, what a take uses */
+static volatile unsigned g_in_delay;
+static int g_lat_fixed = -1; /* MINIMOD_LOOP_LAT: override the measurement */
+static int g_lat_extra;      /* MINIMOD_LOOP_LAT_EXTRA: calibration trim */
 static volatile unsigned g_out_peak_bits;
 static volatile unsigned g_out_write_calls;
 /* In-process tap of the last two seconds of written audio (mono, channel 0).
@@ -4388,6 +4413,32 @@ long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size)
         return -1;
     unsigned ch = g_pcm_channels ? g_pcm_channels : 4;
     int looper = looper_is_open();
+    if (looper) {
+        long delay = 0;
+        if (!real_snd_pcm_delay)
+            real_snd_pcm_delay = (long (*)(void *, long *))dlsym(RTLD_NEXT, "snd_pcm_delay");
+        if (real_snd_pcm_delay && real_snd_pcm_delay(pcm, &delay) == 0 && delay >= 0) {
+            g_out_delay = (unsigned)delay;
+            unsigned avg = g_out_delay_avg;
+            g_out_delay_avg = avg ? (avg * 7 + g_out_delay) / 8 : g_out_delay;
+        }
+        if (g_lat_fixed >= 0) {
+            looper_set_latency((unsigned)g_lat_fixed);
+        } else {
+            /* A finished round-trip calibration wins; otherwise estimate from
+             * the device buffers: one period of output is queued after this
+             * write, and the capture side adds the frames already buffered when
+             * we read them. */
+            unsigned cal = looper_calibrated_latency();
+            int total = cal ? (int)cal
+                            : (int)(g_out_delay_avg + (unsigned)size + g_in_delay +
+                                    looper_input_backlog());
+            total += g_lat_extra;
+            if (total < 0)
+                total = 0;
+            looper_set_latency((unsigned)total);
+        }
+    }
     if (looper && buffer && size)
         looper_render_s32((int32_t *)buffer, ch, (unsigned)size);
     long got = real_snd_pcm_writei(pcm, buffer, size);
@@ -4426,6 +4477,13 @@ long snd_pcm_readi(void *pcm, void *buffer, unsigned long size)
             (long (*)(void *, void *, unsigned long))dlsym(RTLD_NEXT, "snd_pcm_readi");
     if (!real_snd_pcm_readi)
         return -1;
+    if (looper_is_open()) {
+        long avail = 0;
+        if (!real_snd_pcm_avail)
+            real_snd_pcm_avail = (long (*)(void *))dlsym(RTLD_NEXT, "snd_pcm_avail");
+        if (real_snd_pcm_avail && (avail = real_snd_pcm_avail(pcm)) > 0)
+            g_in_delay = (unsigned)avail;
+    }
     long got = real_snd_pcm_readi(pcm, buffer, size);
     if (got > 0) {
         __atomic_add_fetch(&g_audio_in_calls, 1, __ATOMIC_RELAXED);
@@ -5424,6 +5482,27 @@ static int g_in_cc_replay;
 
 static void cc_capture(void *ev, unsigned raw, float lo, float range)
 {
+    if (!g_in_cc_replay && ev && looper_is_open()) {
+        unsigned cc = ((unsigned char *)ev)[8];
+        if (cc == 0x10) { /* K1: trim the record latency, 1 ms per step */
+            static int k1_last = -1;
+            if (k1_last < 0) {
+                k1_last = (int)raw;
+            } else if ((int)raw != k1_last) {
+                int ms = (g_lat_extra + (int)raw - k1_last) / 44;
+                if (ms < -400)
+                    ms = -400;
+                if (ms > 400)
+                    ms = 400;
+                g_lat_extra = ms * 44;
+                k1_last = (int)raw;
+                char line[40];
+                snprintf(line, sizeof line, "LAT %+d ms", ms);
+                looper_notice(line);
+            }
+        }
+        return; /* the looper owns every control while it is open */
+    }
     if (!g_in_cc_replay && ev && g_hpss_menu && g_bass_edit && !g_hpss_busy) {
         unsigned cc = ((unsigned char *)ev)[8];
         int knob = cc == 0x10 ? 0 : cc == 0x11 ? 1 : cc == 0x12 ? 2 : -1;
@@ -7209,6 +7288,14 @@ __attribute__((constructor)) static void load(void)
     debug_mode = dbg_env && atoi(dbg_env) != 0;
     const char *probe_env = getenv("MINIMOD_PROBE");
     probe_mode = probe_env && atoi(probe_env) != 0;
+    {
+        const char *lat = getenv("MINIMOD_LOOP_LAT");
+        if (lat && *lat)
+            g_lat_fixed = atoi(lat);
+        const char *extra = getenv("MINIMOD_LOOP_LAT_EXTRA");
+        if (extra && *extra)
+            g_lat_extra = atoi(extra);
+    }
     const char *bits_env = getenv("MINIMOD_PROBES");
     if (bits_env && *bits_env)
         probe_bits = atoi(bits_env);

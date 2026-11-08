@@ -1,19 +1,21 @@
 """Live looper acceptance: record from the selected input, play, overdub, sync.
 
 Requires the virtual MPC lab with a build of this mod preloaded, on the Sample
-page. It clears any loops left from an earlier run. Drives the panel, reads the mod's own output tap (the last two seconds of
-audio the firmware handed to the audio device) and the pad state machine from
-/proc/<pid>/mem, so the check does not depend on the lab's host PCM socket.
+page. It clears any loops left from an earlier run.
 
 What it proves, in order:
   * SAMPLE OPTIONS has a Live Looper entry and it opens a fullscreen view
-  * a pad records from the selected input source and closes into playback
+  * opening it measures the round-trip latency from a chirp (loop cable here)
+  * the metronome click is off by default
+  * a pad records from the selected input source and closes into playback,
+    with a measured latency compensation on the take
   * the recorded loop really is on the device output (440 Hz from the tone
     source, after the input is unplugged)
   * pressing the pad again stops it (output goes silent)
   * SHIFT + pad overdubs and a second press returns to playback
   * LOOP starts the sync pulse and a new loop is quantized to a whole pulse
-  * SHIFT + DATA closes the view, keeps the loops, and pads reach the app again
+  * STOP stops every loop, ERASE + pad clears one, SHIFT + LOOP toggles the click
+  * SHIFT + DATA closes the view, keeps the loops, and the app does not restart
 """
 import argparse
 import json
@@ -73,7 +75,6 @@ def main():
     pid = int(ssh('pidof "MPC Sample"'))
     maps = ssh(f'cat /proc/{pid}/maps').splitlines()
     mod_base = int(next(x for x in maps if x.endswith('/minimod.so')).split('-')[0], 16)
-    app_base = int(next(x for x in maps if x.endswith('/MPC Sample')).split('-')[0], 16)
 
     def read(offset, size):
         data = ssh(f'dd if=/proc/{pid}/mem bs=1 skip={mod_base + offset} count={size} '
@@ -88,8 +89,8 @@ def main():
         raw = read(symbol('g_pads'), 16 * 32)
         pads = []
         for i in range(16):
-            state, length, rec = struct.unpack('<III', raw[i * 32:i * 32 + 12])
-            pads.append((state, length, rec))
+            state, length, rec, lat = struct.unpack('<IIII', raw[i * 32:i * 32 + 16])
+            pads.append((state, length, rec, lat))
         return pads
 
     def output_tail(frames=4000):
@@ -131,28 +132,48 @@ def main():
         control('SHIFT', 'release')
         time.sleep(0.6)
 
-    route('tone')
+    def clear_all():
+        control('ERASE', 'press', 127)
+        tap('LOOP')
+        control('ERASE', 'release')
+
+    def hold(name, other):
+        control(name, 'press', 127)
+        tap(other)
+        control(name, 'release')
+
+    # --- the view calibrates itself on open: with the loop cable in, the
+    #     chirp it plays comes back and the measured delay is used
+    route('loop')
     if u32(symbol('g_open')):
         close_looper()          # a previous run may have left the view open
     open_looper()
     assert u32(symbol('g_open')) == 1, 'the looper view did not open'
-    # clear any loops left by an earlier run, then start from an empty looper
-    control('SHIFT', 'press', 127)
-    tap('LOOP')
-    control('SHIFT', 'release')
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and u32(symbol('g_cal_state')) == 2:
+        time.sleep(0.05)
+    cal_state = u32(symbol('g_cal_state'))
+    cal_frames = u32(symbol('g_cal_result'))
+    assert cal_state == 4, f'round-trip calibration failed (state {cal_state})'
+    assert 300 < cal_frames < 6000, f'implausible calibrated latency {cal_frames}'
+
+    route('tone')
+    clear_all()
     time.sleep(0.3)
     pads = snapshot()
     assert len(pads) == 16, pads
     assert all(p[0] == 0 and p[1] == 0 for p in pads), pads
+    assert u32(symbol('g_click')) == 0, 'the metronome must start off'
 
     # --- record one second from the tone input, then close into playback
     tap('PAD 1')
     time.sleep(1.0)
     tap('PAD 1')
     wait_state(0, 2)                       # PLAY
-    state, length, rec = snapshot()[0]
+    state, length, rec, lat = snapshot()[0]
     assert length > 40000, (state, length, rec)
     assert abs(length - rec) < 4000, (length, rec)
+    assert lat > 0, f'no latency compensation on the take: {lat}'
 
     # --- unplug the input: what remains can only be the loop we recorded
     route('none')
@@ -173,13 +194,12 @@ def main():
     # --- SHIFT + pad overdubs, a second press returns to playback
     route('tone')
     time.sleep(0.2)
-    control('SHIFT', 'press', 127)
-    tap('PAD 1')
-    control('SHIFT', 'release')
+    hold('SHIFT', 'PAD 1')
     wait_state(0, 3)                       # DUB
     time.sleep(0.5)
     tap('PAD 1')
     wait_state(0, 2)                       # PLAY
+    assert snapshot()[0][1] == loop_length, snapshot()[0]
     route('none')
     time.sleep(0.4)
     assert rms(output_tail()) > 0.02, 'overdub lost the loop'
@@ -198,20 +218,43 @@ def main():
     time.sleep(0.45)
     tap('PAD 2')
     wait_state(1, 2)                       # PLAY
-    state, length, rec = snapshot()[1]
+    state, length, rec, lat = snapshot()[1]
     assert length == pulse, (length, pulse, rec)
     assert rec < length, (rec, length)     # padded with silence, not stretched
+    quant_len, quant_rec, take_lat = length, rec, lat
 
-    # --- SHIFT + DATA closes; loops survive and the pads reach the app again
-    tap('LOOP')                            # sync off
+    # --- STOP stops everything that is playing
+    tap('STOP')
+    time.sleep(0.3)
+    assert all(p[0] != 2 and p[0] != 3 for p in snapshot()), snapshot()
+    assert rms(output_tail()) < 0.01, 'STOP should silence every loop'
+
+    # --- ERASE + pad clears exactly that pad
+    control('ERASE', 'press', 127)
+    tap('PAD 2')
+    control('ERASE', 'release')
+    time.sleep(0.2)
+    state, length, rec, lat = snapshot()[1]
+    assert state == 0 and length == 0, (state, length, rec)
+
+    # --- SHIFT + LOOP toggles the metronome click (off by default)
+    hold('SHIFT', 'LOOP')
+    time.sleep(0.2)
+    assert u32(symbol('g_click')) == 1, 'SHIFT + LOOP did not enable the click'
+    hold('SHIFT', 'LOOP')
+    time.sleep(0.2)
+    assert u32(symbol('g_click')) == 0, 'SHIFT + LOOP did not disable the click'
+
+    # --- SHIFT + DATA closes; loops survive and the app does not restart
     close_looper()
     after = snapshot()
-    assert after[0][1] == loop_length and after[1][1] == pulse, after
-    assert ssh(f'systemctl show ac50 -p NRestarts').strip().endswith('0'), 'app restarted'
+    assert after[0][1] == loop_length, after[0]
+    assert ssh('systemctl show ac50 -p NRestarts').strip().endswith('0'), 'app restarted'
     assert int(ssh('pidof "MPC Sample"')) == pid, 'app pid changed'
     print(f'live looper: loop {loop_length} frames ({loop_length / 44100:.2f}s), '
-          f'{loop_rms:.3f} rms at {loop_hz:.0f} Hz, sync {pulse} frames, '
-          f'quantized {rec} -> {length}')
+          f'{loop_rms:.3f} rms at {loop_hz:.0f} Hz, calib {cal_frames} frames, '
+          f'take latency {take_lat} frames, sync {pulse}, '
+          f'quantized {quant_rec} -> {quant_len}')
 
 
 if __name__ == '__main__':

@@ -18,7 +18,7 @@ original MPC Sample experience, with just small fixes that enhance it for better
 | **Add Reverb** — adds the firmware's stereo reverb and a rendered tail to a new pad copy | `SHIFT` + `DATA`, choose **Add Reverb**, `DATA` |
 | **Vinyl / Lo-Fi** — applies the firmware's Vinyl or Decimator effect to a new pad copy | `SHIFT` + `DATA`, choose **Vinyl** or **Lo-Fi**, `DATA` |
 | **Bass Synth** — previews C2–D#3 from pads 1–16 and saves a shaped C2 pluck to a new pad | `SHIFT` + `DATA`, choose **Bass Synth**; K1/K2/K3 shape it |
-| **Live Looper** — a fullscreen 16-pad looper: each pad records a loop from the selected input source and plays it back; overdub, per-pad stop, sync pulse with loop-length quantization | `SHIFT` + `DATA`, choose **Live Looper**; pads record/play/stop, `SHIFT`+pad overdubs, `LOOP` syncs, `SHIFT`+`DATA` exits |
+| **Live Looper** — a fullscreen 16-pad looper: each pad records a loop from the selected input source and plays it back; overdub, per-pad clear, stop-all, sync pulse with loop-length quantization and self-calibrated latency | `SHIFT` + `DATA`, choose **Live Looper**; pads record/play/stop, `SHIFT`+pad overdubs, `ERASE`+pad clears, `STOP` stops all, `LOOP` syncs, `K1` trims latency, `SHIFT`+`DATA` exits |
 
 The trim and pitch changes confirm themselves on screen for a second. HPSS,
 Spectral Chop, Add Reverb, Vinyl, Lo-Fi and Bass Synth are in the small
@@ -44,10 +44,13 @@ The **Live Looper** is a separate fullscreen view, not a sample action: every pa
 records a loop from the source the sampler itself hears (the selected input),
 plays it through the app's audio output, and keeps it in RAM until the app
 restarts. Pressing a pad records, pressing it again plays, another press stops;
-`SHIFT`+pad overdubs and returns to playback; `LOOP` starts a sync pulse from the
-last loop's length, after which new loops are quantized to whole pulse lengths.
-Pads are blocked from the app while the view is open and `SHIFT`+`DATA` closes
-it. Details: [`docs/LIVE-LOOPER.md`](docs/LIVE-LOOPER.md).
+`SHIFT`+pad overdubs and returns to playback; `ERASE`+pad clears one loop and
+`STOP` stops them all; `LOOP` starts a sync pulse from the last loop's length,
+after which new loops are quantized to whole pulse lengths (the metronome click
+is off by default, `SHIFT`+`LOOP` toggles it). Opening the view plays a short
+chirp and measures the round-trip latency so recordings and overdubs line up;
+`K1` trims it. Pads are blocked from the app while the view is open and
+`SHIFT`+`DATA` closes it. Details: [`docs/LIVE-LOOPER.md`](docs/LIVE-LOOPER.md).
 
 External MIDI plays the selected sample chromatically over the whole keyboard
 while 16 Levels is active (C3 root, exact semitones, no wrapping). Enable **Pad

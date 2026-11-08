@@ -40,8 +40,12 @@ captured while recording, where playback is while playing.
 |---|---|
 | pad | empty → **record**; recording → **play**; playing → **stop**; stopped → **play** |
 | `SHIFT` + pad | **overdub** (adds the input to the existing loop); the next pad press returns to playback |
+| `ERASE` + pad | **clear** that pad's loop |
+| `STOP` | stop every loop, keeping the material |
 | `LOOP` | **sync pulse** on/off, with the length of the most recently recorded loop |
-| `SHIFT` + `LOOP` | clear all loops and the pulse |
+| `SHIFT` + `LOOP` | **metronome click** on/off (off by default) |
+| `ERASE` + `LOOP` | clear all loops and the pulse |
+| `K1` | trim the record latency, 1 ms per step (shown as `LAT ±N ms`) |
 | `SHIFT` + `DATA` | close the view and return to the previous page |
 | every other button | consumed while the view is open |
 
@@ -61,13 +65,16 @@ looper before this was fixed.
   so the material already there stays and the new pass layers on top.
 * **Sync pulse** uses the length of the last recorded loop as its period. While
   it is on:
-  * an audible 1 kHz click marks every pulse (420-frame decay), and the header
-    dot, the pulse bar and the sync message show it;
+  * the header dot, the pulse bar and the sync message show the beat; the
+    **click is off by default** (`SHIFT`+`LOOP` turns the audible 1 kHz click on,
+    the header then reads `SYNC … +CLK`);
   * every newly closed loop is quantized to a **whole multiple** of the pulse.
     The nearest multiple wins, and if that would drop more than 1/8 of a pulse
     the next multiple is used instead, so recorded material is never silently
     truncated. The tail is padded with silence, so `length` is always a multiple
     of the pulse even when the take was shorter (`rec < length`).
+* **Overdub** clamps each sample to full scale, so an input that hears the
+  output cannot grow a loop without bound.
 * **Closing** the view stops all playback and clears the pulse but keeps the
   recorded loops in RAM; reopening shows them as `STOP` and they can be played
   again. They are not saved to disk and do not survive an app restart.
@@ -119,6 +126,32 @@ Mixing there instead of in the planar writer hook means the loops land on the
 device no matter which device object rendered the app's own sound, and it is the
 same block a hardware jack would receive.
 
+### Latency: measured on open, applied per take
+
+A frame written to the output is heard `out` frames later; a frame read from the
+input was captured `in` frames ago (plus whatever waits in the mod's ring).
+Recording without correcting that writes the performance late in the loop, which
+is exactly what makes overdubs and synced loops feel behind.
+
+When the view opens it **calibrates itself**: it plays a 20 ms 1→4 kHz chirp into
+the output, captures 0.74 s of input and cross-correlates the two. If the chirp
+comes back — a loop cable, the resample source, or a microphone that hears the
+speaker — the measured round trip becomes the compensation (padded to whole
+frames by the transport stamp, ±3 ms quantisation). If it does not come back, the
+mod falls back to the device buffers: `snd_pcm_delay` of the output (smoothed)
+plus the block being written, `snd_pcm_avail` of the capture stream and the
+frames waiting in the input ring. `K1` trims ±400 ms on top for the room, the
+cable or personal preference.
+
+The value is snapshotted when a take starts and used for the whole take: a new
+recording drops its first `lat` frames (they belong before the loop start) and
+overdubs write `lat` frames earlier, wrapping inside the loop.
+
+Measured in the emulator with the loop cable in: the chirp calibrates to
+`2142` frames, and clicks recorded through the cable land **6 frames** from the
+expected pulse grid (0.14 ms). A fixed `MINIMOD_LOOP_LAT=<frames>` overrides the
+whole thing for experiments.
+
 ### Clock and threads
 
 The output frames are the clock. Recording consumes input frames from a
@@ -149,19 +182,22 @@ The test drives the panel and reads the mod's own state and output tap from
 Last run on the release build:
 
 ```
-live looper: loop 52096 frames (1.18s), 0.150 rms at 441 Hz, sync 52096 frames,
-quantized 27648 -> 52096
+live looper: loop 51712 frames (1.17s), 0.150 rms at 435 Hz, calib 1700 frames,
+take latency 1700 frames, sync 51712, quantized 25820 -> 51712
 ```
 
-What that covers, in order: the menu entry opens a fullscreen view with 16 empty
-pads; a pad records ~1 s from the tone input and closes into `PLAY`; after the
-input is unplugged the device output still carries the recorded 440 Hz at
-0.15 rms (`441 Hz` measured by zero crossings); a second press stops it and the
-output goes silent; `SHIFT`+pad reaches `DUB` and the next press returns to
-`PLAY` without losing the loop; `LOOP` sets the pulse to the last loop length and
-a 0.6 s take is quantized to exactly one 52096-frame pulse with
-`rec < length`; `SHIFT`+`DATA` closes the view, the loops survive, the app does
-not restart and its pid is unchanged.
+What that covers, in order: opening the view calibrates the round-trip latency
+from the chirp with the loop cable in; the menu entry opens a fullscreen view
+with 16 empty pads and the click off; a pad records ~1 s from the tone input and
+closes into `PLAY` with a compensation equal to the calibration; after the input
+is unplugged the device output still carries the recorded 440 Hz at 0.15 rms
+(`441 Hz` by zero crossings); a second press stops it and the output goes silent;
+`SHIFT`+pad reaches `DUB` and the next press returns to `PLAY` with the length
+unchanged; `LOOP` sets the pulse to the last loop length and a short take is
+quantized to exactly one pulse with `rec < length`; `STOP` silences everything;
+`ERASE`+pad clears one pad; `SHIFT`+`LOOP` toggles the click both ways;
+`SHIFT`+`DATA` closes the view, the loops survive, the app does not restart and
+its pid is unchanged.
 
 The tap is the last two seconds of audio the app handed to the device
 (`g_outtap`, `g_outtap_w`). It exists because the lab's host PCM socket
@@ -175,6 +211,9 @@ in-process tap is.
 
 * Mono loops, 8 s maximum, no undo. The 44.1 kHz constant is only used for the
   seconds readout; looping itself is frame-based.
+* The chirp only calibrates when the selected input can hear the output (loop
+  cable, resample, or speaker + microphone). With a silent instrument input the
+  buffer estimate is used instead and `K1` is the trim.
 * **The app's hidden page selection still follows the last pad press.** Pad
   events are dispatched to the app's observer listeners upstream of the note
   handler, and the pad-grid selection is one of those siblings. Blocking the
