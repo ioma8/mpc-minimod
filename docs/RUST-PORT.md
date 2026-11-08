@@ -274,6 +274,19 @@ Rust static library in its place, and the emulator test for that feature becomes
 the acceptance gate. The C sources stay in `mod/src` until the whole mod is Rust
 because they are the reference the golden fixtures are recorded from.
 
+## Dead sources removed
+
+Three C files were still in the tree but no longer compiled: `looper.c` (684
+lines), `bass_sample.c` (89) and `h3m_effect.c` (147).  Their Rust replacements
+have been the ones the device runs since rounds 3 and 5, and the headers stay
+because they declare the C ABI the Rust implements.  Deleting them removes 920
+lines of superseded code from the repository - the binary is unchanged.
+
+`hpss.c` (153) and `spectral.c` (339) are the opposite case: still compiled, and
+their Rust ports exist and pass their golden fixtures but are **not wired**, so
+the device still runs the C.  Wiring them is a straight swap of two entry points
+and is the next round's work.
+
 ## Inventory after round 31
 
 `minimod.c` is 4 381 lines in 94 functions, of which the largest are:
