@@ -849,6 +849,205 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
 
 /* --------------------------------------------------------- trim parameter */
 
+/* ------------------------------------------------- in-memory sample audio */
+/* The loaded sample, read from the app's own float32 buffer instead of its
+ * WAV file. This also covers recordings that were never saved and samples the
+ * app keeps in memory. Layout verified on 1.3.0.12 (the scale-mode addin reads
+ * the same fields):
+ *
+ *   sample + 0x170 -> holder object, RTTI "12MemorySample"
+ *   holder + 0x18     the data object at sample + 0x130
+ *   holder + 0x28  -> sample holder
+ *   holder[0]         interleaved float32 buffer
+ *   data            {u16 channels, u32 frames, u32 rate, u32 bits == 32}
+ */
+static int rtti_is(uintptr_t obj, const char *want)
+{
+    uintptr_t vt = 0, ti = 0, name = 0;
+    char s[64];
+    if (!obj || !rd(obj, &vt, 8) || !vt || !rd(vt - 8, &ti, 8) || !ti ||
+        !rd(ti + 8, &name, 8) || !name || !rd(name, s, sizeof s - 1))
+        return 0;
+    s[sizeof s - 1] = 0;
+    const char *p = s;
+    while (*p >= '0' && *p <= '9')
+        p++;
+    return strcmp(p, want) == 0;
+}
+
+static int sample_memory(uintptr_t sample, uintptr_t *buf, unsigned *frames,
+                         unsigned *ch, unsigned *rate)
+{
+    uintptr_t data = 0, y = 0, back = 0, sh = 0, b = 0;
+    int32_t hdr[4];
+    if (!sample || !rd(sample + 0x130, &data, 8) || !data)
+        return 0;
+    if (!rd(sample + 0x170, &y, 8) || !y || !rtti_is(y, "MemorySample"))
+        return 0;
+    if (!rd(y + 0x18, &back, 8) || back != data)
+        return 0;
+    if (!rd(y + 0x28, &sh, 8) || !sh || !rd(sh, &b, 8) || !b)
+        return 0;
+    if (!rd(data, hdr, sizeof hdr))
+        return 0;
+    if (hdr[0] < 1 || hdr[0] > 2 || hdr[1] <= 0)
+        return 0;
+    if (hdr[2] < 8000 || hdr[2] > 192000 || hdr[3] != 32)
+        return 0;
+    *buf = b;
+    *frames = (unsigned)hdr[1];
+    *ch = (unsigned)hdr[0];
+    *rate = (unsigned)hdr[2];
+    return 1;
+}
+
+/* 256 MB of float32: larger than any sample this firmware holds in memory. */
+#define MEMORY_AUDIO_MAX_CELLS (64u * 1024u * 1024u)
+
+static float *sample_memory_read(uintptr_t sample, unsigned *frames,
+                                 unsigned *ch, unsigned *rate)
+{
+    uintptr_t buf = 0;
+    unsigned fr = 0, cc = 0, rt = 0;
+    if (!sample_memory(sample, &buf, &fr, &cc, &rt))
+        return 0;
+    size_t cells = (size_t)fr * cc;
+    if (!cells || cells > MEMORY_AUDIO_MAX_CELLS ||
+        cells > SIZE_MAX / sizeof(float))
+        return 0;
+    float *out = malloc(cells * sizeof(float));
+    if (!out)
+        return 0;
+    const size_t chunk = 64 * 1024;
+    size_t at = 0;
+    while (at < cells) {
+        size_t n = (cells - at) * sizeof(float);
+        if (n > chunk)
+            n = chunk;
+        if (!rd(buf + at * sizeof(float), (char *)out + at * sizeof(float), n)) {
+            free(out);
+            return 0;
+        }
+        at += n / sizeof(float);
+    }
+    *frames = fr;
+    *ch = cc;
+    *rate = rt;
+    return out;
+}
+
+/* Threshold shared by the two edge scans: relative to the peak, with an
+ * absolute floor and ceiling. Kept in step with wav_edges(). */
+static short trim_threshold(int peak)
+{
+    double db = -30.45757490560675; /* 3 % of peak */
+    double ratio;
+    if (g_trim_ratio > 0.0) {
+        ratio = g_trim_ratio;
+    } else {
+        const char *e = getenv("MINIMOD_TRIM_DB");
+        if (e && *e)
+            db = atof(e);
+        if (db < -90.0)
+            db = -90.0;
+        if (db > -6.0)
+            db = -6.0;
+        ratio = pow(10.0, db / 20.0);
+    }
+    double t = (double)peak * ratio;
+    if (t < 90.0)
+        t = 90.0;
+    if (t > 30000.0)
+        t = 30000.0;
+    return (short)t;
+}
+
+/* Same scan as wav_edges(), over the in-memory float32 buffer: peak, threshold,
+ * first and last loud frame. The caller has already set g_trim_ratio. */
+static int memory_edges(uintptr_t sample, unsigned frames, unsigned *first,
+                        unsigned *last)
+{
+    uintptr_t buf = 0;
+    unsigned fr = 0, ch = 0, rate = 0;
+    if (!sample_memory(sample, &buf, &fr, &ch, &rate) || !ch || fr != frames)
+        return 0;
+    const unsigned stride = 4 * ch;
+    unsigned char tmp[16384];
+    unsigned peak = 0;
+    unsigned g = 0;
+    while (g < frames) {
+        unsigned want = frames - g;
+        if (want > sizeof tmp / stride)
+            want = sizeof tmp / stride;
+        if (!rd(buf + (uintptr_t)g * stride, tmp, (size_t)want * stride))
+            return 0;
+        for (unsigned i = 0; i < want; ++i) {
+            for (unsigned c = 0; c < ch; ++c) {
+                int v = pcm_at(tmp + i * stride + c * 4, 4, 3);
+                if (v < 0)
+                    v = -v;
+                if ((unsigned)v > peak)
+                    peak = (unsigned)v;
+            }
+        }
+        g += want;
+    }
+    if (!peak)
+        return 0;
+    short thr = trim_threshold((int)peak);
+    unsigned f = 0, firstf = 0;
+    int found = 0;
+    while (f < frames && !found) {
+        unsigned want = frames - f;
+        if (want > sizeof tmp / stride)
+            want = sizeof tmp / stride;
+        if (!rd(buf + (uintptr_t)f * stride, tmp, (size_t)want * stride))
+            return 0;
+        for (unsigned i = 0; i < want && !found; ++i) {
+            for (unsigned c = 0; c < ch; ++c) {
+                int v = pcm_at(tmp + i * stride + c * 4, 4, 3);
+                if (v > thr || v < -thr) {
+                    firstf = f + i;
+                    found = 1;
+                    break;
+                }
+            }
+        }
+        f += want;
+    }
+    if (!found)
+        return 0;
+    unsigned lastf = firstf;
+    unsigned end = frames;
+    unsigned block = (unsigned)(sizeof tmp / stride);
+    if (!block)
+        block = 1;
+    while (end > 0) {
+        unsigned start = end > block ? end - block : 0;
+        unsigned cnt = end - start;
+        if (!rd(buf + (uintptr_t)start * stride, tmp, (size_t)cnt * stride))
+            return 0;
+        int hit = 0;
+        for (unsigned i = cnt; i-- > 0;) {
+            for (unsigned c = 0; c < ch; ++c) {
+                int v = pcm_at(tmp + i * stride + c * 4, 4, 3);
+                if (v > thr || v < -thr) {
+                    lastf = start + i;
+                    hit = 1;
+                    break;
+                }
+            }
+            if (hit)
+                break;
+        }
+        if (hit)
+            break;
+        end = start;
+    }
+    *first = firstf;
+    *last = lastf;
+    return 1;
+}
 
 static unsigned frames_of_sample(uintptr_t sample)
 {
@@ -1511,6 +1710,8 @@ static void (*orig_hpss_ctor)(void *, void *, int, void *, void *, void *, void 
 static void (*orig_hpss_exec)(void *);
 static void (*orig_hpss_writer)(void *, void *);
 
+static int pad_sample_root(int pad);
+
 /* One armed output.  The constructor hook maps the command it sees to this
  * buffer, and the writer callback consumes the buffer sequentially. */
 static volatile int g_hpss_arm;
@@ -2125,16 +2326,21 @@ static void sample_transform_start(int action)
         return;
     }
     char path[512] = {0};
-    if (!hpss_path_for(sample, frames, ch, rate, path, sizeof path)) {
-        sample_action_status(action, "no exact WAV file");
-        toast(action ? "Effect: no WAV" : "HPSS: no WAV");
-        return;
-    }
-    float *input = NULL;
-    if (!wav_read_f32(path, frames, ch, rate, &input, NULL, NULL)) {
-        sample_action_status(action, "cannot decode WAV");
-        toast(action ? "Effect: bad WAV" : "HPSS: bad WAV");
-        return;
+    float *input = sample_memory_read(sample, &frames, &ch, &rate);
+    if (input) {
+        mlog("%s: audio from memory frames=%u ch=%u rate=%u\n", name, frames,
+             ch, rate);
+    } else {
+        if (!hpss_path_for(sample, frames, ch, rate, path, sizeof path)) {
+            sample_action_status(action, "no exact WAV file");
+            toast(action ? "Effect: no WAV" : "HPSS: no WAV");
+            return;
+        }
+        if (!wav_read_f32(path, frames, ch, rate, &input, NULL, NULL)) {
+            sample_action_status(action, "cannot decode WAV");
+            toast(action ? "Effect: bad WAV" : "HPSS: bad WAV");
+            return;
+        }
     }
     struct hpss_job *job = calloc(1, sizeof *job);
     if (!job) {
@@ -2158,8 +2364,8 @@ static void sample_transform_start(int action)
     char status[96];
     snprintf(status, sizeof status, "Processing %s...", name);
     hpss_set_status(status);
-    mlog("%s start: %s frames=%u ch=%u rate=%u\n",
-         name, path, frames, ch, rate);
+    mlog("%s start: %s frames=%u ch=%u rate=%u\n", name,
+         path[0] ? path : "memory", frames, ch, rate);
     pthread_t th;
     int cr = pthread_create(&th, 0, hpss_worker, job);
     if (cr != 0) {
@@ -2968,6 +3174,50 @@ static void chop_probe_run(void)
     mlog("chop: view chop=%d sample_page=%d levels=%d last_pad=%d shift=%d\n",
          in_chop_mode(), sample_page_visible(), levels_active(), g_last_pad,
          g_shift);
+    if (!strcmp(cmd, "root")) {
+        int pad = g_last_pad >= 0 && g_last_pad < 128 ? g_last_pad : 0;
+        mlog("probe: root pad=%d root=%d\n", pad, pad_sample_root(pad));
+        return;
+    }
+    if (!strncmp(cmd, "midirow ", 8)) {
+        int n = atoi(cmd + 8);
+        int pad = g_last_pad >= 0 && g_last_pad < 128 ? g_last_pad : 0;
+        int root = pad_sample_root(pad);
+        mlog("probe: midirow note=%d pad=%d root=%d row=%d\n", n, pad, root,
+             n - root);
+        return;
+    }
+    if (!strcmp(cmd, "memaudio")) {
+        uintptr_t b = 0;
+        unsigned fr = 0, cc = 0, rt = 0;
+        int ok = sample_memory(sample, &b, &fr, &cc, &rt);
+        mlog("probe: memaudio ok=%d buf=%p frames=%u ch=%u rate=%u\n", ok,
+             (void *)b, fr, cc, rt);
+        if (ok) {
+            unsigned char tmp[16384];
+            int peak = 0;
+            unsigned g = 0;
+            const unsigned stride = 4 * cc;
+            while (g < fr) {
+                unsigned want = fr - g;
+                if (want > sizeof tmp / stride)
+                    want = sizeof tmp / stride;
+                if (!rd(b + (uintptr_t)g * stride, tmp, (size_t)want * stride))
+                    break;
+                for (unsigned i = 0; i < want; ++i)
+                    for (unsigned c = 0; c < cc; ++c) {
+                        int v = pcm_at(tmp + i * stride + c * 4, 4, 3);
+                        if (v < 0)
+                            v = -v;
+                        if (v > peak)
+                            peak = v;
+                    }
+                g += want;
+            }
+            mlog("probe: memaudio peak=%d\n", peak);
+        }
+        return;
+    }
     if (!strncmp(cmd, "rw ", 3)) {
         unsigned long addr = 0, len = 0;
         if (sscanf(cmd + 3, "%lx %lx", &addr, &len) != 2 || !addr || len > 0x400)
@@ -5394,6 +5644,34 @@ static void str_assign_hook(void *dest, const char *text)
  * Keep the firmware's MIDI input, note-on/off matching, sustain and audio
  * routing intact. The SampQOL reference confirms the native pitch setter takes
  * the event property block at +0x14 and a semitone delta as argument four. */
+
+/* The note the sample plays at its original speed: the app keeps it at
+ * data+0x3e4 (data = sample+0x130) and its root-note setting edits it. A
+ * chromatic note is measured from this note, not from C3; 60 when it cannot be
+ * read. Verified on 1.3.0.12: A01 RnB-Kik-Grove1 91V = 88, other pads 60. */
+static int sample_root_note(uintptr_t sample)
+{
+    uintptr_t data = 0;
+    int32_t root = 60;
+    if (!sample || !rd(sample + 0x130, &data, 8) || !data ||
+        !rd(data + 0x3e4, &root, 4) || root < 0 || root > 127)
+        return 60;
+    return (int)root;
+}
+
+static int pad_sample_root(int pad)
+{
+    uintptr_t array = 0, end = 0, state = 0, layers = 0, sample = 0;
+    if (!g_surface || pad < 0 || pad >= 128 ||
+        !rd((uintptr_t)g_surface + 0x2808, &array, 8) ||
+        !rd((uintptr_t)g_surface + 0x2810, &end, 8) ||
+        !array || end < array || (end - array) / 8 <= (unsigned)pad ||
+        !rd(array + (uintptr_t)pad * 8, &state, 8) || !state ||
+        !rd(state + 0x22e8, &layers, 8) || !layers ||
+        !rd(layers + 0x4a8, &sample, 8) || !sample)
+        return 60;
+    return sample_root_note(sample);
+}
 static void midi_note_event(void *app, void *context, void *event,
                             uintptr_t source)
 {
@@ -5433,7 +5711,9 @@ static void midi_note_event(void *app, void *context, void *event,
                         (type & 0xffu) == 2);
         if (levels_active() && external && note <= 127 &&
             ((type & 0xffu) == 3 || note_off)) {
-            int row = (int)note - 60;
+            int root = pad_sample_root(g_last_pad >= 0 && g_last_pad < 128
+                                           ? g_last_pad : 0);
+            int row = (int)note - root;
             if (note_on || g_midi_replayed[note]) {
                 /* Re-send the note as the selected pad's event: clear the
                  * property mask, put the selected pad in event+0x30, then apply
@@ -5459,8 +5739,9 @@ static void midi_note_event(void *app, void *context, void *event,
                 } else {
                     g_midi_replayed[note] = 0;
                 }
-                mlog("synth ctx=%llx src=7ffffffa prop=%u e30=%u lv=%d\n",
-                     (unsigned long long)g_pad_ctx, e[0x16], e[0x30], g_levels);
+                mlog("synth ctx=%llx src=7ffffffa prop=%u e30=%u lv=%d root=%d row=%d\n",
+                     (unsigned long long)g_pad_ctx, e[0x16], e[0x30], g_levels,
+                     root, row);
                 if (orig_midi_note_event)
                     orig_midi_note_event(app, (void *)g_pad_ctx, event, 0x7ffffffa);
                 memcpy(e + 0x14, &old_mask, 2);
@@ -5501,26 +5782,38 @@ static void do_autotrim(void)
     unsigned frames = frames_of_sample(sample), fr=0, rate=0, ch=0, off=0, bytes=0;
     unsigned first=0, last=0, format=0;
     char path[512] = {0};
-    if (frames) {
-        if (path_from_object(sample, frames, path, sizeof path))
-            mlog("minimod: path from the sample object -> %s\n", path);
-        else if (wav_path_of(sample, frames, path, sizeof path))
-            ;
-        else if (find_wav_by_frames(frames, path, sizeof path))
-            mlog("minimod: recorded sample (no path yet) -> %s\n", path);
-    }
-    if (!frames || !path[0] ||
-        !wav_info(path, &fr, &rate, &ch, &off, &bytes, &format) || fr != frames) {
+    if (!frames) {
+        mlog("minimod: native trim: no frames for pad %d\n", pad);
         return;
     }
     if (g_trim_step >= 3) {
         /* fourth press: remove the trim entirely */
         first = 0;
-        last = frames ? frames - 1 : 0;
+        last = frames - 1;
+        mlog("minimod: native trim pad=%d clear frames=%u\n", pad, frames);
     } else {
         g_trim_ratio = g_trim_step == 0 ? 0.03
                      : g_trim_step == 1 ? 0.06 : 0.09;
-        int ok = wav_edges(path, fr, off, ch, bytes, format, &first, &last);
+        /* The loaded audio first: it also exists before a sample is saved. */
+        int ok = memory_edges(sample, frames, &first, &last);
+        if (ok) {
+            mlog("minimod: native trim pad=%d audio from memory frames=%u bounds=%u..%u\n",
+                 pad, frames, first, last + 1);
+        } else {
+            /* Not in memory (streamed): use the file the app points at. */
+            if (path_from_object(sample, frames, path, sizeof path))
+                mlog("minimod: path from the sample object -> %s\n", path);
+            else if (wav_path_of(sample, frames, path, sizeof path))
+                ;
+            else if (find_wav_by_frames(frames, path, sizeof path))
+                mlog("minimod: recorded sample (no path yet) -> %s\n", path);
+            if (!path[0] ||
+                !wav_info(path, &fr, &rate, &ch, &off, &bytes, &format) || fr != frames) {
+                g_trim_ratio = 0.0;
+                return;
+            }
+            ok = wav_edges(path, fr, off, ch, bytes, format, &first, &last);
+        }
         g_trim_ratio = 0.0;
         if (!ok)
             return;
@@ -5542,8 +5835,8 @@ static void do_autotrim(void)
         if (orig_repaint && comp)
             orig_repaint(comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
     }
-    mlog("minimod: native trim pad=%d path='%s' frames=%u bounds=%u..%u\n",
-         pad, path, frames, first, last+1);
+    mlog("minimod: native trim pad=%d source='%s' frames=%u bounds=%u..%u\n",
+         pad, path[0] ? path : "memory", frames, first, last+1);
 }
 
 

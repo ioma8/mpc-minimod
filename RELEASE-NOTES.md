@@ -20,9 +20,9 @@ only the latest changes.
 ## Features
 
 - **16 Levels:** shift the pad row by ±8 semitones with PLUS/MINUS; external
-  MIDI plays the selected sample chromatically over the whole keyboard from a
-  C3 root, with exact semitones and no wrapping (enable Pad MIDI In in MIDI
-  Config).
+  MIDI plays the selected sample chromatically over the whole keyboard from the
+  sample's own root note (C3 when it has none), with exact semitones and no
+  wrapping (enable Pad MIDI In in MIDI Config).
 - **AutoTrim:** trim the selected sample's silent edges with SHIFT+B3; the
   shifted Sample page shows the AutoTrim caption.
 - **SAMPLE OPTIONS:** open with SHIFT+DATA, select with DATA, then press DATA

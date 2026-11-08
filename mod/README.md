@@ -94,11 +94,12 @@ released   : Trim        Tune        Filter
   check: `mod/tests/emulator_bass_sample.py`.
 * **Chromatic MIDI** — select a pad, enable **Pad MIDI In** in MIDI Config (it
   resets to Off on every app start), then enter 16 Levels. Every external note
-  plays the selected pad: C3 is the root and the whole keyboard is transposed
-  by exact semitones, with no wrapping and no out-of-range fallback to other
-  pads. The mod rebuilds the note event for the selected pad and calls the
-  app's own pitch setter (`w3 = note - 60`) before dispatching with the
-  physical-pad source; note-offs are tracked and replayed the same way. With 16
+  plays the selected pad from the **sample's own root note** (C3 when it has
+  none), by exact semitones, with no wrapping and no out-of-range fallback to
+  other pads. The mod rebuilds the note event for the selected pad, reads the
+  root from `sample+0x130 -> data+0x3e4`, and calls the app's own pitch setter
+  (`w3 = note - root`) before dispatching with the physical-pad source;
+  note-offs are tracked and replayed the same way. With 16
   Levels off the dispatcher is left byte-identical to stock. See
   [`docs/FEATURES.md`](../docs/FEATURES.md#external-midi-chromatic-playback);
   emulator check: `tests/emulator_midi_chromatic.py`.

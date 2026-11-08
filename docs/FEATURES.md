@@ -50,9 +50,11 @@ step (default 3 % ≈ −30.46 dB). Each step shows a one-second toast
 its stock Split meaning, and the soft-key caption is hidden there too.
 
 **Implementation.** On the B3 press edge (the button repeats while held) the mod
-resolves the pad's sample, reads its WAV, computes the first/last frames above
-the threshold, and calls the app's native control handler (`0x1968020`) with the
-live dispatcher context and the pad index. Order matters: Start is opened to
+resolves the pad's sample, reads its audio — the app's in-memory float32 buffer
+first, so it also works before a sample is saved, with the WAV as the fallback
+for streamed samples — computes the first/last frames above the threshold, and
+calls the app's native control handler (`0x1968020`) with the live dispatcher
+context and the pad index. Order matters: Start is opened to
 zero, End is set to `last + 1`, then Start is set to `first` — that lets the
 bounds expand when clearing an existing trim. The command updates the model and
 renderer; the mod writes no property, no layer field and no marker.
@@ -92,8 +94,9 @@ change it — a dedicated UI-selection source would be needed before release.
 
 **Behavior.** With **16 Levels** on and **Pad MIDI In** enabled in MIDI Config,
 an external keyboard plays the selected sample chromatically over the whole
-keyboard from C3 (MIDI 60): C3 is the original pitch, each semitone is one
-semitone, no wrapping, no fallback to other pads. Chords, note-offs and sustain
+keyboard: the sample's **own root note** is the original pitch (C3/MIDI 60 when
+the sample carries none), each semitone is one semitone, no wrapping, no
+fallback to other pads. Chords, note-offs and sustain
 stay in the firmware's own path. With 16 Levels off, events pass through
 unchanged.
 
@@ -101,23 +104,25 @@ unchanged.
 when 16 Levels turns on and restored to stock when it turns off or the Sample
 page goes away; the first 16 bytes are verified before each swap. For an
 external note the mod rebuilds the event for the selected pad (property mask
-cleared, `event+0x30 = selected pad`), calls the app's own pitch setter with
-`w3 = note − 60`, then dispatches once with the physical-pad source
+cleared, `event+0x30 = selected pad`), reads the sample's root note from
+`sample+0x130 -> data+0x3e4` (0–127, fallback 60), calls the app's own pitch
+setter with `w3 = note − root`, then dispatches once with the physical-pad source
 `0x7ffffffa`. Note-offs take the same path with velocity 0.
 
-**Evidence.** On a 220 Hz sample: note 48 → 110.4 Hz, 60 → 220.7 Hz,
-65 → 293.4 Hz; all notes 36–96 played the selected sample (RMS 161–613 instead
-of stock 4256/16269). With 16 Levels off the dispatcher's first word is the
+**Evidence.** A01 `RnB-Kik-Grove1 91V` has root 88 (read from the live model);
+the debug readout gives `midirow 67 -> row −21`, where the old fixed-C3 code
+produced +7. On a 220 Hz sample whose root is 60: note 48 → 110.4 Hz, 60 →
+220.7 Hz, 65 → 293.4 Hz; all notes 36–96 played the selected sample (RMS 161–613
+instead of stock 4256/16269). With 16 Levels off the dispatcher's first word is the
 stock `d503233f` (hook installed: `155f947c`). Verified on hardware;
 `mod/tests/emulator_midi_chromatic.py` is the automated check.
 
-**Limits.** The root is C3 by construction: the transform uses `note − 60` and
-does **not** yet read the sample's own root note (`data+0x3e4`; see
-[`MECHANISMS.md`](MECHANISMS.md#4-the-sample)). A sample whose root is not 60
-therefore plays transposed by `60 − root` — measured on A01, whose root is 88, it
-is 28 semitones off. Pad MIDI In is not persisted by the app and must be
-re-enabled after every start (this is the most common false "it does not
-work"). The SampQOL reference also has a
+**Limits.** The root is read from the selected pad's sample on every external
+note; a sample whose root cannot be read falls back to 60. The root-aware path
+has been verified through the live model readout (root 88 → delta −21) but not
+yet with a hardware MIDI keyboard on a non-60 sample. Pad MIDI In is not
+persisted by the app and must be re-enabled after every start (this is the most
+common false "it does not work"). The SampQOL reference also has a
 separate chopped-pad mode; MiniMod applies chromatic pitch without a
 slice-versus-pitch setting.
 
@@ -234,15 +239,17 @@ positions and the serialized form of a manual chop remain unknown.
 
 ## Add Reverb, Vinyl and Lo-Fi
 
-**Behavior.** Each action reads the selected pad's WAV, renders it through the
-firmware's own H3 effect, and assigns the copy to the next free pad through
-stock Extract. **Add Reverb** uses `Air::H3M::StereoReverb` and appends the
+**Behavior.** Each action reads the selected pad's audio (in-memory float32
+first, WAV fallback), renders it through the firmware's own H3 effect, and
+assigns the copy to the next free pad through stock Extract. **Add Reverb** uses `Air::H3M::StereoReverb` and appends the
 generated tail, so the copy is longer than the source; **Vinyl** uses the
 firmware's `Vinyl`; **Lo-Fi** the `Decimator` (lower bit depth and sample rate).
 The source is not replaced. If there is no free pad, or the selected sample
 changes during processing, the action stops without submitting output.
 
-**Implementation.** `mod/src/h3m_effect.c` creates a standalone effect instance
+**Implementation.** The input audio is the selected sample's in-memory float32
+buffer, with the WAV as the fallback for streamed samples. `mod/src/h3m_effect.c`
+creates a standalone effect instance
 (factory by mod offset, context `{rate, 0, 512}`, vtable slot 9 setup with the
 context pointer, slot 11 per stereo block, slot 1 destroy). Parameters are
 written through `*(float**)(effect+0x18)`: Vinyl `Drive 0.18`, `Noise Level
@@ -312,7 +319,7 @@ probe and is compiled out unless `-DMINIMOD_FMBASS_PROBE=1`.
 
 ```sh
 cd mod
-./build.sh          # release .so, 0 warnings
+./build.sh          # release .so, 0 warnings, glibc symbol versions <= 2.39
 ./pack.sh           # SD package with a valid autorun.check
 
 # host-side checks (no emulator, no device)

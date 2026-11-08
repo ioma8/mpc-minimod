@@ -12,7 +12,7 @@ original MPC Sample experience, with just small fixes that enhance it for better
 | --- | --- |
 | **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim | `SHIFT` + `B3` |
 | **Octave shift** of pads in 16 Levels mode — by half the grid | `PLUS` / `MINUS` keys (both = reset) |
-| **External MIDI chromatic playback** of the selected sample while in 16 Levels (C3 root) | Enable **Pad MIDI In** in MIDI Config, then play a MIDI keyboard |
+| **External MIDI chromatic playback** of the selected sample while in 16 Levels, in the sample's own key (C3 when it has no root note) | Enable **Pad MIDI In** in MIDI Config, then play a MIDI keyboard |
 | **HPSS** — splits the selected sample into harmonic and percussive copies on two empty pads; the source sample is left untouched | `SHIFT` + `DATA`, choose **HPSS**, `DATA` |
 | **Spectral Chop** — cuts the selected sample into musical regions — a new chord, a new phrase, a different drum — and chops that same pad at those boundaries (Manual slice markers, up to 16) | `SHIFT` + `DATA`, choose **Spectral Chop**, `DATA` |
 | **Add Reverb** — adds the firmware's stereo reverb and a rendered tail to a new pad copy | `SHIFT` + `DATA`, choose **Add Reverb**, `DATA` |
@@ -40,8 +40,9 @@ reports. It never creates samples or uses free pads. Details:
 binding: [`docs/MECHANISMS.md`](docs/MECHANISMS.md#5-the-slice-container-and-a-slice).
 
 External MIDI plays the selected sample chromatically over the whole keyboard
-while 16 Levels is active (C3 root, exact semitones, no wrapping). Enable **Pad
-MIDI In** in MIDI Config — it resets to Off on every start. Details:
+while 16 Levels is active, measured from the sample's own root note (C3 when it
+has none): exact semitones, no wrapping. Enable **Pad MIDI In** in MIDI Config —
+it resets to Off on every start. Details:
 [`docs/FEATURES.md`](docs/FEATURES.md#external-midi-chromatic-playback).
 
 ## Install

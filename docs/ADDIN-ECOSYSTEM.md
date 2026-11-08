@@ -4,8 +4,9 @@ In November 2026 inMusic published its open-source compliance dump for firmware
 1.3.0, and Jacob Sabella published four MPC Sample addins. This document records
 what those projects contain, which of it is usable for minimod, and which parts
 we should not copy. Firmware facts they confirmed are in
-[`MECHANISMS.md`](MECHANISMS.md); candidates that would change minimod are marked
-**not implemented** — this is a study, not a description of current behaviour.
+[`MECHANISMS.md`](MECHANISMS.md); candidates are marked **implemented** once
+adopted, otherwise **not implemented** — the doc is a study plus a record of what
+was taken from it.
 
 ## Sources
 
@@ -271,16 +272,16 @@ DRM capture works on the Sample's panel, and the insert limits above.
 
 | item | value | risk | status |
 |---|---|---|---|
-| Chromatic pitch measured from `data+0x3e4` instead of C3 | high — A01 is currently 28 semitones off; samples tagged 60 are unaffected | low; one read per note, fallback 60 | **not implemented** |
+| Chromatic pitch measured from `data+0x3e4` instead of C3 | high — A01 was 28 semitones off; samples tagged 60 unaffected | low; one read per note, fallback 60 | **implemented** (FEATURES, chromatic MIDI) |
 | Compose `LD_PRELOAD` instead of replacing it | high — otherwise minimod silently disables other addins and firmware preloads | low; shell only | **not implemented** |
 | `MINIMOD_DISABLE=1` kill switch | medium — the addin-standard way out of a crash loop | very low | **not implemented** |
 | Block signals on our worker threads (HPSS, toast timer) | medium — stops us stealing MPC's RT signals | very low | **not implemented** |
 | `-fvisibility=hidden` for the `.so` | low/medium — we currently export 8 symbols (`hpss_split`, `spectral_onsets`, `bass_sample_render`, `h3m_effect_render`, `bass_preview_*`) | very low | **not implemented** |
-| glibc symbol-version check in `build.sh` | low — catches an accidental newer baseline | very low | **not implemented** |
+| glibc symbol-version check in `build.sh` | low — catches an accidental newer baseline | very low | **implemented** (build.sh rejects > 2.39) |
 | Touch injection (evdev write) to reach Preferences | high for discoverability, unproven on this panel | medium; needs a hardware session | experiment |
 | DRM frame capture for on-device screenshots | medium — hardware verification without QMP | medium; `DROP_MASTER`, format/rotation handling | experiment |
 | Hold gestures via control-surface `read()` wrapping | medium UX (hold instead of SHIFT chords) | medium; must chain with other wrappers, replaces part of our input model | idea |
-| In-memory sample audio for AutoTrim/effects | medium — works for unsaved or streamed samples | medium; format handling, our WAV path already works | idea |
+| In-memory sample audio for AutoTrim/effects | medium — works for unsaved samples; identical results to the WAV path | low; float32 interleaved, WAV fallback kept | **implemented** (FEATURES, AutoTrim and effects) |
 | YIN root detection for untagged samples | medium — makes "play in key" work for untagged WAVs | low; MIT code, but adds a worker and policy | idea |
 | `-mcpu=cortex-a55` build | none proven | high — LSE atomics on a v8.0 lab CPU would SIGILL | **do not adopt** |
 | Depend on `/dev/midi_inject` | none for us | high — kernel module, not shipped | **do not adopt** |
@@ -288,13 +289,15 @@ DRM capture works on the Sample's panel, and the insert limits above.
 
 ### Order if we implement
 
-1. Root-aware chromatic pitch: read the root, use `note - root`, keep 60 as the
-   fallback; verify with a debug readout in the lab and a hardware MIDI pass.
-2. `LD_PRELOAD` composition in `autorun.sh`.
-3. The safety items: kill switch, signal-blocked workers, hidden visibility,
-   build-time glibc check.
-4. Documentation of the confirmed offsets (already in `MECHANISMS.md`).
-5. Hardware experiments (touch/Preferences, DRM capture) as separate work.
+1. Root-aware chromatic pitch — implemented; live readout verified (A01 root 88
+   → delta −21), hardware MIDI on a non-60 sample still pending.
+2. glibc symbol-version check — implemented in `build.sh`.
+3. In-memory sample audio — implemented for AutoTrim and the transforms;
+   identical results to the WAV path (reverb RMS unchanged, same trim bounds).
+4. `LD_PRELOAD` composition in `autorun.sh` — not implemented.
+5. The remaining safety items: kill switch, signal-blocked workers, hidden
+   visibility.
+6. Hardware experiments (touch/Preferences, DRM capture) as separate work.
 
 ## What not to copy
 

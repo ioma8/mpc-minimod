@@ -177,7 +177,9 @@ holder[0]          the decoded float32 audio buffer
 `meta` is `{u16 channels, u32 frames, u32 rate, u32 bits}` with `bits == 32`, so
 the buffer is interleaved float32 of `frames × channels`. This is the loaded
 sample, not a file; it also works before the sample is saved. [doc] (scale mode's
-`sample_audio()`), spot-checked here: A01 header `(2, 10501, 44100, 32)`.
+`sample_audio()`), spot-checked here: A01 header `(2, 10501, 44100, 32)`. minimod
+reads AutoTrim and transform input from this buffer first and falls back to the
+WAV for streamed samples.
 
 
 `FN(0x2943640)(sample, 1)` is the sample-validity predicate (1 for a live

@@ -213,6 +213,8 @@ artifact.
 
 The build is warning-free in the shipped configuration; probe code lives behind
 `#if MINIMOD_DEBUG` / `#if MINIMOD_LOG` and is not in the release binary.
+`build.sh` also refuses a library whose highest `GLIBC_*` symbol version is newer
+than the device's 2.39.
 
 ---
 

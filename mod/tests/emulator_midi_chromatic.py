@@ -3,7 +3,8 @@
 Preconditions: the mod is preloaded; MIDI Config has MIDI Port=External and
 Pad MIDI In=On; a populated sample pad is selected in Sample Mode. The test
 uses the panel's external-MIDI input endpoint, then reads the mod's internal
-verification counters through /proc/<pid>/mem.
+verification counters through /proc/<pid>/mem. The pitch delta is checked
+against the sample's own root note (data+0x3e4), not against C3.
 """
 import argparse
 import json
@@ -93,7 +94,24 @@ def main():
         'check that Pad MIDI In is On and MIDI Port is External')
     note = integer('g_midi_chromatic_note', signed=True)
     delta = integer('g_midi_chromatic_delta', signed=True)
-    assert (note, delta) == (67, 7), (note, delta)
+
+    # The transform is measured from the sample's own root note. Pad 1 is A01,
+    # the pad the tap above selects: surface -> instruments[pad] -> layers ->
+    # sample -> data -> root.
+    def qword(address):
+        return int.from_bytes(read(address, 8), 'little')
+
+    surface = integer('g_surface', 8)
+    assert surface, 'The surface pointer is not set'
+    array = qword(surface + 0x2808)
+    state = qword(array)
+    assert state, 'Pad 1 has no sample'
+    layers = qword(state + 0x22e8)
+    sample = qword(layers + 0x4a8)
+    assert sample, 'Pad 1 has no sample'
+    root = int.from_bytes(read(qword(sample + 0x130) + 0x3e4, 4), 'little', signed=True)
+    assert 0 <= root <= 127, root
+    assert (note, delta) == (67, 67 - root), (note, delta, root)
 
     # The hook should pass notes through outside 16 Levels.
     tap('16 LEVELS')
@@ -103,8 +121,9 @@ def main():
         'MIDI note was changed outside 16 Levels'
     assert int(ssh('pidof "MPC Sample"')) == pid, 'Firmware process restarted'
     assert b'NRestarts=0' in ssh('systemctl show ac50 -p NRestarts')
-    print('PASS: C3/C#3/G3 were transposed by 0/+1/+7 semitones; '
-          'outside-mode pass-through; no firmware restart')
+    print(f'PASS: C3/C#3/G3 were transposed by 0/+1/+7 from the sample root '
+          f'(root {root}, G3 delta {67 - root}); outside-mode pass-through; '
+          'no firmware restart')
 
 
 if __name__ == '__main__':
