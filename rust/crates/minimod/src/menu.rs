@@ -4,6 +4,8 @@
 //! it, the encoder picks a row, and a press runs it.  The state it keeps is the
 //! open flag, the selected row and whether the bass control page is showing.
 
+use crate::paint;
+
 /// The rows of the effects menu.
 /// The split.
 pub const ROW_HPSS: i32 = 0;
@@ -247,6 +249,187 @@ pub unsafe extern "C" fn minimod_menu_restore_chop(
     let (state, hooks) = unsafe { (&mut *state, *hooks) };
     // SAFETY: the hook is the caller's callback.
     unsafe { restore_chop(state, hooks.restore_chop, allowed != 0) };
+}
+
+/// The menu's colours.
+const PANEL: u32 = 0xff10_1014;
+const ACCENT: u32 = 0xffff_b43c;
+const WHITE: u32 = 0xffff_ffff;
+const MUTED: u32 = 0xffb8_b8be;
+const DIM: u32 = 0xff48_484f;
+const SLOT: u32 = 0xff36_363d;
+const ROW: u32 = 0xff3a_2a10;
+
+/// The rows, in the order the encoder walks them.
+const TITLES: [&str; MENU_ROWS] = [
+    "HPSS",
+    "Spectral Chop",
+    "Add Reverb",
+    "Vinyl",
+    "Lo-Fi (Decimator)",
+    "Bass Synth",
+    "Live Looper",
+    "Close",
+];
+
+/// The bass page's three knobs.
+const KNOBS: [&str; 3] = ["BRIGHT", "EXCITE", "FILTER"];
+
+/// Draw the menu.
+///
+/// `status` is the glue's status line (empty when there is nothing to say) and
+/// `knobs` are the bass synth's three values.
+#[must_use]
+pub fn draw(graphics: usize, state: &State, busy: bool, status: &str, knobs: [f32; 3]) -> bool {
+    let (x, y, w, h) = (14, 8, 292, 224);
+    paint::colour(graphics, PANEL);
+    paint::rect(graphics, x, y, w, h);
+    paint::colour(graphics, ACCENT);
+    paint::rect(graphics, x, y, w, 2);
+    paint::rect(graphics, x, y + h - 2, w, 2);
+    if state.bass_edit == 0 {
+        paint::colour(graphics, WHITE);
+        paint::text(graphics, "SAMPLE OPTIONS", x + 10, y + 6, w - 20, 22, 18.0);
+    }
+    if busy {
+        paint::text(graphics, "Processing...", x + 10, y + 70, w - 20, 24, 16.0);
+        if !status.is_empty() {
+            paint::text(graphics, status, x + 10, y + 98, w - 20, 20, 12.0);
+        }
+        return false;
+    }
+    if state.bass_edit != 0 {
+        draw_knobs(graphics, (x, y, w), status, knobs);
+        return false;
+    }
+    for (index, title) in TITLES.iter().enumerate() {
+        let row = y + 26 + i32::try_from(index).unwrap_or(0) * 20;
+        if state.selection == i32::try_from(index).unwrap_or(-1) {
+            paint::colour(graphics, ROW);
+            paint::rect(graphics, x + 6, row, w - 12, 19);
+            paint::colour(graphics, WHITE);
+        }
+        paint::text(graphics, title, x + 12, row + 1, w - 24, 17, 12.0);
+    }
+    if !status.is_empty() {
+        paint::text(graphics, status, x + 10, y + 200, w - 20, 14, 10.0);
+    }
+    paint::colour(graphics, 0xffb0_b0b0);
+    paint::text(
+        graphics,
+        "TURN: select    DATA: confirm",
+        x + 10,
+        y + h - 17,
+        w - 20,
+        14,
+        10.0,
+    );
+    true
+}
+
+/// The bass control page.
+fn draw_knobs(graphics: usize, area: (i32, i32, i32), status: &str, knobs: [f32; 3]) {
+    let (x, y, w) = area;
+    paint::colour(graphics, ACCENT);
+    paint::text(graphics, "BASS SYNTH", x + 12, y + 6, w - 24, 22, 18.0);
+    paint::colour(graphics, MUTED);
+    paint::text(
+        graphics,
+        "PADS C2-D#3  /  CHROMATIC",
+        x + 12,
+        y + 36,
+        w - 24,
+        16,
+        11.0,
+    );
+    let columns = [x + 16, x + 108, x + 200];
+    for (index, column) in columns.iter().enumerate() {
+        paint::colour(graphics, ACCENT);
+        paint::text(
+            graphics,
+            &format!("K{}", index + 1),
+            *column,
+            y + 72,
+            76,
+            16,
+            11.0,
+        );
+        paint::colour(graphics, WHITE);
+        paint::text(graphics, KNOBS[index], *column, y + 90, 76, 18, 12.0);
+        paint::colour(graphics, SLOT);
+        paint::rect(graphics, *column, y + 116, 76, 4);
+        paint::colour(graphics, ACCENT);
+        let filled = (76.0 * knobs[index].clamp(0.0, 1.0) + 0.5) as i32;
+        paint::rect(graphics, *column, y + 116, filled, 4);
+        paint::colour(graphics, WHITE);
+        paint::text(
+            graphics,
+            &format!("{:.2}", knobs[index]),
+            *column,
+            y + 128,
+            76,
+            20,
+            14.0,
+        );
+    }
+    paint::colour(graphics, DIM);
+    paint::rect(graphics, x + 12, y + 164, w - 24, 1);
+    if !status.is_empty() {
+        paint::colour(graphics, 0xffe8_e8ec);
+        paint::text(graphics, status, x + 12, y + 168, w - 24, 14, 10.0);
+    }
+    paint::colour(graphics, ACCENT);
+    paint::text(
+        graphics,
+        "PADS: PLAY   DATA: SAVE   SHIFT+DATA: BACK",
+        x + 10,
+        y + 192,
+        w - 20,
+        16,
+        10.0,
+    );
+}
+
+/// The number of rows.
+pub const MENU_ROWS: usize = 8;
+
+/// Draw the menu, for the C glue.
+///
+/// # Safety
+///
+/// `status` must be a NUL-terminated string and `graphics` the app's object.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_menu_draw(
+    graphics: usize,
+    selection: i32,
+    bass_edit: i32,
+    busy: i32,
+    status: *const u8,
+    knobs: *const f32,
+) {
+    if status.is_null() || knobs.is_null() {
+        return;
+    }
+    // SAFETY: the caller promises a NUL-terminated string.
+    let text = unsafe { core::ffi::CStr::from_ptr(status.cast()) };
+    let status = text.to_str().unwrap_or("");
+    // SAFETY: the caller promises three readable knob values.
+    let values = unsafe { core::slice::from_raw_parts(knobs, 3) };
+    let state = State {
+        open: 1,
+        busy,
+        bass_edit,
+        data_down: 0,
+        selection,
+        restore_pending: 0,
+    };
+    let _ = draw(
+        graphics,
+        &state,
+        busy != 0,
+        status,
+        [values[0], values[1], values[2]],
+    );
 }
 
 #[cfg(test)]

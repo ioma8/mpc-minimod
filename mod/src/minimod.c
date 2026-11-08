@@ -88,6 +88,7 @@
 #include "pads_ffi.h"
 #include "cfg_ffi.h"
 #include "buttons_ffi.h"
+#include "menu_ffi.h"
 #include "overlay_ffi.h"
 #include "paint_ffi.h"
 #include "menu_ffi.h"
@@ -1263,78 +1264,8 @@ static void looper_pump(void)
 
 static void hpss_draw_menu(void *g)
 {
-    int x = 14, y = 8, w = 292, h = 224;
-    draw_colour(g, 0xff101014);
-    draw_rect(g, x, y, w, h);
-    draw_colour(g, 0xffffb43c);
-    draw_rect(g, x, y, w, 2);
-    draw_rect(g, x, y + h - 2, w, 2);
-    if (!g_bass_edit) {
-        draw_colour(g, 0xffffffff);
-        draw_text(g, "SAMPLE OPTIONS", x + 10, y + 6, w - 20, 22, 18.0f);
-    }
-    if (g_hpss_busy) {
-        draw_text(g, "Processing...", x + 10, y + 70, w - 20, 24, 16.0f);
-        if (g_hpss_status[0])
-            draw_text(g, g_hpss_status, x + 10, y + 98, w - 20, 20, 12.0f);
-    } else {
-        if (g_bass_edit) {
-            draw_colour(g, 0xffffb43c);
-            draw_text(g, "BASS SYNTH", x + 12, y + 6, w - 24, 22, 18.0f);
-            draw_colour(g, 0xffb8b8be);
-            draw_text(g, "PADS C2-D#3  /  CHROMATIC", x + 12, y + 36,
-                      w - 24, 16, 11.0f);
-
-            const int col_x[] = {x + 16, x + 108, x + 200};
-            const char *knob_labels[] = {"BRIGHT", "EXCITE", "FILTER"};
-            for (int i = 0; i < 3; ++i) {
-                draw_colour(g, 0xffffb43c);
-                draw_text(g, i == 0 ? "K1" : i == 1 ? "K2" : "K3",
-                          col_x[i], y + 72, 76, 16, 11.0f);
-                draw_colour(g, 0xffffffff);
-                draw_text(g, knob_labels[i], col_x[i], y + 90, 76, 18, 12.0f);
-                draw_colour(g, 0xff36363d);
-                draw_rect(g, col_x[i], y + 116, 76, 4);
-                draw_colour(g, 0xffffb43c);
-                draw_rect(g, col_x[i], y + 116,
-                          (int)(76.0f * g_bass_knob[i] + 0.5f), 4);
-                char value[8];
-                snprintf(value, sizeof value, "%.2f", (double)g_bass_knob[i]);
-                draw_colour(g, 0xffffffff);
-                draw_text(g, value, col_x[i], y + 128, 76, 20, 14.0f);
-            }
-
-            draw_colour(g, 0xff48484f);
-            draw_rect(g, x + 12, y + 164, w - 24, 1);
-            if (g_hpss_status[0]) {
-                draw_colour(g, 0xffe8e8ec);
-                draw_text(g, g_hpss_status, x + 12, y + 168, w - 24, 14, 10.0f);
-            }
-            draw_colour(g, 0xffffb43c);
-            draw_text(g, "PADS: PLAY   DATA: SAVE   SHIFT+DATA: BACK",
-                      x + 10, y + 192, w - 20, 16, 10.0f);
-            return;
-        }
-        static const char *titles[] = {
-            "HPSS", "Spectral Chop", "Add Reverb", "Vinyl", "Lo-Fi (Decimator)",
-            "Bass Synth", "Live Looper", "Close"};
-        for (int i = 0; i < 8; ++i) {
-            int row_y = y + 26 + i * 20;
-            if (g_menu.selection == i) {
-                draw_colour(g, 0xff3a2a10);
-                draw_rect(g, x + 6, row_y, w - 12, 19);
-                draw_colour(g, 0xffffffff);
-            }
-            draw_text(g, titles[i], x + 12, row_y + 1, w - 24, 17, 12.0f);
-        }
-        if (g_hpss_status[0])
-            draw_text(g, g_hpss_status, x + 10, y + 200, w - 20, 14, 10.0f);
-    }
-    if (!g_hpss_busy && !g_hpss_status[0]) {
-        draw_colour(g, 0xffb0b0b0);
-        draw_text(g, "TURN: select    DATA: confirm", x + 10, y + h - 17,
-                  w - 20, 14, 10.0f);
-    }
+    minimod_menu_draw((uintptr_t)g, g_menu.selection, g_menu.bass_edit, g_menu.busy,
+                      g_hpss_status, g_bass_knob);
 }
 
 static void release_held_pads(void);
@@ -2955,17 +2886,17 @@ static void toast(const char *text)
                   (uintptr_t)comp);
 }
 
-static void draw_colour(void *g, uint32_t v)
+__attribute__((unused)) static void draw_colour(void *g, uint32_t v)
 {
     minimod_paint_colour((uintptr_t)g, v);
 }
 
-static void draw_rect(void *g, int x, int y, int w, int h)
+__attribute__((unused)) static void draw_rect(void *g, int x, int y, int w, int h)
 {
     minimod_paint_rect((uintptr_t)g, x, y, w, h);
 }
 
-static void draw_text(void *g, const char *s, int x, int y, int w, int h,
+__attribute__((unused)) static void draw_text(void *g, const char *s, int x, int y, int w, int h,
                       float size)
 {
     minimod_paint_text((uintptr_t)g, s, x, y, w, h, size);

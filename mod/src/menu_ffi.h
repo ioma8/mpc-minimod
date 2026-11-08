@@ -37,4 +37,7 @@ void minimod_menu_restore_chop(struct minimod_menu *state,
                                const struct minimod_menu_hooks *hooks,
                                int32_t allowed);
 
+void minimod_menu_draw(uintptr_t graphics, int32_t selection, int32_t bass_edit,
+                       int32_t busy, const char *status, const float *knobs);
+
 #endif
