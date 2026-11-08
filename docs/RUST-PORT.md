@@ -84,6 +84,7 @@ slice.
 | MIDI note decoding (`midi::decode`) | ported | 5 rule tests (external ids, note on/off, row); the chromatic test drives the hook that uses it |
 | 16 Levels event replay (`midi::replay`) | ported | the chromatic test plays through it: note in, transposed pad event out |
 | Control-change routing (`routing::route`) | ported | 6 ladder tests; the looper test drives the master/trim paths and the bass test the three knobs |
+| MIDI note hook (`midi::handle`) | ported | the chromatic test drives the whole hook: replay, pass-through, 16 Levels state |
 | 16 Levels octave shift (`levels`) | ported | 3 tests: clamping, 8 semitones per press, the toast text |
 | 16 Levels hook trampolines (ctor/proc/pitch) | ported | the chromatic MIDI test drives all three through the 16 Levels path |
 | `minimod.c` (hooks, features, UI glue) | C, shrinking | 7 683 -> 4 564 lines; dead code removed only where the compiler proved it, each pass verified by an identical binary |

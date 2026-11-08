@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import struct
 
 
 MOD = Path(__file__).resolve().parents[1]
@@ -68,6 +69,16 @@ def main():
         assert len(data) == size, 'MPC process exited or memory read failed'
         return data
 
+    def levels():
+        """The 16 Levels flag: the second i32 of the mod's note-hook state."""
+        return struct.unpack('<i', read(mod_base + symbols['g_midi'] + 4, 4))[0]
+
+    def chromatic(field, signed=False):
+        """A diagnostic counter at the tail of the same state."""
+        offset = 160 + field * 4
+        return struct.unpack('<i', read(mod_base + symbols['g_midi'] + offset, 4))[0] \
+            if not signed else struct.unpack('<i', read(mod_base + symbols['g_midi'] + offset, 4))[0]
+
     def integer(name, size=4, signed=False):
         return int.from_bytes(read(mod_base + symbols[name], size), 'little', signed=signed)
 
@@ -79,27 +90,27 @@ def main():
     # active if the user has not already done so.
     tap('SAMPLE')
     tap('PAD 1')
-    if not integer('g_levels'):
+    if not levels():
         tap('16 LEVELS')
-    assert integer('g_levels') == 1, '16 Levels did not become active'
+    assert levels() == 1, '16 Levels did not become active'
 
-    before = integer('g_midi_chromatic_count')
+    before = chromatic(0)
     for message in ('90 3c 64', '80 3c 00', '90 3d 64', '80 3d 00',
                     '90 43 64', '80 43 00'):
         midi(message)
-    after = integer('g_midi_chromatic_count')
+    after = chromatic(0)
     assert after - before == 3, (
         f'Expected three transformed note-ons, got {after - before}; '
         'check that Pad MIDI In is On and MIDI Port is External')
-    note = integer('g_midi_chromatic_note', signed=True)
-    delta = integer('g_midi_chromatic_delta', signed=True)
+    note = chromatic(1, signed=True)
+    delta = chromatic(2, signed=True)
     assert (note, delta) == (67, 7), (note, delta)
 
     # The hook should pass notes through outside 16 Levels.
     tap('16 LEVELS')
-    assert integer('g_levels') == 0
+    assert levels() == 0
     midi('90 45 64')  # A3
-    assert integer('g_midi_chromatic_count') == after, \
+    assert chromatic(0) == after, \
         'MIDI note was changed outside 16 Levels'
     assert int(ssh('pidof "MPC Sample"')) == pid, 'Firmware process restarted'
     assert b'NRestarts=0' in ssh('systemctl show ac50 -p NRestarts')

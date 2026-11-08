@@ -317,15 +317,12 @@ static void *install_hook(uintptr_t site, void *hook)
 static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
 static void midi_note_event(void *app, void *context, void *event,
                             uintptr_t source);
-static int g_midi_ready, g_midi_on;
+static int g_midi_ready;
 /* A physical pad press identifies its pad through property 0 of the note event
  * (event+0x16), whose value is the bank's pad-note base plus the pad index.
  * Learn that base from a real pad press so MIDI can address the same row. */
-static volatile int g_pad_prop_pending, g_pad_prop_val, g_pad_prop_base = 0x75;
-static volatile int g_pad_level_byte;
-static volatile uintptr_t g_pad_ctx;
-static volatile int g_pad_tune_mode;
-static unsigned char g_midi_replayed[128];
+static int g_pad_prop_base = 0x75;
+static struct minimod_midi_state g_midi;
 
 static int midi_hook_site_ok(void)
 {
@@ -336,12 +333,12 @@ static void midi_hook_set(int on)
 {
     /* The dispatcher is hooked once at load; this only changes behaviour, so no
      * code is rewritten while the MIDI thread may be running it. */
-    g_midi_on = on ? 1 : 0;
+    g_midi.on = on ? 1 : 0;
 }
 
 /* -------------------------------------------------------- 16 Levels state */
 static int g_octave;
-static volatile int g_levels; /* 16 LEVELS mode, tracked from button 0x28 */
+/* 16 LEVELS mode lives in `g_midi.levels`, tracked from button 0x28. */
 static int g_plus_held, g_minus_held;   /* octave shift applied while 16 LEVELS is active */
 static void *g_sixteen; /* the live 16 Levels screen, if seen             */
 
@@ -364,12 +361,12 @@ static int levels_active(void)
     if (!s || FIELD(s, 0, uintptr_t) != base + 0x6e212a0) /* SampleModeScreen */
         return 0;
     if (!FN(0x112fd50, int (*)(void *))(s)) {
-        if (g_levels) mlog("lv: predicate 0, clearing\n");
-        g_levels = 0;
+        if (g_midi.levels) mlog("lv: predicate 0, clearing\n");
+        g_midi.levels = 0;
         midi_hook_set(0);
         return 0;
     }
-    return g_levels;
+    return g_midi.levels;
 }
 
 
@@ -469,9 +466,6 @@ static void (*orig_buttons)(void *);
 static void (*orig_note_on)(void *, int, int, void *, float);
 static void (*orig_note_off)(void *, int, int);
 static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
-static volatile uint32_t g_midi_chromatic_count;
-static volatile int g_midi_chromatic_note = -1;
-static volatile int g_midi_chromatic_delta;
 static void (*orig_bass_audio_writer)(void *, void *, size_t, int);
 static volatile unsigned g_audio_in_calls;
 static volatile unsigned g_audio_out_calls;
@@ -1889,10 +1883,10 @@ static void buttons(void *event)
         }
     }
     if (code == 0x28 && down) {
-        g_levels = !g_levels;
-        if (g_levels && g_last_pad >= 0 && g_last_pad < 16)
-            g_pad_level_byte = g_last_pad;
-        mlog("minimod: 16 LEVELS mode -> %d\n", g_levels);
+        g_midi.levels = !g_midi.levels;
+        if (g_midi.levels && g_last_pad >= 0 && g_last_pad < 16)
+            g_midi.pad_level_byte = g_last_pad;
+        mlog("minimod: 16 LEVELS mode -> %d\n", g_midi.levels);
         midi_hook_set(levels_active());
     }
     if ((code == 0x36 || code == 0x37) && levels_active()) {
@@ -1974,9 +1968,9 @@ static void note_on(void *input, int src, int pad, void *props, float vel)
     }
     g_last_pad = pad;
     g_props = props;
-    if (g_pad_prop_pending) {
-        g_pad_prop_base = g_pad_prop_val - pad;
-        g_pad_prop_pending = 0;
+    if (g_midi.pad_prop_pending) {
+        g_pad_prop_base = g_midi.pad_prop_val - pad;
+        g_midi.pad_prop_pending = 0;
     }
 
     if (!g_replaying_pad && pad >= 0 && pad < 128) {
@@ -3770,77 +3764,10 @@ static void str_assign_hook(void *dest, const char *text)
 static void midi_note_event(void *app, void *context, void *event,
                             uintptr_t source)
 {
-    if (!g_midi_on && orig_midi_note_event) {
-        orig_midi_note_event(app, context, event, source);
-        return;
-    }
-    if (event) {
-        /* Decoding lives in Rust: the external-source rule and the
-         * note-on/off rules are the part worth testing. */
-        struct minimod_note decoded;
-        if (!minimod_midi_decode((const unsigned char *)event, (uint64_t)source,
-                                 &decoded))
-            decoded = (struct minimod_note){0};
-        uint32_t type = decoded.kind;
-        float velocity = decoded.velocity;
-        uint8_t note = (uint8_t)decoded.note;
-        int external = decoded.external;
-        int note_on = decoded.note_on;
-        int note_off = decoded.note_off;
-        int row = decoded.row;
-        unsigned char *e = (unsigned char *)event;
-        mlog("ev ext=%d src=%llx ctx=%llx app=%llx type=%u note=%u vel=%.3f lv=%d\n",
-             external, (unsigned long long)source, (unsigned long long)(uintptr_t)context,
-             (unsigned long long)(uintptr_t)app, type & 0xffu, note, velocity, g_levels);
-        if (!external) {
-            char hex[200]; int k = 0;
-            for (int i = 0; i < 64 && k < (int)sizeof hex - 4; ++i)
-                k += snprintf(hex + k, sizeof hex - k, " %02x", e[i]);
-            mlog("padbytes%s\n", hex);
-            g_pad_ctx = (uintptr_t)context;
-        }
-        if (!external && (type & 0xffu) == 3 && velocity > 0.0f) {
-            uint16_t mask = 0;
-            memcpy(&mask, e + 0x14, 2);
-            g_pad_tune_mode = (mask & 1u) ? 0 : 1;
-            if (mask & 1u) {
-                g_pad_prop_val = e[0x16];
-                g_pad_level_byte = e[0x30];
-                g_pad_prop_pending = 1;
-            }
-        }
-        if (levels_active() && external && note <= 127 &&
-            ((type & 0xffu) == 3 || note_off)) {
-            if (note_on || g_midi_replayed[note]) {
-                /* Re-send the note as the selected pad's event: clear the
-                 * property mask, put the selected pad in event+0x30, then apply
-                 * the pitch offset with the app's own setter - the same call
-                 * the 16 Levels renderer makes. */
-                /* Re-send the note as the selected pad's event; the rewrite and
-                 * the pitch offset are in Rust, the restore below puts the
-                 * event back for the caller. */
-                struct minimod_saved saved =
-                    minimod_midi_replay(e, (uint8_t)g_pad_level_byte, row,
-                                        (minimod_pitch_off_fn)orig_pitch_off);
-                if (note_on) {
-                    g_midi_replayed[note] = 1;
-                    g_midi_chromatic_note = note;
-                    g_midi_chromatic_delta = row;
-                    __atomic_add_fetch(&g_midi_chromatic_count, 1, __ATOMIC_RELAXED);
-                } else {
-                    g_midi_replayed[note] = 0;
-                }
-                mlog("synth ctx=%llx src=7ffffffa prop=%u e30=%u lv=%d\n",
-                     (unsigned long long)g_pad_ctx, e[0x16], e[0x30], g_levels);
-                if (orig_midi_note_event)
-                    orig_midi_note_event(app, (void *)g_pad_ctx, event, 0x7ffffffa);
-                minimod_midi_restore(e, saved);
-                return;
-            }
-        }
-    }
-    if (orig_midi_note_event)
-        orig_midi_note_event(app, context, event, source);
+    minimod_midi_handle((uintptr_t)app, (uintptr_t)context, (unsigned char *)event,
+                        (uintptr_t)source, &g_midi,
+                        (minimod_note_event_fn)orig_midi_note_event,
+                        (minimod_pitch_off_fn)orig_pitch_off);
 }
 
 /* -------------------------------------------------------- probe threads */

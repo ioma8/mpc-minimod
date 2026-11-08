@@ -26,18 +26,28 @@ struct minimod_note {
 int minimod_midi_decode(const unsigned char *event, uint64_t source,
                         struct minimod_note *out);
 
-/* The 16 Levels replay rewrite, from Rust (rust/crates/minimod/src/midi.rs). */
-struct minimod_saved {
-    uint16_t mask;
-    uint8_t property;
-    uint8_t note;
+/* The note hook's state and handler, from Rust
+ * (rust/crates/minimod/src/midi.rs). */
+struct minimod_midi_state {
+    int32_t on;
+    int32_t levels;
+    uintptr_t pad_ctx;
+    uint32_t pad_level_byte;
+    int32_t pad_tune_mode;
+    int32_t pad_prop_val;
+    int32_t pad_prop_pending;
+    uint8_t replayed[128];
+    uint32_t chromatic_count;
+    int32_t chromatic_note;
+    int32_t chromatic_delta;
 };
 
+typedef void (*minimod_note_event_fn)(void *, void *, void *, uintptr_t);
 typedef void (*minimod_pitch_off_fn)(void *, uint64_t, uint64_t, int);
 
-struct minimod_saved minimod_midi_replay(unsigned char *event,
-                                         uint8_t pad_level_byte, int32_t row,
-                                         minimod_pitch_off_fn pitch_off);
-void minimod_midi_restore(unsigned char *event, struct minimod_saved saved);
+void minimod_midi_handle(uintptr_t app, uintptr_t context, unsigned char *event,
+                         uintptr_t source, struct minimod_midi_state *state,
+                         minimod_note_event_fn note_event,
+                         minimod_pitch_off_fn pitch_off);
 
 #endif

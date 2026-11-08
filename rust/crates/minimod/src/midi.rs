@@ -153,8 +153,7 @@ const EVENT_PROPERTY: usize = 0x16;
 ///
 /// `event` must be writable for `EVENT_NOTE + 1` bytes, and `pitch_off` must be
 /// the app's displaced setter when present.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_midi_replay(
+pub unsafe fn replay(
     event: *mut u8,
     pad_level_byte: u8,
     row: i32,
@@ -186,13 +185,12 @@ pub unsafe extern "C" fn minimod_midi_replay(
     saved
 }
 
-/// Put back what [`minimod_midi_replay`] changed.
+/// Put back what [`replay`] changed.
 ///
 /// # Safety
 ///
 /// `event` must be the same writable event the replay was given.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_midi_restore(event: *mut u8, saved: Saved) {
+pub unsafe fn restore(event: *mut u8, saved: Saved) {
     if event.is_null() {
         return;
     }
@@ -201,6 +199,134 @@ pub unsafe extern "C" fn minimod_midi_restore(event: *mut u8, saved: Saved) {
         core::ptr::write_unaligned(event.add(EVENT_MASK).cast::<u16>(), saved.mask);
         *event.add(EVENT_PROPERTY) = saved.property;
         *event.add(EVENT_NOTE) = saved.note;
+    }
+}
+
+/// The app's note-event dispatcher: `void (*)(void *, void *, void *, uintptr_t)`.
+pub type NoteEvent = unsafe extern "C" fn(usize, usize, usize, usize);
+
+/// What the note hook carries between events.
+///
+/// The glue owns this struct (it reads the same fields while painting), so the
+/// layout is `#[repr(C)]` and the hook writes through a pointer rather than
+/// keeping a second copy.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MidiState {
+    /// Whether the mod is handling notes at all.
+    pub on: i32,
+    /// Whether 16 Levels is active.
+    pub levels: i32,
+    /// The context of the pad that last sent an event.
+    pub pad_ctx: usize,
+    /// The selected pad's note byte.
+    pub pad_level_byte: u32,
+    /// Whether the pad is in tune mode.
+    pub pad_tune_mode: i32,
+    /// The property value the pad reported.
+    pub pad_prop_val: i32,
+    /// Whether that property is waiting to be learned.
+    pub pad_prop_pending: i32,
+    /// Notes the mod is holding open, so a release can be matched.
+    pub replayed: [u8; 128],
+    /// How many notes the mod has replayed, for diagnostics and tests.
+    pub chromatic_count: u32,
+    /// The last note it replayed.
+    pub chromatic_note: i32,
+    /// That note's row.
+    pub chromatic_delta: i32,
+}
+
+/// The note the mod sends when it re-plays an event as the selected pad.
+pub const REPLAY_SOURCE: usize = 0x7fff_fffa;
+
+/// Handle one note event.
+///
+/// # Safety
+///
+/// `event` must be the app's event object (writable for `EVENT_NOTE + 1` bytes),
+/// `state` must be the glue's state, and both callbacks must be the app's
+/// originals when present.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_midi_handle(
+    app: usize,
+    context: usize,
+    event: *mut u8,
+    source: usize,
+    state: *mut MidiState,
+    note_event: Option<NoteEvent>,
+    pitch_off: Option<levels::PitchOffset>,
+) {
+    if event.is_null() || state.is_null() {
+        forward(note_event, app, context, event, source);
+        return;
+    }
+    // SAFETY: the caller promises `state` points at its own state.
+    let state = unsafe { &mut *state };
+    if state.on == 0 {
+        forward(note_event, app, context, event, source);
+        return;
+    }
+    // SAFETY: the caller promises the event is readable for its fields.
+    let bytes = unsafe { core::slice::from_raw_parts(event.cast_const(), EVENT_NOTE + 1) };
+    let note = decode(bytes, source as u64);
+    if !note.external {
+        state.pad_ctx = context;
+        // SAFETY: the mask is inside the event the caller promised.
+        let mask = unsafe { core::ptr::read_unaligned(event.add(EVENT_MASK).cast::<u16>()) };
+        if note.kind == PAD_EVENT && note.velocity > 0.0 {
+            state.pad_tune_mode = i32::from(mask & 1 == 0);
+            if mask & 1 != 0 {
+                // SAFETY: both bytes are inside the event.
+                unsafe {
+                    state.pad_prop_val = i32::from(*event.add(EVENT_PROPERTY));
+                    state.pad_level_byte = u32::from(*event.add(EVENT_NOTE));
+                }
+                state.pad_prop_pending = 1;
+            }
+        }
+    }
+    let note_index = usize::from(note.note);
+    if state.levels != 0
+        && note.external
+        && note.note <= 127
+        && (note.kind == PAD_EVENT || note.note_off)
+        && (note.note_on || state.replayed[note_index] != 0)
+    {
+        // SAFETY: the caller promises the event is writable.
+        let saved = unsafe {
+            replay(
+                event,
+                u8::try_from(state.pad_level_byte).unwrap_or(0),
+                note.row,
+                pitch_off,
+            )
+        };
+        state.replayed[note_index] = u8::from(note.note_on);
+        if note.note_on {
+            state.chromatic_count = state.chromatic_count.wrapping_add(1);
+            state.chromatic_note = i32::from(note.note);
+            state.chromatic_delta = note.row;
+        }
+        forward(note_event, app, state.pad_ctx, event, REPLAY_SOURCE);
+        // SAFETY: same event, untouched in between.
+        unsafe { restore(event, saved) };
+        return;
+    }
+    forward(note_event, app, context, event, source);
+}
+
+/// Hand the event to the app's own dispatcher.
+fn forward(
+    note_event: Option<NoteEvent>,
+    app: usize,
+    context: usize,
+    event: *mut u8,
+    source: usize,
+) {
+    if let Some(dispatcher) = note_event {
+        // SAFETY: the caller guarantees this is the displaced dispatcher.
+        unsafe { dispatcher(app, context, event as usize, source) };
     }
 }
 
