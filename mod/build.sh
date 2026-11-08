@@ -8,7 +8,6 @@ mkdir -p build
 common="-target aarch64-linux-gnu -fPIC -O2 -fno-omit-frame-pointer -mbranch-protection=standard -Wall -Wextra -ffunction-sections -fdata-sections"
 
 zig cc $common -c src/minimod.c -o build/minimod.o
-zig cc $common -c src/hpss.c -o build/hpss.o
 
 # The looper engine is Rust.  Its static library carries the C ABI the rest of
 # the mod calls, so the C side does not change while the port lands feature by
@@ -22,7 +21,7 @@ fi
 rustlib=../rust/target/aarch64-unknown-linux-gnu/release/libminimod.a
 test -f "$rustlib" || { echo "Rust static library missing" >&2; exit 1; }
 
-objects="build/minimod.o build/hpss.o"
+objects="build/minimod.o"
 # `-lunwind`: the Rust standard library object references the unwinder even in a
 # `panic = "abort"` build (the panic hook's backtrace path), so the symbols have
 # to resolve at load time or the firmware refuses to start the whole process.

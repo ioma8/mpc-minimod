@@ -70,7 +70,7 @@
 #define A_OBS_SET 0x14a7580        /* observable setter (float, property) */
 #define A_LABEL_TEXT 0x11bae00     /* Label::getText (returns String&)    */
 
-#include "hpss.h"
+#include "hpss_ffi.h"
 #include "spectral_ffi.h"
 #include "h3m_effect.h"
 #include "audio_ffi.h"

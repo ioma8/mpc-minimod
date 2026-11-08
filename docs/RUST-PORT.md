@@ -308,7 +308,13 @@ reverted three times rather than shipped: the fixture compares positions on
 synthetic material, which is blind to a feature-matrix error that only real
 material exposes.
 
-`hpss.c` remains unwired.  The spectral one: with the Rust onset detector behind
+`hpss.c` is wired too, and its swap caught a convention the golden fixture could
+not: the reference's `hpss_split` returns **0 on success and -1 on failure**, and
+the port returned 1/0 like the other entry points.  The device reported
+`HPSS: processing failed` on a perfectly good split until the return values were
+mapped.  A fixture compares buffers, not conventions.
+
+The spectral one: with the Rust onset detector behind
 `spectral_onsets`, the Spectral Chop device test failed while iterating its cases
 (`('first from Trim', (a, 0, [...]))`) - a triple of the selected sample, a slice
 start and the boundary list, which is *not* the same thing as "the detector asked
