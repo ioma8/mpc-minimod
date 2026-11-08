@@ -68,7 +68,7 @@ slice.
 | Sample/instrument geometry accessors | ported | rate-range test; Reverb device test runs the paint path that uses them |
 | Trim sample scale (`pcm_at`) | ported | 6 assertions over 16/24/float scaling and clamping; Vinyl and Bass Synth device tests run the paths around it |
 | Trim edge scan (`wav_edges`) | ported | 3 host tests over synthesised takes (padded, silent, over-threshold); Bass Synth device test runs on the build |
-| `minimod.c` (hooks, features, UI glue) | C, shrinking | 7 683 -> 4 774 lines; every removal verified by an identical binary |
+| `minimod.c` (hooks, features, UI glue) | C, shrinking | 7 683 -> 4 564 lines; dead code removed only where the compiler proved it, each pass verified by an identical binary |
 
 The looper, the effects and the whole bass synth are already what the device
 runs: `mod/build.sh` links the Rust static library instead of the C engines, and

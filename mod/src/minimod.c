@@ -122,7 +122,6 @@ static void looper_draw(void *g);
 static void looper_pump(void);
 static void *g_trim_page;
 static int prop_references(uintptr_t P, uintptr_t param);
-static int find_screens(uintptr_t *out, int max);
 
 static uintptr_t g_watch_page;
 #define MAXW 12
@@ -767,7 +766,6 @@ static volatile int g_pending_prop;
 
 static void *g_paint_comp;
 static void *g_paint_gfx;
-static void who_points_at(uintptr_t target);
 static uintptr_t g_reg_base;
 static unsigned char g_reg_buf[0x40000];
 static int g_reg_have;
