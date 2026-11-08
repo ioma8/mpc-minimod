@@ -286,9 +286,15 @@ lines of superseded code from the repository - the binary is unchanged.
 their Rust ports exist and pass their golden fixtures but are **not wired**.
 
 Wiring them was attempted and reverted: with the Rust onset detector behind
-`spectral_onsets`, the Spectral Chop device test failed on the boundaries - the
-app's first slice started at 0 where the detector asked for 264, and the rest of
-the list shifted with it. The golden fixture compares positions on one synthetic
+`spectral_onsets`, the Spectral Chop device test failed while iterating its cases
+(`('first from Trim', (a, 0, [...]))`) - a triple of the selected sample, a slice
+start and the boundary list, which is *not* the same thing as "the detector asked
+for 264".  Reading the assertion source afterwards showed the comparison is made
+across a full cycle (select, chop, re-read), so the failure could be the detector,
+the marker writer, or the sample the test picked up after the previous run.
+
+That reading matters: the swap is still unvalidated, but the diagnosis in the
+revert commit is too specific and should not be trusted as the cause. The golden fixture compares positions on one synthetic
 input and passes, so the mismatch is in something the fixture does not cover
 (sub-frame rounding, or the leading-silence rule, both plausible). That needs a
 differential run on a real sample before the swap is safe - the detector is not
