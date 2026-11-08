@@ -29,6 +29,7 @@ pub mod pads;
 pub mod page;
 pub mod paths;
 pub mod paths_ffi;
+pub mod routing;
 pub mod sample;
 pub mod selection;
 pub mod status;
