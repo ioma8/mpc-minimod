@@ -64,6 +64,7 @@ slice.
 | `fmbass_sample.c` (FM bass preset renderer) | removed | never compiled and never called; the Bass Synth action renders with `bass_sample_render` |
 | WAV reading, source backup/restore | ported | 5 host tests over synthetic files; the effects and bass device tests run on it |
 | Sample-path resolution (object graph, unique/newest file) | ported | 6 host tests; the effects and bass device tests run on it |
+| Status line (action names, formatted messages) | ported | 3 host tests; the bass device test reads the string out of the process |
 | `minimod.c` (hooks, features, UI glue) | C, shrinking | — |
 
 The looper, the effects and the whole bass synth are already what the device

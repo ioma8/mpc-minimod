@@ -76,6 +76,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "status_ffi.h"
 #include "paths_ffi.h"
 #include "wav_ffi.h"
 #include "bass_sample.h"
@@ -1736,31 +1737,10 @@ static struct hpss_job *volatile g_hpss_job;
 static volatile int g_hpss_done;
 static volatile int g_hpss_finalizing;
 static volatile int g_hpss_data_down;
-static char g_hpss_status[96];
 static unsigned char g_hpss_btn[16];
 static int g_hpss_btn_valid;
 static int g_hpss_chop_before;
 static int g_hpss_restore_pending;
-static void hpss_set_status(const char *text);
-
-static const char *sample_action_name(int action)
-{
-    switch (action) {
-    case 1: return "Reverb";
-    case 2: return "Vinyl";
-    case 3: return "Lo-Fi";
-    case 4: return "Bass Synth";
-    default: return "HPSS";
-    }
-}
-
-static void sample_action_status(int action, const char *message)
-{
-    char text[96];
-    snprintf(text, sizeof text, "%s: %s", sample_action_name(action), message);
-    hpss_set_status(text);
-}
-
 static void hpss_repaint(void)
 {
     void *comp = g_paint_comp ? g_paint_comp : g_screen;
@@ -1840,17 +1820,6 @@ static void hpss_free_job(struct hpss_job *job)
     free(job->rendered);
     free(job->source_audio_backup);
     free(job);
-}
-
-static void hpss_set_status(const char *text)
-{
-    if (!text)
-        text = "";
-    size_t n = strlen(text);
-    if (n >= sizeof g_hpss_status)
-        n = sizeof g_hpss_status - 1;
-    memcpy(g_hpss_status, text, n);
-    g_hpss_status[n] = 0;
 }
 
 static void sample_transform_start(int action)
