@@ -63,6 +63,7 @@ static float g_cal_cap[LP_CAL_CAP];
 static int g_cal_result;
 static float g_cal_conf;
 static volatile unsigned g_lat_used; /* latency snapshotted for the last take */
+static volatile char g_lat_src = 'E'; /* E estimate, C chirp, A correlation, S seeded */
 
 /* Keep this at 32 bytes: the emulator test reads the array by stride, and the
  * offsets are state 0, len 4, rec 8, lat 12, origin 16, skip 24. */
@@ -471,6 +472,7 @@ void looper_calibration_finish(void)
     g_cal_result = (int)d;
     g_lat = (unsigned)d;
     g_cal_state = 4;
+    g_lat_src = 'C';
     char line[40];
     snprintf(line, sizeof line, "CALIB %d ms", (int)(d * 1000 / LP_RATE));
     say(line);
@@ -484,6 +486,7 @@ void looper_seed_latency(unsigned frames)
         frames = LP_LAT_MAX;
     g_cal_result = (int)frames;
     g_lat = frames;
+    g_lat_src = 'S';
 }
 
 /* Adopt a latency measured by the continuous input/output correlation. */
@@ -494,6 +497,7 @@ void looper_force_latency(unsigned frames)
     g_cal_result = (int)frames;
     g_lat = frames;
     g_cal_state = 4;
+    g_lat_src = 'A';
 }
 
 int looper_calibration_state(void)
@@ -776,6 +780,7 @@ int looper_snapshot(struct looper_view *view)
     view->input = lv > 1.f ? 1.f : lv;
     view->recording_pad = -1;
     view->lat_frames = g_lat_used;
+    view->lat_src = g_lat_src;
     uint64_t t = g_t;
     for (int i = 0; i < LOOPER_PADS; ++i) {
         struct pad *p = &g_pads[i];

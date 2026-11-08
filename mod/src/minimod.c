@@ -4029,8 +4029,11 @@ static void looper_draw(void *g)
         draw_colour(g, 0xffffb43c);
         draw_text(g, v.message, 12, 202, 296, 12, 10.0f);
     } else if (v.lat_frames) {
-        char lat[24];
-        snprintf(lat, sizeof lat, "LAT %ums", (unsigned)((uint64_t)v.lat_frames * 1000 / 44100));
+        char lat[28];
+        const char *src = v.lat_src == 'C' ? "CAL" : v.lat_src == 'A' ? "AUTO" :
+                          v.lat_src == 'S' ? "SAVED" : "EST";
+        snprintf(lat, sizeof lat, "%s %ums", src,
+                 (unsigned)((uint64_t)v.lat_frames * 1000 / 44100));
         draw_colour(g, 0xff5a5a64);
         draw_rect(g, 8, 202, 304, 12);
         draw_colour(g, 0xffb8b8be);

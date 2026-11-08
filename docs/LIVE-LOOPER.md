@@ -137,23 +137,23 @@ Latency is measured in three layers, so it works even when the simple case does
 not:
 
 1. **Chirp on open.** The view plays a 30 ms 1→4 kHz chirp, captures 0.74 s of
-   input and cross-correlates the two with a normalised score. If the chirp comes
+   input and cross-correlates the two with a normalised score (`CAL`). If the chirp comes
    back — a loop cable, the resample source, a microphone that hears the speaker
    — the measured round trip becomes the compensation. It repeats up to five
    times, 4 s apart, while no take is running, so switching the input source
    after opening still calibrates.
-2. **Continuous correlation while playing.** The mod keeps the last two seconds
+2. **Continuous correlation while playing (`AUTO`).** The mod keeps the last two seconds
    of what it sent to the device and the same span of input, and every 2.5 s
    cross-correlates them. Whenever the input contains any of the output (bleed,
    resample, cable) the lag is the true round trip, and it is adopted directly —
    this tracks changes and corrects a bad chirp.
-3. **Buffer estimate.** With no return path at all (a silent instrument input),
+3. **Buffer estimate (`EST`).** With no return path at all (a silent instrument input),
    it falls back to the device buffers: `snd_pcm_delay` of the output (smoothed)
    plus the block being written, `snd_pcm_avail` of the capture stream and the
    frames waiting in the input ring.
 
 A successful measurement is written to `/data/minimod-looper.cfg` and seeded at
-the next start, so one calibration lasts until the hardware setup changes. `K1`
+the next start (`SAVED`), so one calibration lasts until the hardware setup changes. `K1`
 adds a trim of ±400 ms (stored in the same file) for the room or personal
 preference.
 
@@ -197,8 +197,8 @@ The test drives the panel and reads the mod's own state and output tap from
 Last run on the release build:
 
 ```
-live looper: loop 51584 frames (1.17s), 0.150 rms at 441 Hz, calib 1844 frames,
-take latency 1844 frames, sync 51584, quantized 25548 -> 51584
+live looper: loop 51968 frames (1.18s), 0.150 rms at 441 Hz, calib 1621 frames,
+take latency 1621 frames, sync 51968, quantized 25643 -> 51968
 ```
 
 What that covers, in order: opening the view calibrates the round-trip latency

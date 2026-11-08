@@ -45,6 +45,7 @@ struct looper_view {
     float input;               /* input level 0..1 */
     int recording_pad;         /* -1 when nothing is recording */
     unsigned lat_frames;       /* latency applied to the last take */
+    char lat_src;              /* E estimate, C chirp, A correlation, S seeded */
     char message[40];          /* status line, empty when none */
     struct looper_pad_view pads[LOOPER_PADS];
 };

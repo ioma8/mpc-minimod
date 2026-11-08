@@ -69,7 +69,8 @@ The release supports MPC Sample firmware **1.3.0.12** only.
   play whenever the input hears the output, and apply it to every take so
   overdubs and synced loops line up; a buffer-based estimate is used when no
   return path exists, `K1` trims it, and the result is stored in
-  `/data/minimod-looper.cfg` so it survives a restart.
+  `/data/minimod-looper.cfg` so it survives a restart. The status strip shows
+  the source and value (`CAL`, `AUTO`, `SAVED`, `EST`).
 - Draw the loop state, length, playhead and input level as a fullscreen view,
   and block pad notes from the app while it is open.
 - Add `mod/tests/emulator_looper.py` and an in-process output tap for audio
