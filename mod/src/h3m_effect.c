@@ -23,8 +23,9 @@ typedef void (*effect_process)(void *, const float *const *, float *const *,
 typedef void (*effect_destroy)(void *);
 
 int h3m_effect_render(uintptr_t app_base, enum h3m_effect kind,
-                     const float *input, size_t frames, unsigned channels,
-                     unsigned rate, float **output, size_t *output_frames)
+                     h3m_read_fn read_mem, const float *input, size_t frames,
+                     unsigned channels, unsigned rate, float **output,
+                     size_t *output_frames)
 {
     if (!output || !output_frames)
         return -1;
@@ -55,11 +56,43 @@ int h3m_effect_render(uintptr_t app_base, enum h3m_effect kind,
         return -1;
     }
 
-    void **vtable = *(void ***)effect;
-    effect_setup setup = (effect_setup)vtable[9];
-    effect_process process = (effect_process)vtable[11];
-    effect_destroy destroy = (effect_destroy)vtable[1];
-    float *params = *(float **)((char *)effect + 0x18);
+    void **vtable = 0;
+    uintptr_t fn_setup = 0, fn_process = 0, fn_destroy = 0, params_p = 0;
+    if (read_mem) {
+        /* The factory returned an object; check its class data and slots before
+         * calling through them.  A failed check leaks the object but cannot
+         * corrupt the host. */
+        if (!read_mem((uintptr_t)effect, &vtable, sizeof vtable) || !vtable ||
+            (uintptr_t)vtable < app_base ||
+            (uintptr_t)vtable >= app_base + 0x12000000ULL ||
+            !read_mem((uintptr_t)vtable + 9 * 8, &fn_setup, 8) ||
+            !read_mem((uintptr_t)vtable + 11 * 8, &fn_process, 8) ||
+            !read_mem((uintptr_t)vtable + 1 * 8, &fn_destroy, 8) ||
+            !fn_setup || !fn_process || !fn_destroy ||
+            fn_setup < app_base || fn_setup >= app_base + 0x12000000ULL ||
+            fn_process < app_base || fn_process >= app_base + 0x12000000ULL ||
+            fn_destroy < app_base || fn_destroy >= app_base + 0x12000000ULL ||
+            !read_mem((uintptr_t)effect + 0x18, &params_p, 8) || !params_p ||
+            (params_p & 3)) {
+            free(rendered);
+            return -1;
+        }
+        float params_probe[6];
+        if (!read_mem(params_p, params_probe, sizeof params_probe)) {
+            free(rendered);
+            return -1;
+        }
+    } else {
+        vtable = *(void ***)effect;
+        fn_setup = (uintptr_t)vtable[9];
+        fn_process = (uintptr_t)vtable[11];
+        fn_destroy = (uintptr_t)vtable[1];
+        params_p = *(uintptr_t *)((char *)effect + 0x18);
+    }
+    effect_setup setup = (effect_setup)fn_setup;
+    effect_process process = (effect_process)fn_process;
+    effect_destroy destroy = (effect_destroy)fn_destroy;
+    float *params = (float *)params_p;
     if (kind == H3M_VINYL) {
         /* Mild drive and a restrained noise level retain the source while
            making the firmware's vinyl coloration audible. */

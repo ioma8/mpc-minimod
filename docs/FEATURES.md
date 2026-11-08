@@ -201,8 +201,10 @@ chord, a new phrase, a different drum — and rewrites that pad's chop in place 
 up to 16 detected frames. It creates no samples, uses no free pads, writes no
 file, and kills the previous chop (stock slice edits are not undoable either).
 The menu reports `Spectral: n slices on this pad`, or the reason it refused
-(`no sample on this pad`, `cannot read sample WAV`, `no onsets`, `cannot select
-Manual chop`, `native marker write failed`).
+(`no sample on this pad`, `cannot read sample audio`, `no onsets`, `cannot
+select Manual chop`, `native marker write failed`). Input is the sample's
+in-memory float32 buffer first — so an unsaved recording works — with the WAV as
+the fallback for streamed samples.
 
 **Detector** (`mod/src/spectral.c`; reference `tools/hpss/spectral_chop.py`):
 

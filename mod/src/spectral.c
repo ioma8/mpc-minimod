@@ -82,11 +82,15 @@ int spectral_onsets(const float *input, size_t frames, unsigned channels,
                     unsigned *detected_out)
 {
     if (detected_out) *detected_out = 0;
-    if (!input || !positions || !max_positions || !frames || !channels ||
-        !rate || frames < N / 2)
+    if (!input || !positions || !max_positions || !frames ||
+        channels < 1 || channels > 2 || !rate || frames < N / 2)
+        return 0;
+    if (frames > SIZE_MAX / sizeof(float))
         return 0;
 
     float *mono = malloc(frames * sizeof(float));
+    float *scratch = NULL, *cmean = NULL, *tmean = NULL;
+    unsigned *hits = NULL, *kept = NULL;
     if (!mono) return 0;
     for (size_t t = 0; t < frames; ++t) {
         float sum = 0;
@@ -94,8 +98,9 @@ int spectral_onsets(const float *input, size_t frames, unsigned channels,
         mono[t] = sum / channels;
     }
 
-    unsigned nf = (unsigned)((frames + HOP - 1) / HOP);
-    if (nf > MAX_FRAMES) nf = MAX_FRAMES;
+    size_t nfz = frames / HOP + (frames % HOP != 0);
+    if (nfz > MAX_FRAMES) nfz = MAX_FRAMES;
+    unsigned nf = (unsigned)nfz;
 
     float *mag = malloc((size_t)nf * BINS * sizeof(float));
     float *flux = calloc(nf, sizeof(float));
@@ -205,8 +210,8 @@ int spectral_onsets(const float *input, size_t frames, unsigned channels,
     if (radius < 1) radius = 1;
     unsigned gap = (unsigned)ceilf(.040f * rate / HOP);
     if (gap < 1) gap = 1;
-    float *scratch = malloc((2 * radius + 2) * sizeof(float));
-    unsigned *hits = malloc(nf * sizeof(unsigned));
+    scratch = malloc((2 * radius + 2) * sizeof(float));
+    hits = malloc(nf * sizeof(unsigned));
     if (!scratch || !hits) goto fail;
 
     unsigned nhits = 0;
@@ -241,9 +246,9 @@ int spectral_onsets(const float *input, size_t frames, unsigned channels,
     if (win < 2) win = 2;
     long end_guard = (long)(.120 * rate / HOP);
 
-    float *cmean = malloc(CHROMA * sizeof(float));
-    float *tmean = malloc(TBANDS * sizeof(float));
-    unsigned *kept = malloc(nf * sizeof(unsigned));
+    cmean = malloc(CHROMA * sizeof(float));
+    tmean = malloc(TBANDS * sizeof(float));
+    kept = malloc(nf * sizeof(unsigned));
     if (!cmean || !tmean || !kept) goto fail;
 
     unsigned nkeep = 0;
@@ -317,7 +322,9 @@ int spectral_onsets(const float *input, size_t frames, unsigned channels,
                env_max(mono, a0 + (size_t)(onset - 1) * hop, hop) > level)
             onset--;
         unsigned p = (unsigned)(a0 + (size_t)onset * hop);
-        if (out && p - positions[out - 1] < (unsigned)(.040f * rate)) continue;
+        if (out && (long long)p - (long long)positions[out - 1] <
+                       (long long)(.040f * rate))
+            continue;
         positions[out++] = p;
     }
 
@@ -335,5 +342,6 @@ int spectral_onsets(const float *input, size_t frames, unsigned channels,
 
 fail:
     free(mono); free(mag); free(flux); free(window); free(a); free(chr); free(tbr);
+    free(scratch); free(hits); free(cmean); free(tmean); free(kept);
     return 0;
 }

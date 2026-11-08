@@ -90,7 +90,12 @@
 #define A_LOC_BOUNDS 0x16b6060     /* AC50WaveformLocator::bounds */
 #define A_PITCH_OFF 0x27e4400      /* 16 Levels: set pitch offset (a3 = semitones) */
 
-#define FIELD(p, off, type) (*(type *)((char *)(p) + (off)))
+/* memcpy, not a pointer cast: the app's objects are aligned but the macro is
+ * also used on byte buffers and event structs, where a cast would be UB. */
+#define FIELD(p, off, type) \
+    __extension__({ type _field_v; \
+                    memcpy(&_field_v, (const char *)(p) + (off), sizeof _field_v); \
+                    _field_v; })
 #define FN(off, type) ((type)(base + (off)))
 
 /* ---------------------------------------------------------------- state */
@@ -104,15 +109,21 @@ static int nslots, ntramp;
 static int relay_used;
 /* Release hook set: 16-Levels proc, buttons, pad note-on, control-surface
  * events, pad note-off. Bit 0 (the 16-Levels constructor) is off because it
- * crashes; the MIDI dispatcher is installed lazily by midi_hook_set(), never
+ * crashes; the MIDI dispatcher hook forwards untouched unless the note is an
+ * external one in 16 Levels, never
  * from this mask. */
 static int hook_mask = 0xf2;
 static int safe_mode;
 static int debug_mode;
 static int probe_mode;
 
+#if MINIMOD_DEBUG
 static volatile int g_cc_recover;
+static volatile pthread_t g_cc_thread;
+#endif
+#if MINIMOD_DEBUG
 static sigjmp_buf g_cc_jmp;
+#endif
 
 static void mlog(const char *fmt, ...);
 static void toast(const char *text);
@@ -158,66 +169,92 @@ static void watch_arm(uintptr_t addr, const char *why)
 
 
 #if MINIMOD_DEBUG
+/* The handler may run on any thread at any point, including inside mlog while
+ * it holds the log mutex: only write(2) and plain stores are allowed here. */
+static void sig_write(const char *s)
+{
+    size_t n = 0;
+    while (s[n])
+        n++;
+    (void)!write(2, s, n);
+}
+
+static void sig_hex(unsigned long v)
+{
+    static const char digits[] = "0123456789abcdef";
+    char b[19];
+    b[0] = '0';
+    b[1] = 'x';
+    for (int i = 0; i < 16; ++i)
+        b[2 + i] = digits[(v >> (60 - 4 * i)) & 15];
+    b[18] = ' ';
+    (void)!write(2, b, sizeof b);
+}
+
 static void fault_handler(int sig, siginfo_t *si, void *ucv)
 {
     ucontext_t *u = (ucontext_t *)ucv;
-    unsigned long pc = 0, lr = 0, sp = 0;
-    if (u) {
-        pc = (unsigned long)u->uc_mcontext.pc;
-        lr = (unsigned long)u->uc_mcontext.regs[30];
-        sp = (unsigned long)u->uc_mcontext.sp;
-    }
-    if (si && watch_has((uintptr_t)si->si_addr & ~(uintptr_t)0xfff)) {
-        mlog("minimod: WATCH addr=%p pc=%p lr=%p sp=%p\n", si->si_addr, (void *)pc,
-             (void *)lr, (void *)sp);
-        mprotect((void *)((uintptr_t)si->si_addr & ~(uintptr_t)0xfff), 0x1000,
+    unsigned long pc = u ? (unsigned long)u->uc_mcontext.pc : 0;
+    unsigned long lr = u ? (unsigned long)u->uc_mcontext.regs[30] : 0;
+    unsigned long sp = u ? (unsigned long)u->uc_mcontext.sp : 0;
+    uintptr_t addr = si ? (uintptr_t)si->si_addr : 0;
+    if (si && watch_has(addr & ~(uintptr_t)0xfff)) {
+        sig_write("minimod: WATCH addr=");
+        sig_hex(addr);
+        sig_write("pc=");
+        sig_hex(pc);
+        sig_write("\n");
+        mprotect((void *)(addr & ~(uintptr_t)0xfff), 0x1000,
                  PROT_READ | PROT_WRITE);
         for (int i = 0; i < g_nwpage; ++i)
-            if (g_wpages[i] == ((uintptr_t)si->si_addr & ~(uintptr_t)0xfff))
+            if (g_wpages[i] == (addr & ~(uintptr_t)0xfff))
                 g_wpages[i] = 0;
         return;
     }
-    mlog("minimod: FAULT sig=%d addr=%p pc=%p lr=%p sp=%p\n", sig,
-         si ? si->si_addr : 0, (void *)pc, (void *)lr, (void *)sp);
-    /* The knob replay can end in a call through a bad pointer inside the app's
-     * follow-up work. That jump faults before touching the stack, so jumping
-     * back out of it is safe enough and keeps the app alive. */
-    if (si && si->si_signo == SIGSEGV) {
-        /* registers at the fault identify what the app was working on */
-        ucontext_t *uc = (ucontext_t *)ucv;
-        if (uc)
-            mlog("minimod: fault regs x0=%llx x1=%llx x2=%llx x3=%llx x19=%llx x20=%llx "
-                 "x21=%llx x22=%llx x23=%llx\n",
-                 (unsigned long long)uc->uc_mcontext.regs[0],
-                 (unsigned long long)uc->uc_mcontext.regs[1],
-                 (unsigned long long)uc->uc_mcontext.regs[2],
-                 (unsigned long long)uc->uc_mcontext.regs[3],
-                 (unsigned long long)uc->uc_mcontext.regs[19],
-                 (unsigned long long)uc->uc_mcontext.regs[20],
-                 (unsigned long long)uc->uc_mcontext.regs[21],
-                 (unsigned long long)uc->uc_mcontext.regs[22],
-                 (unsigned long long)uc->uc_mcontext.regs[23]);
-    }
-    if (g_cc_recover) {
+    sig_write("minimod: FAULT sig=");
+    sig_hex((unsigned long)sig);
+    sig_write("addr=");
+    sig_hex(addr);
+    sig_write("pc=");
+    sig_hex(pc);
+    sig_write("lr=");
+    sig_hex(lr);
+    sig_write("sp=");
+    sig_hex(sp);
+    sig_write("\n");
+    /* Only the thread that armed the jump may take it: a longjmp into another
+     * thread's stack would be undefined. */
+    if (g_cc_recover && pthread_equal(g_cc_thread, pthread_self())) {
         g_cc_recover = 0;
+        g_cc_thread = 0;
         siglongjmp(g_cc_jmp, 1);
     }
+    /* Never resume after a fatal signal. */
     _exit(139);
-    /* Never resume after a fatal signal: restore the default disposition and
-     * let the app die the way it would without the mod. */
-    {
-        struct sigaction dfl;
-        memset(&dfl, 0, sizeof dfl);
-        dfl.sa_handler = SIG_DFL;
-        sigemptyset(&dfl.sa_mask);
-        sigaction(sig, &dfl, 0);
-        raise(sig);
-    }
 }
 #endif /* MINIMOD_DEBUG */
 
+#if MINIMOD_DEBUG
 static volatile int g_cc_recover;
+static volatile pthread_t g_cc_thread;
+#endif
+#if MINIMOD_DEBUG
 static sigjmp_buf g_cc_jmp;
+#endif
+
+#if MINIMOD_DEBUG
+static void cc_guard_arm(void)
+{
+    g_cc_thread = pthread_self();
+    g_cc_recover = 1;
+}
+
+static void cc_guard_disarm(void)
+{
+    g_cc_recover = 0;
+    g_cc_thread = 0;
+}
+#endif
 
 #define LOG_CAP (256u * 1024u)
 #if MINIMOD_LOG
@@ -322,35 +359,46 @@ static int mapped(const void *p)
      * stay permissive: rd()/wr() fail safely on unmapped memory anyway. The only
      * writer that trusted this blindly was the debug `set` channel, which is now
      * compiled out of release builds. */
-    if (!g_rng_loaded)
+    if (!__atomic_load_n(&g_rng_loaded, __ATOMIC_ACQUIRE))
         return 1;
+    int nrng = __atomic_load_n(&g_nrng, __ATOMIC_ACQUIRE);
     uintptr_t a = (uintptr_t)p;
-    for (int i = 0; i < g_nrng; ++i)
+    for (int i = 0; i < nrng; ++i)
         if (a >= g_rng[i].lo && a < g_rng[i].hi)
             return 1;
     return 0;
 }
 
+static pthread_mutex_t g_rng_mtx = PTHREAD_MUTEX_INITIALIZER;
+
 static void ranges_load(void)
 {
-    if (g_rng_loaded)
+    pthread_mutex_lock(&g_rng_mtx);
+    if (__atomic_load_n(&g_rng_loaded, __ATOMIC_ACQUIRE)) {
+        pthread_mutex_unlock(&g_rng_mtx);
         return;
+    }
     FILE *f = fopen("/proc/self/maps", "r");
-    if (!f)
+    if (!f) {
+        pthread_mutex_unlock(&g_rng_mtx);
         return;
+    }
+    int n = 0;
     char line[512];
-    while (fgets(line, sizeof line, f) && g_nrng < 512) {
+    while (fgets(line, sizeof line, f) && n < 512) {
         unsigned long lo = 0, hi = 0;
         char perms[8] = {0};
         if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3)
             continue;
-        g_rng[g_nrng].lo = lo;
-        g_rng[g_nrng].hi = hi;
-        g_rng[g_nrng].w = perms[1] == 'w';
-        g_nrng++;
+        g_rng[n].lo = lo;
+        g_rng[n].hi = hi;
+        g_rng[n].w = perms[1] == 'w';
+        n++;
     }
     fclose(f);
-    g_rng_loaded = 1;
+    __atomic_store_n(&g_nrng, n, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_rng_loaded, 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&g_rng_mtx);
 }
 
 /* ------------------------------------------------------------ hook engine */
@@ -371,6 +419,8 @@ static int pc_relative(uint32_t insn)
 {
     if ((insn & 0x7C000000u) == 0x14000000u) /* B / BL            */
         return 1;
+    if ((insn & 0xFF000010u) == 0x54000000u) /* B.cond            */
+        return 1;
     if ((insn & 0x9F000000u) == 0x90000000u) /* ADRP              */
         return 1;
     if ((insn & 0x9F000000u) == 0x10000000u) /* ADR               */
@@ -386,7 +436,7 @@ static int pc_relative(uint32_t insn)
         return 1;
     if ((insn & 0xFFFFFC1Fu) == 0xD63F0000u) /* BLR xN            */
         return 1;
-    if ((insn & 0xFFFFFBFFu) == 0xD65F0000u) /* RET               */
+    if ((insn & 0xFFFFFC1Fu) == 0xD65F0000u) /* RET               */
         return 1;
     return 0;
 }
@@ -471,8 +521,6 @@ static void *install_hook(uintptr_t site, void *hook)
 static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
 static void midi_note_event(void *app, void *context, void *event,
                             uintptr_t source);
-static unsigned char g_midi_orig[4], g_midi_patch[4];
-static int g_midi_ready, g_midi_on;
 /* A physical pad press identifies its pad through property 0 of the note event
  * (event+0x16), whose value is the bank's pad-note base plus the pad index.
  * Learn that base from a real pad press so MIDI can address the same row. */
@@ -491,63 +539,6 @@ static int midi_hook_site_ok(void)
     unsigned char got[16];
     return rd(base + A_MIDI_NOTE_EVENT, got, sizeof got) &&
            !memcmp(got, want, sizeof want);
-}
-
-static void midi_site_bytes(const void *p)
-{
-    uintptr_t site = base + A_MIDI_NOTE_EVENT;
-    uintptr_t page = site & ~(uintptr_t)0xfff;
-    if (mprotect((void *)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
-        return;
-    wr(site, p, 4);
-    __builtin___clear_cache((char *)site, (char *)site + 4);
-    mprotect((void *)page, 0x2000, PROT_READ | PROT_EXEC);
-}
-
-static void midi_hook_set(int on)
-{
-    if (!base || !relay_page || !tramp_page || nslots >= 60 || ntramp >= 60)
-        return;
-    on = on ? 1 : 0;
-    if (on == g_midi_on)
-        return;
-    if (on) {
-        if (!g_midi_ready) {
-            if (!midi_hook_site_ok()) {
-                mlog("minimod: MIDI dispatcher mismatch; not hooking\n");
-                toast("MIDI hook: firmware?");
-                return;
-            }
-            if (!rd(base + A_MIDI_NOTE_EVENT, g_midi_orig, 4))
-                return;
-            /* The relay/trampoline pages are RX after load; reopen them for
-             * the one-time slot build. */
-            mprotect(relay_page, 4096, PROT_READ | PROT_WRITE);
-            mprotect(tramp_page, 4096, PROT_READ | PROT_WRITE);
-            void *t = install_hook(base + A_MIDI_NOTE_EVENT,
-                                   (void *)midi_note_event);
-            mprotect(relay_page, 4096, PROT_READ | PROT_EXEC);
-            mprotect(tramp_page, 4096, PROT_READ | PROT_EXEC);
-            if (!t)
-                return;
-            orig_midi_note_event =
-                (void (*)(void *, void *, void *, uintptr_t))t;
-            g_midi_ready = 1;
-            if (!rd(base + A_MIDI_NOTE_EVENT, g_midi_patch, 4))
-                return;
-            mlog("minimod: MIDI hook installed\n");
-        } else {
-            midi_site_bytes(g_midi_patch);
-            mlog("minimod: MIDI hook on\n");
-        }
-        g_midi_on = 1;
-    } else {
-        if (g_midi_ready) {
-            midi_site_bytes(g_midi_orig);
-            mlog("minimod: MIDI hook off (stock)\n");
-        }
-        g_midi_on = 0;
-    }
 }
 
 /* -------------------------------------------------------- 16 Levels state */
@@ -580,7 +571,6 @@ static int levels_active(void)
     if (!FN(0x112fd50, int (*)(void *))(s)) {
         if (g_levels) mlog("lv: predicate 0, clearing\n");
         g_levels = 0;
-        midi_hook_set(0);
         return 0;
     }
     return g_levels;
@@ -643,6 +633,11 @@ static int wav_info(const char *path, unsigned *frames, unsigned *rate,
             if (encoding == 0xfffe && sz >= 40)   /* EXTENSIBLE: subformat GUID */
                 encoding = (unsigned)f[24] | ((unsigned)f[25] << 8);
         } else if (!memcmp(ck, "data", 4)) {
+            /* The app's WAVs are mono or stereo; anything else is not one of
+             * ours and must not reach the edge scan.  The data offset is kept
+             * 32-bit too, so a >4 GiB file is refused rather than truncated. */
+            if ((uint64_t)off + 8 > UINT32_MAX)
+                break;
             dof = (unsigned)off + 8;
             len = sz;
             if (encoding)
@@ -651,7 +646,7 @@ static int wav_info(const char *path, unsigned *frames, unsigned *rate,
         off += 8 + (off_t)sz + (off_t)(sz & 1);
     }
     close(fd);
-    if (!dof || !len || !chn || !rt || !encoding)
+    if (!dof || !len || !chn || chn > 2 || !rt || !encoding)
         return 0;
     if (encoding != 1 && !(encoding == 3 && bits == 32))
         return 0;
@@ -699,13 +694,15 @@ static int g_b3_down;      /* edge detection: the button auto-repeats while held
 static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
                      unsigned ch, unsigned bps, unsigned format, unsigned *first, unsigned *last)
 {
+    /* Only the formats wav_read_f32() accepts: 1..2 channels, 2..4 bytes per
+     * sample.  Anything else would make a frame wider than the read buffer and
+     * is refused instead of scanned. */
+    if (ch < 1 || ch > 2 || bps < 2 || bps > 4)
+        return 0;
+    const unsigned frame_bytes = bps * ch;
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return 0;
-    if (!ch)
-        ch = 1;
-    if (bps < 2 || bps > 4)
-        bps = 2;
     /* Threshold: relative to the file's peak so quiet material is trimmed as
      * well, with an absolute floor so a nearly silent file is not trimmed to
      * nothing. g_trim_ratio is set per SHIFT+B3 press (3 %, then 6 %);
@@ -731,7 +728,9 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
             ssize_t n = pread(fd, buf, sizeof buf, (off_t)dataoff + (off_t)g * bps * ch);
             if (n <= 0)
                 break;
-            unsigned got = (unsigned)(n / (bps * ch));
+            unsigned got = (unsigned)(n / frame_bytes);
+            if (!got)
+                break;      /* cannot happen with frame_bytes <= 16 KiB */
             for (unsigned i = 0; i < got; ++i)
                 for (unsigned c = 0; c < ch; ++c) {
                     int v = pcm_at(buf + (i * ch + c) * bps, bps, format);
@@ -739,7 +738,7 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
                     if (v > peak) peak = v;
                 }
             g += got;
-            if (got < sizeof buf / (bps * ch))
+            if (got < sizeof buf / frame_bytes)
                 break;
         }
         if (peak > 0) {
@@ -785,7 +784,9 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
         ssize_t n = pread(fd, buf, sizeof buf, (off_t)dataoff + (off_t)f * bps * ch);
         if (n <= 0)
             break;
-        unsigned got = (unsigned)(n / (bps * ch));
+        unsigned got = (unsigned)(n / frame_bytes);
+        if (!got)
+            break;
         for (unsigned i = 0; i < got; ++i) {
             int loud = 0;
             for (unsigned c = 0; c < ch; ++c) {
@@ -800,7 +801,7 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
             }
         }
         f += got;
-        if (got < sizeof buf / (bps * ch))
+        if (got < sizeof buf / frame_bytes)
             break;
     }
     if (!found_first) {
@@ -811,18 +812,20 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
     unsigned lastf = *first;
     /* Walk backwards in blocks: one pread per frame froze the UI thread on a
      * 15k-frame sample, and the stock library has 500k-frame ones. */
-    unsigned block = (unsigned)(sizeof buf / (bps * ch));
-    if (!block)
-        block = 1;
+    /* frame_bytes <= 8, so the block is at least 2 KiB and the pread below can
+     * never exceed the 16 KiB buffer. */
+    unsigned block = (unsigned)(sizeof buf / frame_bytes);
     unsigned end = frames;
     while (end > 0) {
         unsigned start = end > block ? end - block : 0;
         unsigned cnt = end - start;
-        ssize_t n = pread(fd, buf, (size_t)cnt * bps * ch,
-                          (off_t)dataoff + (off_t)start * bps * ch);
+        ssize_t n = pread(fd, buf, (size_t)cnt * frame_bytes,
+                          (off_t)dataoff + (off_t)start * frame_bytes);
         if (n <= 0)
             break;
-        unsigned got = (unsigned)(n / (bps * ch));
+        unsigned got = (unsigned)(n / frame_bytes);
+        if (!got)
+            break;
         int found = 0;
         for (unsigned i = got; i-- > 0;) {
             int loud = 0;
@@ -1049,7 +1052,8 @@ static int memory_edges(uintptr_t sample, unsigned frames, unsigned *first,
     return 1;
 }
 
-static unsigned frames_of_sample(uintptr_t sample)
+static unsigned frames_of_sample(uintptr_t sample, unsigned *ch_out,
+                                 unsigned *rate_out)
 {
     uintptr_t meta = 0;
     if (!sample || !rd(sample + 0x130, &meta, 8) || !meta)
@@ -1058,12 +1062,16 @@ static unsigned frames_of_sample(uintptr_t sample)
     unsigned fr = 0, rt = 0;
     if (!rd(meta, &ch, 2))
         return 0;
-    rd(meta + 4, &fr, 4);
-    rd(meta + 8, &rt, 4);
+    if (!rd(meta + 4, &fr, 4) || !rd(meta + 8, &rt, 4))
+        return 0;
     if (ch != 1 && ch != 2)
         return 0;
     if (rt < 8000 || rt > 192000)
         return 0;
+    if (ch_out)
+        *ch_out = ch;
+    if (rate_out)
+        *rate_out = rt;
     return fr;
 }
 
@@ -1083,7 +1091,8 @@ static int page_layers(uintptr_t param, uintptr_t *layers, uintptr_t *instr)
     return 1;
 }
 
-static int path_from_buffer(const char *buf, unsigned want, char *out, size_t n)
+static int path_from_buffer(const char *buf, unsigned want, unsigned want_ch,
+                            unsigned want_rate, char *out, size_t n)
 {
     static const char *roots[] = {"/data/", "/media/", "/usr/share/", "/factory/"};
     for (unsigned r = 0; r < 4; ++r) {
@@ -1098,7 +1107,8 @@ static int path_from_buffer(const char *buf, unsigned want, char *out, size_t n)
         char tmp[512];
         snprintf(tmp, sizeof tmp, "%.*s", (int)(end - hit), hit);
         unsigned fr = 0, rt = 0, ch = 0, doff = 0, bps = 2;
-        if (!wav_info(tmp, &fr, &rt, &ch, &doff, &bps, NULL) || fr != want)
+        if (!wav_info(tmp, &fr, &rt, &ch, &doff, &bps, NULL) || fr != want ||
+            ch != want_ch || rt != want_rate)
             continue;
         snprintf(out, n, "%s", tmp);
         return 1;
@@ -1109,7 +1119,8 @@ static int path_from_buffer(const char *buf, unsigned want, char *out, size_t n)
 /* A freshly recorded (unsaved) sample has no path anywhere near its object, but
  * the app has already written the audio into the temp project. Find the file by
  * its frame count - the recording's own length is a strong identifier. */
-static int find_wav_by_frames(unsigned want, char *out, size_t n)
+static int find_wav_by_frames(unsigned want, unsigned want_ch, unsigned want_rate,
+                               char *out, size_t n)
 {
     DIR *root = opendir("/data/TempProjects");
     if (!root)
@@ -1136,7 +1147,8 @@ static int find_wav_by_frames(unsigned want, char *out, size_t n)
             char full[512];
             snprintf(full, sizeof full, "%s/%s", dirp, fe->d_name);
             unsigned fr = 0, rate = 0, ch = 0, off = 0, bytes = 0, fmt = 0;
-            if (!wav_info(full, &fr, &rate, &ch, &off, &bytes, &fmt) || fr != want)
+            if (!wav_info(full, &fr, &rate, &ch, &off, &bytes, &fmt) ||
+                fr != want || ch != want_ch || rate != want_rate)
                 continue;
             struct stat fs;
             if (stat(full, &fs) != 0)
@@ -1158,7 +1170,8 @@ static int find_wav_by_frames(unsigned want, char *out, size_t n)
 /* The sample object carries its file: sample+0x30 is the holder, whose +0x120
  * is a std::string with the path. Read it directly before falling back to the
  * generic scan or the frame-count lookup. */
-static int path_from_object(uintptr_t sample, unsigned want, char *out, size_t n)
+static int path_from_object(uintptr_t sample, unsigned want, unsigned want_ch,
+                             unsigned want_rate, char *out, size_t n)
 {
     uintptr_t holder = 0, sptr = 0;
     char buf[512];
@@ -1169,33 +1182,34 @@ static int path_from_object(uintptr_t sample, unsigned want, char *out, size_t n
     if (!rd(sptr, buf, sizeof buf - 1))
         return 0;
     buf[sizeof buf - 1] = 0;
-    return path_from_buffer(buf, want, out, n);
+    return path_from_buffer(buf, want, want_ch, want_rate, out, n);
 }
 
-static int wav_path_of(uintptr_t obj, unsigned want, char *out, size_t n)
+static int wav_path_of(uintptr_t obj, unsigned want, unsigned want_ch,
+                       unsigned want_rate, char *out, size_t n)
 {
     ranges_load();
     char buf[512];
     for (long o = 0; o < 0x2000; o += 8) {
         uintptr_t q = 0;
-        if (!rd(obj + o, &q, 8) || !q || !mapped((void *)q))
+        if (!rd(obj + (uintptr_t)o, &q, 8) || !q || !mapped((void *)q))
             continue;
         if (!rd(q, buf, sizeof buf - 1))
             continue;
         buf[sizeof buf - 1] = 0;
-        if (path_from_buffer(buf, want, out, n)) {
+        if (path_from_buffer(buf, want, want_ch, want_rate, out, n)) {
             mlog("minimod: path from sample+0x%lx -> %s\n", (unsigned long)o, out);
             return 1;
         }
         /* one level deeper: the path often lives in a small holder object */
         for (long k = 0; k < 0x400; k += 8) {
             uintptr_t q2 = 0;
-            if (!rd(q + k, &q2, 8) || !q2 || !mapped((void *)q2))
+            if (!rd(q + (uintptr_t)k, &q2, 8) || !q2 || !mapped((void *)q2))
                 continue;
             if (!rd(q2, buf, sizeof buf - 1))
                 continue;
             buf[sizeof buf - 1] = 0;
-            if (path_from_buffer(buf, want, out, n)) {
+            if (path_from_buffer(buf, want, want_ch, want_rate, out, n)) {
                 mlog("minimod: path from sample+0x%lx/+0x%lx -> %s\n",
                      (unsigned long)o, (unsigned long)k, out);
                 return 1;
@@ -1213,7 +1227,7 @@ static int wav_path_of(uintptr_t obj, unsigned want, char *out, size_t n)
                 printable = 0;
                 break;
             }
-        if (printable && path_from_buffer(buf, want, out, n))
+        if (printable && path_from_buffer(buf, want, want_ch, want_rate, out, n))
             return 1;
     }
     return 0;
@@ -1260,6 +1274,8 @@ static int wav_read_f32(const char *path, unsigned want_frames, unsigned want_ch
             if (encoding == 0xfffe && sz >= 40)
                 encoding = (unsigned)f[24] | ((unsigned)f[25] << 8);
         } else if (!memcmp(ck, "data", 4)) {
+            if ((uint64_t)off + 8 > UINT32_MAX)
+                break;
             dof = (unsigned)off + 8;
             len = sz;
             if (encoding)
@@ -1356,38 +1372,9 @@ static struct {
 } g_pm[8];
 static volatile int g_npm;
 
-static uintptr_t learned_prop(uintptr_t param)
-{
-    for (int i = 0; i < g_npm; ++i)
-        if (g_pm[i].param == param)
-            return g_pm[i].prop;
-    return 0;
-}
-
 /* A property seen in a real broadcast whose cached value is exactly the
  * parameter's current value is the one that owns it. Exact equality keeps the
  * false positives (and the abort they caused) away. */
-static uintptr_t broadcast_prop(uintptr_t param, float cur)
-{
-    (void)param;
-    uintptr_t best = 0;
-    int hits = 0;
-    for (int i = 0; i < (g_nbc < 256 ? g_nbc : 256); ++i) {
-        uintptr_t p = g_bc[i].p;
-        if ((p & 7) || p < 0x10000 || !mapped((void *)p))
-            continue;
-        if (g_bc[i].v != cur)
-            continue;
-        float v50 = 0;
-        if (!rd(p + 0x50, &v50, 4) || v50 != cur)
-            continue;
-        if (best && p != best)
-            hits++;
-        best = p;
-    }
-    return hits ? 0 : best; /* ambiguous -> refuse */
-}
-
 /* ------------------------------------------------------------ app screens */
 
 
@@ -1409,7 +1396,9 @@ static void (*orig_cs)(void *, int, void *);
 static void (*orig_trim)(void *, float);
 /* The Sample page (0x2468 bytes) captured from SamplePage_Ctor; it owns the
  * Start/End widgets and is what must be repainted after a property change. */
+#if MINIMOD_DEBUG
 static void *g_page;
+#endif
 typedef void (*pagector_fn)(void *, void *, void *, void *, void *, void *,
                             void *, void *, void *, void *, void *, void *);
 #if MINIMOD_DEBUG
@@ -1448,7 +1437,9 @@ static void setctl_probe(void *a0, void *a1, int a2, int a3, float v)
 
 /* The page object, captured from the control handler FUN_02904e90(page, id, ...)
  * - refreshed on every knob turn, so it is always a live pointer. */
+#if MINIMOD_DEBUG
 static void *g_livepage;
+#endif
 #if MINIMOD_DEBUG
 static void (*orig_ctlhandler)(void *, uint64_t, uint64_t);
 #endif /* MINIMOD_DEBUG */
@@ -1631,32 +1622,11 @@ static void who_points_at(uintptr_t target);
 #endif /* MINIMOD_DEBUG */
 static uintptr_t g_last_press_obj;
 static void (*orig_screen_paint)(void *, void *);
-static volatile int g_pending_ctl;
-static float g_pending_v0, g_pending_v1;
-static int g_pending_r0, g_pending_r1;
-static void (*orig_setctl2)(void *, void *, int, int, float);
-static void *g_surface2;
 
 
 #if MINIMOD_DEBUG
 /* Write the property values immediately before the app paints, so the paint
  * reads the trim we computed. */
-static void apply_pending_ctl(void)
-{
-    if (!g_pending_ctl)
-        return;
-    g_pending_ctl = 0;
-    if (!g_surface2 || !orig_setctl2)
-        return;
-    uintptr_t svt = 0;
-    if (!rd((uintptr_t)g_surface2, &svt, 8) || svt < base || svt > base + 0x12000000ULL)
-        return;
-    if (!g_control_context)
-        return;
-    orig_setctl2(g_control_context, g_surface2, 0, 0x466, g_pending_v1);
-    orig_setctl2(g_control_context, g_surface2, 0, 0x462, g_pending_v0);
-    mlog("minimod: paint-time setctl %d/%d\n", g_pending_r0, g_pending_r1);
-}
 #endif /* MINIMOD_DEBUG */
 static void *g_paint_comp;
 static void *g_paint_gfx;
@@ -1674,13 +1644,6 @@ static void do_poke(void);
 static volatile int g_sdump;
 static void dump_sliders(void *p);
 static volatile float g_poke_value;
-static float g_mark_v0 = -1.0f, g_mark_v1 = -1.0f;
-static volatile int g_pending_cc;
-static volatile int g_in_inject;
-static int g_cc_step;
-static uintptr_t g_cc_obj;
-static unsigned g_cc_r0, g_cc_r1;
-static void commit_trim(void);
 
 /* ---------------------------------------------------------- HPSS bridge */
 /* Stock Chop Extract, used as the sample-creation/assignment mechanism.  The
@@ -1829,7 +1792,7 @@ static void hpss_exec_hook(void *cmd)
             armed = 1;
     uintptr_t settings = 0;
     uint64_t old_start = 0, old_end = 0;
-    int patched = 0;
+    int patched = 0, wrote_start = 0, wrote_end = 0;
     if (armed && g_hpss_arm) {
         g_hpss_write_ok = 0;
         g_hpss_sub_on = 0;
@@ -1848,8 +1811,11 @@ static void hpss_exec_hook(void *cmd)
             rd(settings + HPSS_RANGE_START, &old_start, 8) &&
             rd(settings + HPSS_RANGE_END, &old_end, 8)) {
             uint64_t start = g_hpss_arm_start, end = g_hpss_arm_end;
-            patched = wr(settings + HPSS_RANGE_START, &start, 8) &&
-                      wr(settings + HPSS_RANGE_END, &end, 8);
+            /* Track the two writes separately: a failure on the second must not
+             * leave the first one patched for the next extraction. */
+            wrote_start = wr(settings + HPSS_RANGE_START, &start, 8);
+            wrote_end = wr(settings + HPSS_RANGE_END, &end, 8);
+            patched = wrote_start || wrote_end;
             mlog("HPSS exec: cmd=%p settings range %llu..%llu -> %u..%u\n", cmd,
                  (unsigned long long)old_start, (unsigned long long)old_end,
                  g_hpss_arm_start, g_hpss_arm_end);
@@ -1863,8 +1829,10 @@ static void hpss_exec_hook(void *cmd)
     if (orig_hpss_exec)
         orig_hpss_exec(cmd);
     if (patched) {
-        wr(settings + HPSS_RANGE_START, &old_start, 8);
-        wr(settings + HPSS_RANGE_END, &old_end, 8);
+        if (wrote_start)
+            wr(settings + HPSS_RANGE_START, &old_start, 8);
+        if (wrote_end)
+            wr(settings + HPSS_RANGE_END, &old_end, 8);
     }
     if (armed && g_hpss_sub_on) {
         /* The native writer may run on an executor thread.  Wait for it so the
@@ -1892,7 +1860,9 @@ static void hpss_writer_hook(void *closure, void *block)
     memcpy(&frames, block, sizeof frames);
     memcpy(&ptr, (char *)block + 8, sizeof ptr);
     size_t pos = g_hpss_sub_pos;
-    if (g_hpss_sub_buf && frames && pos + frames <= g_hpss_sub_source_frames) {
+    if (g_hpss_sub_buf && frames &&
+        pos + frames <= g_hpss_sub_source_frames &&
+        pos + frames <= g_hpss_sub_frames) {
         float *replacement =
             (float *)(g_hpss_sub_buf + pos * (size_t)g_hpss_sub_ch);
         unsigned write_frames = frames;
@@ -2005,6 +1975,8 @@ static int hpss_wav_info(const char *path, unsigned *frames, unsigned *ch,
             if (encoding == 0xfffe && sz >= 40)
                 encoding = (unsigned)f[24] | ((unsigned)f[25] << 8);
         } else if (!memcmp(ck, "data", 4)) {
+            if ((uint64_t)off + 8 > UINT32_MAX)
+                break;
             dof = (unsigned)off + 8;
             len = sz;
             if (encoding)
@@ -2013,7 +1985,7 @@ static int hpss_wav_info(const char *path, unsigned *frames, unsigned *ch,
         off += 8 + (off_t)sz + (off_t)(sz & 1);
     }
     close(fd);
-    if (!dof || !len || !channels || !rt || !bits)
+    if (!dof || !len || channels < 1 || channels > 2 || !rt || !bits)
         return 0;
     if (!((encoding == 1 && (bits == 16 || bits == 24 || bits == 32)) ||
           (encoding == 3 && (bits == 32 || bits == 64))))
@@ -2082,12 +2054,12 @@ static int hpss_path_for(uintptr_t sample, unsigned frames, unsigned ch,
                          unsigned rate, char *path, size_t pathsz)
 {
     char candidate[512];
-    if (path_from_object(sample, frames, candidate, sizeof candidate) &&
+    if (path_from_object(sample, frames, ch, rate, candidate, sizeof candidate) &&
         hpss_wav_matches(candidate, frames, ch, rate)) {
         snprintf(path, pathsz, "%s", candidate);
         return 1;
     }
-    if (wav_path_of(sample, frames, candidate, sizeof candidate) &&
+    if (wav_path_of(sample, frames, ch, rate, candidate, sizeof candidate) &&
         hpss_wav_matches(candidate, frames, ch, rate)) {
         snprintf(path, pathsz, "%s", candidate);
         return 1;
@@ -2137,7 +2109,7 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
     if (dest)
         *dest = -1;
     uintptr_t program = 0;
-    if (!screen || start >= end || !ch ||
+    if (!screen || start >= end || ch < 1 || ch > 2 ||
         !rd(state + 0x2310, &program, 8) || !program)
         return 0;
     int before = hpss_free_pad((void *)program);
@@ -2273,7 +2245,7 @@ static void *hpss_worker(void *arg)
                                 g_bass_knob[2], &job->rendered,
                                 &job->rendered_frames);
     else if (job->action != 0)
-        rc = h3m_effect_render(base, (enum h3m_effect)(job->action - 1),
+        rc = h3m_effect_render(base, (enum h3m_effect)(job->action - 1), rd,
                                job->input, job->frames, job->ch, job->rate,
                                &job->rendered, &job->rendered_frames);
     else
@@ -2282,10 +2254,15 @@ static void *hpss_worker(void *arg)
     if (job->action == 4)
         job->rendered_ch = 2;
     job->rc = rc;
+    /* The UI thread frees the job as soon as completion is published, so take
+     * everything the log line needs *before* the store and touch nothing after
+     * it except the repaint (which may run finalize). */
+    int action = job->action;
+    unsigned frames = job->frames, ch = job->ch;
+    size_t rendered_frames = job->rendered_frames;
     __atomic_store_n(&g_hpss_done, 1, __ATOMIC_RELEASE);
     mlog("%s worker: rc=%d frames=%u ch=%u output=%zu\n",
-         sample_action_name(job->action), rc, job->frames, job->ch,
-         job->rendered_frames);
+         sample_action_name(action), rc, frames, ch, rendered_frames);
     hpss_repaint();
     return NULL;
 }
@@ -2443,7 +2420,7 @@ static void hpss_close(void);
  * model calls below run from screen_paint, after the stock paint returns. */
 static unsigned char g_spectral_event[16];
 static struct {
-    int phase, n;
+    int phase, n, owns_busy;
     void *screen;
     uintptr_t state, sample;
     unsigned frames, ch, rate, pos[16];
@@ -2475,7 +2452,10 @@ static void spectral_finish(const char *error)
     hpss_set_status(status);
     toast(error ? status : "Spectral: chopped");
     g_spectral.phase = 0;
-    g_hpss_busy = 0;
+    if (g_spectral.owns_busy) {
+        g_hpss_busy = 0;
+        g_spectral.owns_busy = 0;
+    }
     __atomic_store_n(&g_spectral_active, 0, __ATOMIC_RELEASE);
     hpss_repaint();
 }
@@ -2549,6 +2529,9 @@ static void spectral_start(void)
                                      __ATOMIC_RELEASE, __ATOMIC_RELAXED))
         return;
     memcpy(g_spectral_event, g_hpss_btn, sizeof g_spectral_event);
+    /* A start that never reaches a paint tick must still expire: the note hook
+     * uses this deadline to stop swallowing pad presses. */
+    g_spectral.deadline = now_ms() + 5000;
     __atomic_store_n(&g_spectral_active, 1, __ATOMIC_RELEASE);
     hpss_repaint();
 }
@@ -2559,21 +2542,38 @@ static void spectral_tick(void)
 {
     if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE) != 1)
         return;
+    if (now_ms() >= g_spectral.deadline) {
+        spectral_finish("timed out");
+        return;
+    }
     if (!g_spectral.phase) {
         g_hpss_menu = 0;
         g_hpss_busy = 1;
+        g_spectral.owns_busy = 1;
         if (!hpss_sample_now(&g_spectral.screen, &g_spectral.state, &g_spectral.sample,
                              &g_spectral.frames, &g_spectral.ch, &g_spectral.rate)) {
             spectral_finish("no sample on this pad");
             return;
         }
         char path[512] = {0};
-        float *input = NULL;
-        if (!hpss_path_for(g_spectral.sample, g_spectral.frames, g_spectral.ch,
-                           g_spectral.rate, path, sizeof path) ||
-            !wav_read_f32(path, g_spectral.frames, g_spectral.ch, g_spectral.rate,
-                          &input, NULL, NULL)) {
-            spectral_finish("cannot read sample WAV");
+        unsigned mf = g_spectral.frames, mc = g_spectral.ch, mr = g_spectral.rate;
+        float *input = sample_memory_read(g_spectral.sample, &mf, &mc, &mr);
+        if (input && (mf != g_spectral.frames || mc != g_spectral.ch ||
+                      mr != g_spectral.rate)) {
+            /* The app metadata is what the native slice range refers to; a
+             * mismatch means this is not the same sample and the file is the
+             * safer source. */
+            free(input);
+            input = NULL;
+        }
+        if (input) {
+            mlog("Spectral: audio from memory frames=%u ch=%u\n",
+                 g_spectral.frames, g_spectral.ch);
+        } else if (!hpss_path_for(g_spectral.sample, g_spectral.frames, g_spectral.ch,
+                                  g_spectral.rate, path, sizeof path) ||
+                   !wav_read_f32(path, g_spectral.frames, g_spectral.ch,
+                                 g_spectral.rate, &input, NULL, NULL)) {
+            spectral_finish("cannot read sample audio");
             return;
         }
         unsigned detected = 0;
@@ -2662,22 +2662,34 @@ static uintptr_t g_chop_editor;
 static void *(*g_real_malloc)(size_t);
 static volatile int g_malloc_probe;
 static volatile int g_malloc_n;
+/* glibc's own entry point: unlike dlsym(RTLD_NEXT, "malloc") it cannot call
+ * back into this interposer while the loader resolves the symbol. */
+extern void *__libc_malloc(size_t) __attribute__((weak));
+static __thread int in_malloc;
 
 void *malloc(size_t n)
 {
-    if (!g_real_malloc)
-        g_real_malloc = (void *(*)(size_t))dlsym(RTLD_NEXT, "malloc");
-    if (!g_real_malloc)
-        return 0;
-    void *p = g_real_malloc(n);
+    if (in_malloc) {
+        /* Re-entered by the loader or by mlog() while resolving/logging: use
+         * libc directly and never recurse. */
+        return __libc_malloc ? __libc_malloc(n) : 0;
+    }
+    in_malloc = 1;
+    if (!g_real_malloc) {
+        if (__libc_malloc)
+            g_real_malloc = __libc_malloc;
+        else
+            g_real_malloc = (void *(*)(size_t))dlsym(RTLD_NEXT, "malloc");
+    }
+    void *p = g_real_malloc ? g_real_malloc(n) : 0;
     if (g_malloc_probe && n >= 0x100 && n <= 0x8000 && p && g_malloc_n < 400) {
         g_malloc_n++;
         mlog("chop: malloc %zu -> %p lr=%p\n", n, p, __builtin_return_address(0));
     }
+    in_malloc = 0;
     return p;
 }
 
-static void cc_replay(unsigned cc, unsigned raw);
 
 static unsigned chop_slice_count(uintptr_t sample)
 {
@@ -3038,13 +3050,13 @@ static void chop_add_guarded(uintptr_t ed, uintptr_t *pair, uint64_t frame)
 {
     g_chop_ok = 0;
     if (sigsetjmp(g_cc_jmp, 1) == 0) {
-        g_cc_recover = 1;
+        cc_guard_arm();
         if (orig_add_slice)
             orig_add_slice((void *)ed, pair, frame);
-        g_cc_recover = 0;
+        cc_guard_disarm();
         g_chop_ok = 1;
     } else {
-        g_cc_recover = 0;
+        cc_guard_disarm();
     }
 }
 
@@ -3052,13 +3064,13 @@ static void chop_rmall_guarded(uintptr_t ctl, uintptr_t *pair, uintptr_t ed)
 {
     g_chop_ok = 0;
     if (sigsetjmp(g_cc_jmp, 1) == 0) {
-        g_cc_recover = 1;
+        cc_guard_arm();
         if (orig_rmall_cmd)
             orig_rmall_cmd((void *)ctl, pair, (void *)ed);
-        g_cc_recover = 0;
+        cc_guard_disarm();
         g_chop_ok = 1;
     } else {
-        g_cc_recover = 0;
+        cc_guard_disarm();
     }
 }
 
@@ -3157,14 +3169,17 @@ static void chop_find(uintptr_t sample)
 /* Commands are queued by the probe thread and run on the UI thread from the
  * button hook: the app's model is not safe to touch from a foreign thread. */
 static char g_chop_cmd[64];
+static pthread_mutex_t g_cmd_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 static void chop_probe_run(void)
 {
     char cmd[64];
+    pthread_mutex_lock(&g_cmd_mtx);
     memcpy(cmd, g_chop_cmd, sizeof cmd);
+    g_chop_cmd[0] = 0;
+    pthread_mutex_unlock(&g_cmd_mtx);
     if (!cmd[0])
         return;
-    g_chop_cmd[0] = 0;
     void *screen = 0;
     uintptr_t state = 0, sample = 0;
     unsigned frames = 0, ch = 0, rate = 0;
@@ -3558,13 +3573,13 @@ static void chop_probe_run(void)
              (void *)a, (void *)b, (void *)buf);
         g_chop_ok = 0;
         if (sigsetjmp(g_cc_jmp, 1) == 0) {
-            g_cc_recover = 1;
+            cc_guard_arm();
             unsigned r = FN(0x2943640, unsigned (*)(void *, unsigned))((void *)sample, 1);
-            g_cc_recover = 0;
+            cc_guard_disarm();
             g_chop_ok = 1;
             mlog("chop: isSampleValid=%u\n", r);
         } else {
-            g_cc_recover = 0;
+            cc_guard_disarm();
             mlog("chop: isSampleValid FAULTED\n");
         }
         return;
@@ -3610,7 +3625,13 @@ static void *chop_probe_thread(void *arg)
         char *nl = strchr(buf, '\n');
         if (nl)
             *nl = 0;
-        memcpy(g_chop_cmd, buf, sizeof g_chop_cmd);
+        size_t len = strlen(buf);
+        if (len >= sizeof g_chop_cmd)
+            len = sizeof g_chop_cmd - 1;
+        pthread_mutex_lock(&g_cmd_mtx);
+        memset(g_chop_cmd, 0, sizeof g_chop_cmd);
+        memcpy(g_chop_cmd, buf, len);
+        pthread_mutex_unlock(&g_cmd_mtx);
         mlog("chop: queued '%s'\n", g_chop_cmd);
     }
     return 0;
@@ -3619,15 +3640,20 @@ static void *chop_probe_thread(void *arg)
 
 static void hpss_finalize(void)
 {
-    if (g_hpss_finalizing || !__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE))
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&g_hpss_finalizing, &expected, 1, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return;
-    g_hpss_finalizing = 1;
+    if (!__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&g_hpss_finalizing, 0, __ATOMIC_RELEASE);
+        return;
+    }
     __atomic_store_n(&g_hpss_done, 0, __ATOMIC_RELEASE);
     struct hpss_job *job = g_hpss_job;
     g_hpss_job = NULL;
     if (!job) {
         g_hpss_busy = 0;
-        g_hpss_finalizing = 0;
+        __atomic_store_n(&g_hpss_finalizing, 0, __ATOMIC_RELEASE);
         return;
     }
     int effect = job->action != 0;
@@ -3719,7 +3745,7 @@ out:
     g_hpss_menu = 0;
     bass_preview_set_active(0);
     g_hpss_data_down = 0;
-    g_hpss_finalizing = 0;
+    __atomic_store_n(&g_hpss_finalizing, 0, __ATOMIC_RELEASE);
     hpss_repaint();
 }
 
@@ -3853,15 +3879,30 @@ static void hpss_draw_menu(void *g)
     }
 }
 
+/* A completed job or a running spectral action used to need a paint of the
+ * Sample page to finish.  Both are polled from the always-running input hooks
+ * so leaving the page cannot wedge them (finalize cancels before any model
+ * call when the page is gone). */
+static void hpss_poll_offpage(void)
+{
+    if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE) &&
+        g_spectral.screen &&
+        (!sample_page_visible() || g_screen != g_spectral.screen))
+        spectral_finish("page changed");
+    if (__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE)) {
+        struct hpss_job *job = g_hpss_job;
+        if (job && (!sample_page_visible() || g_screen != job->screen))
+            hpss_finalize();
+    }
+}
+
 static void buttons(void *event)
 {
+    hpss_poll_offpage();
 
     unsigned code = event ? FIELD(event, 8, uint8_t) : 0;
     unsigned down = event ? FIELD(event, 9, uint8_t) : 0;
     mlog("btn %02x %u\n", code, down);
-    /* Keep the lazy MIDI hook in sync with the visible mode: leaving the Sample
-     * page restores the stock dispatcher on the very next button. */
-    midi_hook_set(levels_active());
     if (event && rd((uintptr_t)event, g_hpss_btn, sizeof g_hpss_btn)) {
         g_hpss_btn_valid = 1;
         uintptr_t context = 0, surface = 0;
@@ -3929,9 +3970,9 @@ static void buttons(void *event)
             /* Analysis is cheap now (block reads); it must stay on this thread
              * so the commit is queued for the very next repaint. */
             do_autotrim();
-            g_trim_step = (g_trim_step + 1) % 4;
+            g_trim_step = (int)((unsigned)(g_trim_step + 1) % 4u);
         }
-        g_b3_down = down;
+        g_b3_down = (int)down;
         return;
     }
     /* PLUS / MINUS move the 16 Levels row by an octave. The pitch hook only
@@ -3952,15 +3993,6 @@ static void buttons(void *event)
         }
     }
     do_poke();
-    if (down && g_mark_v0 >= 0.0f) {
-        /* any key press may change what the page shows: drop our edges and ask
-         * for a repaint so they actually disappear */
-        g_mark_v0 = -1.0f;
-        g_mark_v1 = -1.0f;
-        if (g_screen)
-            FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-                g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
-    }
     if (code == 0x06 && down == 0x7f) {
         /* remember the object of the last press so it can be replayed to make
          * the sample page reload (which is when it redraws its trim) */
@@ -3986,7 +4018,6 @@ static void buttons(void *event)
         if (g_levels && g_last_pad >= 0 && g_last_pad < 16)
             g_pad_level_byte = g_last_pad;
         mlog("minimod: 16 LEVELS mode -> %d\n", g_levels);
-        midi_hook_set(levels_active());
     }
     if ((code == 0x36 || code == 0x37) && levels_active()) {
         int plus = (code == 0x36);
@@ -4030,8 +4061,14 @@ static struct {
 
 static void note_on(void *input, int src, int pad, void *props, float vel)
 {
-    if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
-        return;
+    hpss_poll_offpage();
+    if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE)) {
+        /* Never mute the pads indefinitely: an action that lost its page can
+         * only be finished here, on the next pad press. */
+        if (now_ms() < g_spectral.deadline)
+            return;
+        spectral_finish("timed out");
+    }
     if (__atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE) &&
         pad >= 0 && pad < 16) {
         bass_preview_note((unsigned)pad, vel);
@@ -4088,14 +4125,19 @@ static void bass_audio_writer(void *self, void *input, size_t frames, int offset
         count = FIELD(self, 0xe4, int32_t);
     if (!orig_bass_audio_writer)
         return;
-    if (count < 1 || count > 8 || frames > 2048 || !input) {
+    if (count < 1 || count > 8 || frames > 2048 || !input ||
+        ((uintptr_t)input & 7)) {
         orig_bass_audio_writer(self, input, frames, offset);
         return;
     }
 
     float **source = input;
     for (int i = 0; i < count; ++i) {
-        if (!source[i]) {
+        /* The array length is not known; at least make sure every pointer is
+         * readable, aligned and covers the whole block before copying it. */
+        if (!source[i] || ((uintptr_t)source[i] & 3) ||
+            !mapped(source[i]) ||
+            !mapped((const char *)source[i] + (frames - 1) * 4)) {
             orig_bass_audio_writer(self, input, frames, offset);
             return;
         }
@@ -4343,8 +4385,6 @@ static void trim_probe(void *self, float v)
     }
     if (!g_own_call) {
         /* a real knob move takes over: drop our markers */
-        g_mark_v0 = -1.0f;
-        g_mark_v1 = -1.0f;
     }
     if (probe_mode && logs < 200) {
         uintptr_t lay = 0, ins = 0;
@@ -4405,9 +4445,6 @@ static void bcast_hook(void *self, float v)
 
 /* ------------------------------------------------------- message-thread pump */
 static void *g_trim_param0, *g_trim_param1;
-static float g_trim_v0, g_trim_v1;
-static unsigned g_trim_frames;
-static uintptr_t g_trim_layer;
 
 /* Broadcast a unique value to one candidate property: if the app's own
  * listener chain reaches the trim core for *our* parameter, that property owns
@@ -4504,49 +4541,6 @@ static int prop_references(uintptr_t P, uintptr_t param)
 /* Find the listener node that points at `param` and report what looks like its
  * owner property. A property P keeps its list head at P+0x10 and its sentinel
  * at P+8; a node keeps its target (tagged) at +0x18 and its next at +8. */
-static void probe_node(uintptr_t param)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return;
-    int hits = 0;
-    for (int r = 0; r < g_nrng && hits < 4; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && hits < 4; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && hits < 4; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if ((q & ~(uintptr_t)3) != param)
-                    continue;
-                uintptr_t node = a + o - 0x18;
-                uintptr_t owner = 0, next = 0, back = 0;
-                rd(node, &owner, 8);
-                rd(node + 8, &next, 8);
-                rd(node + 0x10, &back, 8);
-                mlog("minimod: node %p owner=%p next=%p back=%p\n", (void *)node,
-                     (void *)owner, (void *)next, (void *)back);
-                if (owner && mapped((void *)owner)) {
-                    uintptr_t head = 0;
-                    rd(owner + 0x10, &head, 8);
-                    float c50 = 0;
-                    int ok50 = rd(owner + 0x50, &c50, 4) && c50 >= -1.0f && c50 <= 1.0f;
-                    mlog("minimod:   owner+0x10=%p c50=%.4f (%d)\n", (void *)head,
-                         (double)c50, ok50);
-                }
-                hits++;
-                break;
-            }
-        }
-    }
-    free(buf);
-}
-
 /* Recover a parameter's owning property without watching a knob.
  *
  * A property P keeps its list head at P+0x10 and its sentinel at P+8. A node
@@ -4616,35 +4610,6 @@ static uintptr_t prop_of_param(uintptr_t param)
 /* The app's own CC path: 0x159f230(range, event, raw) divides raw by range and
  * broadcasts through the property at *(event[0]+0x10) + 0x1ac0 (CC 0x10 = K1)
  * or +0x1b18 (CC 0x11 = K2). Calling it is exactly a knob turn. */
-static uintptr_t ctl_obj_for(uintptr_t base)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    uintptr_t hit = 0;
-    for (int r = 0; r < g_nrng && !hit; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && !hit; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (q == base) {
-                    hit = a + o - 0x10;
-                    break;
-                }
-            }
-        }
-    }
-    free(buf);
-    return hit;
-}
-
 /* A real CC event captured from the app, replayed with our own number so the
  * app performs exactly what a knob does. */
 static unsigned char g_cc_ev[32];
@@ -4663,7 +4628,7 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
         int knob = cc == 0x10 ? 0 : cc == 0x11 ? 1 : cc == 0x12 ? 2 : -1;
         if (knob >= 0) {
             float scale = range > 1.0f ? range : 127.0f;
-            g_bass_knob[knob] = fminf(1.f, fmaxf(0.f, raw / scale));
+            g_bass_knob[knob] = fminf(1.f, fmaxf(0.f, (float)raw / scale));
             bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
             hpss_repaint();
             return;
@@ -4698,8 +4663,7 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
         else if (cc == 0x11)
             idx = 1;
         if (idx >= 0) {
-            if (!g_cc_ev_valid) {
-                memcpy(g_cc_ev, ev, sizeof g_cc_ev);
+            if (!g_cc_ev_valid && rd((uintptr_t)ev, g_cc_ev, sizeof g_cc_ev)) {
                 g_cc_ev_valid = 1;
                 mlog("minimod: captured CC event (cc=0x%x raw=%u range=%.1f)\n", cc,
                      raw, (double)range);
@@ -4709,52 +4673,12 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
                 g_cc_range[idx] = range;
             g_cc_seen[idx] = 1;
         }
-        if (cc == 0x12 && !g_cc_k3_valid) {
-            memcpy(g_cc_k3_ev, ev, sizeof g_cc_k3_ev);
+        if (cc == 0x12 && !g_cc_k3_valid &&
+            rd((uintptr_t)ev, g_cc_k3_ev, sizeof g_cc_k3_ev))
             g_cc_k3_valid = 1;
-        }
     }
     if (orig_cc)
         orig_cc(ev, raw, lo, range);
-}
-
-static void cc_replay(unsigned cc, unsigned raw)
-{
-    unsigned char ev[32];
-    if (!g_cc_ev_valid) {
-        mlog("Spectral: no captured CC event, cannot replay\n");
-        return;
-    }
-    memcpy(ev, g_cc_ev, sizeof ev);
-    ev[8] = (unsigned char)cc;
-    g_in_cc_replay = 1;
-    if (orig_cc)
-        orig_cc(ev, raw, 0.0f, 127.0f);
-    g_in_cc_replay = 0;
-}
-
-
-static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
-{
-    /* Static, not stack: the app may keep the pointer it was handed (the abort
-     * after the replay looked exactly like a dangling event). */
-    static unsigned char ev[64];
-    memset(ev, 0, sizeof ev);
-    *(uintptr_t *)ev = obj;
-    ev[8] = (unsigned char)cc;
-    /* Disassembly of 0x159f230:
-     *   ldrb w3,[x0,8]    -> x0 is the event, byte +8 is the CC
-     *   and  w2,w1,0x7f   -> w1 is the raw 7-bit value
-     *   fdiv s0,s0,s1     -> s1 is the range (so: two float parameters)
-     *   ldr  x0,[x0] / ldr x0,[x0,0x10] / add x0,x0,#0x1ac0 -> the property
-     * so the call is (event, raw, min, range). */
-    if (sigsetjmp(g_cc_jmp, 1) == 0) {
-        g_cc_recover = 1;
-        FN(0x159f230, void (*)(void *, unsigned, float, float))(ev, raw, 0.0f, 127.0f);
-        g_cc_recover = 0;
-    } else {
-        mlog("minimod: replay faulted - recovered\n");
-    }
 }
 
 /* Whole-heap fingerprint: hash every 4 KiB page of writable memory. Two
@@ -4883,52 +4807,9 @@ static uintptr_t find_knob_props(void)
 /* Every listener of a real property has a vtable inside the app's
  * .data.rel.ro. If one does not, the property is not the one the page uses and
  * broadcasting through it would jump into garbage. */
-static int prop_listeners_sane(uintptr_t P)
-{
-    uintptr_t node = 0;
-    if (!rd(P + 0x10, &node, 8) || !node)
-        return 0;
-    int n = 0;
-    for (; n < 32 && node && node != P + 8; ++n) {
-        uintptr_t tgt = 0, next = 0, vt = 0;
-        if (!rd(node + 0x18, &tgt, 8) || !rd(node + 8, &next, 8))
-            return 0;
-        tgt &= ~(uintptr_t)3;
-        if (!tgt || !mapped((void *)tgt))
-            return 0;
-        if (!rd(tgt, &vt, 8))
-            return 0;
-        if (vt < base + 0x6ddf910 || vt > base + 0x7162018)
-            return 0;
-        if (!next || !mapped((void *)next))
-            return 0;
-        node = next;
-    }
-    return n > 0;
-}
-
 /* The trim parameter is the listener of the knob's property whose vtable is
  * TrimParameter's. That makes the Start/End pair exact, with no scanning and no
  * dependence on which knob was touched last. */
-static uintptr_t param_from_prop(uintptr_t P)
-{
-    uintptr_t node = 0;
-    if (!P || !rd(P + 0x10, &node, 8) || !node)
-        return 0;
-    for (int i = 0; i < 32 && node && node != P + 8; ++i) {
-        uintptr_t tgt = 0, next = 0, vt = 0;
-        if (!rd(node + 0x18, &tgt, 8) || !rd(node + 8, &next, 8))
-            return 0;
-        tgt &= ~(uintptr_t)3;
-        if (tgt && mapped((void *)tgt) && rd(tgt, &vt, 8) && vt == base + 0x6e1b240)
-            return tgt;
-        if (!next || !mapped((void *)next))
-            return 0;
-        node = next;
-    }
-    return 0;
-}
-
 static void do_poke(void)
 {
     if (g_poke_which >= 0) {
@@ -4966,367 +4847,6 @@ static void do_poke(void)
         }
     }
 }
-
-static void commit_trim(void)
-{
-    void *p0 = g_trim_param0, *p1 = g_trim_param1;
-    float v0 = g_trim_v0, v1 = g_trim_v1;
-    if (!p0 || !p1)
-        return;
-
-    /* The Trim knobs' own effect, in their own order: the core (which stores
-     * the value and the applied value on the parameter), the layer frames the
-     * engine plays, then a repaint. Everything else tried so far - page cache
-     * fields, slider widgets, property broadcasts - was measured to be a no-op
-     * or to corrupt the page, so none of it is attempted any more. */
-    /* A learned property broadcasts exactly like a knob; the others are
-     * written through the trim core. Broadcasting even one of them is what
-     * makes the page repaint. */
-    if (dbg_env("MINIMOD_NODEPROBE"))
-        probe_node((uintptr_t)p0);
-
-    /* A property seen broadcasting the parameter's *current* value is the one
-     * that owns it. Broadcasting through it is the knob's own path: the
-     * broadcaster stores the value and notifies every listener, which is the
-     * step that repaints the page. */
-    float cur0 = 0, cur1 = 0;
-    rd((uintptr_t)p0 + T_VALUE, &cur0, 4);
-    rd((uintptr_t)p1 + T_VALUE, &cur1, 4);
-    uintptr_t pr0 = learned_prop((uintptr_t)p0);
-    uintptr_t pr1 = learned_prop((uintptr_t)p1);
-    if (!pr0)
-        pr0 = broadcast_prop((uintptr_t)p0, cur0);
-    if (!pr1)
-        pr1 = broadcast_prop((uintptr_t)p1, cur1);
-    if (!pr0)
-        pr0 = prop_of_param((uintptr_t)p0);
-    if (!pr1)
-        pr1 = prop_of_param((uintptr_t)p1);
-    mlog("minimod: props %p/%p (cur %.4f/%.4f, seen %d)\n", (void *)pr0,
-         (void *)pr1, (double)cur0, (double)cur1, g_nbc);
-
-    /* Exact pair from the knob properties, when we can find them. */
-    {
-        uintptr_t kp = find_knob_props();
-        if (kp) {
-            uintptr_t sp = param_from_prop(kp), ep = param_from_prop(kp + 0x58);
-            mlog("minimod: params from props %p/%p (had %p/%p)\n", (void *)sp, (void *)ep,
-                 g_trim_param0, g_trim_param1);
-            if (sp && ep) {
-                g_trim_param0 = (void *)sp;
-                g_trim_param1 = (void *)ep;
-                p0 = (void *)sp;
-                p1 = (void *)ep;
-            }
-        }
-    }
-
-    /* Replaying the knob through the app's CC dispatcher gives the exact visual
-     * result of a manual trim (verified pixel-identical), but it crashes the
-     * app when called from inside the button dispatch, so it is deferred to the
-     * paint hook (opt-in). */
-    if (dbg_env("MINIMOD_CCINJECT") && !g_in_inject) {
-        g_cc_step = 0;
-        g_pending_cc = 1;
-    }
-    if (g_in_inject) {
-        uintptr_t base = 0, obj = 0;
-        if (pr0)
-            base = pr0 - 0x1ac0;
-        else if (pr1)
-            base = pr1 - 0x1b18;
-        else {
-            uintptr_t kp = find_knob_props();
-            if (kp) {
-                base = kp - 0x1ac0;
-                mlog("minimod: knob property triple at %p\n", (void *)kp);
-            }
-        }
-        if (base) {
-            /* Only trust a control base whose K1/K2 properties really exist and
-             * have a terminated listener list; a wrong one crashes the app. */
-            uintptr_t p1 = base + 0x1ac0;
-            uintptr_t head = 0;
-            float v = 0;
-            int ok = rd(p1 + 0x10, &head, 8) && head && mapped((void *)head) &&
-                     rd(p1 + 0x50, &v, 4) && v >= -2.0f && v <= 2.0f;
-            if (ok) {
-                uintptr_t node = head;
-                int steps = 0;
-                for (; steps < 64 && node && node != p1 + 8; ++steps) {
-                    uintptr_t next = 0;
-                    if (!rd(node + 8, &next, 8) || !next || !mapped((void *)next))
-                        break;
-                    node = next;
-                }
-                if (node != p1 + 8)
-                    ok = 0; /* list does not terminate at the sentinel */
-            }
-            if (ok && !prop_listeners_sane(p1))
-                ok = 0;
-            if (ok && !prop_listeners_sane(base + 0x1b18))
-                ok = 0;
-            if (!ok) {
-                mlog("minimod: control base %p rejected\n", (void *)base);
-                base = 0;
-            } else {
-                obj = ctl_obj_for(base);
-            }
-        }
-        mlog("minimod: cc base=%p obj=%p\n", (void *)base, (void *)obj);
-        /* What exactly will be called? Log every listener and its call slot so
-         * a bad pointer can be matched against the fault address. */
-        if (obj) {
-            for (int k = 0; k < 2; ++k) {
-                uintptr_t P = base + 0x1ac0 + (uintptr_t)k * 0x58;
-                uintptr_t node = 0;
-                if (!rd(P + 0x10, &node, 8) || !node)
-                    continue;
-                for (int i = 0; i < 8 && node && node != P + 8; ++i) {
-                    uintptr_t tgt = 0, next = 0, vt = 0, slot = 0;
-                    if (!rd(node + 0x18, &tgt, 8) || !rd(node + 8, &next, 8))
-                        break;
-                    tgt &= ~(uintptr_t)3;
-                    if (rd(tgt, &vt, 8) && rd(vt + 0x28, &slot, 8))
-                        mlog("minimod: P%p listener %p vt=%p slot28=%p\n", (void *)P,
-                             (void *)tgt, (void *)vt, (void *)slot);
-                    if (!next || !mapped((void *)next))
-                        break;
-                    node = next;
-                }
-            }
-        }
-        if (obj) {
-            unsigned r0 = (unsigned)(v0 * 127.0f + 0.5f);
-            unsigned r1 = (unsigned)(v1 * 127.0f + 0.5f);
-            /* Default: one control per paint (safe, but the page does not
-             * update). MINIMOD_ONESHOT delivers both in one turn, which does
-             * update the model - and leaves the app faulting afterwards. */
-            if (dbg_env("MINIMOD_ONESHOT")) {
-                if (g_cc_ev_valid) {
-                    cc_replay(0x11, r1);
-                    cc_replay(0x10, r0);
-                } else {
-                    cc_inject(obj, 0x11, r1);
-                    cc_inject(obj, 0x10, r0);
-                }
-                mlog("minimod: one-shot replay done\n");
-                return;
-            }
-            if (g_cc_step == 0) {
-                g_cc_step = 1;
-                g_cc_obj = obj;
-                g_cc_r0 = r0;
-                g_cc_r1 = r1;
-                if (g_cc_ev_valid)
-                    cc_replay(0x11, r1);
-                else
-                    cc_inject(obj, 0x11, r1);
-                g_pending_cc = 1; /* come back for the second one */
-                mlog("minimod: step 1 done\n");
-                return;
-            }
-            if (g_cc_step == 1) {
-                g_cc_step = 2;
-                if (g_cc_ev_valid)
-                    cc_replay(0x10, g_cc_r0);
-                else
-                    cc_inject(g_cc_obj, 0x10, g_cc_r0);
-                mlog("minimod: step 2 done\n");
-                return;
-            }
-            mlog("minimod: injected CC 0x10=%u 0x11=%u\n", r0, r1);
-            {
-                float c0 = -9, c1 = -9;
-                if (pr0)
-                    rd(pr0 + 0x50, &c0, 4);
-                if (pr1)
-                    rd(pr1 + 0x50, &c1, 4);
-                mlog("minimod: app stored %.4f/%.4f (want %.4f/%.4f)\n", (double)c0,
-                     (double)c1, (double)v0, (double)v1);
-            }
-            /* The page draws its trim only when it reloads the pad, so repeat
-             * the pad press that is already in progress. */
-            {
-                int pd = g_last_pad;
-                if (pd >= 0 && pd < 128 && g_pad_rec[pd].valid && orig_note_on) {
-                    g_replaying_pad = 1;
-                    orig_note_on(g_pad_rec[pd].input, g_pad_rec[pd].src,
-                                 g_pad_rec[pd].pad, g_pad_rec[pd].props,
-                                 g_pad_rec[pd].vel);
-                    g_replaying_pad = 0;
-                    mlog("minimod: re-selected pad %d to refresh the page\n", pd);
-                }
-            }
-            /* Repaint the whole window, not just the page: the page is a
-             * child and the app repaints from the top-level component. */
-            if (g_screen) {
-                uintptr_t root = (uintptr_t)g_screen;
-                for (int i = 0; i < 8; ++i) {
-                    uintptr_t parent = 0;
-                    if (!rd(root + 0x18, &parent, 8) || !parent || !mapped((void *)parent))
-                        break;
-                    root = parent;
-                }
-                mlog("minimod: repaint root=%p (page %p)\n", (void *)root, g_screen);
-                FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-                    (void *)root, 0, FIELD(root, 0x28, uint64_t));
-                FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-                    g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
-            }
-            return;
-        }
-    }
-    /* Write the end first: the core clamps a start that would pass the current
-     * end, so the pair must move outward before inward. */
-    g_own_call = 1;
-    if (pr1)
-        FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
-    else
-        FN(A_TRIM_CORE, void (*)(float, void *))(v1, p1);
-    if (pr0)
-        FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
-    else
-        FN(A_TRIM_CORE, void (*)(float, void *))(v0, p0);
-    /* Either parameter can reject a write while it still holds -1 (the core
-     * treats that as "not yet bound"), so retry the pair a few times. */
-    for (int attempt = 0; attempt < 4; ++attempt) {
-        float c0 = 0, c1 = 0;
-        int ok0 = rd((uintptr_t)p0 + T_VALUE, &c0, 4) && c0 > -0.5f;
-        int ok1 = rd((uintptr_t)p1 + T_VALUE, &c1, 4) && c1 > -0.5f;
-        if (ok0 && ok1)
-            break;
-        mlog("minimod: retry %d (p0=%.3f p1=%.3f)\n", attempt, (double)c0, (double)c1);
-        if (!ok1)
-            FN(A_TRIM_CORE, void (*)(float, void *))(v1, p1);
-        if (!ok0)
-            FN(A_TRIM_CORE, void (*)(float, void *))(v0, p0);
-    }
-    g_own_call = 0;
-
-    if (g_trim_layer) {
-        unsigned fa = (unsigned)(v0 * (float)g_trim_frames + 0.5f);
-        unsigned fb = (unsigned)(v1 * (float)g_trim_frames + 0.5f);
-        if (fb <= fa)
-            fb = fa + 1;
-        wr(g_trim_layer + 0x4d8, &fa, 4);
-        wr(g_trim_layer + 0x588, &fa, 4);
-        wr(g_trim_layer + 0x530, &fb, 4);
-        mlog("minimod: layer %p <- %u..%u frames\n", (void *)g_trim_layer, fa, fb);
-    }
-
-    float a0 = v0, a1 = v1;
-    wr((uintptr_t)p0 + T_APPLIED, &a0, 4);
-    wr((uintptr_t)p1 + T_APPLIED, &a1, 4);
-
-    float check = 0, check2 = 0;
-    rd((uintptr_t)p0 + T_VALUE, &check, 4);
-    rd((uintptr_t)p1 + T_VALUE, &check2, 4);
-    /* Also write the property caches: the broadcaster stores the value there
-     * before notifying, so anything that polls the property sees the new trim. */
-    /* NOTE: do NOT store prop+0x50 directly. Property_Broadcast(value, prop)
-     * early-outs when the stored value already equals the new one, so writing
-     * the slot first suppresses the listener notification (which is what the
-     * page needs in order to update and redraw). The broadcast below does the
-     * store itself. */
-    /* Move the app's own slider widgets too: the page draws the Start/End bars
-     * from them at paint time. */
-    for (int i = 0; i < g_nps; ++i) {
-        float pct = -1.0f;
-        if (g_ps[i].param == (uintptr_t)p0)
-            pct = v0 * 100.0f;
-        else if (g_ps[i].param == (uintptr_t)p1)
-            pct = v1 * 100.0f;
-        if (pct >= 0.0f && g_ps[i].slider) {
-            if (wr(g_ps[i].slider + 0x1b4, &pct, 4))
-                mlog("minimod: slider %p -> %.2f%%\n", (void *)g_ps[i].slider,
-                     (double)pct);
-        }
-    }
-    g_mark_v0 = v0;
-    g_mark_v1 = v1;
-    mlog("minimod: commit core done p0=%.4f p1=%.4f (want %.4f/%.4f)\n",
-         (double)check, (double)check2, (double)v0, (double)v1);
-
-    /* Re-press the last control so the page reloads: it only redraws its trim
-     * when the pad is (re)selected. Off by default - the object recorded from a
-     * press is not always the pad and pressing it can open a menu. */
-    if (0 && g_last_press_obj && orig_buttons) {
-        static unsigned char ev[32];
-        memset(ev, 0, sizeof ev);
-        *(uintptr_t *)ev = g_last_press_obj;
-        ev[8] = 0x06;
-        ev[9] = 0x7f;
-        g_replaying_pad = 1;
-        orig_buttons(ev);
-        ev[9] = 0x00;
-        orig_buttons(ev);
-        g_replaying_pad = 0;
-        mlog("minimod: re-pressed %p to refresh the page\n", (void *)g_last_press_obj);
-    }
-    /* Repaint the page itself: with the property values written above, this is
-     * what makes the app's own Start/End edge follow the trim. */
-    if (g_livepage) {
-        uintptr_t vt = 0;
-        if (rd((uintptr_t)g_livepage, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
-            mlog("minimod: page vt=%#lx file=%#lx\n", (unsigned long)vt,
-                 (unsigned long)(vt - base));
-            for (int i = 20; i < 32; ++i) {
-                uintptr_t fn = 0;
-                if (rd(vt + i * 8, &fn, 8) && fn >= base && fn <= base + 0x12000000ULL)
-                    mlog("minimod:   slot %d -> %#lx\n", i, (unsigned long)(fn - base));
-            }
-        }
-    }
-    if (g_livepage) g_page = g_livepage;
-    uintptr_t pvt = 0;
-    if (g_page && rd((uintptr_t)g_page, &pvt, 8) &&
-        pvt >= base && pvt <= base + 0x12000000ULL) {
-        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-            g_page, 0, FIELD(g_page, 0x28, uint64_t));
-        mlog("minimod: repainted page %p\n", g_page);
-    }
-    /* Dry run: report the surface we would drive the controls with. */
-    if (g_surface) {
-        uintptr_t svt = 0;
-        int ok = rd((uintptr_t)g_surface, &svt, 8) && svt >= base && svt <= base + 0x12000000ULL;
-        mlog("minimod: surface=%p vt=%p valid=%d raw0=%d raw1=%d\n",
-             g_surface, (void *)svt, ok, (int)(v0 * 127.0f + 0.5f),
-             (int)(v1 * 127.0f + 0.5f));
-    }
-    /* Drive the app's own control path exactly like a knob turn:
-     * FUN_01a68020(surface, 0, controlId, value, mode) - the first argument is
-     * the surface (it dispatches through surface->vtable+0x160). */
-    /* The control-path call is experimental: it executes cleanly but does not
-     * move the app's display, so it stays behind an env flag. */
-    if (dbg_env("MINIMOD_CTL")) {
-        g_surface2 = g_surface;
-        orig_setctl2 = orig_setctl;
-        g_pending_r0 = (int)(v0 * 127.0f + 0.5f);
-        g_pending_r1 = (int)(v1 * 127.0f + 0.5f);
-        g_pending_v0 = v0 * g_trim_frames;
-        g_pending_v1 = v1 * g_trim_frames;
-        g_pending_ctl = 1;
-        mlog("minimod: armed paint-time ctl %d/%d\n", g_pending_r0, g_pending_r1);
-    }
-    /* Notify the property's listeners: the page syncs its widget from the
-     * property when it is told the value changed. */
-    if (orig_bcast) {
-        g_own_call = 1;
-        if (pr0)
-            orig_bcast((void *)pr0, v0);
-        if (pr1)
-            orig_bcast((void *)pr1, v1);
-        g_own_call = 0;
-        mlog("minimod: notified props %p/%p\n", (void *)pr0, (void *)pr1);
-    }
-    /* Also ask the screen to repaint with a clean (0,0) origin. */
-    if (g_screen) {
-        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))((void *)g_screen, 0, 0);
-        mlog("minimod: repainted screen %p\n", (void *)g_screen);
-    }
-}
-
 
 static void repaint_hook(void *comp, uint64_t a, uint64_t b)
 {
@@ -5419,7 +4939,7 @@ static void dump_sliders(void *p)
     unsigned n = 0;
     for (long o = 0; o < 0x20000; o += 8) {
         uintptr_t q = 0;
-        if (!rd((uintptr_t)p + o, &q, 8))
+        if (!rd((uintptr_t)p + (uintptr_t)o, &q, 8))
             break;
         if (q != want)
             continue;
@@ -5428,7 +4948,7 @@ static void dump_sliders(void *p)
         mlog("minimod: slider +0x%lx\n", o);
         for (long k = 0x160; k < 0x230; k += 4) {
             float f = 0;
-            if (!rd(s + k, &f, 4))
+            if (!rd(s + (uintptr_t)k, &f, 4))
                 break;
             if (f > -0.01f && f < 100.5f && f != 0.0f)
                 mlog("minimod:   +0x%lx = %.4f\n", k, (double)f);
@@ -5450,7 +4970,8 @@ static void screen_paint(void *p, void *g)
                  p, (unsigned long)vt, (unsigned long)(vt - base));
             for (int i = 24; i < 32; ++i) {
                 uintptr_t fn = 0;
-                if (rd(vt + i * 8, &fn, 8) && fn >= base && fn <= base + 0x12000000ULL)
+                if (rd(vt + (uintptr_t)i * 8, &fn, 8) && fn >= base &&
+                    fn <= base + 0x12000000ULL)
                     mlog("minimod:   vt[%d] -> %#lx\n", i, (unsigned long)(fn - base));
             }
         }
@@ -5463,12 +4984,13 @@ static void screen_paint(void *p, void *g)
         g_sdump = 0;
         dump_sliders(p);
     }
-    if (g_pending_cc) {
-        g_pending_cc = 0;
-        g_in_inject = 1;
-        commit_trim();
-        g_in_inject = 0;
-    }
+    /* Completion and cancellation must not depend on the Sample page being the
+     * one that paints: any paint is a chance to free the job / end the action. */
+    if (__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE))
+        hpss_finalize();
+    if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE) &&
+        g_spectral.screen && (p != g_spectral.screen || !sample_page_visible()))
+        spectral_finish("page changed");
     if (FIELD(p, 0, uintptr_t) != base + A_SCREEN_VT)
         return;
     if (g_screen != p) {
@@ -5479,8 +5001,6 @@ static void screen_paint(void *p, void *g)
     chop_probe_run(); /* model probes must also run on the UI thread */
 #endif
     spectral_tick();
-    if (__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE))
-        hpss_finalize();
     if (g_hpss_restore_pending && !g_shift && sample_page_visible()) {
         g_hpss_restore_pending = 0;
         hpss_restore_chop();
@@ -5550,22 +5070,6 @@ static void screen_paint(void *p, void *g)
         draw_colour(g, 0xffffffff);
         draw_text(g, g_toast_text, x + 4, y + 6, w - 8, h - 12, 18.0f);
     }
-    if (g_mark_v0 >= 0.0f && g_mark_v1 >= 0.0f && !dbg_env("MINIMOD_NOOVERLAY")) {
-        int x0 = 10 + (int)(g_mark_v0 * 295.0f + 0.5f);
-        int x1 = 10 + (int)(g_mark_v1 * 295.0f + 0.5f);
-        /* The page fills the trimmed-out parts with the waveform background
-         * (27,27,30); draw the same so the picture matches a manual trim. */
-        draw_colour(g, 0xff1b1b1e);
-        if (x0 > 10)
-            draw_rect(g, 10, 88, (uint64_t)(x0 - 10), 98);
-        if (x1 < 305)
-            draw_rect(g, (uint64_t)x1, 88, (uint64_t)(305 - x1), 98);
-        draw_colour(g, 0xffffffff);
-        draw_rect(g, (uint64_t)x0, 88, 1, 98);
-        draw_rect(g, (uint64_t)x1, 88, 1, 98);
-        draw_rect(g, (uint64_t)x0, 88, 3, 1);
-        draw_rect(g, (uint64_t)x1, 88, 3, 1);
-    }
     if (g_hpss_menu) {
         hpss_draw_menu(g);
         return;
@@ -5585,18 +5089,21 @@ static int install_screen_paint(void)
     if (!mapped((void *)vtaddr))
         return 0;
     uintptr_t *vt = (uintptr_t *)vtaddr;
+    uintptr_t slot = vtaddr + 27 * sizeof(uintptr_t);
+    uintptr_t page = vtaddr & ~(uintptr_t)0xfff;
+    uintptr_t last_page = slot & ~(uintptr_t)0xfff;
+    size_t page_len = last_page > page ? (size_t)(last_page - page) + 0x1000 : 0x1000;
     orig_screen_paint = (void (*)(void *, void *))vt[27];
     mlog("minimod: paint fn = %p (file %#lx)\n",
          (void *)orig_screen_paint, (unsigned long)((uintptr_t)orig_screen_paint - base));
     if (!orig_screen_paint)
         return 0;
-    uintptr_t page = vtaddr & ~(uintptr_t)0xfff;
-    if (mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE) != 0) {
+    if (mprotect((void *)page, page_len, PROT_READ | PROT_WRITE) != 0) {
         mlog("minimod: screen vtable mprotect failed: %s\n", strerror(errno));
         return 0;
     }
     vt[27] = (uintptr_t)screen_paint;
-    mprotect((void *)page, 0x1000, PROT_READ);
+    mprotect((void *)page, page_len, PROT_READ);
     mlog("minimod: screen paint hooked (stock %p)\n", (void *)orig_screen_paint);
     return 1;
 }
@@ -5687,12 +5194,15 @@ static void midi_note_event(void *app, void *context, void *event,
         unsigned char *e = (unsigned char *)event;
         mlog("ev ext=%d src=%llx ctx=%llx app=%llx type=%u note=%u vel=%.3f lv=%d\n",
              external, (unsigned long long)source, (unsigned long long)(uintptr_t)context,
-             (unsigned long long)(uintptr_t)app, type & 0xffu, note, velocity, g_levels);
+             (unsigned long long)(uintptr_t)app, type & 0xffu, note,
+             (double)velocity, g_levels);
         if (!external) {
+#if MINIMOD_LOG
             char hex[200]; int k = 0;
             for (int i = 0; i < 64 && k < (int)sizeof hex - 4; ++i)
                 k += snprintf(hex + k, sizeof hex - k, " %02x", e[i]);
             mlog("padbytes%s\n", hex);
+#endif
             g_pad_ctx = (uintptr_t)context;
         }
         if (!external && (type & 0xffu) == 3 && velocity > 0.0f) {
@@ -5773,13 +5283,15 @@ static void do_autotrim(void)
         !rd((uintptr_t)g_surface + 0x2808, &array, 8) ||
         !rd((uintptr_t)g_surface + 0x2810, &end, 8) ||
         !array || end < array || (end-array)/8 <= (unsigned)pad ||
-        !rd(array + pad*8, &state, 8) || !state ||
+        !rd(array + (uintptr_t)pad * 8, &state, 8) || !state ||
         !rd(state + 0x22e8, &layers, 8) || !layers ||
         !rd(layers + 0x4a8, &sample, 8) || !sample) {
         mlog("minimod: native trim: no sample for pad %d\n", pad);
         return;
     }
-    unsigned frames = frames_of_sample(sample), fr=0, rate=0, ch=0, off=0, bytes=0;
+    unsigned want_ch = 0, want_rate = 0;
+    unsigned frames = frames_of_sample(sample, &want_ch, &want_rate);
+    unsigned fr=0, rate=0, ch=0, off=0, bytes=0;
     unsigned first=0, last=0, format=0;
     char path[512] = {0};
     if (!frames) {
@@ -5801,14 +5313,22 @@ static void do_autotrim(void)
                  pad, frames, first, last + 1);
         } else {
             /* Not in memory (streamed): use the file the app points at. */
-            if (path_from_object(sample, frames, path, sizeof path))
+            if (path_from_object(sample, frames, want_ch, want_rate, path,
+                                 sizeof path))
                 mlog("minimod: path from the sample object -> %s\n", path);
-            else if (wav_path_of(sample, frames, path, sizeof path))
+            else if (wav_path_of(sample, frames, want_ch, want_rate, path,
+                                 sizeof path))
                 ;
-            else if (find_wav_by_frames(frames, path, sizeof path))
+            else if (find_wav_by_frames(frames, want_ch, want_rate, path,
+                                        sizeof path))
                 mlog("minimod: recorded sample (no path yet) -> %s\n", path);
+            /* Frame count alone does not identify a file: require the same
+             * channels and rate as the loaded sample before scanning it. */
             if (!path[0] ||
-                !wav_info(path, &fr, &rate, &ch, &off, &bytes, &format) || fr != frames) {
+                !wav_info(path, &fr, &rate, &ch, &off, &bytes, &format) ||
+                fr != frames || ch != want_ch || rate != want_rate) {
+                mlog("minimod: native trim: no matching WAV (frames %u ch %u rate %u)\n",
+                     frames, want_ch, want_rate);
                 g_trim_ratio = 0.0;
                 return;
             }
@@ -5935,7 +5455,6 @@ static void *heap_probe_thread(void *arg)
     struct timespec ts = {.tv_sec = 0, .tv_nsec = 400 * 1000 * 1000};
     for (;;) {
         nanosleep(&ts, 0);
-        apply_pending_ctl();
         int fd = open("/run/minimod.heap", O_RDONLY);
         if (fd < 0)
             continue;
@@ -6403,9 +5922,19 @@ __attribute__((constructor)) static void load(void)
     void *t_poff = install_hook(base + A_PITCH_OFF, (void *)pitch_off);
     if (t_poff)
         orig_pitch_off = (void (*)(void *, uint64_t, uint64_t, int))t_poff;
-    /* The MIDI dispatcher is hooked lazily by midi_hook_set(): outside
-     * 16 Levels the stock code must stay untouched. */
-    mlog("minimod: MIDI hook deferred until 16 LEVELS\n");
+    /* Installed once at load: the hook forwards untouched when 16 Levels is
+     * off or the note is internal, so no runtime code patching is needed. */
+    if (midi_hook_site_ok()) {
+        void *t_midi = install_hook(base + A_MIDI_NOTE_EVENT,
+                                    (void *)midi_note_event);
+        if (t_midi)
+            orig_midi_note_event =
+                (void (*)(void *, void *, void *, uintptr_t))t_midi;
+        else
+            mlog("minimod: MIDI dispatcher hook failed\n");
+    } else {
+        mlog("minimod: MIDI dispatcher mismatch; not hooking\n");
+    }
     void *t_btn = (hook_mask & 16) ? install_hook(base + A_BUTTONS, (void *)buttons) : 0;
     void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)note_on) : 0;
     void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)cs_event) : 0;
@@ -6525,12 +6054,17 @@ __attribute__((constructor)) static void load(void)
     install_screen_paint();
 #if MINIMOD_DEBUG
     {
-        pthread_t wth, sth, bth, hth, cth;
-        pthread_create(&wth, 0, watch_thread, 0);
-        pthread_create(&sth, 0, slider_probe_thread, 0);
-        pthread_create(&bth, 0, bcast_probe_thread, 0);
-        pthread_create(&hth, 0, heap_probe_thread, 0);
-        pthread_create(&cth, 0, chop_probe_thread, 0);
+        pthread_t th;
+        if (pthread_create(&th, 0, watch_thread, 0) == 0)
+            pthread_detach(th);
+        if (pthread_create(&th, 0, slider_probe_thread, 0) == 0)
+            pthread_detach(th);
+        if (pthread_create(&th, 0, bcast_probe_thread, 0) == 0)
+            pthread_detach(th);
+        if (pthread_create(&th, 0, heap_probe_thread, 0) == 0)
+            pthread_detach(th);
+        if (pthread_create(&th, 0, chop_probe_thread, 0) == 0)
+            pthread_detach(th);
     }
 #endif
     if (!relay_used) {

@@ -180,7 +180,7 @@ behaviour keep the trampoline (`orig_*`) and call it.
 * the **screen vtable** before any model access (`base + 0x6e212a0`);
 * the **sample identity** before committing a transform (pointer and frame
   count), and the **chop type** after setting it;
-* the **first bytes of the lazy MIDI hook target** before swapping it in.
+* the **first four instructions of the MIDI dispatcher** before installing the permanent hook (the hook itself is never swapped at runtime; it forwards untouched when 16 Levels is off).
 
 A mismatch must turn into "no mod" or an explicit status, never a wrong write.
 

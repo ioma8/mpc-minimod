@@ -6,7 +6,7 @@ import tempfile
 source = (Path(__file__).resolve().parents[1] / 'src/minimod.c').read_text()
 native = source[source.index('/* Native DATA input:'):source.index('static void hpss_make_names(')]
 cc_start = source.index('/* A real CC event captured')
-cc = source[cc_start:source.index('static void cc_replay(unsigned', cc_start)]
+cc = source[cc_start:source.index('/* Whole-heap fingerprint:', cc_start)]
 harness = r'''
 #include <assert.h>
 #include <stdint.h>
@@ -24,6 +24,10 @@ static void bass_preview_set_params(float a, float b, float c) {
 static int paints, forwarded, cc_forwarded;
 static void hpss_repaint(void) { ++paints; }
 static void (*orig_cc)(void *, unsigned, float, float);
+static int rd(uintptr_t addr, void *dst, size_t n) {
+    memcpy(dst, (const void *)addr, n);
+    return 1;
+}
 '''+native+cc+r'''
 static void original_signal(void *self, int delta) { (void)self; (void)delta; ++forwarded; }
 static void original_cc(void *ev, unsigned raw, float lo, float range) {

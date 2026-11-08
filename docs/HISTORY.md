@@ -232,7 +232,7 @@ Five steps, in the order they happened:
 5. **The contract, then the full-range check.** Routing is keyed by source;
    rebuild the note for the selected pad, call the setter, dispatch with the
    physical-pad sentinel `0x7ffffffa`. Every note 36–96 played the selected
-   sample; 16 Levels off restores the stock dispatcher bytes (`d503233f`).
+   sample; 16 Levels off restores the stock dispatcher bytes (`d503233f`). That byte swap was later removed: the dispatcher is hooked once at load and the hook forwards untouched when 16 Levels is off (see section 10).
 
 An earlier raw-ALSA experiment opened a device already owned by the firmware and
 called the pad `note_on` entry directly, creating two competing input paths. It
@@ -348,3 +348,43 @@ Their unique measurements are preserved here and in
 [`MECHANISMS.md`](MECHANISMS.md)/[`FEATURES.md`](FEATURES.md); the originals
 remain in git history, and the raw captures (Ghidra output, decompiled
 fragments) remain in [`re/`](re/README.md).
+
+---
+
+## 10. Safety audit of the mod
+
+A full read of `mod/src` with sanitizer runs and targeted repros found and fixed:
+
+1. **WAV edge scan** — a header channel count > 4096 made `wav_edges()` loop
+   forever on the UI thread (`got = n / (bps·ch)` stayed 0 and the loop guard
+   divided to 0). `wav_info()` now accepts only 1–2 channels and rejects data
+   offsets beyond 32 bits; `wav_edges()` bounds its bytes-per-frame and breaks on
+   a zero-length read. Repro before the fix: a 20 KB `ch=5000, bits=32` WAV froze
+   the scanner.
+2. **HPSS worker** — it published `g_hpss_done` before its last reads of the job,
+   so a paint in that window could free the job under it. Everything is copied
+   before the store now.
+3. **Spectral liveness** — a run that lost its page stayed `active` forever and
+   `note_on` swallowed every pad press. Runs now have a deadline, are cancelled
+   from the always-running input hooks, and never mute pads past it.
+4. **Hook engine** — `pc_relative()` missed `B.cond` and the `RET` mask ignored
+   the register field; a host test now feeds every PC-relative class.
+5. **Range patch** — a failed second `wr` left the first trim range patched; each
+   field is restored independently.
+6. **Writer bound** — substitution is bounded by both the source and the rendered
+   buffer, not the source alone.
+7. **Debug machinery** — the malloc interposer resolves `__libc_malloc` under a
+   re-entrancy guard; the fault handler only uses `write(2)` and refuses to
+   longjmp across threads.
+8. **Input trust** — the bass preview validates channel pointers, CC events are
+   copied with `rd` (never a raw over-read) and replay events are static and
+   aligned, and the H3 effect validates its vtable and parameter block before
+   writing through them.
+9. **Dead trim path removed** — the old broadcast/slider commit route was
+   unreachable and used values that were never assigned (`g_trim_v0/v1`,
+   `g_trim_frames`); it and its overlay are gone.
+10. **Hygiene** — the `FIELD` macro uses `memcpy` instead of an alignment cast,
+    WAV path candidates must match the sample's channels and rate, the maps
+    snapshot is published atomically, and the debug command buffer is mutexed.
+
+---

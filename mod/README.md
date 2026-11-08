@@ -141,9 +141,9 @@ Release builds run the fixed hook set and honour **no** environment switches
 except `MINIMOD_TRIM_DB` (the AutoTrim threshold, described under Controls). A
 `-DMINIMOD_DEBUG=1` build additionally reads `MINIMOD_HOOKS` (bitmask: 2 proc,
 16 buttons, 32 note_on, 64 cs, 128 note_off), `MINIMOD_PROBE=1`, and the
-investigation switches `MINIMOD_VIS`, `MINIMOD_BTNLOG`, `MINIMOD_NOOVERLAY`,
-`MINIMOD_DUMP`, `MINIMOD_SNAPDIFF`, `MINIMOD_CCINJECT`, `MINIMOD_ONESHOT`,
-`MINIMOD_CTL` and `MINIMOD_ENV`. The release build ignores all of those.
+investigation switches `MINIMOD_VIS`, `MINIMOD_BTNLOG`,
+`MINIMOD_DUMP`, `MINIMOD_SNAPDIFF`, `MINIMOD_ENV` and `MINIMOD_SAFE`. The
+release build ignores all of those.
 Chromatic MIDI is handled by the native hook in the default release build; it
 has no separate thread or environment switch.
 
