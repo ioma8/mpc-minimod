@@ -118,11 +118,12 @@ stock `d503233f` (hook installed: `155f947c`). Verified on hardware;
 `mod/tests/emulator_midi_chromatic.py` is the automated check.
 
 **Limits.** The root is read from the selected pad's sample on every external
-note; a sample whose root cannot be read falls back to 60. The root-aware path
-has been verified through the live model readout (root 88 → delta −21) but not
-yet with a hardware MIDI keyboard on a non-60 sample. Pad MIDI In is not
-persisted by the app and must be re-enabled after every start (this is the most
-common false "it does not work"). The SampQOL reference also has a
+note; a sample whose root cannot be read falls back to 60. The root-aware path is
+verified end to end in the emulator on A01 (root 88: C3/C#3/G3 →
+−28/−27/−21, `emulator_midi_chromatic.py`); a hardware MIDI keyboard on a non-60
+sample is still to be checked. Pad MIDI In is not persisted by the app and must
+be re-enabled after every start (this is the most common false "it does not
+work"). The SampQOL reference also has a
 separate chopped-pad mode; MiniMod applies chromatic pitch without a
 slice-versus-pitch setting.
 

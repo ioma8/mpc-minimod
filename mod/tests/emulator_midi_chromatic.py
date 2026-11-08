@@ -121,9 +121,8 @@ def main():
         'MIDI note was changed outside 16 Levels'
     assert int(ssh('pidof "MPC Sample"')) == pid, 'Firmware process restarted'
     assert b'NRestarts=0' in ssh('systemctl show ac50 -p NRestarts')
-    print(f'PASS: C3/C#3/G3 were transposed by 0/+1/+7 from the sample root '
-          f'(root {root}, G3 delta {67 - root}); outside-mode pass-through; '
-          'no firmware restart')
+    print(f'PASS: C3/C#3/G3 deltas {60 - root}/{61 - root}/{67 - root} from the '
+          f'sample root (root {root}); outside-mode pass-through; no firmware restart')
 
 
 if __name__ == '__main__':
