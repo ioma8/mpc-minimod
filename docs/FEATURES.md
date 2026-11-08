@@ -303,8 +303,9 @@ exponentially from 700 Hz to about 16.8 kHz (or 45 % of the sample rate). The
 live preview is mixed into the real output call: the app writes interleaved
 S32_LE (4 channels, 44.1 kHz) through `snd_pcm_writei`, and the mod patches that
 PLT stub because the symbol is versioned (`@ALSA_0.9`); channels 0/1 get the
-preview, each voice decays over 1.2 s, and pads are swallowed while the page is
-open. The saved render is peak-scaled to 0.86. The minimal DaisySP subset is
+preview, each voice decays over 1.2 s, and pads are consumed at the
+control-surface event hook while the page is open, so the firmware never selects
+or switches the sample underneath. The saved render is peak-scaled to 0.86. The minimal DaisySP subset is
 vendored under `mod/third_party/daisysp/Source` (upstream revision `2c72eaf9…`,
 licence included); no runtime library is added.
 

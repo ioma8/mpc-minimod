@@ -401,8 +401,10 @@ A full read of `mod/src` with sanitizer runs and targeted repros found and fixed
     app imports `snd_pcm_writei@ALSA_0.9`, which an unversioned preload symbol
     does not satisfy, and the old anchor was a different output path. The mix now
     runs in the real `snd_pcm_writei` (PLT stub `0xb51ff8`; S32_LE, 4 channels,
-    44.1 kHz, channels 0/1), pads are swallowed while the Bass page is open, and
-    each voice decays over 1.2 s. Verified from the emulator PCM stream.
+    44.1 kHz, channels 0/1), pads are consumed at the control-surface event hook
+    while the Bass page is open (so the firmware never selects or switches the
+    sample underneath, which was the source of the extra high tone), and each
+    voice decays over 1.2 s. Verified from the emulator PCM stream.
 12. **Static analysis** — cppcheck, the Clang Static Analyzer and clang-tidy were
     run over the tree (recipe in `TOOLING.md` §7). They found `fgets` under the
     maps mutex, a null paint component, a negative right shift in the branch

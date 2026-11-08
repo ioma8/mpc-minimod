@@ -476,9 +476,11 @@ app imports `snd_pcm_writei@ALSA_0.9`, so an unversioned preload symbol does not
 interpose; the mod patches the app's PLT stub (`0xb51ff8`) with a 16-byte slot to
 its own hook and calls libasound itself. The hook adds the preview to interleaved
 channels 0/1 before the write, leaves the app's planar/engine buffers untouched,
-and decays each voice over 1.2 s. Pads are swallowed whenever the Bass page is
-open — including during a save render — so a missed preview cannot start a
-looping sample underneath. Activation enables and resets the synth before
+and decays each voice over 1.2 s. Physical pads are consumed in the
+control-surface event hook (`A_CS_EVENT`) while the Bass page is open, before the
+pad-grid observer can select or switch the underlying sample; the same event
+queues the preview. This is what keeps a pad press from changing the selected
+sample or leaking the app's own audio into the preview. Activation enables and resets the synth before
 publishing `active`, and the paint tick re-enables it if the page is open without
 it.
 

@@ -4260,23 +4260,34 @@ static void *g_cs_self;
 
 static void cs_event(void *self, int code, void *payload)
 {
+    unsigned char raw[8];
+    int got = payload && rd((uintptr_t)payload, raw, sizeof raw);
 #if MINIMOD_LOG
     {
         static int n;
-        if (n < 200) {
-            unsigned char raw[16];
-            memset(raw, 0, sizeof raw);
-            if (payload && rd((uintptr_t)payload, raw, sizeof raw)) {
-                n++;
-                mlog("cs %02x | %02x%02x%02x%02x %02x%02x%02x%02x\n",
-                     code & 0xff, raw[0], raw[1], raw[2], raw[3],
-                     raw[4], raw[5], raw[6], raw[7]);
-            }
+        if (n < 200 && got) {
+            n++;
+            mlog("cs %02x | %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                 code & 0xff, raw[0], raw[1], raw[2], raw[3],
+                 raw[4], raw[5], raw[6], raw[7]);
         }
     }
 #endif
     if (self)
         g_cs_self = self;
+    /* Pads arrive here as note messages with the pad index as the event code,
+     * ahead of the pad-grid observer. While the Bass preview owns the page,
+     * consume them before the firmware can select/switch the underlying
+     * sample; feeding the preview from here is the only pad path. */
+    if (got && g_hpss_menu && g_bass_edit && code >= 0 && code < 16 &&
+        ((raw[0] & 0xf0) == 0x80 || (raw[0] & 0xf0) == 0x90 ||
+         (raw[0] & 0xf0) == 0xa0)) {
+        if ((raw[0] & 0xf0) == 0x90 && raw[2] > 0) {
+            bass_preview_note((unsigned)code, (float)raw[2] / 127.0f);
+            __atomic_add_fetch(&g_bass_preview_notes, 1, __ATOMIC_RELAXED);
+        }
+        return;
+    }
     if (debug_mode && g_dbg < 160) {
         g_dbg++;
         mlog("minimod: cs code=0x%02x\n", code & 0xff);
