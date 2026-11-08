@@ -143,6 +143,13 @@ app's playback dominates the window, the ratio stays near 1.  In the earlier
 passing runs the loop dominated, which is why the same code could pass three
 times and fail later.
 
+Measured with the input silenced, the ratio is a **stable 0.331** (two runs,
+0.208/0.629) rather than 0.5: the loop is scaled by the mod's master *and* by the
+app's own volume curve, which the mod mixes into.  Silencing the input also
+changes the level the test's later `loop_rms` check sees (0.63 instead of 0.15),
+so the whole measurement section needs to be re-derived together rather than
+patched band by band - that is what the next round has to do.
+
 It is a test-design issue, not a mod bug: to measure the loop's response to MAIN
 VOLUME, the app's own playback of that pad has to be out of the picture - either
 by selecting an empty pad before measuring, or by measuring the loop's
