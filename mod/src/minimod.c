@@ -87,6 +87,7 @@
 #include "pads_ffi.h"
 #include "cfg_ffi.h"
 #include "buttons_ffi.h"
+#include "spectral_ffi.h"
 #include "menu_ffi.h"
 #include "overlay_ffi.h"
 #include "paint_ffi.h"
@@ -684,7 +685,6 @@ static int g_hpss_cmd_n;
 
 static uint64_t g_hpss_name[6];
 static int g_hpss_names_ready;
-static int g_spectral_active;
 static float g_bass_knob[3] = {0.52f, 0.18f, 0.56f};
 static volatile unsigned g_bass_preview_notes;
 static volatile unsigned g_bass_preview_blocks;
@@ -820,30 +820,7 @@ static void hpss_writer_hook(void *closure, void *block)
                        (minimod_writer)orig_hpss_writer);
 }
 
-static int hpss_read_sample(void *s, void **screen, uintptr_t *state,
-                            uintptr_t *sample, unsigned *frames, unsigned *ch,
-                            unsigned *rate)
-{
-    uintptr_t found_screen = 0, found_state = 0, found_sample = 0;
-    unsigned found_frames = 0, found_ch = 0, found_rate = 0;
-    if (!minimod_sample_now(base, (uintptr_t)s, &found_screen, &found_state,
-                            &found_sample, &found_frames, &found_ch,
-                            &found_rate))
-        return 0;
-    if (screen) *screen = (void *)found_screen;
-    if (state) *state = found_state;
-    if (sample) *sample = found_sample;
-    if (frames) *frames = found_frames;
-    if (ch) *ch = found_ch;
-    if (rate) *rate = found_rate;
-    return 1;
-}
 
-static int hpss_sample_now(void **screen, uintptr_t *state, uintptr_t *sample,
-                           unsigned *frames, unsigned *ch, unsigned *rate)
-{
-    return hpss_read_sample(g_screen, screen, state, sample, frames, ch, rate);
-}
 
 
 
@@ -1002,31 +979,10 @@ static void hpss_close(void);
 /* ------------------------------------------------------- spectral markers */
 /* The input hook is NOT the UI thread. Publish only a request there; all
  * model calls below run from screen_paint, after the stock paint returns. */
-static unsigned char g_spectral_event[16];
-static struct {
-    int phase, n;
-    void *screen;
-    uintptr_t state, sample;
-    unsigned frames, ch, rate, pos[16];
-    long long deadline;
-} g_spectral;
+static struct minimod_spectral_state g_spectral;
 
 
-static void spectral_finish(const char *error)
-{
-    char status[96];
-    if (error)
-        snprintf(status, sizeof status, "Spectral: %s", error);
-    else
-        snprintf(status, sizeof status, "Spectral: %d slices on this pad", g_spectral.n);
-    mlog("%s\n", status);
-    hpss_set_status(status);
-    toast(error ? status : "Spectral: chopped");
-    g_spectral.phase = 0;
-    g_hpss_busy = 0;
-    __atomic_store_n(&g_spectral_active, 0, __ATOMIC_RELEASE);
-    hpss_repaint();
-}
+
 
 /* Same binding path used by the stock Split handler (Ghidra 0x1756728).
  * Manual is enum 0. Calling the binding's model callback preserves the pad's
@@ -1036,83 +992,39 @@ static void spectral_finish(const char *error)
 
 static void spectral_start(void)
 {
-    int expected = 0;
-    if (g_hpss_busy || minimod_job_busy() ||
-        !__atomic_compare_exchange_n(&g_spectral_active, &expected, -1, 0,
-                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED))
-        return;
-    memcpy(g_spectral_event, g_hpss_btn, sizeof g_spectral_event);
-    __atomic_store_n(&g_spectral_active, 1, __ATOMIC_RELEASE);
-    hpss_repaint();
+    if (minimod_spectral_start(&g_spectral, g_hpss_btn, (int32_t)sizeof g_hpss_btn,
+                               g_hpss_busy || minimod_job_busy()))
+        hpss_repaint();
 }
 
 /* One phase per UI pass: a CHOP press schedules a page switch, so it cannot
  * be followed by a sleep/poll or by another toggle in the same callback. */
 /* The three-phase dance (open Manual chop, write the boundaries, verify them)
  * lives in Rust; the glue keeps the sample read and applies each frame's result. */
-static void spectral_press_chop(void)
+
+
+
+
+/* The machine presses CHOP through the app's own button handler; the event it
+ * replays is the one that started the run, which lives in the Rust state. */
+static void spectral_press_chop_now(void)
 {
     if (!orig_buttons)
         return;
-    g_spectral_event[8] = 0x4b;
-    g_spectral_event[9] = 0x7f;
-    orig_buttons(g_spectral_event);
-    g_spectral_event[9] = 0;
-    orig_buttons(g_spectral_event);
-}
-
-static void spectral_apply(int step, const unsigned char *error)
-{
-    if (step == 3)
-        spectral_finish(NULL);
-    else if (step == 4)
-        spectral_finish((const char *)error);
-    hpss_repaint();
+    g_spectral.event[8] = 0x4b;
+    g_spectral.event[9] = 0x7f;
+    orig_buttons(g_spectral.event);
+    g_spectral.event[9] = 0;
+    orig_buttons(g_spectral.event);
 }
 
 static void spectral_tick(void)
 {
-    if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE) != 1)
-        return;
-    const unsigned char *error = NULL;
-    unsigned slices = 0;
-    if (!g_spectral.phase) {
-        char path[512] = {0};
-        float *input = NULL;
-        if (!hpss_sample_now(&g_spectral.screen, &g_spectral.state, &g_spectral.sample,
-                             &g_spectral.frames, &g_spectral.ch, &g_spectral.rate)) {
-            spectral_finish("no sample on this pad");
-            return;
-        }
-        if (!hpss_path_for(g_spectral.sample, g_spectral.frames, g_spectral.ch,
-                           g_spectral.rate, path, sizeof path) ||
-            !wav_read_f32(path, g_spectral.frames, g_spectral.ch, g_spectral.rate,
-                          &input, NULL, NULL)) {
-            spectral_finish("cannot read sample WAV");
-            return;
-        }
-        int begun = minimod_spectral_begin(base, minimod_now_ms(),
-                                           (uintptr_t)g_spectral.screen,
-                                           g_spectral.state, g_spectral.sample,
-                                           g_spectral.frames, g_spectral.ch,
-                                           g_spectral.rate, input,
-                                           spectral_press_chop, &error);
-        free(input);
-        if (begun) {
-            spectral_finish((const char *)error);
-            return;
-        }
-        g_hpss_menu = 0;
-        g_hpss_busy = 1;
-        g_spectral.phase = 1;
-        g_spectral.deadline = minimod_now_ms() + 3000;
-        hpss_repaint();
-        return;
-    }
-    int step = minimod_spectral_step(base, minimod_now_ms(), &slices, &error);
-    if (step == 3)
-        g_spectral.n = (int)slices;
-    spectral_apply(step, error);
+    struct minimod_spectral_hooks hooks = {0};
+    hooks.press_chop = spectral_press_chop_now;
+    hooks.set_status = hpss_set_status;
+    hooks.repaint = hpss_repaint;
+    minimod_spectral_tick(&g_spectral, &g_menu, base, (uintptr_t)g_screen, &hooks);
 }
 
 
@@ -1291,7 +1203,7 @@ static void buttons(void *event)
     int looper = looper_is_open();
     int action = button_action(code, down, looper, g_hpss_menu, g_hpss_data_down,
                               g_hpss_busy, g_bass_edit,
-                              __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE),
+                              g_spectral.active,
                               g_midi.levels, &value);
     if (looper) {
         switch (action) {
@@ -1410,7 +1322,7 @@ static void buttons(void *event)
 static void input_context(struct minimod_input_context *ctx)
 {
     ctx->looper_open = looper_is_open();
-    ctx->spectral_active = __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE);
+    ctx->spectral_active = g_spectral.active;
     ctx->preview_active = __atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE);
     ctx->menu_open = g_hpss_menu;
     ctx->bass_edit = g_bass_edit;
@@ -2242,7 +2154,7 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
     struct minimod_route r = minimod_cc_route(
         g_in_cc_replay ? 1 : 0, cc, raw, range, looper_is_open() ? 1 : 0,
         g_hpss_menu ? 1 : 0, g_bass_edit ? 1 : 0, g_hpss_busy ? 1 : 0,
-        __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE) == 1 ? 1 : 0,
+        g_spectral.active == 1 ? 1 : 0,
         g_lat_extra);
     switch (r.kind) {
     case 1: /* MAIN VOLUME drives the loops, then the app's own mix */
@@ -2278,7 +2190,7 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
      * integer signal while our modal menu owns controls; knobs must not edit
      * the sample behind it. Replayed internal commands are not user input. */
     if (!g_in_cc_replay && ev &&
-        (g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE)) &&
+        (g_hpss_menu || g_spectral.active) &&
         ((unsigned char *)ev)[8] != 0x64)
         return;
     if (!g_in_cc_replay && ev) {

@@ -10,11 +10,6 @@ use crate::paint;
 /// How long a run may take before it gives up.
 const DEADLINE_MS: i64 = 3_000;
 
-/// The event the mod replays to press the app's CHOP key.
-const CHOP_KEY: u8 = 0x4b;
-/// A full press.
-const PRESSED: u8 = 0x7f;
-
 /// What the chop is doing.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -53,23 +48,6 @@ pub struct Hooks {
     pub set_status: Option<unsafe extern "C" fn(*const u8)>,
     /// Redraw the screen.
     pub repaint: Option<unsafe extern "C" fn()>,
-}
-
-/// Press the app's CHOP key through its own button handler.
-///
-/// # Safety
-///
-/// `press` must be the app's displaced button hook.
-pub unsafe fn press_chop(state: &mut State, press: Option<unsafe extern "C" fn(*const u8)>) {
-    let Some(press) = press else { return };
-    state.event[8] = CHOP_KEY;
-    state.event[9] = PRESSED;
-    // SAFETY: the event buffer is ours and the callback is the app's hook.
-    unsafe {
-        press(state.event.as_ptr());
-        state.event[9] = 0;
-        press(state.event.as_ptr());
-    }
 }
 
 /// Claim a run; false when one is already going or a job is busy.
