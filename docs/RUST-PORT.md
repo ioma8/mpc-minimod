@@ -79,6 +79,7 @@ slice.
 | Hook installation (pages, slots, trampolines, patching) | ported | the whole device suite runs on 40+ hooks installed by the Rust engine |
 | Substitute writer (rendered buffer for the app) | ported | Reverb (154k frames incl. tail) renders through it; progress/arm tests |
 | Stream geometry (`audio_channels`) | ported | offset test + stereo fallback; the bass preview path reads it every block |
+| Audio writer (preview into the app's block) | ported | Bass Synth renders its whole pluck through it; looper passes on the same build |
 | Hook-site guard (`midi_hook_site_ok`) | ported | the MIDI prologue is a documented constant; the chromatic test runs the hook it guards |
 | MIDI note decoding (`midi::decode`) | ported | 5 rule tests (external ids, note on/off, row); the chromatic test drives the hook that uses it |
 | 16 Levels octave shift (`levels`) | ported | 3 tests: clamping, 8 semitones per press, the toast text |

@@ -74,6 +74,7 @@
 #include "spectral.h"
 #include "h3m_effect.h"
 #include "audio_ffi.h"
+#include "audio_ffi.h"
 #include "substitute_ffi.h"
 #include "hooks_ffi.h"
 #include "levels_ffi.h"
@@ -2275,65 +2276,19 @@ static void looper_cfg_save(void)
 static void audio_writer(void *self, void *input, size_t frames, int offset)
 {
     __atomic_add_fetch(&g_audio_out_calls, 1, __ATOMIC_RELAXED);
-#if MINIMOD_LOG
-    {
-        static int n;
-        if (n < 4) {
-            n++;
-            mlog("minimod: WRITER top self=%p frames=%zu offset=%d looper=%d\n", self,
-                 frames, offset, looper_is_open());
-        }
+    int preview = __atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE) ? 1 : 0;
+    float peak = 0.f;
+    if (minimod_audio_writer((uintptr_t)self, (float **)input, frames, offset,
+                             (minimod_audio_writer_fn)orig_bass_audio_writer,
+                             preview, &peak) &&
+        peak > 0.f) {
+        __atomic_add_fetch(&g_bass_preview_blocks, 1, __ATOMIC_RELAXED);
+        uint32_t previous_bits = __atomic_load_n(&g_bass_preview_peak_bits, __ATOMIC_RELAXED);
+        float previous;
+        memcpy(&previous, &previous_bits, sizeof previous);
+        if (peak > previous)
+            __atomic_store_n(&g_bass_preview_peak_bits, bass_float_bits(peak), __ATOMIC_RELAXED);
     }
-#endif
-    static __thread float scratch[8][4096];
-    float *channels[8];
-    if (!__atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE)) {
-        bass_preview_mix(NULL, 0, 0, 44100); /* clear any ringing voices after close */
-        if (orig_bass_audio_writer)
-            orig_bass_audio_writer(self, input, frames, offset);
-        return;
-    }
-    int count = audio_channels(self, 0);
-    if (!orig_bass_audio_writer)
-        return;
-    if (count < 1 || count > 8 || frames > 4096 || !input) {
-        orig_bass_audio_writer(self, input, frames, offset);
-        return;
-    }
-
-#if MINIMOD_LOG
-    {
-        static int n;
-        if (n < 6) {
-            n++;
-            mlog("minimod: audio out self=%p frames=%zu count=%d offset=%d\n", self,
-                 frames, count, offset);
-        }
-    }
-#endif
-    float **source = input;
-    for (int i = 0; i < count; ++i) {
-        if (!source[i]) {
-            orig_bass_audio_writer(self, input, frames, offset);
-            return;
-        }
-        memcpy(scratch[i], source[i], frames * sizeof(float));
-        channels[i] = scratch[i];
-    }
-    if (__atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE)) {
-        float peak = bass_preview_mix(channels, frames, (unsigned)count, 44100);
-        if (peak > 0.f) {
-            __atomic_add_fetch(&g_bass_preview_blocks, 1, __ATOMIC_RELAXED);
-            uint32_t previous_bits = __atomic_load_n(&g_bass_preview_peak_bits, __ATOMIC_RELAXED);
-            float previous;
-            memcpy(&previous, &previous_bits, sizeof previous);
-            if (peak > previous)
-                __atomic_store_n(&g_bass_preview_peak_bits, bass_float_bits(peak), __ATOMIC_RELAXED);
-        }
-    } else {
-        bass_preview_mix(NULL, 0, 0, 44100);
-    }
-    orig_bass_audio_writer(self, channels, frames, offset);
 }
 
 static void *g_cs_self;

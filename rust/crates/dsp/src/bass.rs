@@ -289,9 +289,13 @@ pub fn preview_note(pad: usize, velocity: f32) {
 }
 
 /// Mix the preview into the device's output channels and report its peak.
-pub fn preview_mix(channels: &mut [&mut [f32]], rate: u32) -> f32 {
+///
+/// # Safety
+///
+/// Every pointer in `channels` must be writable for `frames` samples, and
+/// `channels` itself may be empty (which mixes nothing).
+pub unsafe fn preview_mix(channels: &mut [*mut f32], frames: usize, rate: u32) -> f32 {
     let channel_count = channels.len();
-    let frames = channels.first().map_or(0, |channel| channel.len());
     if !ENABLED.load(Ordering::Acquire)
         || channel_count == 0
         || frames == 0
@@ -367,7 +371,10 @@ pub fn preview_mix(channels: &mut [&mut [f32]], rate: u32) -> f32 {
                 }
             }
             sample = fclamp(sample, -PREVIEW_PEAK, PREVIEW_PEAK);
-            for channel in channels.iter_mut() {
+            for pointer in channels.iter_mut() {
+                // SAFETY: the caller promises each channel is writable for
+                // `frames` samples.
+                let channel = unsafe { core::slice::from_raw_parts_mut(*pointer, frames) };
                 channel[frame] = fclamp(channel[frame] + sample, -1.0, 1.0);
             }
             peak = peak.max(sample.abs());
@@ -456,12 +463,24 @@ mod tests {
         preview_note(0, 0.8);
         let mut left = vec![0.0_f32; 4_096];
         let mut right = vec![0.0_f32; 4_096];
-        let peak = preview_mix(&mut [&mut left, &mut right], 44_100);
+        let peak = unsafe {
+            preview_mix(
+                &mut [left.as_mut_ptr(), right.as_mut_ptr()],
+                left.len(),
+                44_100,
+            )
+        };
         assert!(peak > 0.0, "the strike is audible: {peak}");
         assert!(left.iter().any(|v| *v != 0.0));
         assert_eq!(left, right, "both channels get the same voice mix");
         preview_enable(false);
-        let silent = preview_mix(&mut [&mut left, &mut right], 44_100);
+        let silent = unsafe {
+            preview_mix(
+                &mut [left.as_mut_ptr(), right.as_mut_ptr()],
+                left.len(),
+                44_100,
+            )
+        };
         assert!(silent.abs() < f32::EPSILON);
     }
 }

@@ -90,21 +90,18 @@ pub unsafe extern "C" fn bass_preview_mix(
     }
     let count = usize::try_from(channel_count).unwrap_or(0);
     // SAFETY: the caller guarantees each channel pointer is writable.
-    let first = unsafe { *channels };
-    if first.is_null() {
-        return 0.0;
+    unsafe {
+        let first = *channels;
+        if first.is_null() {
+            return 0.0;
+        }
+        if count == 1 {
+            return bass::preview_mix(&mut [first], frames, rate);
+        }
+        let second = *channels.add(1);
+        if second.is_null() {
+            return bass::preview_mix(&mut [first], frames, rate);
+        }
+        bass::preview_mix(&mut [first, second], frames, rate)
     }
-    // SAFETY: see above.
-    let mut left = unsafe { core::slice::from_raw_parts_mut(first, frames) };
-    if count == 1 {
-        return bass::preview_mix(&mut [&mut left], rate);
-    }
-    // SAFETY: see above.
-    let second = unsafe { *channels.add(1) };
-    if second.is_null() {
-        return bass::preview_mix(&mut [&mut left], rate);
-    }
-    // SAFETY: see above.
-    let mut right = unsafe { core::slice::from_raw_parts_mut(second, frames) };
-    bass::preview_mix(&mut [&mut left, &mut right], rate)
 }
