@@ -73,6 +73,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "levels_ffi.h"
 #include "hooks_ffi.h"
 #include "page_ffi.h"
 #include "selection_ffi.h"
@@ -462,23 +463,13 @@ static int levels_active(void)
 
 static int bump_octave(int d)
 {
-    mlog("minimod: PLUS/MINUS -> %+d x 8 semitones\n", d);
-    int next = g_octave + d;
-    if (next < -4)
-        next = -4;
-    if (next > 4)
-        next = 4;
-    if (next == g_octave)
+    int next = 0;
+    if (!minimod_levels_shift(g_octave, d, &next))
         return 0;
     g_octave = next;
-    mlog("minimod: pitch shift=%d (%+d semitones)\n", next, next * 8);
-    if (next == 0) {
-        toast("Pitch reset");           /* back to the original pitch */
-    } else {
-        char buf[48];
-        snprintf(buf, sizeof buf, "Pitch %+d semitones", next * 8);
-        toast(buf);
-    }
+    char buf[48];
+    snprintf(buf, sizeof buf, "Pitch %+d semitones", next * 8);
+    toast(next == 0 ? "Pitch reset" : buf);
     return 1;
 }
 
@@ -706,7 +697,7 @@ static void sixteen_proc(void *self, int idx, void *out)
 
 static void pitch_off(void *a0, uint64_t a1, uint64_t a2, int a3)
 {
-    int off = a3 + 8 * g_octave; /* half of the 16-note grid per press */
+    int off = minimod_levels_pitch_offset(a3, g_octave);
     if (g_octave && debug_mode)
         mlog("minimod: pitch offset %d -> %d\n", a3, off);
     if (orig_pitch_off)
