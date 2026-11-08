@@ -3867,7 +3867,6 @@ static volatile unsigned g_out_ch; /* channels of the device buffer, from ALSA *
 static volatile unsigned g_in_ch;
 static volatile int g_out_s32;      /* output stream is S32_LE */
 static volatile int g_in_s32;       /* input stream is S32_LE */
-static volatile void *g_in_pcm;
 static unsigned stream_geometry(void *pcm, unsigned *channels, int *s32);
 
 static void *looper_pump_thread(void *arg)
@@ -4608,8 +4607,6 @@ long snd_pcm_readi(void *pcm, void *buffer, unsigned long size)
         }
     }
 #endif
-    if (!g_in_pcm)
-        g_in_pcm = pcm; /* the first capture stream is the source */
     if (!g_buf_in || g_buf_dirty) {
         unsigned c = 0;
         int s32 = 0;
@@ -4625,8 +4622,7 @@ long snd_pcm_readi(void *pcm, void *buffer, unsigned long size)
     if (got > 0) {
 
         __atomic_add_fetch(&g_audio_in_calls, 1, __ATOMIC_RELAXED);
-        if (looper_is_open() && buffer && g_in_ch && g_in_s32 &&
-            pcm == g_in_pcm)
+        if (looper_is_open() && buffer && g_in_ch && g_in_s32)
             looper_input_s32_interleaved((const int32_t *)buffer, g_in_ch,
                                          (unsigned)got);
     }
@@ -4643,8 +4639,7 @@ long snd_pcm_readn(void *pcm, void **bufs, unsigned long size)
     long got = real_snd_pcm_readn(pcm, bufs, size);
     if (got > 0) {
         __atomic_add_fetch(&g_audio_in_calls, 1, __ATOMIC_RELAXED);
-        if (looper_is_open() && bufs && bufs[0] && g_in_s32 &&
-            (!g_in_pcm || pcm == g_in_pcm))
+        if (looper_is_open() && bufs && bufs[0] && g_in_s32)
             looper_input_s32((const int32_t *const *)bufs, 1, (unsigned)got);
     }
     return got;
