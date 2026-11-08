@@ -70,6 +70,7 @@ slice.
 | Trim edge scan (`wav_edges`) | ported | 3 host tests over synthesised takes (padded, silent, over-threshold); Bass Synth device test runs on the build |
 | Looper settings file | ported | 4 host tests; the device writes and reloads its own trim |
 | Pad occupancy (`hpss_free_pad`, `hpss_free_count`) | ported | offset test; the Bass Synth device test waits on the pad count to detect the assignment |
+| Monotonic clock (`now_ms`) | ported | real-time test; every deadline the looper and spectral paths use runs on it |
 | `minimod.c` (hooks, features, UI glue) | C, shrinking | 7 683 -> 4 564 lines; dead code removed only where the compiler proved it, each pass verified by an identical binary |
 
 The looper, the effects and the whole bass synth are already what the device

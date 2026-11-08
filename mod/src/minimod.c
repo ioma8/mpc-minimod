@@ -116,7 +116,7 @@ static sigjmp_buf g_cc_jmp;
 
 static void mlog(const char *fmt, ...);
 static void toast(const char *text);
-static long long now_ms(void);
+#include "clock_ffi.h"
 static void *g_screen;
 static void looper_draw(void *g);
 static void looper_pump(void);
@@ -1492,7 +1492,7 @@ static void spectral_tick(void)
             return;
         }
         g_spectral.phase = 1;
-        g_spectral.deadline = now_ms() + 3000;
+        g_spectral.deadline = minimod_now_ms() + 3000;
     } else {
         void *screen = 0;
         uintptr_t state = 0, sample = 0;
@@ -1509,7 +1509,7 @@ static void spectral_tick(void)
         rd((uintptr_t)screen + 0x168, &binding, 8);
         if (binding) rd(binding + 0x9c, &type, 4);
         if (!hpss_chop_mode() || type != 0) {
-            if (now_ms() >= g_spectral.deadline)
+            if (minimod_now_ms() >= g_spectral.deadline)
                 spectral_finish("Manual chop did not open");
         } else if (g_spectral.phase == 1) {
             if (!spectral_write_markers()) {
@@ -1517,8 +1517,8 @@ static void spectral_tick(void)
                 return;
             }
             g_spectral.phase = 2;
-            g_spectral.deadline = now_ms() + 150;
-        } else if (now_ms() >= g_spectral.deadline) {
+            g_spectral.deadline = minimod_now_ms() + 150;
+        } else if (minimod_now_ms() >= g_spectral.deadline) {
             spectral_finish(spectral_verify() ? NULL : "marker verification failed");
         }
     }
@@ -3128,8 +3128,8 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
 {
     if (!g_in_cc_replay && ev && ((unsigned char *)ev)[8] == 0x13) {
         looper_set_master(raw); /* MAIN VOLUME drives the loops ... */
-        if (now_ms() > g_cfg_saved_at + 5000) {
-            g_cfg_saved_at = now_ms();
+        if (minimod_now_ms() > g_cfg_saved_at + 5000) {
+            g_cfg_saved_at = minimod_now_ms();
             looper_cfg_save();
         }
         /* ... and the app's own mix, so fall through to orig_cc */
@@ -3148,8 +3148,8 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
                 if (frames > 400L * 44)
                     frames = 400L * 44;
                 g_lat_extra = (int)frames;
-                if (now_ms() > g_cfg_saved_at + 5000) {
-                    g_cfg_saved_at = now_ms();
+                if (minimod_now_ms() > g_cfg_saved_at + 5000) {
+                    g_cfg_saved_at = minimod_now_ms();
                     looper_cfg_save();
                 }
                 k1_last = (int)raw;
@@ -3781,13 +3781,6 @@ static void (*orig_screen_paint)(void *, void *);
 static volatile long long g_toast_until;
 static char g_toast_text[48];
 
-static long long now_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-
 static void *toast_expiry(void *arg)
 {
     (void)arg;
@@ -3810,7 +3803,7 @@ static void toast(const char *text)
         n = sizeof g_toast_text - 1;
     memcpy(g_toast_text, text, n);
     g_toast_text[n] = 0;
-    g_toast_until = now_ms() + 1000;
+    g_toast_until = minimod_now_ms() + 1000;
     {
         void *comp = g_paint_comp ? g_paint_comp : g_screen;
         if (orig_repaint && comp)
@@ -3964,7 +3957,7 @@ static void screen_paint(void *p, void *g)
     /* Trim edges of the last autotrim, drawn where the page's own markers would
      * be: the page itself only re-reads its trim when the pad is re-selected, so
      * without this the result of SHIFT+B3 would be invisible. */
-    if (g_toast_until > now_ms() && g_toast_text[0]) {
+    if (g_toast_until > minimod_now_ms() && g_toast_text[0]) {
         /* Cover the Start/End/Loop bar. Near-black fill, an amber rule top and
          * bottom (the colour the page already uses for the waveform) and white
          * 18 pt text, so it reads at a glance without looking like a dialog. */

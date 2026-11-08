@@ -14,6 +14,7 @@
 pub mod bass_ffi;
 pub mod cfg;
 pub mod cfg_ffi;
+pub mod clock;
 pub mod effect;
 pub mod effect_ffi;
 pub mod firmware;
