@@ -13,7 +13,7 @@ cc=${CC:-cc}
 cxx=${CXX:-c++}
 
 # The DSP behind HPSS, Spectral Chop and the live looper.
-$cc -O2 -std=c11 -D_GNU_SOURCE -I"$src" \
+$cc -O2 -std=c11 -D_GNU_SOURCE -I"$src" -I. \
     generate.c "$src/hpss.c" "$src/spectral.c" \
     -lm -o generate
 ./generate

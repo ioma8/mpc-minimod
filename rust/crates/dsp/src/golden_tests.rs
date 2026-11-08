@@ -85,6 +85,29 @@ fn hpss_matches_the_reference() {
 }
 
 #[test]
+fn spectral_onsets_match_with_leading_silence() {
+    // The evenly spaced fixture starts with an attack, so it never exercises the
+    // rule that inserts a leading boundary; this take starts with a quarter
+    // second of silence and then hits.
+    let input = floats("spectral_late_input.bin");
+    let header = integers("spectral_late_onsets.bin");
+    let positions = integers("spectral_late_positions.bin");
+    let onsets = spectral::detect(&input, 2, 44_100, 16).expect("detects");
+    assert_eq!(
+        i32::try_from(onsets.positions.len()).unwrap_or(-1),
+        header[0]
+    );
+    assert_eq!(i32::try_from(onsets.detected).unwrap_or(-1), header[1]);
+    for (index, position) in onsets.positions.iter().enumerate() {
+        assert_eq!(
+            i32::try_from(*position).unwrap_or(-1),
+            positions[index],
+            "position {index}"
+        );
+    }
+}
+
+#[test]
 fn spectral_onsets_match_the_reference() {
     let input = floats("spectral_input.bin");
     let detections = spectral::detect(&input, 2, 44_100, 16).expect("valid input");

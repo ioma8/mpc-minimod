@@ -285,6 +285,12 @@ lines of superseded code from the repository - the binary is unchanged.
 `hpss.c` (153) and `spectral.c` (339) are the opposite case: still compiled, and
 their Rust ports exist and pass their golden fixtures but are **not wired**.
 
+The Rust detector was then given the case the old fixture could not express - a
+take that starts with a quarter second of silence and then hits, which is what
+the leading-boundary rule exists for.  It matches the C position for position,
+so the detector is very likely not the cause of the device failure; the swappable
+part is the harness reading, not the algorithm.
+
 Wiring them was attempted and reverted: with the Rust onset detector behind
 `spectral_onsets`, the Spectral Chop device test failed while iterating its cases
 (`('first from Trim', (a, 0, [...]))`) - a triple of the selected sample, a slice

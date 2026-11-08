@@ -20,7 +20,7 @@
 
 /* looper.c is pulled in directly: the fixtures also capture the loop buffers,
  * which are file-scope statics in that translation unit. */
-#include "looper.c"
+#include "reference/looper_reference.c"
 
 /* Defined by looper.c and read by the emulator test through the ELF symbol. */
 extern volatile unsigned g_pad_stride;
@@ -96,6 +96,41 @@ static void golden_hpss(void)
 }
 
 /* Spectral Chop: onset positions on a longer take. */
+
+/* A take that starts with silence and then hits: this is the case the leading
+ * boundary rule exists for, and the one the evenly-spaced fixture above never
+ * reaches. */
+static void golden_spectral_late(void)
+{
+    unsigned frames = SPECTRAL_FRAMES;
+    float *stereo = calloc((size_t)frames * 2, sizeof(float));
+    if (!stereo)
+        die("spectral late input");
+    unsigned lead = RATE / 4; /* 250 ms of silence */
+    for (unsigned frame = lead; frame < frames; ++frame) {
+        unsigned region = (frame - lead) / (RATE / 3);
+        float frequency = (region % 2) ? 220.0f : 330.0f;
+        unsigned phase = (frame - lead) % (RATE / 3);
+        float envelope = expf(-(float)phase / (float)(RATE / 8));
+        float value = 0.4f * envelope * sinf(6.2831853f * frequency * (float)frame / (float)RATE);
+        if (phase < 300u)
+            value += 0.35f * noise() * expf(-(float)phase / 60.0f);
+        stereo[frame * 2] = value;
+        stereo[frame * 2 + 1] = value * 0.9f;
+    }
+    write_file("spectral_late_input.bin", stereo, (size_t)frames * 2 * sizeof(float));
+
+    unsigned positions[16] = {0};
+    unsigned detected = 0;
+    int count = spectral_onsets(stereo, frames, 2, RATE, positions, 16, &detected);
+    if (count < 0)
+        die("spectral_onsets late failed");
+    unsigned header[2] = {(unsigned)count, detected};
+    write_file("spectral_late_onsets.bin", header, sizeof header);
+    write_file("spectral_late_positions.bin", positions, sizeof positions);
+    free(stereo);
+}
+
 static void golden_spectral(void)
 {
     unsigned frames = SPECTRAL_FRAMES;
@@ -253,6 +288,7 @@ int main(void)
     golden_convert();
     golden_hpss();
     golden_spectral();
+    golden_spectral_late();
     golden_looper();
     printf("golden fixtures written\n");
     return 0;
