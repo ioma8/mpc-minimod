@@ -298,6 +298,18 @@ General lesson, from two reverts now: **a port inherits its dependencies'
 behaviour, so diff the helpers it calls, not only its own body** - or, better,
 pass the data in so the port cannot resolve it differently.
 
+## The paint hook
+
+Drawing and the toast are ported (`paint`) but **cannot be wired yet**: every
+attempt makes the app crash-loop at startup (`NRestarts=5` within seconds, before
+any interaction), so the fault is in the first paint, not in a toast.  The Rust
+side mirrors the C calls one for one - setColour, fillRect, and the String + Font
++ drawText sequence with the same offsets - so the likely difference is in how the
+temporary String/Font objects are laid out or destroyed.
+
+It stays unwired until that is understood; the C draws with its own calls, which
+is verified by every device run.
+
 ## Certified after the input port
 
 `2c11ef0` is the last fully device-certified build: Live Looper, Bass Synth,
