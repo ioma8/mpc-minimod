@@ -1653,39 +1653,9 @@ static volatile int g_nlis;
 static struct { uintptr_t param, slider; } g_ps[8];
 static volatile int g_nps;
 
-static uintptr_t slider_for_value(float pct)
+uintptr_t slider_for_value(float pct)
 {
-    if (!g_screen)
-        return 0;
-    const size_t len = 0x20000;
-    unsigned char *buf = malloc(len);
-    if (!buf)
-        return 0;
-    if (!rd((uintptr_t)g_screen, buf, len)) {
-        free(buf);
-        return 0;
-    }
-    uintptr_t want = base + 0x706e5d0, found = 0;
-    for (size_t o = 0; o + 8 <= len; o += 8) {
-        uintptr_t q;
-        memcpy(&q, buf + o, 8);
-        if (q != want)
-            continue;
-        size_t vo = o + 0x1b4;
-        if (vo + 4 > len)
-            continue;
-        float v;
-        memcpy(&v, buf + vo, 4);
-        float d = v - pct;
-        if (d < 0)
-            d = -d;
-        if (d <= 1.0f) {
-            found = (uintptr_t)g_screen + o;
-            break;
-        }
-    }
-    free(buf);
-    return found;
+    return minimod_slider_for_value((uintptr_t)g_screen, base, pct);
 }
 
 static void *g_obs[8];
@@ -1912,51 +1882,9 @@ static unsigned g_trim_frames;
 /* Read-only ownership test: the property's listener chain must reference the
  * parameter (or its model) somewhere within two hops. No broadcasting, so a
  * wrong candidate can never disturb the app. */
-static int prop_references(uintptr_t P, uintptr_t param)
+int prop_references(uintptr_t P, uintptr_t param)
 {
-    uintptr_t model = 0;
-    rd(param + T_MODEL, &model, 8);
-    uintptr_t node = 0;
-    if (!rd(P + 0x10, &node, 8) || !node)
-        return 0;
-    uintptr_t back = 0;
-    if (!rd(node, &back, 8) || back != P + 0x10)
-        return 0;
-    unsigned char buf[0x200];
-    unsigned char buf2[0x100];
-    for (int n = 0; n < 16; ++n) {
-        if (node == P + 8 || !node || !mapped((void *)node))
-            break;
-        uintptr_t tgt = 0;
-        if (!rd(node + 0x18, &tgt, 8))
-            break;
-        tgt &= ~(uintptr_t)3;
-        if (tgt && mapped((void *)tgt) && rd(tgt, buf, sizeof buf)) {
-            for (size_t o = 0; o + 8 <= sizeof buf; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (!q)
-                    continue;
-                if (q == param || (model && q == model))
-                    return 1;
-                if (q < 0x10000 || !mapped((void *)q))
-                    continue;
-                if (!rd(q, buf2, sizeof buf2))
-                    continue;
-                for (size_t k = 0; k + 8 <= sizeof buf2; k += 8) {
-                    uintptr_t q2;
-                    memcpy(&q2, buf2 + k, 8);
-                    if (q2 == param || (model && q2 == model))
-                        return 1;
-                }
-            }
-        }
-        uintptr_t next = 0;
-        if (!rd(node + 8, &next, 8))
-            break;
-        node = next;
-    }
-    return 0;
+    return minimod_prop_references(P, param);
 }
 
 /* The object in x20 at a trim-core call is the *listener*, not the property.
@@ -2054,33 +1982,9 @@ static uintptr_t prop_of_param(uintptr_t param)
 /* The app's own CC path: 0x159f230(range, event, raw) divides raw by range and
  * broadcasts through the property at *(event[0]+0x10) + 0x1ac0 (CC 0x10 = K1)
  * or +0x1b18 (CC 0x11 = K2). Calling it is exactly a knob turn. */
-static uintptr_t ctl_obj_for(uintptr_t base)
+uintptr_t ctl_obj_for(uintptr_t surface)
 {
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    uintptr_t hit = 0;
-    for (int r = 0; r < g_nrng && !hit; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && !hit; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (q == base) {
-                    hit = a + o - 0x10;
-                    break;
-                }
-            }
-        }
-    }
-    free(buf);
-    return hit;
+    return minimod_ctl_obj_for(surface);
 }
 
 /* A real CC event captured from the app, replayed with our own number so the
@@ -2226,49 +2130,9 @@ static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
  * the control surface without needing a knob move first. */
 
 
-static uintptr_t find_knob_props(void)
+uintptr_t find_knob_props(void)
 {
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    uintptr_t best = 0;
-    int bestscore = 0;
-    for (int r = 0; r < g_nrng; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 0xb0 + 0x58 + 8 <= n; o += 8) {
-                uintptr_t cand = a + o;
-                if (cand >= base && cand < base + 0x9000000)
-                    continue;
-                int ok = 1, score = 0;
-                for (int k = 0; k < 3 && ok; ++k) {
-                    size_t co = o + (size_t)k * 0x58;
-                    uintptr_t head;
-                    float v;
-                    memcpy(&head, buf + co + 0x10, 8);
-                    memcpy(&v, buf + co + 0x50, 4);
-                    if (!head || !mapped((void *)head) || !(v >= -2.0f && v <= 2.0f))
-                        ok = 0;
-                    else if (head != cand + (uintptr_t)k * 0x58 + 8)
-                        score++; /* a non-empty listener list */
-                }
-                if (ok && score > bestscore) {
-                    bestscore = score;
-                    best = cand;
-                }
-            }
-        }
-    }
-    free(buf);
-    if (best)
-        mlog("minimod: knob triple %p score=%d\n", (void *)best, bestscore);
-    return best;
+    return minimod_find_knob_props(base);
 }
 
 /* Every listener of a real property has a vtable inside the app's
