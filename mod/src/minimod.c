@@ -87,6 +87,7 @@
 #include "chop_ffi.h"
 #include "pads_ffi.h"
 #include "cfg_ffi.h"
+#include "input_ffi.h"
 #include "sample_ffi.h"
 #include "status_ffi.h"
 #include "paths_ffi.h"
@@ -126,6 +127,8 @@ static void mlog(const char *fmt, ...);
 static void toast(const char *text);
 #include "clock_ffi.h"
 static void *g_screen;
+static struct minimod_input g_input;
+static void input_context(struct minimod_input_context *ctx);
 static void looper_draw(void *g);
 static void looper_pump(void);
 static int prop_references(uintptr_t P, uintptr_t param);
@@ -323,7 +326,6 @@ static int g_midi_ready;
 /* A physical pad press identifies its pad through property 0 of the note event
  * (event+0x16), whose value is the bank's pad-note base plus the pad index.
  * Learn that base from a real pad press so MIDI can address the same row. */
-static int g_pad_prop_base = 0x75;
 static struct minimod_midi_state g_midi;
 
 static int midi_hook_site_ok(void)
@@ -578,9 +580,7 @@ static void do_autotrim(void);
 static volatile int g_shift;
 static volatile int g_erase_down;
 static volatile int g_buf_dirty; /* re-read the device rings on the audio thread */
-static volatile int g_last_pad = -1;
 static volatile int g_core_hit;
-static void *g_props;
 static int g_dbg;
 
 static void *sixteen_ctor(void *a, void *b, void *c, void *d)
@@ -680,7 +680,6 @@ static int g_hpss_names_ready;
 static int g_spectral_active;
 static volatile int g_hpss_menu;
 static volatile int g_hpss_busy;
-static volatile int g_hpss_sel;
 static volatile int g_bass_edit;
 static float g_bass_knob[3] = {0.52f, 0.18f, 0.56f};
 static volatile unsigned g_bass_preview_notes;
@@ -710,25 +709,15 @@ static void bass_preview_set_active(int active)
  * Ghidra FUN_0150dbc0(surface + 0x2da8, delta). Unlike the float broadcaster,
  * this is an event: repeated identical deltas must each move the selection.
  * Learn the surface from the same native event that opens SAMPLE OPTIONS. */
-static uintptr_t g_data_signal;
 static void (*orig_data_signal)(void *, int);
 static void hpss_repaint(void);
 
 static void data_signal(void *self, int delta)
 {
-    if ((uintptr_t)self == __atomic_load_n(&g_data_signal, __ATOMIC_ACQUIRE) &&
-        (g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))) {
-        if (g_hpss_menu && !g_hpss_busy && delta) {
-            if (!g_bass_edit) {
-                g_hpss_sel = (g_hpss_sel + (delta > 0 ? 1 : 7)) % 8;
-                hpss_repaint();
-                mlog("menu DATA delta=%d sel=%d\n", delta, g_hpss_sel);
-            }
-        }
-        return; /* consume only this surface's DATA event, including busy */
-    }
-    if (orig_data_signal)
-        orig_data_signal(self, delta);
+    struct minimod_input_context ctx;
+    input_context(&ctx);
+    minimod_input_data(&g_input, (uintptr_t)self, delta, ctx,
+                       (minimod_data_signal_fn)orig_data_signal);
 }
 
 static void hpss_make_names(void)
@@ -1159,7 +1148,7 @@ static void hpss_open(void)
     if (!sample_page_visible() || g_hpss_busy)
         return;
     g_hpss_menu = 1;
-    g_hpss_sel = 0;
+    g_input.menu_selection = 0;
     g_bass_edit = 0;
     bass_preview_set_active(0);
     g_hpss_data_down = 0;
@@ -1186,20 +1175,20 @@ static void hpss_activate(void)
         fmbass_start();
         return;
     }
-    if (g_hpss_sel == 0)
+    if (g_input.menu_selection == 0)
         hpss_start();
-    else if (g_hpss_sel == 1)
+    else if (g_input.menu_selection == 1)
         spectral_start();
-    else if (g_hpss_sel >= 2 && g_hpss_sel <= 4)
-        effect_start(g_hpss_sel - 1);
-    else if (g_hpss_sel == 5) {
+    else if (g_input.menu_selection >= 2 && g_input.menu_selection <= 4)
+        effect_start(g_input.menu_selection - 1);
+    else if (g_input.menu_selection == 5) {
         g_bass_edit = 1;
         bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
         bass_preview_set_active(1);
         hpss_set_status(g_bass_preview_available ? "" : "Live preview unavailable");
         hpss_repaint();
     }
-    else if (g_hpss_sel == 6) {
+    else if (g_input.menu_selection == 6) {
         if (looper_activate()) {
             g_buf_dirty = 1; /* re-read the device rings on its own thread */
             g_hpss_menu = 0;
@@ -1461,7 +1450,7 @@ static void hpss_draw_menu(void *g)
             "Bass Synth", "Live Looper", "Close"};
         for (int i = 0; i < 8; ++i) {
             int row_y = y + 26 + i * 20;
-            if (g_hpss_sel == i) {
+            if (g_input.menu_selection == i) {
                 draw_colour(g, 0xff3a2a10);
                 draw_rect(g, x + 6, row_y, w - 12, 19);
                 draw_colour(g, 0xffffffff);
@@ -1516,7 +1505,7 @@ static void buttons(void *event)
         uintptr_t context = 0, surface = 0;
         memcpy(&context, g_hpss_btn, sizeof context);
         if (context && rd(context + 0x10, &surface, sizeof surface) && surface)
-            __atomic_store_n(&g_data_signal, surface + 0x2da8, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_input.data_target, surface + 0x2da8, __ATOMIC_RELEASE);
     }
     if (code == 0x6f) { /* DATA press/turn */
         static int consumed;
@@ -1624,8 +1613,8 @@ static void buttons(void *event)
     }
     if (code == 0x28 && down) {
         g_midi.levels = !g_midi.levels;
-        if (g_midi.levels && g_last_pad >= 0 && g_last_pad < 16)
-            g_midi.pad_level_byte = g_last_pad;
+        if (g_midi.levels && g_input.last_pad >= 0 && g_input.last_pad < 16)
+            g_midi.pad_level_byte = g_input.last_pad;
         mlog("minimod: 16 LEVELS mode -> %d\n", g_midi.levels);
         midi_hook_set(levels_active());
     }
@@ -1660,86 +1649,38 @@ static void buttons(void *event)
         orig_buttons(event);
 }
 
-static int g_replaying_pad;
-static struct {
-    void *input;
-    int src, pad;
-    void *props;
-    float vel;
-    int valid;
-} g_pad_rec[128];
-
-/* Pads whose note-on the app may have seen; a note-off that arrives while the
- * looper owns the pads is replayed when the view closes. */
-static unsigned char g_held_on[128];
-static void *g_held_input[128];
-static int g_held_src[128];
+static void input_context(struct minimod_input_context *ctx)
+{
+    ctx->looper_open = looper_is_open();
+    ctx->spectral_active = __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE);
+    ctx->preview_active = __atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE);
+    ctx->menu_open = g_hpss_menu;
+    ctx->bass_edit = g_bass_edit;
+    ctx->busy = g_hpss_busy;
+    ctx->shift = g_shift;
+    ctx->erase = g_erase_down;
+    ctx->repaint = hpss_repaint;
+}
 
 static void release_held_pads(void)
 {
-    for (int p = 0; p < 128; ++p) {
-        if (!g_held_on[p])
-            continue;
-        g_held_on[p] = 0;
-        if (orig_note_off)
-            orig_note_off(g_held_input[p], g_held_src[p], p);
-    }
+    minimod_input_release_held(&g_input, (minimod_note_off_fn)orig_note_off);
 }
 
 static void note_on(void *input, int src, int pad, void *props, float vel)
 {
-    if (pad >= 0 && pad < 128) {
-        g_held_on[pad] = 1;
-        g_held_input[pad] = input;
-        g_held_src[pad] = src;
-    }
-    if (looper_is_open() && pad >= 0) {
-        if (pad < LOOPER_PADS)
-            looper_pad(pad, g_shift, g_erase_down); /* the looper owns the pads */
-        return;
-    }
-    if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
-        return;
-    if (__atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE) &&
-        pad >= 0 && pad < 16) {
-        bass_preview_note((unsigned)pad, vel);
-        __atomic_add_fetch(&g_bass_preview_notes, 1, __ATOMIC_RELAXED);
-        return;
-    }
-    g_last_pad = pad;
-    g_props = props;
-    if (g_midi.pad_prop_pending) {
-        g_pad_prop_base = g_midi.pad_prop_val - pad;
-        g_midi.pad_prop_pending = 0;
-    }
-
-    if (!g_replaying_pad && pad >= 0 && pad < 128) {
-        /* remember a real pad press so the page can be re-selected later */
-        g_pad_rec[pad].input = input;
-        g_pad_rec[pad].src = src;
-        g_pad_rec[pad].pad = pad;
-        g_pad_rec[pad].props = props;
-        g_pad_rec[pad].vel = vel;
-        g_pad_rec[pad].valid = 1;
-    }
-    if (debug_mode && g_dbg < 120) {
-        g_dbg++;
-        mlog("minimod: note_on pad=%d vel=%.2f\n", pad, (double)vel);
-    }
-    if (orig_note_on)
-        orig_note_on(input, src, pad, props, vel);
+    struct minimod_input_context ctx;
+    input_context(&ctx);
+    minimod_input_note_on(&g_input, (uintptr_t)input, src, pad, (uintptr_t)props, vel,
+                          ctx, (minimod_note_on_fn)orig_note_on);
 }
 
 static void note_off(void *input, int src, int pad)
 {
-    if (pad >= 0 && pad < 128)
-        g_held_on[pad] = 0;
-    if (looper_is_open() && pad >= 0)
-        return;
-    if (g_hpss_menu && g_bass_edit && pad >= 0 && pad < 16)
-        return;
-    if (orig_note_off)
-        orig_note_off(input, src, pad);
+    struct minimod_input_context ctx;
+    input_context(&ctx);
+    minimod_input_note_off(&g_input, (uintptr_t)input, src, pad, ctx,
+                           (minimod_note_off_fn)orig_note_off);
 }
 
 /* The firmware's audio writer accepts planar float channels, then converts
@@ -2021,33 +1962,11 @@ static void audio_writer(void *self, void *input, size_t frames, int offset)
     }
 }
 
-static void *g_cs_self;
 
 static void cs_event(void *self, int code, void *payload)
 {
-#if MINIMOD_LOG
-    {
-        static int n;
-        if (n < 200) {
-            unsigned char raw[16];
-            memset(raw, 0, sizeof raw);
-            if (payload && rd((uintptr_t)payload, raw, sizeof raw)) {
-                n++;
-                mlog("cs %02x | %02x%02x%02x%02x %02x%02x%02x%02x\n",
-                     code & 0xff, raw[0], raw[1], raw[2], raw[3],
-                     raw[4], raw[5], raw[6], raw[7]);
-            }
-        }
-    }
-#endif
-    if (self)
-        g_cs_self = self;
-    if (debug_mode && g_dbg < 160) {
-        g_dbg++;
-        mlog("minimod: cs code=0x%02x\n", code & 0xff);
-    }
-    if (orig_cs)
-        orig_cs(self, code, payload);
+    minimod_input_surface(&g_input, (uintptr_t)self, code, (uintptr_t)payload,
+                          (minimod_surface_fn)orig_cs);
 }
 
 
@@ -3004,13 +2923,13 @@ static void commit_trim(void)
             /* The page draws its trim only when it reloads the pad, so repeat
              * the pad press that is already in progress. */
             {
-                int pd = g_last_pad;
-                if (pd >= 0 && pd < 128 && g_pad_rec[pd].valid && orig_note_on) {
-                    g_replaying_pad = 1;
-                    orig_note_on(g_pad_rec[pd].input, g_pad_rec[pd].src,
-                                 g_pad_rec[pd].pad, g_pad_rec[pd].props,
-                                 g_pad_rec[pd].vel);
-                    g_replaying_pad = 0;
+                int pd = g_input.last_pad;
+                if (pd >= 0 && pd < 128 && g_input.pad_rec[pd].valid && orig_note_on) {
+                    g_input.replaying = 1;
+                    orig_note_on((void *)g_input.pad_rec[pd].input, g_input.pad_rec[pd].src,
+                                 g_input.pad_rec[pd].pad, (void *)g_input.pad_rec[pd].props,
+                                 g_input.pad_rec[pd].velocity);
+                    g_input.replaying = 0;
                     mlog("minimod: re-selected pad %d to refresh the page\n", pd);
                 }
             }
@@ -3113,11 +3032,11 @@ static void commit_trim(void)
         *(uintptr_t *)ev = g_last_press_obj;
         ev[8] = 0x06;
         ev[9] = 0x7f;
-        g_replaying_pad = 1;
+        g_input.replaying = 1;
         orig_buttons(ev);
         ev[9] = 0x00;
         orig_buttons(ev);
-        g_replaying_pad = 0;
+        g_input.replaying = 0;
         mlog("minimod: re-pressed %p to refresh the page\n", (void *)g_last_press_obj);
     }
     /* Repaint the page itself: with the property values written above, this is
@@ -3521,7 +3440,7 @@ static void midi_note_event(void *app, void *context, void *event,
  * the knobs keep (boundary object and layer). */
 static void do_autotrim(void)
 {
-    int pad = g_last_pad >= 0 && g_last_pad < 128 ? g_last_pad : 0;
+    int pad = g_input.last_pad >= 0 && g_input.last_pad < 128 ? g_input.last_pad : 0;
     uintptr_t array = 0, end = 0, state = 0, layers = 0, sample = 0;
     if (!g_surface || !g_control_context || !orig_setctl ||
         !rd((uintptr_t)g_surface + 0x2808, &array, 8) ||

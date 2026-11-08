@@ -147,6 +147,28 @@ fn room_for_pads(base: usize, job: &Job, effect: bool) -> Result<(), Report> {
     })
 }
 
+/// Put the source audio back when the action took a backup of it.
+///
+/// Every exit path needs this: the bass synth overwrites the pad's file while it
+/// renders, so a cancelled or failed job would otherwise leave the user's sample
+/// modified.
+fn restore_source(job: &Job) -> bool {
+    if job.source_audio_backup.is_null() {
+        return true;
+    }
+    // SAFETY: the path is NUL-terminated by the glue and the backup is the
+    // job's own buffer.
+    let restored = unsafe {
+        wav_ffi::bass_source_restore(
+            job.source_path.as_ptr().cast(),
+            job.source_data_offset,
+            job.source_audio_backup,
+            job.source_audio_bytes,
+        )
+    };
+    restored != 0
+}
+
 /// Write an effect or synth take to a pad, restoring the source if it moved.
 ///
 /// # Safety
@@ -186,19 +208,7 @@ unsafe fn extract_take(base: usize, job: &Job, hooks: &Hooks) -> Result<(), Repo
         // SAFETY: the caller guarantees this is the app's restore.
         unsafe { restore() };
     }
-    let source_ok = job.source_audio_backup.is_null() || {
-        // SAFETY: the path is NUL-terminated by the glue and the backup is the
-        // job's own buffer.
-        let restored = unsafe {
-            wav_ffi::bass_source_restore(
-                job.source_path.as_ptr().cast(),
-                job.source_data_offset,
-                job.source_audio_backup,
-                job.source_audio_bytes,
-            )
-        };
-        restored != 0
-    };
+    let source_ok = restore_source(job);
     let _ = base;
     if !source_ok {
         return Err(Report {
