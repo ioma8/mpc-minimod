@@ -73,6 +73,7 @@
 #include "hpss_ffi.h"
 #include "spectral_ffi.h"
 #include "h3m_effect.h"
+#include "routing_ffi.h"
 #include "audio_ffi.h"
 #include "audio_ffi.h"
 #include "substitute_ffi.h"
@@ -2826,52 +2827,41 @@ static int g_in_cc_replay;
 
 static void cc_capture(void *ev, unsigned raw, float lo, float range)
 {
-    if (!g_in_cc_replay && ev && ((unsigned char *)ev)[8] == 0x13) {
-        looper_set_master(raw); /* MAIN VOLUME drives the loops ... */
+    unsigned cc = ev ? ((unsigned char *)ev)[8] : 0xffffu;
+    struct minimod_route r = minimod_cc_route(
+        g_in_cc_replay ? 1 : 0, cc, raw, range, looper_is_open() ? 1 : 0,
+        g_hpss_menu ? 1 : 0, g_bass_edit ? 1 : 0, g_hpss_busy ? 1 : 0,
+        __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE) == 1 ? 1 : 0,
+        g_lat_extra);
+    switch (r.kind) {
+    case 1: /* MAIN VOLUME drives the loops, then the app's own mix */
+        looper_set_master(raw);
         if (minimod_now_ms() > g_cfg_saved_at + 5000) {
             g_cfg_saved_at = minimod_now_ms();
             looper_cfg_save();
         }
-        /* ... and the app's own mix, so fall through to orig_cc */
-    }
-    if (!g_in_cc_replay && ev && looper_is_open()) {
-        unsigned cc = ((unsigned char *)ev)[8];
-        if (cc == 0x10) { /* K1: 1 ms per step, clamped to +-400 ms */
-            static int k1_last = -1;
-            if (k1_last < 0) {
-                k1_last = (int)raw;
-            } else if ((int)raw != k1_last) {
-                long frames = (long)g_lat_extra +
-                              ((long)raw - (long)k1_last) * 44L;
-                if (frames < -400L * 44)
-                    frames = -400L * 44;
-                if (frames > 400L * 44)
-                    frames = 400L * 44;
-                g_lat_extra = (int)frames;
-                if (minimod_now_ms() > g_cfg_saved_at + 5000) {
-                    g_cfg_saved_at = minimod_now_ms();
-                    looper_cfg_save();
-                }
-                k1_last = (int)raw;
-                char line[40];
-                snprintf(line, sizeof line, "TRIM %+d ms", (int)(frames / 44));
-                looper_notice(line);
-            }
-            return;
+        break;
+    case 2: { /* trim: the knob's movement, one millisecond per step */
+        long frames = r.value;
+        g_lat_extra = (int)frames;
+        if (minimod_now_ms() > g_cfg_saved_at + 5000) {
+            g_cfg_saved_at = minimod_now_ms();
+            looper_cfg_save();
         }
-        if (cc != 0x13)
-            return; /* the looper owns the other controls while it is open */
+        char line[40];
+        snprintf(line, sizeof line, "TRIM %+ld ms", frames / 44L);
+        looper_notice(line);
+        return;
     }
-    if (!g_in_cc_replay && ev && g_hpss_menu && g_bass_edit && !g_hpss_busy) {
-        unsigned cc = ((unsigned char *)ev)[8];
-        int knob = cc == 0x10 ? 0 : cc == 0x11 ? 1 : cc == 0x12 ? 2 : -1;
-        if (knob >= 0) {
-            float scale = range > 1.0f ? range : 127.0f;
-            g_bass_knob[knob] = fminf(1.f, fmaxf(0.f, raw / scale));
-            bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
-            hpss_repaint();
-            return;
-        }
+    case 3: /* the bass control page owns the three knobs */
+        g_bass_knob[r.value] = r.amount;
+        bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
+        hpss_repaint();
+        return;
+    case 4: /* swallowed: a modal screen keeps the app away from the sample */
+        return;
+    default:
+        break;
     }
     /* Keep the stock decoder/transport intact. Only DATA reaches the native
      * integer signal while our modal menu owns controls; knobs must not edit
