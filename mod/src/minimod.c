@@ -87,6 +87,7 @@
 #include "pads_ffi.h"
 #include "cfg_ffi.h"
 #include "props_ffi.h"
+#include "autotrim_ffi.h"
 #include "buttons_ffi.h"
 #include "spectral_ffi.h"
 #include "menu_ffi.h"
@@ -402,7 +403,6 @@ static int bump_octave(int d)
 /* SHIFT+B3 cycles 3 % -> 6 % -> 9 % -> untrimmed while SHIFT stays held;
  * releasing SHIFT resets the cycle. */
 static int g_trim_step;
-static double g_trim_ratio;
 static int g_b3_down;      /* edge detection: the button auto-repeats while held */
 
 
@@ -2743,65 +2743,17 @@ static void midi_note_event(void *app, void *context, void *event,
  * the knobs keep (boundary object and layer). */
 static void do_autotrim(void)
 {
-    int pad = g_input.last_pad >= 0 && g_input.last_pad < 128 ? g_input.last_pad : 0;
-    uintptr_t array = 0, end = 0, state = 0, layers = 0, sample = 0;
-    if (!g_surface || !g_control_context || !orig_setctl ||
-        !rd((uintptr_t)g_surface + 0x2808, &array, 8) ||
-        !rd((uintptr_t)g_surface + 0x2810, &end, 8) ||
-        !array || end < array || (end-array)/8 <= (unsigned)pad ||
-        !rd(array + pad*8, &state, 8) || !state ||
-        !rd(state + 0x22e8, &layers, 8) || !layers ||
-        !rd(layers + 0x4a8, &sample, 8) || !sample) {
-        mlog("minimod: native trim: no sample for pad %d\n", pad);
-        return;
-    }
-    unsigned frames = frames_of_sample(sample), fr=0, rate=0, ch=0, off=0, bytes=0;
-    unsigned first=0, last=0, format=0;
-    char path[512] = {0};
-    if (frames) {
-        if (path_from_object(sample, frames, path, sizeof path))
-            mlog("minimod: path from the sample object -> %s\n", path);
-        else if (wav_path_of(sample, frames, path, sizeof path))
-            ;
-        else if (find_wav_by_frames(frames, path, sizeof path))
-            mlog("minimod: recorded sample (no path yet) -> %s\n", path);
-    }
-    if (!frames || !path[0] ||
-        !wav_info(path, &fr, &rate, &ch, &off, &bytes, &format) || fr != frames) {
-        return;
-    }
-    if (g_trim_step >= 3) {
-        /* fourth press: remove the trim entirely */
-        first = 0;
-        last = frames ? frames - 1 : 0;
-    } else {
-        g_trim_ratio = g_trim_step == 0 ? 0.03
-                     : g_trim_step == 1 ? 0.06 : 0.09;
-        int ok = wav_edges(path, fr, off, ch, bytes, format, g_trim_ratio,
-                           &first, &last);
-        g_trim_ratio = 0.0;
-        if (!ok)
-            return;
-    }
-    /* Arm the toast first: the trim's own repaint is what paints the page, so
-     * the box has to be set before the dispatch or it only appears on the next
-     * unrelated repaint (previously SHIFT release). */
-    switch (g_trim_step) {
-    case 0: toast("Trim 3% of peak"); break;
-    case 1: toast("Trim 6% of peak"); break;
-    case 2: toast("Trim 9% of peak"); break;
-    default: toast("Trim cleared"); break;
-    }
-    orig_setctl(g_control_context, g_surface, pad, 0x462, 0.0f);
-    orig_setctl(g_control_context, g_surface, pad, 0x466, (float)(last+1));
-    orig_setctl(g_control_context, g_surface, pad, 0x462, (float)first);
-    {
-        void *comp = g_paint_comp ? g_paint_comp : g_screen;
-        if (orig_repaint && comp)
-            orig_repaint(comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
-    }
-    mlog("minimod: native trim pad=%d path='%s' frames=%u bounds=%u..%u\n",
-         pad, path, frames, first, last+1);
+    struct minimod_autotrim_hooks hooks = {0};
+    hooks.set_control = (void (*)(void *, void *, int32_t, int32_t, float))orig_setctl;
+    hooks.repaint = (void (*)(void *, uint64_t, uint64_t))orig_repaint;
+    struct minimod_autotrim_context context = {
+        .surface = (uintptr_t)g_surface,
+        .control = (uintptr_t)g_control_context,
+        .component = (uintptr_t)(g_paint_comp ? g_paint_comp : g_screen),
+        .step = g_trim_step,
+        .last_pad = g_input.last_pad,
+    };
+    minimod_autotrim_run(&context, &hooks);
 }
 
 

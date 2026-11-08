@@ -13,6 +13,7 @@
 
 pub mod analysis_ffi;
 pub mod audio;
+pub mod autotrim;
 pub mod bass_ffi;
 pub mod buttons;
 pub mod cfg;

@@ -341,6 +341,19 @@ app's button hook, which takes the event pointer.  It read whatever was in the
 argument register as an event and the app died in the first frame.  A logging
 build narrowed it to the phase-0 path; the signature was the difference.
 
+## AutoTrim
+
+`autotrim` is the `SHIFT`+soft-key press: it walks the surface's pad tables to the
+sample, resolves the WAV, asks `trim` for the audible bounds and applies them
+through the app's own control surface, so the page redraws exactly as if the
+markers had been moved.  The fourth press clears the trim.
+
+It is wired and the cycle runs four times with the app stable, but **the trim's
+effect is not asserted by any test in this lab**: the older `emulator_autotrim.py`
+compares screenshots, and its QMP screendump targets the other lab's setup.  What
+is proven here is that the press is handled, the app survives it and every other
+feature still passes.
+
 ## What the last 3 287 lines are
 
 The glue that is left is one unit, and it is worth being precise about why it
