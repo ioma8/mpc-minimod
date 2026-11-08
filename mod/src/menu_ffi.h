@@ -21,6 +21,9 @@ struct minimod_menu_hooks {
     void (*start_spectral)(void);
     void (*start_bass)(void);
     void (*restore_chop)(void);
+    void (*start_bass_page)(void);
+    int32_t (*start_looper)(void);
+    void (*set_status)(const char *text);
 };
 
 int32_t minimod_menu_open(struct minimod_menu *state,

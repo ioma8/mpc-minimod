@@ -54,8 +54,12 @@ pub struct Hooks {
     pub start_bass: Option<unsafe extern "C" fn()>,
     /// Put the chop mode back.
     pub restore_chop: Option<unsafe extern "C" fn()>,
-    /// Whether the page is visible.
-    pub page_visible: Option<unsafe extern "C" fn() -> i32>,
+    /// Show the bass control page.
+    pub start_bass_page: Option<unsafe extern "C" fn()>,
+    /// Open the live looper.
+    pub start_looper: Option<unsafe extern "C" fn() -> i32>,
+    /// Replace the status line.
+    pub set_status: Option<unsafe extern "C" fn(*const u8)>,
 }
 
 /// Open the menu, if the page is showing and nothing is running.
@@ -119,7 +123,28 @@ pub unsafe fn activate(state: &mut State, hooks: Hooks) {
                 unsafe { start(state.selection - 1) };
             }
         }
-        ROW_BASS | ROW_LOOPER => repaint(hooks),
+        ROW_BASS => {
+            if let Some(status) = hooks.set_status {
+                // SAFETY: the message is a static, NUL-terminated string.
+                unsafe { status(c"Live preview unavailable".as_ptr().cast()) };
+            }
+            if let Some(page) = hooks.start_bass_page {
+                // SAFETY: the caller's callback.
+                unsafe { page() };
+            }
+            repaint(hooks);
+        }
+        ROW_LOOPER => {
+            if let Some(activate) = hooks.start_looper {
+                // SAFETY: the caller's callback.
+                let opened = unsafe { activate() };
+                if opened != 0 {
+                    state.open = 0;
+                    state.bass_edit = 0;
+                }
+            }
+            repaint(hooks);
+        }
         _ => {
             close(state, hooks);
         }
@@ -236,7 +261,9 @@ mod tests {
             start_spectral: None,
             start_bass: None,
             restore_chop: None,
-            page_visible: None,
+            start_bass_page: None,
+            start_looper: None,
+            set_status: None,
         }
     }
 

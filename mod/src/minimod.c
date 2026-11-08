@@ -1170,39 +1170,37 @@ static void hpss_close(void)
     hpss_repaint();
 }
 
+static void bass_page_open(void)
+{
+    g_menu.bass_edit = 1;
+    bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
+    bass_preview_set_active(1);
+    hpss_set_status(g_bass_preview_available ? "" : "Live preview unavailable");
+}
+
+static int looper_menu_open(void)
+{
+    int opened = looper_activate();
+    if (opened) {
+        g_buf_dirty = 1; /* re-read the device rings on its own thread */
+        bass_preview_set_active(0);
+        looper_pump();
+    }
+    return opened;
+}
+
 static void hpss_activate(void)
 {
-    if (g_hpss_busy)
-        return;
-    if (g_bass_edit) {
-        fmbass_start();
-        return;
-    }
-    if (g_menu.selection == 0)
-        hpss_start();
-    else if (g_menu.selection == 1)
-        spectral_start();
-    else if (g_menu.selection >= 2 && g_menu.selection <= 4)
-        effect_start(g_menu.selection - 1);
-    else if (g_menu.selection == 5) {
-        g_bass_edit = 1;
-        bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
-        bass_preview_set_active(1);
-        hpss_set_status(g_bass_preview_available ? "" : "Live preview unavailable");
-        hpss_repaint();
-    }
-    else if (g_menu.selection == 6) {
-        if (looper_activate()) {
-            g_buf_dirty = 1; /* re-read the device rings on its own thread */
-            g_hpss_menu = 0;
-            g_bass_edit = 0;
-            bass_preview_set_active(0);
-            looper_pump();
-        }
-        hpss_repaint();
-    }
-    else
-        hpss_close();
+    struct minimod_menu_hooks hooks = {0};
+    hooks.repaint = hpss_repaint;
+    hooks.start_split = hpss_start;
+    hooks.start_effect = effect_start;
+    hooks.start_spectral = spectral_start;
+    hooks.start_bass = fmbass_start;
+    hooks.start_bass_page = bass_page_open;
+    hooks.start_looper = looper_menu_open;
+    hooks.set_status = hpss_set_status;
+    minimod_menu_activate(&g_menu, &hooks);
 }
 
 static void draw_colour(void *g, uint32_t v);
