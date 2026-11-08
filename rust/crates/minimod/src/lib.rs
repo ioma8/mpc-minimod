@@ -37,6 +37,7 @@ pub mod page;
 pub mod paint;
 pub mod paths;
 pub mod paths_ffi;
+pub mod props;
 pub mod routing;
 pub mod sample;
 pub mod selection;

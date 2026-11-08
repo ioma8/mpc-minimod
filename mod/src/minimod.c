@@ -86,6 +86,7 @@
 #include "chop_ffi.h"
 #include "pads_ffi.h"
 #include "cfg_ffi.h"
+#include "props_ffi.h"
 #include "buttons_ffi.h"
 #include "spectral_ffi.h"
 #include "menu_ffi.h"
@@ -2047,62 +2048,7 @@ static void probe_node(uintptr_t param)
  * mapped node and P+0x50 a plausible float. */
 static uintptr_t prop_of_param(uintptr_t param)
 {
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    uintptr_t result = 0;
-    for (int r = 0; r < g_nrng && !result; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && !result; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && !result; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if ((q & ~(uintptr_t)3) != param)
-                    continue;
-                uintptr_t node = a + o - 0x18;
-                for (int step = 0; step < 8 && !result; ++step) {
-                    uintptr_t next = 0;
-                    if (!rd(node + 8, &next, 8) || !next || !mapped((void *)next))
-                        break;
-                    uintptr_t cand = next - 8;
-                    uintptr_t head = 0;
-                    float c50 = 0;
-                    /* The image holds the class prototype of every property; it
-                     * matches structurally but is never the live one. */
-                    if (cand >= base && cand < base + 0x9000000)
-                        ; /* reject below */
-                    else if (rd(cand + 0x10, &head, 8) && head && mapped((void *)head) &&
-                             rd(cand + 0x50, &c50, 4) && c50 >= -2.0f && c50 <= 2.0f) {
-                        /* prove the chain from head reaches our node */
-                        uintptr_t w = head;
-                        for (int i = 0; i < 32 && w; ++i) {
-                            if (w == node) {
-                                result = cand;
-                                break;
-                            }
-                            uintptr_t nx = 0;
-                            if (!rd(w + 8, &nx, 8) || !nx || !mapped((void *)nx))
-                                break;
-                            if (nx == cand + 8)
-                                break;
-                            w = nx;
-                        }
-                    }
-                    node = next;
-                    if (node == cand + 8)
-                        break;
-                }
-            }
-        }
-    }
-    free(buf);
-    return result;
+    return minimod_prop_of_param(param, base);
 }
 
 /* The app's own CC path: 0x159f230(range, event, raw) divides raw by range and
