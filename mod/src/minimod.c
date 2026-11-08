@@ -73,6 +73,7 @@
 #include "hpss.h"
 #include "spectral.h"
 #include "h3m_effect.h"
+#include "selection_ffi.h"
 #include "chop_ffi.h"
 #include "pads_ffi.h"
 #include "cfg_ffi.h"
@@ -983,7 +984,22 @@ static void hpss_writer_hook(void *closure, void *block)
 
 static int hpss_read_sample(void *s, void **screen, uintptr_t *state,
                             uintptr_t *sample, unsigned *frames, unsigned *ch,
-                            unsigned *rate);
+                            unsigned *rate)
+{
+    uintptr_t found_screen = 0, found_state = 0, found_sample = 0;
+    unsigned found_frames = 0, found_ch = 0, found_rate = 0;
+    if (!minimod_sample_now(base, (uintptr_t)s, &found_screen, &found_state,
+                            &found_sample, &found_frames, &found_ch,
+                            &found_rate))
+        return 0;
+    if (screen) *screen = (void *)found_screen;
+    if (state) *state = found_state;
+    if (sample) *sample = found_sample;
+    if (frames) *frames = found_frames;
+    if (ch) *ch = found_ch;
+    if (rate) *rate = found_rate;
+    return 1;
+}
 
 static int hpss_sample_now(void **screen, uintptr_t *state, uintptr_t *sample,
                            unsigned *frames, unsigned *ch, unsigned *rate)
@@ -991,41 +1007,6 @@ static int hpss_sample_now(void **screen, uintptr_t *state, uintptr_t *sample,
     return hpss_read_sample(g_screen, screen, state, sample, frames, ch, rate);
 }
 
-static int hpss_read_sample(void *s, void **screen, uintptr_t *state,
-                            uintptr_t *sample, unsigned *frames, unsigned *ch,
-                            unsigned *rate)
-{
-    if (!s || FIELD(s, 0, uintptr_t) != base + A_SCREEN_VT)
-        return 0;
-    if (!FN(0x112fd50, int (*)(void *))(s))
-        return 0;
-    uintptr_t binding = 0, st = 0, layers = 0, smp = 0, meta = 0;
-    if (!rd((uintptr_t)s + 0x178, &binding, 8) || !binding ||
-        !rd(binding + 0x60, &st, 8) || !st ||
-        !rd(st + 0x22e8, &layers, 8) || !layers ||
-        !rd(layers + 0x4a8, &smp, 8) || !smp ||
-        !rd(smp + 0x130, &meta, 8) || !meta)
-        return 0;
-    unsigned short c = 0;
-    unsigned fr = 0, rt = 0;
-    if (!rd(meta, &c, 2) || !rd(meta + 4, &fr, 4) || !rd(meta + 8, &rt, 4))
-        return 0;
-    if ((c != 1 && c != 2) || !fr || rt < 8000 || rt > 192000)
-        return 0;
-    if (screen)
-        *screen = s;
-    if (state)
-        *state = st;
-    if (sample)
-        *sample = smp;
-    if (frames)
-        *frames = fr;
-    if (ch)
-        *ch = c;
-    if (rate)
-        *rate = rt;
-    return 1;
-}
 
 
 

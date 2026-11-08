@@ -25,6 +25,7 @@ pub mod pads;
 pub mod paths;
 pub mod paths_ffi;
 pub mod sample;
+pub mod selection;
 pub mod status;
 pub mod status_ffi;
 pub mod trim;
