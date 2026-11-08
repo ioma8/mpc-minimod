@@ -86,26 +86,6 @@ pub fn verify(sample: usize, positions: &[u32], frames: u32) -> bool {
     true
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{MAX_SLICES, SAMPLE_METADATA, SLICE_BYTES, SLICE_END, SLICE_START};
-
-    #[test]
-    fn the_object_layout_matches_the_reverse_engineering() {
-        assert_eq!(SAMPLE_METADATA, 0x130);
-        assert_eq!(SLICE_BYTES, 8);
-        assert_eq!(MAX_SLICES, 128);
-        assert_eq!(SLICE_START, 0x78);
-        assert_eq!(SLICE_END, 0xd0);
-    }
-
-    #[test]
-    fn a_zero_sample_has_no_slices() {
-        assert!(super::slice_count(0).is_none());
-        assert!(!super::verify(0, &[0], 100));
-    }
-}
-
 /// The slice count of a sample, with the two pointers the app's Insert/Reset
 /// calls need.  Returns 0 when the sample is not chopped.
 ///
@@ -154,4 +134,24 @@ pub unsafe extern "C" fn minimod_spectral_verify(
     // SAFETY: the caller promises `positions` is readable for `count` entries.
     let positions = unsafe { core::slice::from_raw_parts(positions, count) };
     i32::from(verify(sample, positions, frames))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_SLICES, SAMPLE_METADATA, SLICE_BYTES, SLICE_END, SLICE_START};
+
+    #[test]
+    fn the_object_layout_matches_the_reverse_engineering() {
+        assert_eq!(SAMPLE_METADATA, 0x130);
+        assert_eq!(SLICE_BYTES, 8);
+        assert_eq!(MAX_SLICES, 128);
+        assert_eq!(SLICE_START, 0x78);
+        assert_eq!(SLICE_END, 0xd0);
+    }
+
+    #[test]
+    fn a_zero_sample_has_no_slices() {
+        assert!(super::slice_count(0).is_none());
+        assert!(!super::verify(0, &[0], 100));
+    }
 }
