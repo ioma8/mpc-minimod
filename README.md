@@ -76,12 +76,18 @@ cd mod && ./build.sh && ./pack.sh
 ```
 
 That writes `mod/build/minimod.zip` — the same package as the release.
+
+The mod is being rewritten in Rust, one validated module at a time; the live
+looper already runs the Rust engine. `rust/check.sh` runs formatting, clippy
+(warnings denied), the host tests and the aarch64 build. Status, the proof
+method and the findings: [`docs/RUST-PORT.md`](docs/RUST-PORT.md).
 Release description format and the complete feature overview are in
 [`RELEASE-NOTES.md`](RELEASE-NOTES.md).
 
 ## Docs
 
 - [`mod/README.md`](mod/README.md) — details, controls, hooks
+- [`docs/RUST-PORT.md`](docs/RUST-PORT.md) — the Rust rewrite: layout, lint policy, what is ported and how it is proven
 - [`AUTOTRIM-HANDOFF.md`](AUTOTRIM-HANDOFF.md) — how AutoTrim works
 - [`HPSS-HANDOFF.md`](HPSS-HANDOFF.md) — how SAMPLE OPTIONS / HPSS works and what was validated
 - [`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md) — the region detector and the in-place chop write

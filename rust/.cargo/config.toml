@@ -1,0 +1,4 @@
+# The device runs aarch64 Linux; zig supplies the cross toolchain on this Mac
+# (same compiler the C build used), so no aarch64 sysroot is needed here.
+[target.aarch64-unknown-linux-gnu]
+linker = "zig-cc-aarch64-linux-gnu"

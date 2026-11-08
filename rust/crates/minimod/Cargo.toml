@@ -1,0 +1,21 @@
+[package]
+name = "minimod"
+description = "LD_PRELOAD firmware mod for the Akai MPC Sample"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["audio", "dsp", "reverse-engineering"]
+categories = ["multimedia::audio"]
+readme = "../../README.md"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+minimod-dsp.workspace = true
+libc.workspace = true
+
+[lints]
+workspace = true

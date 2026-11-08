@@ -1,0 +1,17 @@
+#!/bin/sh
+# Cross linker driver for the aarch64 build.
+#
+# rustc asks for `-Wl,-O1`, which lld has deprecated and ignores; zig forwards
+# it verbatim and the linker then prints "ignoring deprecated linker
+# optimization setting" on every build.  Dropping the argument changes nothing
+# in the output and keeps the build silent.  Install this on PATH (or point
+# `[target.aarch64-unknown-linux-gnu] linker` at it) before building.
+args=
+for arg in "$@"; do
+    case $arg in
+        -Wl,-O0|-Wl,-O1|-Wl,-O2|-Wl,-O3|-Wl,-Os|-Wl,-Oz) ;;
+        *) args="$args $arg" ;;
+    esac
+done
+# shellcheck disable=SC2086 # word splitting is the point: rebuild the argv
+exec /opt/homebrew/bin/zig cc -target aarch64-linux-gnu $args
