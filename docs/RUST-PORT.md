@@ -125,6 +125,23 @@ Both passes were checked by rebuilding: the resulting `.so` is **byte-identical*
 instruction changed. The device artifact is the same binary the round-6 tests ran
 against.
 
+## Reopened: the looper volume, with a sharper symptom
+
+After the settings-file port the Live Looper test failed its volume assertion
+again (ratio 0.936 where 0.35..0.65 is expected) - and this time the new,
+direct assertion on `g_looper_master` **passed**: the master really is 64 in the
+mixer, yet the output level barely moved.
+
+So the CC path is fine and the problem is downstream: either the mixer does not
+apply `MASTER` on that path, or the test's output tap is not where the master is
+applied.  The next probe is to log `MASTER` and the first output sample inside
+the mix loop for a few blocks while the test drives the volume - that separates
+"the mixer ignores it" from "the tap measures before it".
+
+It is intermittent (three consecutive passes in round 12, one failure since), and
+the settings-file port is the newest change on that path, so the loader's
+`looper_set_master` at startup is the first thing to check.
+
 ## Closed: the looper volume "regression"
 
 The Live Looper test's MAIN VOLUME assertion failed twice with a ratio of 0.78
