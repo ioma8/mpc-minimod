@@ -47,9 +47,6 @@
 #endif
 /* Release builds carry no probes: the /run channels, the experimental hooks
  * and the polling threads are all compiled out unless MINIMOD_DEBUG is set. */
-#ifndef MINIMOD_DEBUG
-#define MINIMOD_DEBUG 0
-#endif
 
 #define A_SIXTEEN_CTOR 0x1545a50   /* 16 Levels screen constructor        */
 #define A_SIXTEEN_PROC 0x21472f0   /* 16 Levels pitch computation         */
@@ -130,86 +127,9 @@ static uintptr_t g_watch_page;
 static uintptr_t g_wpages[MAXW];
 static int g_nwpage;
 
-static int watch_has(uintptr_t page)
-{
-    for (int i = 0; i < g_nwpage; ++i)
-        if (g_wpages[i] == page)
-            return 1;
-    return 0;
-}
-
-static void watch_arm(uintptr_t addr, const char *why)
-{
-    uintptr_t page = addr & ~(uintptr_t)0xfff;
-    if (watch_has(page) || g_nwpage >= MAXW)
-        return;
-    int rc = mprotect((void *)page, 0x1000, PROT_READ);
-    if (rc == 0) {
-        g_wpages[g_nwpage++] = page;
-        mlog("minimod: watch(%s) %p page=%p\n", why, (void *)addr, (void *)page);
-    } else {
-        mlog("minimod: watch(%s) %p page=%p failed: %s\n", why, (void *)addr,
-             (void *)page, strerror(errno));
-    }
-}
 
 
-static void fault_handler(int sig, siginfo_t *si, void *ucv)
-{
-    ucontext_t *u = (ucontext_t *)ucv;
-    unsigned long pc = 0, lr = 0, sp = 0;
-    if (u) {
-        pc = (unsigned long)u->uc_mcontext.pc;
-        lr = (unsigned long)u->uc_mcontext.regs[30];
-        sp = (unsigned long)u->uc_mcontext.sp;
-    }
-    if (si && watch_has((uintptr_t)si->si_addr & ~(uintptr_t)0xfff)) {
-        mlog("minimod: WATCH addr=%p pc=%p lr=%p sp=%p\n", si->si_addr, (void *)pc,
-             (void *)lr, (void *)sp);
-        mprotect((void *)((uintptr_t)si->si_addr & ~(uintptr_t)0xfff), 0x1000,
-                 PROT_READ | PROT_WRITE);
-        for (int i = 0; i < g_nwpage; ++i)
-            if (g_wpages[i] == ((uintptr_t)si->si_addr & ~(uintptr_t)0xfff))
-                g_wpages[i] = 0;
-        return;
-    }
-    mlog("minimod: FAULT sig=%d addr=%p pc=%p lr=%p sp=%p\n", sig,
-         si ? si->si_addr : 0, (void *)pc, (void *)lr, (void *)sp);
-    /* The knob replay can end in a call through a bad pointer inside the app's
-     * follow-up work. That jump faults before touching the stack, so jumping
-     * back out of it is safe enough and keeps the app alive. */
-    if (si && si->si_signo == SIGSEGV) {
-        /* registers at the fault identify what the app was working on */
-        ucontext_t *uc = (ucontext_t *)ucv;
-        if (uc)
-            mlog("minimod: fault regs x0=%llx x1=%llx x2=%llx x3=%llx x19=%llx x20=%llx "
-                 "x21=%llx x22=%llx x23=%llx\n",
-                 (unsigned long long)uc->uc_mcontext.regs[0],
-                 (unsigned long long)uc->uc_mcontext.regs[1],
-                 (unsigned long long)uc->uc_mcontext.regs[2],
-                 (unsigned long long)uc->uc_mcontext.regs[3],
-                 (unsigned long long)uc->uc_mcontext.regs[19],
-                 (unsigned long long)uc->uc_mcontext.regs[20],
-                 (unsigned long long)uc->uc_mcontext.regs[21],
-                 (unsigned long long)uc->uc_mcontext.regs[22],
-                 (unsigned long long)uc->uc_mcontext.regs[23]);
-    }
-    if (g_cc_recover) {
-        g_cc_recover = 0;
-        siglongjmp(g_cc_jmp, 1);
-    }
-    _exit(139);
-    /* Never resume after a fatal signal: restore the default disposition and
-     * let the app die the way it would without the mod. */
-    {
-        struct sigaction dfl;
-        memset(&dfl, 0, sizeof dfl);
-        dfl.sa_handler = SIG_DFL;
-        sigemptyset(&dfl.sa_mask);
-        sigaction(sig, &dfl, 0);
-        raise(sig);
-    }
-}
+
 
 static volatile int g_cc_recover;
 static sigjmp_buf g_cc_jmp;
@@ -550,10 +470,6 @@ static int levels_active(void)
     return g_levels;
 }
 
-static int sixteen_tune_active(void)
-{
-    return g_octave != 0;
-}
 
 static int bump_octave(int d)
 {
@@ -661,32 +577,6 @@ static int wav_edges(const char *path, unsigned frames, unsigned dataoff,
             thr = (short)t;
             mlog("minimod: trim threshold ratio %.4f peak %d -> %d\n", ratio,
                  (int)peak, (int)thr);
-#if MINIMOD_DEBUG
-            if (getenv("MINIMOD_ENV")) {
-                /* level envelope in 32 windows, same scale as the threshold */
-                unsigned step = frames / 32 ? frames / 32 : 1;
-                for (unsigned w = 0; w < 32; ++w) {
-                    unsigned a = w * step, b = a + step;
-                    if (b > frames)
-                        b = frames;
-                    int wp = 0;
-                    for (unsigned f = a; f < b; f += 1) {
-                        unsigned char sb[8];
-                        if (!rd(0, sb, 0))
-                            break;
-                        /* read one frame */
-                        if (pread(fd, sb, (size_t)(bps * ch), (off_t)dataoff + (off_t)f * bps * ch) <= 0)
-                            break;
-                        for (unsigned c = 0; c < ch; ++c) {
-                            int v = pcm_at(sb + c * bps, bps, format);
-                            if (v < 0) v = -v;
-                            if (v > wp) wp = v;
-                        }
-                    }
-                    mlog("minimod: env %2u/%02u peak %5d\n", w, 32, (int)wp);
-                }
-            }
-#endif
         }
     }
     unsigned f = 0;
@@ -766,47 +656,6 @@ static struct {
 } g_tp[256];
 static int g_ntp;
 
-static void scan_trim_params(void)
-{
-    if (g_ntp)
-        return;
-    ranges_load();
-    uintptr_t want = base + A_TRIM_PARAM_VT;
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return;
-    for (int r = 0; r < g_nrng && g_ntp < 256; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ntp < 256;
-             a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && g_ntp < 256; o += 8) {
-                uintptr_t v;
-                memcpy(&v, buf + o, 8);
-                if (v != want)
-                    continue;
-                uintptr_t p = a + o;
-                float val = 0;
-                unsigned mn = 0, mx = 0;
-                rd(p + T_VALUE, &val, 4);
-                rd(p + T_MIN, &mn, 4);
-                rd(p + T_MAX, &mx, 4);
-                g_tp[g_ntp].p = (void *)p;
-                g_tp[g_ntp].val = val;
-                g_tp[g_ntp].mn = mn;
-                g_tp[g_ntp].mx = mx;
-                g_tp[g_ntp].bound = 0;
-                g_ntp++;
-            }
-        }
-    }
-    free(buf);
-    mlog("minimod: trimparams found=%d\n", g_ntp);
-}
 
 static unsigned frames_of_sample(uintptr_t sample)
 {
@@ -852,51 +701,6 @@ static int page_layers(uintptr_t param, uintptr_t *layers, uintptr_t *instr)
  * vtable is app+0x6e08a10 and which keeps the property pointer at +0x20. */
 #define A_BINDING_VT 0x6e08a10
 
-static uintptr_t find_prop_by_binding(float cur)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    uintptr_t want = base + A_BINDING_VT, hit = 0;
-    for (int r = 0; r < g_nrng && !hit; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && !hit; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && !hit; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (q != want)
-                    continue;
-                uintptr_t obj = a + o, p20 = 0;
-                if (!rd(obj + 0x20, &p20, 8) || !p20)
-                    continue;
-                uintptr_t cands[2] = {p20 & ~(uintptr_t)0xf,
-                                      (p20 & ~(uintptr_t)0xf) - 0x10};
-                for (int k = 0; k < 2 && !hit; ++k) {
-                    uintptr_t c = cands[k];
-                    float v50 = 0;
-                    if ((c & 7) || !c || !mapped((void *)c))
-                        continue;
-                    if (!rd(c + 0x50, &v50, 4) ||
-                        !(v50 >= -0.001f && v50 <= 1.001f))
-                        continue;
-                    float d = v50 - cur;
-                    if (d < 0)
-                        d = -d;
-                    if (d <= 0.02f)
-                        hit = c;
-                }
-            }
-        }
-    }
-    free(buf);
-    return hit;
-}
 
 /* Properties seen in a real broadcast; the newest 256 are kept. */
 static struct {
@@ -945,80 +749,10 @@ static uintptr_t broadcast_prop(uintptr_t param, float cur)
 }
 
 /* ------------------------------------------------------------ app screens */
-static int is_info_struct(uintptr_t info)
-{
-    unsigned short ch = 0;
-    unsigned fr = 0, rt = 0;
-    if (!info || !rd(info, &ch, 2))
-        return 0;
-    rd(info + 4, &fr, 4);
-    rd(info + 8, &rt, 4);
-    return (ch == 1 || ch == 2) && fr > 0 && rt >= 8000 && rt <= 192000;
-}
 
 
 static int find_displayed_sample(unsigned *frames, char *path, size_t pathsz);
-static void *find_sample_screen(void)
-{
-    ranges_load();
-    uintptr_t want = base + 0x6e212a0; /* SampleModeScreen vtable */
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    void *found = 0;
-    for (int r = 0; r < g_nrng && !found; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && !found; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && g_ntp < 256; o += 8) {
-                uintptr_t v;
-                memcpy(&v, buf + o, 8);
-                if (v == want) {
-                    found = (void *)(a + o);
-                    break;
-                }
-            }
-        }
-    }
-    free(buf);
-    return found;
-}
 
-static int find_displayed_sample(unsigned *frames, char *path, size_t pathsz)
-{
-    void *screen = find_sample_screen();
-    if (!screen) {
-        mlog("minimod: no Sample screen found\n");
-        return 0;
-    }
-    for (int off = 0; off < 0x800; off += 8) {
-        uintptr_t child = 0;
-        if (!rd((uintptr_t)screen + off, &child, 8) || !child)
-            continue;
-        if (!mapped((void *)child) || child < 0x10000)
-            continue;
-        uintptr_t info = 0;
-        if (!rd(child + 0x130, &info, 8) || !is_info_struct(info))
-            continue;
-        unsigned fr = 0, rate = 0;
-        rd(info + 4, &fr, 4);
-        rd(info + 8, &rate, 4);
-        *frames = fr;
-        /* The old path lookup asked for a WAV of zero frames, which can never
-         * match, so it is gone and the object's frames are all this reports. */
-        if (pathsz)
-            path[0] = 0;
-        mlog("minimod: sample obj=%p info=%p frames=%u\n", (void *)child,
-             (void *)info, fr);
-        return 0;
-    }
-    mlog("minimod: displayed sample struct not found (screen=%p)\n", screen);
-    return 0;
-}
 
 /* ------------------------------------------------------------- app hooks */
 static void *(*orig_sixteen_ctor)(void *, void *, void *, void *);
@@ -1050,15 +784,6 @@ typedef void (*pagector_fn)(void *, void *, void *, void *, void *, void *,
                             void *, void *, void *, void *, void *, void *);
 static pagector_fn orig_pagector;
 
-static void pagector_probe(void *a0, void *a1, void *a2, void *a3, void *a4, void *a5,
-                           void *a6, void *a7, void *a8, void *a9, void *a10, void *a11)
-{
-    uintptr_t vt = 0;
-    if (a0 && rd((uintptr_t)a0, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL)
-        g_page = a0;
-    if (orig_pagector)
-        orig_pagector(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
-}
 
 /* The app's own "apply a control value" entry - exactly what a knob turn calls
  * (FUN_01a68020(0, surface, controlId, value, mode)). Capturing the surface lets
@@ -1083,61 +808,18 @@ static void setctl_probe(void *a0, void *a1, int a2, int a3, float v)
 static void *g_livepage;
 static void (*orig_ctlhandler)(void *, uint64_t, uint64_t);
 
-static void ctlhandler_probe(void *a0, uint64_t a1, uint64_t a2)
-{
-    uintptr_t vt = 0;
-    if (a0 && rd((uintptr_t)a0, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
-        uintptr_t arr = 0;
-        /* arr is the pad-block array - a heap pointer, not an image one. */
-        if (rd((uintptr_t)a0 + 0x22e8, &arr, 8) &&
-            arr > 0xffff00000000ULL && arr < 0xffffff000000ULL)
-            g_livepage = a0;
-    }
-    if (orig_ctlhandler)
-        orig_ctlhandler(a0, a1, a2);
-}
 
 /* FUN_02912f10(padBlock) returns the object the page reads its trim from
  * (Start at +0x78, End at +0xd0). Capturing it in-process avoids stale pointers. */
 static void *g_trimobj;
 static void *(*orig_gettrim)(void *);
 
-static void *gettrim_probe(void *blk)
-{
-    void *r = orig_gettrim ? orig_gettrim(blk) : 0;
-    if (r && (uintptr_t)r > 0xffff00000000ULL && (uintptr_t)r < 0xffffff000000ULL) {
-        static int n;
-        if (g_trimobj != r || n < 3) {
-            int64_t f0 = -1, f1 = -1;
-            rd((uintptr_t)r + 0x78, &f0, sizeof f0);
-            rd((uintptr_t)r + 0xd0, &f1, sizeof f1);
-            mlog("minimod: trimobj=%p (blk=%p) start=%lld end=%lld\n",
-                 r, blk, (long long)f0, (long long)f1);
-            n++;
-        }
-        g_trimobj = r;
-    }
-    return r;
-}
 
 /* PadState_CopyIntoPage(page, padState): the pad is the source of the page's
  * Start/End widgets (pad+0x1588 -> widget value, pad+0x15e0 -> End). */
 static void *g_padstate;
 static void (*orig_copypad)(void *, void *);
 
-static void copypad_probe(void *page, void *pad)
-{
-    uintptr_t vt = 0;
-    if (pad && (uintptr_t)pad > 0xffff00000000ULL && (uintptr_t)pad < 0xffffff000000ULL) {
-        float f0 = -1, f1 = -1;
-        rd((uintptr_t)pad + 0x1588, &f0, 4);
-        rd((uintptr_t)pad + 0x15e0, &f1, 4);
-        mlog("minimod: pad=%p start=%.4f end=%.4f\n", pad, (double)f0, (double)f1);
-        g_padstate = pad;
-    }
-    if (orig_copypad)
-        orig_copypad(page, pad);
-}
 
 static void (*orig_bcast)(void *, float);
 static void (*orig_cc)(void *, unsigned, float, float);
@@ -1247,39 +929,6 @@ static uintptr_t g_last_press_obj;
 static void find_float_pair(float v);
 /* "findv <float>" - every address in the small writable ranges holding exactly
  * this float. Run with two knob values and intersect to find the stored state. */
-static void find_value(float v)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return;
-    unsigned char pat[4];
-    memcpy(pat, &v, 4);
-    int shown = 0;
-    for (int r = 0; r < g_nrng; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        if (g_rng[r].lo >= base && g_rng[r].hi <= base + 0x9000000)
-            continue;
-        if (g_rng[r].hi - g_rng[r].lo > 0x8000000)
-            continue; /* skip only the very large buffers */
-        for (uintptr_t a = g_rng[r].lo; a + 4 < g_rng[r].hi; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)3;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 4 <= n && shown < 60; o += 4) {
-                if (memcmp(buf + o, pat, 4) == 0) {
-                    mlog("minimod: fv %#llx %.6f\n",
-                         (unsigned long long)(a + o), (double)v);
-                    shown++;
-                }
-            }
-        }
-    }
-    mlog("minimod: fv done %d\n", shown);
-    free(buf);
-}
 
 static void byte_snap(void);
 static void byte_diff(void);
@@ -1297,40 +946,7 @@ static volatile int g_pending_prop;
 
 /* Write the property values immediately before the app paints, so the paint
  * reads the trim we computed. */
-static void apply_pending_props(void)
-{
-    float v;
-    if (!g_pending_prop)
-        return;
-    g_pending_prop = 0;
-    if (g_pend_prop0) {
-        v = g_pend_pv0;
-        wr((uintptr_t)g_pend_prop0 + 0x50, &v, 4);
-    }
-    if (g_pend_prop1) {
-        v = g_pend_pv1;
-        wr((uintptr_t)g_pend_prop1 + 0x50, &v, 4);
-    }
-    mlog("minimod: props written in paint %.4f/%.4f\n",
-         (double)g_pend_pv0, (double)g_pend_pv1);
-}
 
-static void apply_pending_ctl(void)
-{
-    if (!g_pending_ctl)
-        return;
-    g_pending_ctl = 0;
-    if (!g_surface2 || !orig_setctl2)
-        return;
-    uintptr_t svt = 0;
-    if (!rd((uintptr_t)g_surface2, &svt, 8) || svt < base || svt > base + 0x12000000ULL)
-        return;
-    if (!g_control_context)
-        return;
-    orig_setctl2(g_control_context, g_surface2, 0, 0x466, g_pending_v1);
-    orig_setctl2(g_control_context, g_surface2, 0, 0x462, g_pending_v0);
-    mlog("minimod: paint-time setctl %d/%d\n", g_pending_r0, g_pending_r1);
-}
 static void *g_paint_comp;
 static void *g_paint_gfx;
 static void who_points_at(uintptr_t target);
@@ -2153,940 +1769,6 @@ static void spectral_tick(void)
     hpss_repaint();
 }
 
-#if MINIMOD_DEBUG
-/* ------------------------------------------------------- chop probe (debug) */
-/* All addresses below are Ghidra VAs minus 0x100000 (the mod's own offset
- * space). Mixing the two spaces is how the first version of this probe ended
- * up hooking unrelated functions and calling garbage. */
-/* Stock slice editing, found through the "Insert Slice" undo label at
- * 0x46a80e0 and the telemetry key "slices_added":
- *   FUN_021a3b10(editor, {sample, refcounted}, frame)  add a Manual slice
- *   FUN_021a9fa0(editor)                              add at the playhead
- *   FUN_01a60af0(ctrl, {sample, refcounted}, v, ed)   the undoable command
- * The probe only observes; the apply path is written once these are verified. */
-static void (*orig_add_slice)(void *, void *, uint64_t);
-static void (*orig_add_slice_ph)(void *);
-static void (*orig_insert_cmd)(void *, void *, unsigned, void *);
-static void (*orig_rmall_cmd)(void *, void *, void *);
-static uintptr_t g_chop_editor;
-
-
-/* Slice objects are ~0x350-byte heap allocations, so the chop code that makes
- * them can be found from the allocation's return address. Debug only; the
- * logger is off unless the probe enables it. */
-static void *(*g_real_malloc)(size_t);
-static volatile int g_malloc_probe;
-static volatile int g_malloc_n;
-
-void *malloc(size_t n)
-{
-    if (!g_real_malloc)
-        g_real_malloc = (void *(*)(size_t))dlsym(RTLD_NEXT, "malloc");
-    if (!g_real_malloc)
-        return 0;
-    void *p = g_real_malloc(n);
-    if (g_malloc_probe && n >= 0x100 && n <= 0x8000 && p && g_malloc_n < 400) {
-        g_malloc_n++;
-        mlog("chop: malloc %zu -> %p lr=%p\n", n, p, __builtin_return_address(0));
-    }
-    return p;
-}
-
-static void cc_replay(unsigned cc, unsigned raw);
-
-static unsigned chop_slice_count(uintptr_t sample)
-{
-    uintptr_t buf = 0, lo = 0, hi = 0;
-    if (!sample || !rd(sample + 0x130, &buf, 8) || !buf)
-        return 0;
-    if (!rd(buf + 0x10 + 0x60, &lo, 8) || !rd(buf + 0x10 + 0x68, &hi, 8) || hi < lo)
-        return 0;
-    return (unsigned)((hi - lo) >> 3);
-}
-
-static uintptr_t chop_sample_from_sel(void *sel)
-{
-    uintptr_t sample = 0;
-    if (sel)
-        rd((uintptr_t)sel, &sample, 8);
-    return sample;
-}
-
-/* The serialized layer object keeps the chop model: SlicingStyle at +0xa8 and
- * four std::vector<SlicePoint> pairs (each 0x18 bytes) at +0xb0/+0xc8/+0xe0/
- * +0xf8. Print them so the live layout can be checked against the parser. */
-static void chop_dump_layer(uintptr_t lay)
-{
-    unsigned style = 0;
-    uintptr_t pairs[4][3] = {{0}};
-    if (!lay)
-        return;
-    rd(lay + 0xa8, &style, 4);
-    mlog("chop: layer=%p style=%u (+0xa8)\n", (void *)lay, style);
-    {
-        unsigned char f6e0 = 0;
-        unsigned m418 = 0, n738 = 0, a6e4 = 0;
-        rd(lay + 0x6e0, &f6e0, 1);
-        rd(lay + 0x418, &m418, 4);
-        rd(lay + 0x738, &n738, 4);
-        rd(lay + 0x6e4, &a6e4, 4);
-        mlog("chop:   flags +0x6e0=%u marker +0x418=%u +0x738=%u +0x6e4=%u\n",
-             f6e0, m418, n738, a6e4);
-    }
-    for (int i = 0; i < 4; ++i) {
-        uintptr_t at = lay + 0xb0 + (uintptr_t)i * 0x18;
-        rd(at, &pairs[i][0], 8);
-        rd(at + 8, &pairs[i][1], 8);
-        rd(at + 0x10, &pairs[i][2], 8);
-        mlog("chop:   vec[%d] at +0x%lx begin=%p end=%p cap=%p n=%lld\n", i,
-             (unsigned long)(0xb0 + i * 0x18), (void *)pairs[i][0],
-             (void *)pairs[i][1], (void *)pairs[i][2],
-             (long long)((pairs[i][1] - pairs[i][0]) / 0x18));
-    }
-    for (int i = 0; i < 4; ++i) {
-        uintptr_t n = (pairs[i][1] - pairs[i][0]) / 0x18;
-        if (n > 64)
-            n = 64;
-        for (uintptr_t k = 0; k < n; ++k) {
-            uintptr_t at = pairs[i][0] + k * 0x18;
-            double t = 0, e = 0;
-            float f = 0;
-            rd(at, &t, 8);
-            rd(at + 8, &f, 4);
-            rd(at + 0x10, &e, 8);
-            mlog("chop:   vec[%d][%lu] t=%.6f f=%.4f e=%.4f\n", i,
-                 (unsigned long)k, t, (double)f, e);
-        }
-    }
-}
-
-/* Find the editor object the stock slice commands take: an object whose
- * +0x4c8 points at the live Sample. Discovery only - the shipped path must not
- * depend on a full-heap search. */
-static void chop_scan(uintptr_t sample)
-{
-    if (!sample)
-        return;
-    FILE *f = fopen("/proc/self/maps", "r");
-    if (!f)
-        return;
-    size_t chunk = 8u << 20;
-    unsigned char *buf = malloc(chunk);
-    if (!buf) {
-        fclose(f);
-        return;
-    }
-    char line[512];
-    int hits = 0;
-    while (fgets(line, sizeof line, f) && hits < 32) {
-        unsigned long lo = 0, hi = 0;
-        char perms[8] = {0};
-        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || perms[1] != 'w')
-            continue;
-        for (unsigned long a = lo; a < hi && hits < 32; a += chunk) {
-            size_t n = (hi - a) < chunk ? (size_t)(hi - a) : chunk;
-            if (!rd(a, buf, n))
-                continue;
-            for (size_t o = 0; o + 8 <= n && hits < 32; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (q != sample || a + o < 0x4c8)
-                    continue;
-                uintptr_t base = a + o - 0x4c8;
-                uintptr_t ctl = 0, sel = 0, mgr = 0, mode = 0;
-                unsigned ref = 0;
-                rd(base + 0x10c8, &ctl, 8);
-                rd(base + 0x4d0, &sel, 8);
-                if (ctl)
-                    rd(ctl + 0x60, &mgr, 8);
-                rd(base + 0x528, &mode, 8);
-                if (sel)
-                    rd(sel + 8, &ref, 4);
-                /* The editor's selection is a heap pointer and its controller
-                 * has a command manager; that rejects the text and table
-                 * objects whose +0x4c8 happens to equal the sample. */
-                int shapecand = (sel >> 40) == 0xffff && ctl && mgr;
-                if (!shapecand)
-                    continue;
-                mlog("chop: scan cand editor=%p ctl=%p mgr=%p sel=%p ref=%u mode=%llu\n",
-                     (void *)base, (void *)ctl, (void *)mgr, (void *)sel, ref,
-                     (unsigned long long)(mode & 0xffffffff));
-                hits++;
-            }
-        }
-    }
-    free(buf);
-    fclose(f);
-    mlog("chop: scan done, %d candidate(s)\n", hits);
-}
-
-static void chop_dump(const char *tag, uintptr_t sample)
-{
-    uintptr_t buf = 0, lo = 0, hi = 0;
-    unsigned n = chop_slice_count(sample);
-    mlog("chop: %s sample=%p slices=%u\n", tag, (void *)sample, n);
-    if (!sample || !rd(sample + 0x130, &buf, 8) || !buf)
-        return;
-    if (!rd(buf + 0x10 + 0x60, &lo, 8) || !rd(buf + 0x10 + 0x68, &hi, 8))
-        return;
-    for (unsigned i = 0; i < n && i < 32; ++i) {
-        uintptr_t el = 0;
-        if (!rd(lo + i * 8, &el, 8) || !el)
-            break;
-        uintptr_t d0 = 0, c8 = 0, d8 = 0;
-        rd(el + 0xc8, &c8, 8);
-        rd(el + 0xd0, &d0, 8);
-        rd(el + 0xd8, &d8, 8);
-        mlog("chop:   slice[%u] obj=%p +0xc8=%llu +0xd0=%llu +0xd8=%llu\n", i,
-             (void *)el, (unsigned long long)c8, (unsigned long long)d0,
-             (unsigned long long)d8);
-    }
-}
-
-static void add_slice_hook(void *editor, void *sel, uint64_t pos)
-{
-    uintptr_t sample = chop_sample_from_sel(sel);
-    g_chop_editor = (uintptr_t)editor;
-    mlog("chop: add_slice editor=%p screen=%p pos=%llu before=%u\n", editor,
-         g_screen, (unsigned long long)pos, chop_slice_count(sample));
-    if (orig_add_slice)
-        orig_add_slice(editor, sel, pos);
-    mlog("chop: add_slice after=%u\n", chop_slice_count(sample));
-}
-
-static void add_slice_ph_hook(void *editor)
-{
-    g_chop_editor = (uintptr_t)editor;
-    mlog("chop: add_slice_ph editor=%p screen=%p\n", editor, g_screen);
-    if (orig_add_slice_ph)
-        orig_add_slice_ph(editor);
-}
-
-static void insert_cmd_hook(void *ctl, void *sel, unsigned v, void *ed)
-{
-    mlog("chop: insert_cmd ctl=%p sel=%p val=%u ed=%p editor_seen=%p\n", ctl, sel,
-         v, ed, (void *)g_chop_editor);
-    if (orig_insert_cmd)
-        orig_insert_cmd(ctl, sel, v, ed);
-}
-
-/* The slice editor owns the selected sample at +0x4c8, the marker index at
- * +0x528 and the refcounted selection at +0x4d0. Any of its methods hands us
- * the instance without guessing. */
-static void (*orig_slice_sel)(void *, unsigned);
-static void slice_sel_hook(void *editor, unsigned index)
-{
-    if (!g_chop_editor) {
-        g_chop_editor = (uintptr_t)editor;
-        mlog("chop: editor captured from selectSlice editor=%p index=%u\n", editor,
-             index);
-    }
-    if (orig_slice_sel)
-        orig_slice_sel(editor, index);
-}
-
-/* Remove Slice: (controller, {sample, refcounted}, value, editor). Its fourth
- * argument is the slice editor itself. */
-static void (*orig_rm_slice)(void *, void *, unsigned, void *);
-static void rm_slice_hook(void *ctl, void *sel, unsigned v, void *ed)
-{
-    uintptr_t sample = chop_sample_from_sel(sel);
-    mlog("chop: rm_slice ctl=%p sel=%p val=%u ed=%p sample=%p before=%u\n", ctl, sel, v,
-         ed, (void *)sample, chop_slice_count(sample));
-    if (ed) {
-        g_chop_editor = (uintptr_t)ed;
-        mlog("chop: editor captured from rm_slice ed=%p\n", ed);
-    }
-    if (orig_rm_slice)
-        orig_rm_slice(ctl, sel, v, ed);
-    mlog("chop: rm_slice after=%u\n", chop_slice_count(sample));
-}
-
-/* The layer's marker resolver is called by every chop UI action. Its caller
- * identifies the editor-side function; hooking that entry then yields the
- * editor itself in x0. */
-static int (*orig_marker_at)(void *, unsigned);
-static void marker_at_hook(void *layer, unsigned index)
-{
-    uintptr_t lr = (uintptr_t)__builtin_return_address(0);
-    mlog("chop: marker_at layer=%p index=%u caller=0x%llx\n", layer, index,
-         (unsigned long long)(lr - base));
-    if (orig_marker_at)
-        orig_marker_at(layer, index);
-}
-
-/* Slice-list helper that runs on every edit; its caller is the edit code. */
-static void (*orig_slice_publish)(void *);
-static void slice_publish_hook(void *a)
-{
-    uintptr_t lr = (uintptr_t)__builtin_return_address(0);
-    mlog("chop: slice_publish arg=%p caller=0x%llx\n", a,
-         (unsigned long long)(lr - base));
-    if (orig_slice_publish)
-        orig_slice_publish(a);
-}
-
-
-/* ---- snapshot: what the UI just changed ---------------------------------- */
-static int g_snap_track;
-static int g_snap_n;
-
-static unsigned fnv(const unsigned char *p, size_t n)
-{
-    unsigned h = 2166136261u;
-    for (size_t i = 0; i < n; ++i) {
-        h ^= p[i];
-        h *= 16777619u;
-    }
-    return h;
-}
-
-static void chop_snapshot(const char *tag)
-{
-    void *screen = 0;
-    uintptr_t state = 0, sample = 0;
-    unsigned frames = 0, ch = 0, rate = 0;
-    if (!hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate))
-        return;
-    uintptr_t binding = 0, st = 0, lay = 0;
-    if (screen && rd((uintptr_t)screen + 0x178, &binding, 8) && binding &&
-        rd(binding + 0x60, &st, 8) && st && rd(st + 0x22e8, &lay, 8) && lay)
-        (void)lay;
-    unsigned marker = 0, count = chop_slice_count(sample);
-    if (lay)
-        rd(lay + 0x418, &marker, 4);
-    mlog("SNAP %s chop=%d marker=%u count=%u frames=%u sample=%p layer=%p\n", tag,
-         in_chop_mode(), marker, count, frames, (void *)sample, (void *)lay);
-    if (lay) {
-        static const unsigned lo[] = {0xa8, 0xb0, 0xb8, 0xc0, 0xc8, 0xd0, 0xd8, 0xe0,
-                                      0xe8, 0xf0, 0xf8, 0x100, 0x6e0, 0x738};
-        for (unsigned i = 0; i < sizeof lo / sizeof lo[0]; ++i) {
-            uintptr_t q = 0;
-            rd(lay + lo[i], &q, 8);
-            mlog("SNAP L %03x %016llx\n", lo[i], (unsigned long long)q);
-        }
-    }
-    uintptr_t buf = 0, lo = 0, hi = 0;
-    if (sample && rd(sample + 0x130, &buf, 8) && buf &&
-        rd(buf + 0x70, &lo, 8) && rd(buf + 0x78, &hi, 8) && hi > lo) {
-        unsigned n = (unsigned)((hi - lo) / 8);
-        mlog("SNAP slicevec %p..%p n=%u\n", (void *)lo, (void *)hi, n);
-        if (n > 8)
-            n = 8;
-        for (unsigned i = 0; i < n; ++i) {
-            uintptr_t sp = 0;
-            if (!rd(lo + i * 8, &sp, 8) || !sp)
-                break;
-            unsigned char obj[0x340];
-            memset(obj, 0, sizeof obj);
-            rd(sp, obj, sizeof obj);
-            mlog("SNAP P %u %p hash=%08x\n", i, (void *)sp, fnv(obj, sizeof obj));
-            for (unsigned k = 0; k < 0x140; k += 8) {
-                uintptr_t q = 0;
-                rd(sp + k, &q, 8);
-                mlog("SNAP S %u %03x %016llx\n", i, k, (unsigned long long)q);
-            }
-        }
-    }
-}
-
-/* Every slice edit asks the sample for its slice list first, so the caller of
- * this accessor during a merge/erase is the code that mutates it. */
-static void *(*orig_slice_list)(void *);
-static void *slice_list_hook(void *sample)
-{
-    uintptr_t lr = (uintptr_t)__builtin_return_address(0);
-    mlog("chop: slice_list sample=%p caller=0x%llx\n", sample,
-         (unsigned long long)(lr - base));
-    return orig_slice_list ? orig_slice_list(sample) : 0;
-}
-
-/* The UI's slice-action dispatch: (editor, msg, kind). kind 1 means "slice
- * edit"; the editor reads its selected marker from +0x528. */
-static void (*orig_slice_action)(void *, void *, int);
-static void slice_action_hook(void *ed, void *msg, int kind)
-{
-    uintptr_t sample = 0, ctl = 0, sel = 0;
-    unsigned marker = 0, playhead = 0;
-    rd((uintptr_t)ed + 0x4c8, &sample, 8);
-    rd((uintptr_t)ed + 0x4d0, &sel, 8);
-    rd((uintptr_t)ed + 0x10c8, &ctl, 8);
-    rd((uintptr_t)ed + 0x528, &marker, 4);
-    rd((uintptr_t)ed + 0x848, &playhead, 4);
-    mlog("chop: slice_action ed=%p kind=%d sample=%p marker=%u playhead=%u ctl=%p "
-         "sel=%p\n", ed, kind, (void *)sample, marker, playhead, (void *)ctl,
-         (void *)sel);
-    if (ed)
-        g_chop_editor = (uintptr_t)ed;
-    if (orig_slice_action)
-        orig_slice_action(ed, msg, kind);
-}
-
-/* Split Slice: same shape; its fourth argument is the editor. */
-static void (*orig_split_cmd)(void *, void *, unsigned, void *);
-static void split_cmd_hook(void *ctl, void *sel, unsigned v, void *ed)
-{
-    uintptr_t sample = chop_sample_from_sel(sel);
-    mlog("chop: split_cmd ctl=%p sel=%p val=%u ed=%p sample=%p before=%u\n", ctl, sel, v,
-         ed, (void *)sample, chop_slice_count(sample));
-    if (ed) {
-        g_chop_editor = (uintptr_t)ed;
-        mlog("chop: editor captured from split ed=%p\n", ed);
-    }
-    if (orig_split_cmd)
-        orig_split_cmd(ctl, sel, v, ed);
-    mlog("chop: split_cmd after=%u\n", chop_slice_count(sample));
-}
-
-static void rmall_cmd_hook(void *ctl, void *sel, void *ed)
-{
-    mlog("chop: rmall_cmd ctl=%p sel=%p ed=%p\n", ctl, sel, ed);
-    if (orig_rmall_cmd)
-        orig_rmall_cmd(ctl, sel, ed);
-}
-
-/* Probe calls go through a guarded boundary: a wrong candidate must not take
- * the app down while the layout is still being established. */
-static volatile int g_chop_ok;
-
-static void chop_add_guarded(uintptr_t ed, uintptr_t *pair, uint64_t frame)
-{
-    g_chop_ok = 0;
-    if (sigsetjmp(g_cc_jmp, 1) == 0) {
-        g_cc_recover = 1;
-        if (orig_add_slice)
-            orig_add_slice((void *)ed, pair, frame);
-        g_cc_recover = 0;
-        g_chop_ok = 1;
-    } else {
-        g_cc_recover = 0;
-    }
-}
-
-static void chop_rmall_guarded(uintptr_t ctl, uintptr_t *pair, uintptr_t ed)
-{
-    g_chop_ok = 0;
-    if (sigsetjmp(g_cc_jmp, 1) == 0) {
-        g_cc_recover = 1;
-        if (orig_rmall_cmd)
-            orig_rmall_cmd((void *)ctl, pair, (void *)ed);
-        g_cc_recover = 0;
-        g_chop_ok = 1;
-    } else {
-        g_cc_recover = 0;
-    }
-}
-
-/* Stronger signature: the editor holds the *selected marker index* at +0x528,
- * a Sample pointer at +0x4c8 and the command controller at +0x10c8. The marker
- * index is small and changes with the UI, so matching it is very selective. */
-static void chop_scan_marker(uintptr_t layer)
-{
-    unsigned marker = 0;
-    if (!layer || !rd(layer + 0x418, &marker, 4)) {
-        mlog("chop: scan2 no marker\n");
-        return;
-    }
-    mlog("chop: scan2 looking for marker=%u\n", marker);
-    FILE *f = fopen("/proc/self/maps", "r");
-    if (!f)
-        return;
-    size_t chunk = 8u << 20;
-    unsigned char *buf = malloc(chunk);
-    if (!buf) {
-        fclose(f);
-        return;
-    }
-    char line[512];
-    int hits = 0;
-    while (fgets(line, sizeof line, f) && hits < 16) {
-        unsigned long lo = 0, hi = 0;
-        char perms[8] = {0};
-        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || perms[1] != 'w')
-            continue;
-        for (unsigned long a = lo; a < hi && hits < 16; a += chunk) {
-            size_t n = (hi - a) < chunk ? (size_t)(hi - a) : chunk;
-            if (!rd(a, buf, n))
-                continue;
-            for (size_t o = 0; o + 4 <= n && hits < 16; o += 4) {
-                unsigned m;
-                memcpy(&m, buf + o, 4);
-                if (m != marker || a + o < 0x528)
-                    continue;
-                uintptr_t b = a + o - 0x528;
-                uintptr_t smp = 0, sel = 0, ctl = 0, mgr = 0, ph = 0, key = 0;
-                rd(b + 0x4c8, &smp, 8);
-                rd(b + 0x4d0, &sel, 8);
-                rd(b + 0x10c8, &ctl, 8);
-                rd(b + 0x848, &ph, 8);
-                rd(b, &key, 8);
-                if (ctl)
-                    rd(ctl + 0x60, &mgr, 8);
-                if (!ctl || !mgr || (ctl >> 40) != 0xffff || (mgr >> 40) != 0xffff)
-                    continue;
-                mlog("chop: scan2 cand base=%p vt=0x%llx sample=%p sel=%p ctl=%p "
-                     "playhead=%llu\n", (void *)b, (unsigned long long)(key - base),
-                     (void *)smp, (void *)sel, (void *)ctl,
-                     (unsigned long long)(ph & 0xffffffff));
-                hits++;
-            }
-        }
-    }
-    free(buf);
-    fclose(f);
-    mlog("chop: scan2 done, %d\n", hits);
-}
-
-/* The editor is a long-lived object that owns the selected Sample at +0x4c8.
- * Look for a pointer to it inside the objects we can already reach. */
-static void chop_find(uintptr_t sample)
-{
-    uintptr_t roots[3] = {(uintptr_t)g_screen, 0, 0};
-    uintptr_t binding = 0, st = 0;
-    if (roots[0] && rd(roots[0] + 0x178, &binding, 8) && binding &&
-        rd(binding + 0x60, &st, 8))
-        roots[1] = st;
-    roots[2] = binding;
-    const char *names[3] = {"screen", "state", "binding"};
-    for (int r = 0; r < 3; ++r) {
-        if (!roots[r])
-            continue;
-        for (uintptr_t o = 0; o < 0x12000; o += 8) {
-            uintptr_t v = 0;
-            if (!rd(roots[r] + o, &v, 8) || !v)
-                continue;
-            if (v < 0xffff00000000ULL)
-                continue;
-            uintptr_t s = 0, ctl = 0, sel = 0;
-            if (!rd(v + 0x4c8, &s, 8) || s != sample)
-                continue;
-            rd(v + 0x10c8, &ctl, 8);
-            rd(v + 0x4d0, &sel, 8);
-            mlog("chop: find hit %s+0x%lx -> editor=%p ctl=%p sel=%p\n", names[r],
-                 (unsigned long)o, (void *)v, (void *)ctl, (void *)sel);
-        }
-    }
-    mlog("chop: find done\n");
-}
-
-/* Commands are queued by the probe thread and run on the UI thread from the
- * button hook: the app's model is not safe to touch from a foreign thread. */
-static char g_chop_cmd[64];
-
-static void chop_probe_run(void)
-{
-    char cmd[64];
-    memcpy(cmd, g_chop_cmd, sizeof cmd);
-    if (!cmd[0])
-        return;
-    g_chop_cmd[0] = 0;
-    void *screen = 0;
-    uintptr_t state = 0, sample = 0;
-    unsigned frames = 0, ch = 0, rate = 0;
-    int have = hpss_sample_now(&screen, &state, &sample, &frames, &ch, &rate);
-    mlog("chop: cmd '%s' editor=%p screen=%p sample=%p frames=%u\n", cmd,
-         (void *)g_chop_editor, screen, (void *)sample, frames);
-    mlog("chop: view chop=%d sample_page=%d levels=%d last_pad=%d shift=%d\n",
-         in_chop_mode(), sample_page_visible(), levels_active(), g_last_pad,
-         g_shift);
-    if (!strncmp(cmd, "rw ", 3)) {
-        unsigned long addr = 0, len = 0;
-        if (sscanf(cmd + 3, "%lx %lx", &addr, &len) != 2 || !addr || len > 0x400)
-            return;
-        for (unsigned long o = 0; o < len; o += 8) {
-            uintptr_t q = 0;
-            if (!rd((uintptr_t)addr + o, &q, 8))
-                break;
-            mlog("chop: R %03lx %016llx\n", o, (unsigned long long)q);
-        }
-        return;
-    }
-    if (!strncmp(cmd, "sl ", 3)) {
-        unsigned idx = (unsigned)strtoul(cmd + 3, 0, 10);
-        uintptr_t buf = 0, lo = 0, hi = 0;
-        if (!sample || !rd(sample + 0x130, &buf, 8) || !buf)
-            return;
-        lo = buf + 0x10 + 0x60;
-        if (!rd(lo, &lo, 8) || !rd(buf + 0x10 + 0x68, &hi, 8) || hi <= lo)
-            return;
-        if (idx >= (hi - lo) / 8) {
-            mlog("chop: sl idx %u out of range\n", idx);
-            return;
-        }
-        uintptr_t sp = 0;
-        if (!rd(lo + idx * 8, &sp, 8) || !sp)
-            return;
-        mlog("chop: sl idx=%u obj=%p\n", idx, (void *)sp);
-        for (unsigned o = 0; o < 0x140; o += 8) {
-            uintptr_t q = 0;
-            if (!rd(sp + o, &q, 8))
-                break;
-            mlog("chop: S %03x %016llx\n", o, (unsigned long long)q);
-        }
-        return;
-    }
-    if (!strcmp(cmd, "lay")) {
-        uintptr_t binding = 0, st = 0, lay = 0;
-        if (!screen || !rd((uintptr_t)screen + 0x178, &binding, 8) || !binding ||
-            !rd(binding + 0x60, &st, 8) || !st || !rd(st + 0x22e8, &lay, 8) || !lay) {
-            mlog("chop: lay no layer\n");
-            return;
-        }
-        mlog("chop: lay layer=%p\n", (void *)lay);
-        for (unsigned o = 0; o < 0xb30; o += 8) {
-            uintptr_t q = 0;
-            if (!rd(lay + o, &q, 8))
-                break;
-            mlog("chop: L %03x %016llx\n", o, (unsigned long long)q);
-        }
-        return;
-    }
-    if (!strcmp(cmd, "scan2")) {
-        uintptr_t binding = 0, st = 0, lay = 0;
-        if (screen && rd((uintptr_t)screen + 0x178, &binding, 8) && binding &&
-            rd(binding + 0x60, &st, 8) && st && rd(st + 0x22e8, &lay, 8))
-            chop_scan_marker(lay);
-        return;
-    }
-    if (!strcmp(cmd, "find")) {
-        chop_find(sample);
-        return;
-    }
-    if (!strcmp(cmd, "scan")) {
-        chop_scan(sample);
-        return;
-    }
-    if (!strcmp(cmd, "dump")) {
-        chop_dump("before", sample);
-        {
-            uintptr_t binding = 0, st = 0, lay = 0, smp = 0;
-            if (screen && rd((uintptr_t)screen + 0x178, &binding, 8) && binding &&
-                rd(binding + 0x60, &st, 8) && st &&
-                rd(st + 0x22e8, &lay, 8) && lay) {
-                mlog("chop: chain screen=%p binding=%p state=%p layer=%p\n", screen,
-                     (void *)binding, (void *)st, (void *)lay);
-                if (rd(lay + 0x4a8, &smp, 8))
-                    mlog("chop:   layer+0x4a8=%p (sample)\n", (void *)smp);
-                chop_dump_layer(lay);
-            }
-            /* Which of the objects we can already reach is the editor that the
-             * stock slice commands take as their first argument? */
-            uintptr_t cand[4] = {(uintptr_t)screen, binding, st, lay};
-            const char *names[4] = {"screen", "binding", "state", "layer"};
-            for (int i = 0; i < 4; ++i) {
-                if (!cand[i])
-                    continue;
-                uintptr_t c0 = 0, d0 = 0, ctl = 0, mode = 0, ph = 0;
-                rd(cand[i] + 0x4c8, &c0, 8);
-                rd(cand[i] + 0x4d0, &d0, 8);
-                rd(cand[i] + 0x10c8, &ctl, 8);
-                rd(cand[i] + 0x528, &mode, 8);
-                rd(cand[i] + 0x848, &ph, 8);
-                mlog("chop: cand %s=%p +4c8=%p +4d0=%p +10c8=%p +528=%llu +848=%llu\n",
-                     names[i], (void *)cand[i], (void *)c0, (void *)d0, (void *)ctl,
-                     (unsigned long long)(mode & 0xffffffff),
-                     (unsigned long long)(ph & 0xffffffff));
-            }
-        }
-        if (g_chop_editor) {
-            uintptr_t es = 0, sel = 0, ctl = 0, ph = 0;
-            rd(g_chop_editor + 0x4c8, &es, 8);
-            rd(g_chop_editor + 0x4d0, &sel, 8);
-            rd(g_chop_editor + 0x10c8, &ctl, 8);
-            rd(g_chop_editor + 0x848, &ph, 8);
-            mlog("chop: editor +0x4c8=%p +0x4d0=%p +0x10c8=%p +0x848=%llu\n",
-                 (void *)es, (void *)sel, (void *)ctl, (unsigned long long)(ph & 0xffffffff));
-        }
-        return;
-    }
-    if (!strcmp(cmd, "rp")) {
-        if (g_screen)
-            FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(g_screen, 0, 0);
-        mlog("chop: repaint issued\n");
-        return;
-    }
-    if (!strncmp(cmd, "ww ", 3)) {
-        unsigned long addr = 0, val = 0;
-        if (sscanf(cmd + 3, "%lx %lx", &addr, &val) != 2 || !addr)
-            return;
-        uintptr_t old = 0;
-        rd((uintptr_t)addr, &old, 8);
-        int ok = wr((uintptr_t)addr, &val, 8);
-        mlog("chop: ww %p %llu -> %llu ok=%d\n", (void *)addr,
-             (unsigned long long)old, (unsigned long long)val, ok);
-        return;
-    }
-    if (!strncmp(cmd, "findq ", 6)) {
-        unsigned long long want = 0;
-        if (sscanf(cmd + 6, "%llx", &want) != 1)
-            return;
-        FILE *f = fopen("/proc/self/maps", "r");
-        if (!f)
-            return;
-        size_t chunk = 8u << 20;
-        unsigned char *b = malloc(chunk);
-        char line[512];
-        int hits = 0;
-        while (b && fgets(line, sizeof line, f) && hits < 16) {
-            unsigned long lo = 0, hi = 0;
-            char perms[8] = {0};
-            if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || perms[1] != 'w')
-                continue;
-            for (unsigned long a = lo; a < hi && hits < 16; a += chunk) {
-                size_t n = (hi - a) < chunk ? (size_t)(hi - a) : chunk;
-                if (!rd(a, b, n))
-                    continue;
-                for (size_t o = 0; o + 8 <= n && hits < 16; o += 8) {
-                    unsigned long long v;
-                    memcpy(&v, b + o, 8);
-                    if (v == want) {
-                        mlog("chop: findq %llx at %p\n", want, (void *)(a + o));
-                        hits++;
-                    }
-                }
-            }
-        }
-        if (b)
-            free(b);
-        fclose(f);
-        mlog("chop: findq done %d\n", hits);
-        return;
-    }
-    if (!strncmp(cmd, "findval ", 8)) {
-        unsigned long want = 0;
-        if (sscanf(cmd + 8, "%lx", &want) != 1)
-            return;
-        FILE *f = fopen("/proc/self/maps", "r");
-        if (!f)
-            return;
-        size_t chunk = 8u << 20;
-        unsigned char *b = malloc(chunk);
-        char line[512];
-        int hits = 0;
-        while (b && fgets(line, sizeof line, f) && hits < 24) {
-            unsigned long lo = 0, hi = 0;
-            char perms[8] = {0};
-            if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || perms[1] != 'w')
-                continue;
-            for (unsigned long a = lo; a < hi && hits < 24; a += chunk) {
-                size_t n = (hi - a) < chunk ? (size_t)(hi - a) : chunk;
-                if (!rd(a, b, n))
-                    continue;
-                for (size_t o = 0; o + 4 <= n && hits < 24; o += 4) {
-                    unsigned v;
-                    memcpy(&v, b + o, 4);
-                    if (v == (unsigned)want) {
-                        mlog("chop: findval 0x%lx at %p\n", want, (void *)(a + o));
-                        hits++;
-                    }
-                }
-            }
-        }
-        if (b)
-            free(b);
-        fclose(f);
-        mlog("chop: findval done %d\n", hits);
-        return;
-    }
-
-    if (!strcmp(cmd, "snap")) {
-        chop_snapshot("manual");
-        return;
-    }
-    if (!strcmp(cmd, "snaptrack")) {
-        g_snap_n = 0;
-        g_snap_track = 1;
-        mlog("chop: snapshot tracking on\n");
-        return;
-    }
-    if (!strcmp(cmd, "snapoff")) {
-        g_snap_track = 0;
-        mlog("chop: snapshot tracking off\n");
-        return;
-    }
-    if (!strcmp(cmd, "alloc")) {
-        g_malloc_n = 0;
-        g_malloc_probe = 1;
-        mlog("chop: malloc probe on\n");
-        return;
-    }
-    if (!strcmp(cmd, "allocoff")) {
-        g_malloc_probe = 0;
-        mlog("chop: malloc probe off\n");
-        return;
-    }
-    if (!strncmp(cmd, "add ", 4)) {
-        unsigned want = (unsigned)strtoul(cmd + 4, 0, 10);
-        if (!g_chop_editor || !sample || !orig_add_slice) {
-            mlog("chop: add refused (no editor/sample)\n");
-            return;
-        }
-        uintptr_t sel = 0;
-        if (!rd(g_chop_editor + 0x4d0, &sel, 8) || !sel) {
-            mlog("chop: add refused (no selection)\n");
-            return;
-        }
-        uintptr_t pair[2];
-        pair[0] = sample;
-        pair[1] = sel;
-        mlog("chop: add frame=%u before=%u\n", want, chop_slice_count(sample));
-        orig_add_slice((void *)g_chop_editor, pair, want);
-        chop_dump("after-add", sample);
-        return;
-    }
-    if (!strncmp(cmd, "addx ", 5)) {
-        unsigned long ed = 0, frame = 0;
-        if (sscanf(cmd + 5, "%lx %lu", &ed, &frame) != 2 || !sample || !orig_add_slice) {
-            mlog("chop: addx refused\n");
-            return;
-        }
-        uintptr_t sel = 0;
-        rd(ed + 0x4d0, &sel, 8);
-        uintptr_t pair[2] = {sample, sel};
-        unsigned before = chop_slice_count(sample);
-        mlog("chop: addx ed=%p sel=%p frame=%lu before=%u\n", (void *)ed, (void *)sel,
-             frame, before);
-        chop_add_guarded(ed, pair, frame);
-        unsigned after = chop_slice_count(sample);
-        mlog("chop: addx after=%u guard=%d %s\n", after, (int)g_chop_ok,
-             !g_chop_ok ? "FAULTED" : (after == before + 1 ? "OK" : "UNEXPECTED"));
-        chop_dump("after-addx", sample);
-        return;
-    }
-    if (!strncmp(cmd, "rmallx ", 7)) {
-        unsigned long ed = 0;
-        if (sscanf(cmd + 7, "%lx", &ed) != 1 || !sample || !orig_rmall_cmd) {
-            mlog("chop: rmallx refused\n");
-            return;
-        }
-        uintptr_t ctl = 0, sel = 0;
-        rd(ed + 0x10c8, &ctl, 8);
-        rd(ed + 0x4d0, &sel, 8);
-        uintptr_t pair[2] = {sample, sel};
-        mlog("chop: rmallx ed=%p ctl=%p sel=%p before=%u\n", (void *)ed, (void *)ctl,
-             (void *)sel, chop_slice_count(sample));
-        chop_rmall_guarded(ctl, pair, ed);
-        mlog("chop: rmallx after=%u guard=%d\n", chop_slice_count(sample), (int)g_chop_ok);
-        chop_dump("after-rmall", sample);
-        return;
-    }
-    if (!strncmp(cmd, "mk ", 3)) {
-        unsigned long off = 0;
-        unsigned n = 16;
-        int got = sscanf(cmd + 3, "%lx %u", &off, &n);
-        if (got < 1 || !off)
-            return;
-        if (n > 64)
-            n = 64;
-        uintptr_t addr = base + (uintptr_t)off;
-        for (unsigned i = 0; i < n; ++i) {
-            uintptr_t q = 0;
-            if (!rd(addr + (uintptr_t)i * 8, &q, 8))
-                break;
-            mlog("chop:   m[0x%lx+%u] = 0x%llx\n", (unsigned long)off, i,
-                 (unsigned long long)(q - base));
-        }
-        return;
-    }
-    if (!strncmp(cmd, "vl", 2)) {
-        unsigned n = cmd[2] ? (unsigned)strtoul(cmd + 3, 0, 10) : 40;
-        uintptr_t buf = 0, cont = 0, vt = 0;
-        if (!sample || !rd(sample + 0x130, &buf, 8) || !buf)
-            return;
-        cont = buf + 0x10;
-        if (!rd(cont, &vt, 8))
-            return;
-        mlog("chop: slicelist=%p vtable=%p off=0x%llx\n", (void *)cont, (void *)vt,
-             (unsigned long long)(vt - base));
-        for (unsigned i = 0; i < n; ++i) {
-            uintptr_t q = 0;
-            if (!rd(vt + (uintptr_t)i * 8, &q, 8))
-                break;
-            mlog("chop:   lv[%u] = 0x%llx\n", i, (unsigned long long)(q - base));
-        }
-        return;
-    }
-    if (!strcmp(cmd, "wvec")) {
-        uintptr_t buf = 0, cont = 0, begin = 0;
-        if (sample && rd(sample + 0x130, &buf, 8) && buf) {
-            cont = buf + 0x10;
-            rd(cont + 0x60, &begin, 8);
-            mlog("chop: watch vector header %p and elements %p\n",
-                 (void *)(cont + 0x68), (void *)begin);
-            watch_arm(cont + 0x68, "slicevec");
-            watch_arm(cont + 0x60, "slicevec0");
-            if (begin)
-                watch_arm(begin, "sliceelems");
-        }
-        return;
-    }
-    if (!strcmp(cmd, "samp")) {
-        uintptr_t a = 0, b = 0, buf = 0;
-        rd(sample + 0x170, &a, 8);
-        rd(sample + 0x178, &b, 8);
-        rd(sample + 0x130, &buf, 8);
-        mlog("chop: sample=%p +0x170=%p +0x178=%p +0x130=%p\n", (void *)sample,
-             (void *)a, (void *)b, (void *)buf);
-        g_chop_ok = 0;
-        if (sigsetjmp(g_cc_jmp, 1) == 0) {
-            g_cc_recover = 1;
-            unsigned r = FN(0x2943640, unsigned (*)(void *, unsigned))((void *)sample, 1);
-            g_cc_recover = 0;
-            g_chop_ok = 1;
-            mlog("chop: isSampleValid=%u\n", r);
-        } else {
-            g_cc_recover = 0;
-            mlog("chop: isSampleValid FAULTED\n");
-        }
-        return;
-    }
-    if (!strcmp(cmd, "count")) {
-        chop_dump("count", sample);
-        return;
-    }
-    if (!strncmp(cmd, "vt", 2)) {
-        unsigned n = cmd[2] ? (unsigned)strtoul(cmd + 3, 0, 10) : 40;
-        uintptr_t vt = 0;
-        if (!sample || !rd(sample, &vt, 8))
-            return;
-        mlog("chop: sample=%p vtable=%p file_off=0x%llx entries=%u\n", (void *)sample,
-             (void *)vt, (unsigned long long)(vt - base), n);
-        for (unsigned i = 0; i < n; ++i) {
-            uintptr_t q = 0;
-            if (!rd(vt + (uintptr_t)i * 8, &q, 8))
-                break;
-            mlog("chop:   vt[%u] = 0x%llx\n", i, (unsigned long long)(q - base));
-        }
-        return;
-    }
-    (void)have;
-}
-
-static void *chop_probe_thread(void *arg)
-{
-    (void)arg;
-    struct timespec ts = {.tv_sec = 0, .tv_nsec = 200 * 1000 * 1000};
-    for (;;) {
-        nanosleep(&ts, 0);
-        int fd = open("/run/minimod.chop", O_RDONLY);
-        if (fd < 0)
-            continue;
-        char buf[64];
-        ssize_t n = read(fd, buf, sizeof buf - 1);
-        close(fd);
-        unlink("/run/minimod.chop");
-        if (n <= 0)
-            continue;
-        buf[n] = 0;
-        char *nl = strchr(buf, '\n');
-        if (nl)
-            *nl = 0;
-        memcpy(g_chop_cmd, buf, sizeof g_chop_cmd);
-        mlog("chop: queued '%s'\n", g_chop_cmd);
-    }
-    return 0;
-}
-#endif
 
 static void hpss_finalize(void)
 {
@@ -3578,14 +2260,6 @@ static void buttons(void *event)
         if (context && rd(context + 0x10, &surface, sizeof surface) && surface)
             __atomic_store_n(&g_data_signal, surface + 0x2da8, __ATOMIC_RELEASE);
     }
-#if MINIMOD_DEBUG
-    if (g_snap_track && g_snap_n < 24) {
-        char tag[16];
-        snprintf(tag, sizeof tag, "btn%02x%d", code, down ? 1 : 0);
-        chop_snapshot(tag);
-        g_snap_n++;
-    }
-#endif
     if (code == 0x6f) { /* DATA press/turn */
         static int consumed;
         if (__atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE))
@@ -4211,34 +2885,10 @@ static void cs_event(void *self, int code, void *payload)
         orig_cs(self, code, payload);
 }
 
-static void trim_write_probe(void *self, long a, long b)
-{
-    if (orig_trim_write)
-        orig_trim_write(self, a, b);
-}
 
-static void frames_probe(void *self)
-{
-    if (orig_frames)
-        orig_frames(self);
-}
 
-static void screen_resized(void *a, long b, long c, long d)
-{
-    if (orig_resized)
-        orig_resized(a, b, c, d);
-}
 
-static void trim_reg(void *a, void *b)
-{
-    if (orig_reg)
-        orig_reg(a, b);
-}
 
-static void *prog_inst(void *a, int b)
-{
-    return orig_prog_inst ? orig_prog_inst(a, b) : 0;
-}
 
 /* The trim core is called by the broadcaster's listener loop, which keeps the
  * property in x20: learning that pair is what lets autotrim drive the page. */
@@ -4508,56 +3158,6 @@ static int g_ncand;
 
 /* The page keeps a small binding object per parameter (vtable app+0x6e08a10)
  * that holds the property at +0x20. Collect those as probe candidates. */
-static void collect_binding_props(void)
-{
-    if (g_ncand)
-        return;
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return;
-    uintptr_t want = base + A_BINDING_VT;
-    for (int r = 0; r < g_nrng && g_ncand < 24; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ncand < 24;
-             a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && g_ncand < 24; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (q != want)
-                    continue;
-                uintptr_t p20 = 0;
-                if (!rd(a + o + 0x20, &p20, 8) || !p20)
-                    continue;
-                uintptr_t cs[2] = {p20 & ~(uintptr_t)0xf, (p20 & ~(uintptr_t)0xf) - 0x10};
-                for (int k = 0; k < 2; ++k) {
-                    uintptr_t c = cs[k];
-                    float f = 0;
-                    if (!c || (c & 7) || !mapped((void *)c))
-                        continue;
-                    if (!rd(c + 0x50, &f, 4) || !(f >= -0.001f && f <= 1.001f))
-                        continue;
-                    /* statics in the app image pass the float test but are not
-                     * properties; a property lives on the heap */
-                    if (c >= base && c < base + 0x9000000)
-                        continue;
-                    int dup = 0;
-                    for (int i = 0; i < g_ncand; ++i)
-                        if (g_cand[i] == c) { dup = 1; break; }
-                    if (!dup)
-                        g_cand[g_ncand++] = c;
-                }
-            }
-        }
-    }
-    free(buf);
-    mlog("minimod: %d property candidates from bindings\n", g_ncand);
-}
 
 /* Read-only ownership test: the property's listener chain must reference the
  * parameter (or its model) somewhere within two hops. No broadcasting, so a
@@ -4612,324 +3212,37 @@ static int prop_references(uintptr_t P, uintptr_t param)
 /* The object in x20 at a trim-core call is the *listener*, not the property.
  * The property that owns it is the one whose list contains a node whose target
  * is exactly that object. */
-static uintptr_t owner_of_listener(uintptr_t lis)
-{
-    if (!lis)
-        return 0;
-    for (int i = 0; i < g_ncand; ++i) {
-        uintptr_t P = g_cand[i];
-        uintptr_t node = 0;
-        if (!rd(P + 0x10, &node, 8) || !node || !mapped((void *)node))
-            continue;
-        for (int n = 0; n < 16; ++n) {
-            uintptr_t tgt = 0;
-            if (!rd(node + 0x18, &tgt, 8))
-                break;
-            tgt &= ~(uintptr_t)3;
-            if (tgt == lis)
-                return P;
-            uintptr_t next = 0;
-            if (!rd(node + 8, &next, 8) || next == P + 8 || !next)
-                break;
-            node = next;
-        }
-    }
-    return 0;
-}
 
-static uintptr_t listener_of_param(uintptr_t param)
-{
-    for (int i = 0; i < g_nlis; ++i)
-        if (g_lis[i].param == param)
-            return g_lis[i].listener;
-    return 0;
-}
 
-static int probe_property(uintptr_t param)
-{
-    collect_binding_props();
-    for (int i = 0; i < g_ncand; ++i)
-        if (prop_references(g_cand[i], param)) {
-            int slot = g_npm;
-            if (slot < 8) {
-                g_pm[slot].param = param;
-                g_pm[slot].prop = g_cand[i];
-                g_npm = slot + 1;
-            }
-            mlog("minimod: owner of param=%p is prop=%p\\n", (void *)param,
-                 (void *)g_cand[i]);
-            return 1;
-        }
-    return 0;
-}
 
 /* am-mod's lesson: don't write the model, drive the app's own input path.
  * The Trim knobs are control-surface events 0x10 (Start) / 0x11 (End) with an
  * absolute 7-bit position, so the app updates parameter, page and audio. */
-static int inject_cc(unsigned code, unsigned value)
-{
-    if (!orig_buttons)
-        return 0;
-    unsigned char ev[16] = {0};
-    ev[8] = (unsigned char)code;
-    /* sweep like the physical encoder: the app treats these as movements */
-    for (unsigned v = 0; v <= 127; v += 1) {
-        ev[9] = (unsigned char)v;
-        orig_buttons(ev);
-    }
-    ev[9] = (unsigned char)(value > 127 ? 127 : value);
-    orig_buttons(ev);
-    return 1;
-}
 
 /* am-mod sets native properties through the command at 0x1671650 with a pointer
  * to the value; the property lives inside SamplePadControls (root+0x178) and
  * has guards at +0x38/+0x78/+0x80/+0x88. Find the one that references our trim
  * parameter, then set it the same way. */
-static uintptr_t find_controls_prop(uintptr_t param)
-{
-    if (!g_screen)
-        return 0;
-    /* am-mod's SamplePadControls offset belongs to its firmware; ours differs.
-     * Scan the screen object itself for the same property shape. */
-    uintptr_t controls = (uintptr_t)g_screen;
-    for (long o = 0; o < 0x12000; o += 8) {
-        uintptr_t p = controls + (uintptr_t)o;
-        uintptr_t f38 = 0, f78 = 0, f80 = 0, f88 = 0;
-        if (!rd(p + 0x38, &f38, 8) || !rd(p + 0x78, &f78, 8) ||
-            !rd(p + 0x80, &f80, 8) || !rd(p + 0x88, &f88, 8))
-            break;
-        if (!f38 || !f78 || !f80 || !f88)
-            continue;
-        if (!mapped((void *)f38) || !mapped((void *)f78))
-            continue;
-        unsigned char buf[0x100];
-        if (!rd(p, buf, sizeof buf))
-            continue;
-        for (size_t k = 0; k + 8 <= sizeof buf; k += 8) {
-            uintptr_t q;
-            memcpy(&q, buf + k, 8);
-            if (q == param) {
-                mlog("minimod: controls prop +0x%lx references %p\n", (unsigned long)o,
-                     (void *)param);
-                return p;
-            }
-        }
-    }
-    return 0;
-}
 
 /* The page draws its locators from the trim **slider widget**: a ui::Slider
  * embedded in the screen holds its position as a percentage at +0x1b4
  * (measured: +0x6758 = 49.0 right after K1 was set to 50). Writing that value
  * and repainting is what a knob move does to the widget. */
-static int set_slider_percent(float from, float to)
-{
-    if (!g_screen)
-        return 0;
-    uintptr_t want = base + 0x706e5d0;
-    for (long o = 0; o < 0x20000; o += 8) {
-        uintptr_t q = 0;
-        if (!rd((uintptr_t)g_screen + o, &q, 8))
-            break;
-        if (q != want)
-            continue;
-        uintptr_t s = (uintptr_t)g_screen + (uintptr_t)o;
-        float v = 0;
-        if (!rd(s + 0x1b4, &v, 4))
-            continue;
-        float d = v - from;
-        if (d < 0)
-            d = -d;
-        if (d <= 0.75f) {
-            wr(s + 0x1b4, &to, 4);
-            mlog("minimod: slider +0x%lx %.2f -> %.2f\n", o, (double)v, (double)to);
-            return 1;
-        }
-    }
-    return 0;
-}
 
 /* Apply the trim to one screen instance: find the two trim sliders by the
  * instance's own cached percentages, write ours into their +0x1b4 and repaint.
  * Returns 1 when both were found. */
-static int apply_to_instance(uintptr_t S, float p0, float p1)
-{
-    float c0 = 0, c1 = 0;
-    if (!rd(S + 0x1f4c, &c0, 4) || !rd(S + 0x1f50, &c1, 4))
-        return 0;
-    if (!(c0 >= -0.5f && c0 <= 100.5f && c1 >= -0.5f && c1 <= 100.5f))
-        return 0;
-    uintptr_t want = base + 0x706e5d0, s0 = 0, s1 = 0;
-    for (long o = 0; o < 0x20000; o += 8) {
-        uintptr_t q = 0;
-        if (!rd(S + o, &q, 8))
-            break;
-        if (q != want)
-            continue;
-        uintptr_t sl = S + (uintptr_t)o;
-        float v = 0;
-        if (!rd(sl + 0x1b4, &v, 4))
-            continue;
-        float d0 = v - c0, d1 = v - c1;
-        if (d0 < 0) d0 = -d0;
-        if (d1 < 0) d1 = -d1;
-        if (!s0 && d0 <= 0.6f)
-            s0 = sl;
-        else if (!s1 && d1 <= 0.6f)
-            s1 = sl;
-    }
-    if (!s0 || !s1 || s0 == s1)
-        return 0;
-    wr(s0 + 0x1b4, (void *)&p0, 4);
-    wr(s1 + 0x1b4, (void *)&p1, 4);
-    mlog("minimod: instance %p sliders %p/%p -> %.2f/%.2f (was %.2f/%.2f)\n",
-         (void *)S, (void *)s0, (void *)s1, (double)p0, (double)p1, (double)c0,
-         (double)c1);
-    FN(0x1149880, void (*)(void *, uint64_t, uint64_t))((void *)S, 0,
-                                                        FIELD(S, 0x28, uint64_t));
-    return 1;
-}
 
 /* The page paints from the *model*. Find the TrimParameter instances whose
  * value matches the page's own cached percentages (screen+0x1f4c / +0x1f50):
  * those are the parameters the page is actually showing. */
-static uintptr_t param_by_value(float frac)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    uintptr_t want = base + A_TRIM_PARAM_VT, best = 0;
-    float bestd = 0.02f;
-    for (int r = 0; r < g_nrng; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && g_ntp < 256; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (q != want)
-                    continue;
-                uintptr_t p = a + o;
-                float v = 0;
-                if (!rd(p + T_VALUE, &v, 4))
-                    continue;
-                float d = v - frac;
-                if (d < 0)
-                    d = -d;
-                if (d < bestd) {
-                    bestd = d;
-                    best = p;
-                }
-            }
-        }
-    }
-    free(buf);
-    return best;
-}
 
 /* Find the page object by its own cached percentage: a float equal to the
  * End percent whose address-0x1f50 starts with a vtable pointer. Works for any
  * screen subclass, which is what the enumeration by one vptr misses. */
-static uintptr_t find_page_by_cache(float pct)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    uintptr_t hit = 0;
-    for (int r = 0; r < g_nrng && !hit; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && !hit; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 4 <= n && !hit; o += 4) {
-                float v;
-                memcpy(&v, buf + o, 4);
-                if (v < 0.5f || v > 100.5f)
-                    continue;
-                float d = v - pct;
-                if (d < 0) d = -d;
-                if (d > 0.75f)
-                    continue;
-                uintptr_t addr = a + o;
-                uintptr_t b = addr - 0x1f50;
-                /* the page is a heap object, not a static in the image */
-                if (b >= base && b < base + 0x9000000)
-                    continue;
-                uintptr_t vt = 0;
-                if (b < 0x10000 || !rd(b, &vt, 8))
-                    continue;
-                if (vt < base + 0x6ddf910 || vt > base + 0x7162018)
-                    continue;
-                float chk = 0;
-                if (!rd(b + 0x1f4c, &chk, 4))
-                    continue;
-                if (chk < -0.5f || chk > 100.5f)
-                    continue;
-                hit = b;
-                mlog("minimod: page base %p vptr=%p (vt+0x%lx)\n", (void *)b,
-                     (void *)vt, (unsigned long)(vt - base));
-            }
-        }
-    }
-    free(buf);
-    return hit;
-}
 
 /* Enumerate objects of the Trim page class and pick the one whose cached
  * percentages match what the layer currently holds. */
-static uintptr_t find_trim_page(float c0, float c1)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    uintptr_t want = base + A_TRIM_PAGE_VT, best = 0;
-    float bestscore = 3.0f;
-    for (int r = 0; r < g_nrng; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ntp < 256; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && g_ntp < 256; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (q != want)
-                    continue;
-                uintptr_t p = a + o;
-                float x = 0, y = 0;
-                if (!rd(p + 0x1f4c, &x, 4) || !rd(p + 0x1f50, &y, 4))
-                    continue;
-                if (!(x >= -0.5f && x <= 100.5f && y >= -0.5f && y <= 100.5f))
-                    continue;
-                float d0 = x - c0, d1 = y - c1;
-                if (d0 < 0) d0 = -d0;
-                if (d1 < 0) d1 = -d1;
-                float score = d0 + d1;
-                if (score < bestscore) {
-                    bestscore = score;
-                    best = p;
-                }
-            }
-        }
-    }
-    free(buf);
-    if (best)
-        mlog("minimod: trim page %p (score %.2f)\n", (void *)best, (double)bestscore);
-    return best;
-}
 
 /* Find the listener node that points at `param` and report what looks like its
  * owner property. A property P keeps its list head at P+0x10 and its sentinel
@@ -5142,14 +3455,6 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
         (g_hpss_menu || __atomic_load_n(&g_spectral_active, __ATOMIC_ACQUIRE)) &&
         ((unsigned char *)ev)[8] != 0x64)
         return;
-#if MINIMOD_DEBUG
-    if (g_snap_track && !g_in_cc_replay && ev && g_snap_n < 24) {
-        char tag[24];
-        snprintf(tag, sizeof tag, "cc%02x=%u", ((unsigned char *)ev)[8], raw);
-        chop_snapshot(tag);
-        g_snap_n++;
-    }
-#endif
     if (!g_in_cc_replay && ev) {
         unsigned char cc = ((unsigned char *)ev)[8];
         static int allc;
@@ -5199,19 +3504,6 @@ static void cc_replay(unsigned cc, unsigned raw)
     g_in_cc_replay = 0;
 }
 
-static void cc_replay_k3(unsigned raw)
-{
-    if (!g_cc_k3_valid)
-        return;
-    unsigned char ev[32];
-    memcpy(ev, g_cc_k3_ev, sizeof ev);
-    ev[8] = 0x12;
-    g_in_cc_replay = 1;
-    if (orig_cc)
-        orig_cc(ev, raw, 0.0f, 127.0f);
-    g_in_cc_replay = 0;
-    mlog("Spectral: replayed K3=%u (valid=%d)\n", raw, g_cc_k3_valid);
-}
 
 static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
 {
@@ -5249,90 +3541,12 @@ static volatile int g_nhp;
 
 static unsigned char *g_hp_bytes; /* optional byte copy for diffs */
 
-static void heap_snapshot(const char *tag)
-{
-    ranges_load();
-    g_nhp = 0;
-    unsigned char *buf = malloc(HP_PAGE);
-    if (!buf)
-        return;
-    for (int r = 0; r < g_nrng && g_nhp < HP_MAX; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        if (g_rng[r].lo >= base && g_rng[r].hi <= base + 0x9000000)
-            continue; /* the image, not the heap */
-        if (g_rng[r].hi - g_rng[r].lo > 0x4000000)
-            continue; /* huge audio buffers dwarf everything else */
-        for (uintptr_t a = g_rng[r].lo; a + HP_PAGE <= g_rng[r].hi && g_nhp < HP_MAX;
-             a += HP_PAGE) {
-            if (!rd(a, buf, HP_PAGE))
-                break;
-            uint64_t h = 1469598103934665603ULL;
-            for (int i = 0; i < HP_PAGE; ++i) {
-                h ^= buf[i];
-                h *= 1099511628211ULL;
-            }
-            g_hp[g_nhp].addr = a;
-            g_hp[g_nhp].hash = h;
-            g_nhp++;
-        }
-    }
-    free(buf);
-    mlog("minimod: heap snapshot '%s': %d pages\n", tag, g_nhp);
-}
 
-static void heap_diff(const char *tag)
-{
-    ranges_load();
-    unsigned char *buf = malloc(HP_PAGE);
-    if (!buf)
-        return;
-    int shown = 0;
-    for (int i = 0; i < g_nhp && shown < 24; ++i) {
-        if (!rd(g_hp[i].addr, buf, HP_PAGE))
-            continue;
-        uint64_t h = 1469598103934665603ULL;
-        for (int k = 0; k < HP_PAGE; ++k) {
-            h ^= buf[k];
-            h *= 1099511628211ULL;
-        }
-        if (h != g_hp[i].hash) {
-            mlog("minimod: changed page %p (%s)\n", (void *)g_hp[i].addr, tag);
-            shown++;
-        }
-    }
-    free(buf);
-}
 
 /* The three knobs' properties are consecutive objects 0x58 apart (K1 at
  * base+0x1ac0, K2 at +0x1b18, K3 at +0x1b70). Finding that triple identifies
  * the control surface without needing a knob move first. */
-static int prop_like(uintptr_t x)
-{
-    uintptr_t head = 0;
-    float v = 0;
-    if (!rd(x + 0x10, &head, 8) || !head || !mapped((void *)head))
-        return 0;
-    if (!rd(x + 0x50, &v, 4) || !(v >= -2.0f && v <= 2.0f))
-        return 0;
-    return 1;
-}
 
-static int prop_listeners(uintptr_t x)
-{
-    uintptr_t head = 0;
-    if (!rd(x + 0x10, &head, 8) || !head || head == x + 8)
-        return 0;
-    int n = 0;
-    for (int i = 0; i < 32 && head && head != x + 8 && n < 99; ++i) {
-        uintptr_t next = 0;
-        n++;
-        if (!rd(head + 8, &next, 8) || !next || !mapped((void *)next))
-            break;
-        head = next;
-    }
-    return n;
-}
 
 static uintptr_t find_knob_props(void)
 {
@@ -5975,9 +4189,6 @@ static void screen_paint(void *p, void *g)
         g_screen = p;
         mlog("minimod: screen=%p\n", p);
     }
-#if MINIMOD_DEBUG
-    chop_probe_run(); /* model probes must also run on the UI thread */
-#endif
     spectral_tick();
     if (__atomic_load_n(&g_hpss_done, __ATOMIC_ACQUIRE))
         hpss_finalize();
@@ -6118,32 +4329,6 @@ static void *g_filter_dest;
  * renames the key without touching the layout of anything else. */
 static void *g_label_str;
 
-static const char *string_text(void *str, char *buf, size_t n)
-{
-    uintptr_t h = 0;
-    if (!str || !rd((uintptr_t)str, &h, 8) || !h)
-        return 0;
-    int len = 0;
-    if (rd(h + 4, &len, 4) && len > 0 && len < 200) { /* {ref, len, chars[]} */
-        if (rd(h + 8, buf, (size_t)len < n - 1 ? (size_t)len : n - 1)) {
-            buf[len < (int)n ? len : (int)n - 1] = 0;
-            int ok = 1;
-            for (int i = 0; i < len; ++i)
-                if ((unsigned char)buf[i] < 32) { ok = 0; break; }
-            if (ok)
-                return buf;
-        }
-    }
-    uintptr_t data = 0;
-    size_t l = 0;
-    if (rd(h, &data, 8) && rd(h + 8, &l, 8) && data && l > 0 && l < 200) {
-        if (rd(data, buf, l < n - 1 ? l : n - 1)) {
-            buf[l < n ? l : n - 1] = 0;
-            return buf;
-        }
-    }
-    return 0;
-}
 
 /* The soft-key captions are not juce::Label (Label::getText is never called),
  * so find the live juce::String that holds "Filter" once, and rename it in
@@ -6151,35 +4336,6 @@ static const char *string_text(void *str, char *buf, size_t n)
 static void *g_filter_strs[6];
 static int g_nfilter_strs;
 
-static void find_filter_strings(void)
-{
-    if (g_nfilter_strs)
-        return;
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return;
-    char txt[64];
-    for (int r = 0; r < g_nrng && g_nfilter_strs < 6; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && g_ntp < 256; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && g_nfilter_strs < 6; o += 8) {
-                uintptr_t str = a + o;
-                const char *t = string_text((void *)str, txt, sizeof txt);
-                if (t && !strcmp(t, "Filter")) {
-                    g_filter_strs[g_nfilter_strs++] = (void *)str;
-                    mlog("minimod: filter string at %p\n", (void *)str);
-                }
-            }
-        }
-    }
-    free(buf);
-}
 
 /* Scanning the heap on the UI thread froze the app (one /proc/self/mem open
  * per read), so the rename is done by a worker that only touches the cached
@@ -6298,16 +4454,6 @@ static void midi_note_event(void *app, void *context, void *event,
 }
 
 /* -------------------------------------------------------- probe threads */
-static void *needle_thread(void *arg)
-{
-    (void)arg;
-    return 0;
-}
-static void *layer_needle(void *arg)
-{
-    (void)arg;
-    return 0;
-}
 
 /* -------------------------------------------------- probe bookkeeping */
 static void *g_setter[32];
@@ -6393,252 +4539,15 @@ static void do_autotrim(void)
 
 /* every SampleModeScreen instance in the heap (the page paints from one of
  * them, the Trim knobs may drive another) */
-static int find_screens(uintptr_t *out, int max)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return 0;
-    uintptr_t want = base + A_SCREEN_VT;
-    int n = 0;
-    for (int r = 0; r < g_nrng && n < max; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && n < max; a += 65536) {
-            size_t sz = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            sz &= ~(size_t)7;
-            if (!rd(a, buf, sz))
-                break;
-            for (size_t o = 0; o + 8 <= sz && n < max; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (q == want)
-                    out[n++] = a + o;
-            }
-        }
-    }
-    free(buf);
-    return n;
-}
 
 /* Probe: /run/minimod.slider holds "N,V" - write percent V into the N-th
  * ui::Slider of the painting screen and repaint. Used to identify which slider
  * drives which locator. */
-static void *slider_probe_thread(void *arg)
-{
-    (void)arg;
-    struct timespec ts = {.tv_sec = 0, .tv_nsec = 300 * 1000 * 1000};
-    int last_n = -1;
-    float last_v = -1;
-    for (;;) {
-        nanosleep(&ts, 0);
-        int fd = open("/run/minimod.slider", O_RDONLY);
-        if (fd < 0)
-            continue;
-        char buf[64];
-        ssize_t n = read(fd, buf, sizeof buf - 1);
-        close(fd);
-        if (n <= 0)
-            continue;
-        buf[n] = 0;
-        int idx = -1;
-        float val = 0;
-        if (sscanf(buf, "%d,%f", &idx, &val) != 2 || idx < 0)
-            continue;
-        if (idx == last_n && val == last_v)
-            continue;
-        last_n = idx;
-        last_v = val;
-        if (!g_screen)
-            continue;
-        uintptr_t want = base + 0x706e5d0, hit = 0;
-        int k = 0;
-        for (long o = 0; o < 0x20000; o += 8) {
-            uintptr_t q = 0;
-            if (!rd((uintptr_t)g_screen + o, &q, 8))
-                break;
-            if (q != want)
-                continue;
-            if (k++ == idx) {
-                hit = (uintptr_t)g_screen + (uintptr_t)o;
-                break;
-            }
-        }
-        if (!hit)
-            continue;
-        wr(hit + 0x1b4, (void *)&val, 4);
-        mlog("minimod: probe slider %d @%p = %.2f\n", idx, (void *)hit, (double)val);
-        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-            g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
-    }
-    return 0;
-}
 
 /* Probe: /run/minimod.heap holds "snap" or "diff" for the heap fingerprint. */
-static void *heap_probe_thread(void *arg)
-{
-    (void)arg;
-    struct timespec ts = {.tv_sec = 0, .tv_nsec = 400 * 1000 * 1000};
-    for (;;) {
-        nanosleep(&ts, 0);
-        apply_pending_ctl();
-        int fd = open("/run/minimod.heap", O_RDONLY);
-        if (fd < 0)
-            continue;
-        char buf[32];
-        ssize_t n = read(fd, buf, sizeof buf - 1);
-        close(fd);
-        unlink("/run/minimod.heap");
-        if (n <= 0)
-            continue;
-        buf[n] = 0;
-        if (!strncmp(buf, "snap", 4))
-            heap_snapshot("mark");
-        else if (!strncmp(buf, "diff", 4))
-            heap_diff("after knob");
-        else if (!strncmp(buf, "find ", 5))
-            find_float_pair((float)atof(buf + 5));
-        else if (!strncmp(buf, "model", 5)) {
-            /* Resolve the pad-state container from the trim parameter and show
-             * the fields that track the Start/End knobs. */
-            uintptr_t pr = g_npm > 0 ? g_pm[0].param : (uintptr_t)g_trim_param0;
-            uintptr_t c = 0;
-            const char *sp = strchr(buf, ' ');
-            if (sp) {
-                float v = (float)atof(sp + 1);
-                if (pr && rd(pr + 0x90, &c, 8) && c) {
-                    int ok = wr(c + 0x7ea0, &v, 4);
-                    mlog("minimod: model c=%p +0x7ea0 <- %.4f ok=%d\n", (void *)c,
-                         (double)v, ok);
-                }
-            }
-            if (pr && rd(pr + 0x90, &c, 8) && c) {
-                mlog("minimod: model param used = %p\n", (void *)pr);
-                for (unsigned off = 0x7000; off <= 0x9000; off += 4) {
-                    float f = 0;
-                    if (rd(c + off, &f, 4) && f > -0.01f && f < 1.01f)
-                        mlog("minimod:   c+%#x = %.4f\n", off, (double)f);
-                }
-            }
-        } else if (!strncmp(buf, "set ", 4)) {
-            uintptr_t a = (uintptr_t)strtoull(buf + 4, 0, 16);
-            const char *sp = strchr(buf + 4, ' ');
-            float v = sp ? (float)atof(sp + 1) : 0.0f;
-            int ok = wr(a, &v, 4);
-            mlog("minimod: set %p = %.4f ok=%d\n", (void *)a, (double)v, ok);
-        } else if (!strncmp(buf, "snapb", 5))
-            byte_snap();
-        else if (!strncmp(buf, "diffb", 5))
-            byte_diff();
-        else if (!strncmp(buf, "who ", 4))
-            who_points_at((uintptr_t)strtoull(buf + 4, 0, 16));
-        else if (!strncmp(buf, "findval ", 8)) {
-            /* Every float equal to <val> (tolerance 1e-4) in the app's heap.
-             * Run at two knob positions and intersect to find the stored trim. */
-            float want = (float)atof(buf + 8);
-            ranges_load();
-            unsigned char *chunk = malloc(65536);
-            int hits = 0;
-            for (int r = 0; r < g_nrng && chunk && hits < 200; ++r) {
-                if (!g_rng[r].w)
-                    continue;
-                /* skip the image and the big audio buffers */
-                if (g_rng[r].lo >= base && g_rng[r].hi <= base + 0x9000000)
-                    continue;
-                if (g_rng[r].hi - g_rng[r].lo > 0x4000000)
-                    continue;
-                for (uintptr_t a = g_rng[r].lo; a + 4 < g_rng[r].hi; a += 65536) {
-                    size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-                    n &= ~(size_t)3;
-                    if (!rd(a, chunk, n))
-                        break;
-                    for (size_t o = 0; o + 4 <= n && hits < 200; o += 4) {
-                        float f;
-                        memcpy(&f, chunk + o, 4);
-                        float d = f - want;
-                        if (d < 0.0001f && d > -0.0001f) {
-                            mlog("minimod: fv %#llx %.6f\n",
-                                 (unsigned long long)(a + o), (double)f);
-                            hits++;
-                        }
-                    }
-                }
-            }
-            free(chunk);
-            mlog("minimod: fv done %d\n", hits);
-        }
-        else if (!strncmp(buf, "reg ", 4)) {
-            g_reg_base = (uintptr_t)strtoull(buf + 4, 0, 16);
-            g_reg_have = rd(g_reg_base, g_reg_buf, sizeof g_reg_buf) ? 1 : 0;
-            mlog("minimod: region mark %p ok=%d\n", (void *)g_reg_base, g_reg_have);
-        } else if (!strncmp(buf, "regdiff", 7)) {
-            if (g_reg_have) {
-                unsigned char *cur = malloc(sizeof g_reg_buf);
-                if (cur && rd(g_reg_base, cur, sizeof g_reg_buf)) {
-                    int shown = 0;
-                    for (size_t i = 0; i + 4 <= sizeof g_reg_buf && shown < 30; i += 4) {
-                        if (memcmp(cur + i, g_reg_buf + i, 4) == 0)
-                            continue;
-                        float a, b;
-                        memcpy(&a, g_reg_buf + i, 4);
-                        memcpy(&b, cur + i, 4);
-                        mlog("minimod: reg %p+%#zx %.4f -> %.4f\n",
-                             (void *)g_reg_base, i, (double)a, (double)b);
-                        shown++;
-                    }
-                    mlog("minimod: regdiff done\n");
-                }
-                free(cur);
-            }
-        } else if (!strncmp(buf, "poke ", 5)) {
-            int w = atoi(buf + 5);
-            const char *sp = strchr(buf + 5, ' ');
-            g_poke_value = sp ? (float)atof(sp + 1) : 0.5f;
-            g_poke_which = w;
-        }
-    }
-    return 0;
-}
 
 /* Probe: find every place in writable memory where the float pair
  * (0.0, value) sits adjacent - the trim model would keep Start/End that way. */
-static void find_float_pair(float v)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return;
-    unsigned char pat[4];
-    memcpy(pat, &v, 4);
-    int shown = 0;
-    for (int r = 0; r < g_nrng; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        if (g_rng[r].lo >= base && g_rng[r].hi <= base + 0x9000000)
-            continue;
-        if (g_rng[r].hi - g_rng[r].lo > 0x4000000)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)3;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 4; o + 4 <= n; ++o) {
-                if (memcmp(buf + o, pat, 4))
-                    continue;
-                float prev;
-                memcpy(&prev, buf + o - 4, 4);
-                if (prev > -1e-4f && prev < 1e-4f && shown < 24) {
-                    shown++;
-                    mlog("minimod: pair at %p (prev %.4f next %.4f)\n",
-                         (void *)(a + o - 4), (double)prev, (double)v);
-                }
-            }
-        }
-    }
-    mlog("minimod: pair search done, %d hits\n", shown);
-    free(buf);
-}
 
 /* Byte-level snapshot of the small writable ranges: a knob move changes the
  * pad's stored trim, and this names it exactly. */
@@ -6648,186 +4557,16 @@ static size_t g_bs_len;
 
 /* "findv <float>" - every address in the small writable ranges holding exactly
  * this float. Run with two knob values and intersect to find the stored state. */
-static void byte_snap(void)
-{
-    ranges_load();
-    free(g_bs);
-    g_bs = 0;
-    g_bs_len = 0;
-    size_t cap = BS_MAX, used = 0;
-    unsigned char *buf = malloc(cap);
-    if (!buf)
-        return;
-    for (int r = 0; r < g_nrng; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        if (g_rng[r].lo >= base && g_rng[r].hi <= base + 0x9000000)
-            continue;
-        size_t len = (size_t)(g_rng[r].hi - g_rng[r].lo);
-        if (len > 0x400000)      /* skip the big audio buffers */
-            continue;
-        if (used + 16 + len > cap)
-            break;
-        uint64_t addr = g_rng[r].lo;
-        memcpy(buf + used, &addr, 8);
-        memcpy(buf + used + 8, &len, 8);
-        if (!rd(g_rng[r].lo, buf + used + 16, len)) {
-            continue;
-        }
-        used += 16 + len;
-    }
-    g_bs = buf;
-    g_bs_len = used;
-    mlog("minimod: byte snapshot %zu bytes\n", used);
-}
 
-static void byte_diff(void)
-{
-    if (!g_bs)
-        return;
-    unsigned char *cur = malloc(0x400000);
-    if (!cur)
-        return;
-    int shown = 0;
-    size_t o = 0;
-    while (o + 16 <= g_bs_len && shown < 24) {
-        uint64_t addr, len;
-        memcpy(&addr, g_bs + o, 8);
-        memcpy(&len, g_bs + o + 8, 8);
-        if (o + 16 + len > g_bs_len)
-            break;
-        if (len <= 0x400000 && rd((uintptr_t)addr, cur, len)) {
-            for (size_t i = 0; i + 4 <= len && shown < 24; i += 4) {
-                if (memcmp(cur + i, g_bs + o + 16 + i, 4) == 0)
-                    continue;
-                float a, b;
-                memcpy(&a, g_bs + o + 16 + i, 4);
-                memcpy(&b, cur + i, 4);
-                if (!(a > -2.0f && a < 2.0f) && !(b > -2.0f && b < 2.0f))
-                    continue;
-                mlog("minimod: bdiff %#llx %.4f -> %.4f\n",
-                     (unsigned long long)(addr + i), (double)a, (double)b);
-                shown++;
-            }
-        }
-        o += 16 + len;
-    }
-    free(cur);
-    mlog("minimod: byte diff done\n");
-}
 
 /* Probe: "who <addr>" - every object that holds a pointer to <addr>, with the
  * holder's offset and whether it looks like an object (vtable in the image). */
-static void who_points_at(uintptr_t target)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return;
-    int shown = 0;
-    for (int r = 0; r < g_nrng && shown < 20; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && shown < 20; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && shown < 20; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if (q != target)
-                    continue;
-                uintptr_t holder = a + o;
-                uintptr_t vt = 0;
-                rd(a, &vt, 8); /* object base in this chunk */
-                int base_off = (int)(holder & 0xffff);
-                mlog("minimod: who %p holder %p chunkvt=%p off_in_chunk=%#x\n",
-                     (void *)target, (void *)holder, (void *)vt, base_off);
-                shown++;
-            }
-        }
-    }
-    mlog("minimod: who done, %d holders\n", shown);
-    free(buf);
-}
 
 /* Probe: /run/minimod.bcast holds "i,v" - broadcast g_bp[i] with value v, so we
  * can find which recorded property drives the page. */
-static void *bcast_probe_thread(void *arg)
-{
-    (void)arg;
-    struct timespec ts = {.tv_sec = 0, .tv_nsec = 300 * 1000 * 1000};
-    int last_i = -1;
-    float last_v = -1;
-    for (;;) {
-        nanosleep(&ts, 0);
-        int fd = open("/run/minimod.bcast", O_RDONLY);
-        if (fd < 0)
-            continue;
-        char buf[64];
-        ssize_t n = read(fd, buf, sizeof buf - 1);
-        close(fd);
-        if (n <= 0)
-            continue;
-        buf[n] = 0;
-        int idx = -1;
-        float val = 0;
-        if (sscanf(buf, "%d,%f", &idx, &val) != 2 || idx < 0 || idx >= g_nbp)
-            continue;
-        if (idx == last_i && val == last_v)
-            continue;
-        last_i = idx;
-        last_v = val;
-        mlog("minimod: bcast probe %d (%p) = %.4f\n", idx, (void *)g_bp[idx],
-             (double)val);
-        FN(A_BROADCAST, void (*)(void *, float))((void *)g_bp[idx], val);
-    }
-    return 0;
-}
 
 /* Re-arms the software watchpoint from /run/minimod.watch (hex address), so the
  * address can be set after the app has started and picked a new heap. */
-static void *watch_thread(void *arg)
-{
-    (void)arg;
-    struct timespec ts = {.tv_sec = 0, .tv_nsec = 200 * 1000 * 1000};
-    for (;;) {
-        nanosleep(&ts, 0);
-        /* the app installs its own crash handler after us; keep ours on top */
-        struct sigaction sa;
-        memset(&sa, 0, sizeof sa);
-        sa.sa_sigaction = fault_handler;
-        sa.sa_flags = SA_SIGINFO;
-        sigemptyset(&sa.sa_mask);
-        sigaction(SIGSEGV, &sa, 0);
-        int fd = open("/run/minimod.watch", O_RDONLY);
-        if (fd < 0)
-            continue;
-        char buf[64];
-        ssize_t n = read(fd, buf, sizeof buf - 1);
-        close(fd);
-        if (n <= 0)
-            continue;
-        buf[n] = 0;
-        if (!strncmp(buf, "scan", 4)) {
-            uintptr_t sc[8];
-            int ns = find_screens(sc, 8);
-            mlog("minimod: %d screen instance(s)\n", ns);
-            for (int i = 0; i < ns; ++i) {
-                mlog("minimod:   screen[%d]=%p\n", i, (void *)sc[i]);
-                watch_arm(sc[i] + 0x1f4c, "screen");
-                watch_arm(sc[i] + 0x72c8, "screenfrac");
-            }
-            unlink("/run/minimod.watch");
-            continue;
-        }
-        uintptr_t a = (uintptr_t)strtoull(buf, 0, 16);
-        if (a)
-            watch_arm(a, "addr");
-    }
-    return 0;
-}
 
 static int find_main(struct dl_phdr_info *info, size_t size, void *out)
 {
@@ -6858,20 +4597,6 @@ __attribute__((constructor)) static void load(void)
 {
 #if MINIMOD_LOG
     log_fd = open("/run/minimod.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-#endif
-#if MINIMOD_DEBUG
-    /* Debug builds only: the watch probe needs to see the fault it caused.
-     * Never installed in release - swallowing a SIGSEGV/SIGBUS changes the
-     * host app's behaviour on every fault. */
-    {
-        struct sigaction sa;
-        memset(&sa, 0, sizeof sa);
-        sa.sa_sigaction = fault_handler;
-        sa.sa_flags = SA_SIGINFO;
-        sigemptyset(&sa.sa_mask);
-        sigaction(SIGSEGV, &sa, 0);
-        sigaction(SIGBUS, &sa, 0);
-    }
 #endif
     uintptr_t found = 0;
     if (!dl_iterate_phdr(find_main, &found)) {
@@ -6973,60 +4698,6 @@ __attribute__((constructor)) static void load(void)
     void *t_sc = install_hook(base + 0x1968020, (void *)setctl_probe);
     if (t_sc)
         orig_setctl = (void (*)(void *, void *, int, int, float))t_sc;
-#if MINIMOD_DEBUG
-    void *t_pg = install_hook(base + 0x28100c0, (void *)pagector_probe);
-    if (t_pg)
-        orig_pagector = (pagector_fn)t_pg;
-    void *t_ch = install_hook(base + 0x2804e90, (void *)ctlhandler_probe);
-    if (t_ch)
-        orig_ctlhandler = (void (*)(void *, uint64_t, uint64_t))t_ch;
-    void *t_gt = install_hook(base + 0x2812f10, (void *)gettrim_probe);
-    if (t_gt)
-        orig_gettrim = (void *(*)(void *))t_gt;
-    void *t_cp = install_hook(base + 0x280dca0, (void *)copypad_probe);
-    if (t_cp)
-        orig_copypad = (void (*)(void *, void *))t_cp;
-#endif
-#if MINIMOD_DEBUG
-    {
-        void *t = 0;
-        t = install_hook(base + 0x20a3b10, (void *)add_slice_hook);
-        if (t)
-            orig_add_slice = (void (*)(void *, void *, uint64_t))t;
-        t = install_hook(base + 0x20a9fa0, (void *)add_slice_ph_hook);
-        if (t)
-            orig_add_slice_ph = (void (*)(void *))t;
-        t = install_hook(base + 0x1960af0, (void *)insert_cmd_hook);
-        if (t)
-            orig_insert_cmd = (void (*)(void *, void *, unsigned, void *))t;
-        t = install_hook(base + 0x195cf40, (void *)rmall_cmd_hook);
-        if (t)
-            orig_rmall_cmd = (void (*)(void *, void *, void *))t;
-        t = install_hook(base + 0x192d040, (void *)slice_publish_hook);
-        if (t)
-            orig_slice_publish = (void (*)(void *))t;
-        t = install_hook(base + 0x2941ff0, (void *)slice_list_hook);
-        if (t)
-            orig_slice_list = (void *(*)(void *))t;
-        t = install_hook(base + 0x20a7140, (void *)slice_action_hook);
-        if (t)
-            orig_slice_action = (void (*)(void *, void *, int))t;
-        t = install_hook(base + 0x1960d50, (void *)split_cmd_hook);
-        if (t)
-            orig_split_cmd = (void (*)(void *, void *, unsigned, void *))t;
-        t = install_hook(base + 0x195d1c0, (void *)rm_slice_hook);
-        if (t)
-            orig_rm_slice = (void (*)(void *, void *, unsigned, void *))t;
-        t = install_hook(base + 0x2814ec0, (void *)marker_at_hook);
-        if (t)
-            orig_marker_at = (int (*)(void *, unsigned))t;
-        t = install_hook(base + 0x20aa9e0, (void *)slice_sel_hook);
-        if (t)
-            orig_slice_sel = (void (*)(void *, unsigned))t;
-        mlog("chop hooks: add=%p ph=%p cmd=%p\n", (void *)orig_add_slice,
-             (void *)orig_add_slice_ph, (void *)orig_insert_cmd);
-    }
-#endif
     void *t_trim = install_hook(base + A_TRIM_CORE, (void *)trim_probe); /* also learns param->property */
     void *t_bc = install_hook(base + A_BROADCAST, (void *)bcast_hook);
     if (t_bc)
@@ -7082,16 +4753,6 @@ __attribute__((constructor)) static void load(void)
              (void *)orig_hpss_writer);
     }
     install_screen_paint();
-#if MINIMOD_DEBUG
-    {
-        pthread_t wth, sth, bth, hth, cth;
-        pthread_create(&wth, 0, watch_thread, 0);
-        pthread_create(&sth, 0, slider_probe_thread, 0);
-        pthread_create(&bth, 0, bcast_probe_thread, 0);
-        pthread_create(&hth, 0, heap_probe_thread, 0);
-        pthread_create(&cth, 0, chop_probe_thread, 0);
-    }
-#endif
     if (!relay_used) {
         mlog("minimod: no hook installed\n");
         return;

@@ -65,7 +65,7 @@ slice.
 | WAV reading, source backup/restore | ported | 5 host tests over synthetic files; the effects and bass device tests run on it |
 | Sample-path resolution (object graph, unique/newest file) | ported | 6 host tests; the effects and bass device tests run on it |
 | Status line (action names, formatted messages) | ported | 3 host tests; the bass device test reads the string out of the process |
-| `minimod.c` (hooks, features, UI glue) | C, shrinking | — |
+| `minimod.c` (hooks, features, UI glue) | C, shrinking | 7 683 -> 4 774 lines; every removal verified by an identical binary |
 
 The looper, the effects and the whole bass synth are already what the device
 runs: `mod/build.sh` links the Rust static library instead of the C engines, and
@@ -104,6 +104,21 @@ are deleted, and the header disappears with the file.  Each area is chosen so an
 existing emulator test already covers it — the WAV layer, for instance, is on the
 path of every sample action, so the Reverb and Bass Synth tests validate it on
 the device.
+
+## What was deleted rather than ported
+
+Two kinds of code in the glue were never going to be Rust:
+
+* the `#if MINIMOD_DEBUG` forensic scaffolding (probes, watch points, heap and
+  broadcast dumps) - 1 050 lines that the release build already compiled out;
+* the 63 functions and globals the compiler proved unreachable once that
+  scaffolding was gone (~1 270 lines), which were the leftovers of the
+  reverse-engineering sessions.
+
+Both passes were checked by rebuilding: the resulting `.so` is **byte-identical**
+(`b47b7971c7ee8ac2`) before and after, so 2 320 lines left the glue and not one
+instruction changed. The device artifact is the same binary the round-6 tests ran
+against.
 
 ## Findings from the port
 
