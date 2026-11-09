@@ -65,4 +65,16 @@ void minimod_input_data(struct minimod_input *state, int32_t *selection,
                         struct minimod_input_context ctx,
                         minimod_data_signal_fn callback);
 
+/* The app's own hooks, recorded once at install time. */
+void minimod_hook_originals(minimod_note_on_fn on, minimod_note_off_fn off,
+                            minimod_surface_fn surface,
+                            minimod_data_signal_fn data);
+
+/* The four entry points the constructor installs. */
+void minimod_hook_note_on(void *input, int32_t src, int32_t pad, void *props,
+                          float velocity);
+void minimod_hook_note_off(void *input, int32_t src, int32_t pad);
+void minimod_hook_surface(void *self_address, int32_t code, void *payload);
+void minimod_hook_data(void *self_address, int32_t delta);
+
 #endif

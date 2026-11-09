@@ -406,13 +406,10 @@ static void *(*orig_sixteen_ctor)(void *, void *, void *, void *);
 static void (*orig_sixteen_proc)(void *, int, void *);
 static void (*orig_pitch_off)(void *, uint64_t, uint64_t, int);
 static void (*orig_buttons)(void *);
-static void (*orig_note_on)(void *, int, int, void *, float);
-static void (*orig_note_off)(void *, int, int);
 static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
 static void (*orig_bass_audio_writer)(void *, void *, size_t, int);
 static volatile unsigned g_audio_in_calls;
 static volatile unsigned g_audio_out_calls;
-static void (*orig_cs)(void *, int, void *);
 /* The Sample page (0x2468 bytes) captured from SamplePage_Ctor; it owns the
  * Start/End widgets and is what must be repainted after a property change. */
 typedef void (*pagector_fn)(void *, void *, void *, void *, void *, void *,
@@ -566,16 +563,8 @@ static void bass_preview_set_active(int active)
  * Ghidra FUN_0150dbc0(surface + 0x2da8, delta). Unlike the float broadcaster,
  * this is an event: repeated identical deltas must each move the selection.
  * Learn the surface from the same native event that opens SAMPLE OPTIONS. */
-static void (*orig_data_signal)(void *, int);
 static void hpss_repaint(void);
 
-static void data_signal(void *self, int delta)
-{
-    struct minimod_input_context ctx;
-    input_context(&ctx);
-    minimod_input_data(&g_input, &g_menu.selection, (uintptr_t)self, delta, ctx,
-                       (minimod_data_signal_fn)orig_data_signal);
-}
 
 static void hpss_make_names(void)
 {
@@ -1134,6 +1123,22 @@ static void buttons(void *event)
         orig_buttons(event);
 }
 
+/* The Rust entry points ask for this once per event. */
+struct minimod_input_context minimod_glue_context(void);
+int *minimod_glue_selection(void);
+
+struct minimod_input_context minimod_glue_context(void)
+{
+    struct minimod_input_context ctx;
+    input_context(&ctx);
+    return ctx;
+}
+
+int *minimod_glue_selection(void)
+{
+    return &g_menu.selection;
+}
+
 static void input_context(struct minimod_input_context *ctx)
 {
     ctx->looper_open = looper_is_open();
@@ -1149,24 +1154,10 @@ static void input_context(struct minimod_input_context *ctx)
 
 static void release_held_pads(void)
 {
-    minimod_input_release_held(&g_input, (minimod_note_off_fn)orig_note_off);
+    minimod_input_release_held(&g_input, (minimod_note_off_fn)minimod_hook_note_off);
 }
 
-static void note_on(void *input, int src, int pad, void *props, float vel)
-{
-    struct minimod_input_context ctx;
-    input_context(&ctx);
-    minimod_input_note_on(&g_input, (uintptr_t)input, src, pad, (uintptr_t)props, vel,
-                          ctx, (minimod_note_on_fn)orig_note_on);
-}
 
-static void note_off(void *input, int src, int pad)
-{
-    struct minimod_input_context ctx;
-    input_context(&ctx);
-    minimod_input_note_off(&g_input, (uintptr_t)input, src, pad, ctx,
-                           (minimod_note_off_fn)orig_note_off);
-}
 
 /* The firmware's audio writer accepts planar float channels, then converts
    them to S32 PCM. Mix the preview and the live-looper loops into private
@@ -1448,11 +1439,6 @@ static void audio_writer(void *self, void *input, size_t frames, int offset)
 }
 
 
-static void cs_event(void *self, int code, void *payload)
-{
-    minimod_input_surface(&g_input, (uintptr_t)self, code, (uintptr_t)payload,
-                          (minimod_surface_fn)orig_cs);
-}
 
 
 
@@ -1876,7 +1862,13 @@ __attribute__((constructor)) static void load(void)
     }
     void *t_ctor = (hook_mask & 1) ? install_hook(base + A_SIXTEEN_CTOR, (void *)sixteen_ctor) : 0;
     void *t_proc = (hook_mask & 2) ? install_hook(base + A_SIXTEEN_PROC, (void *)sixteen_proc) : 0;
-    void *t_data = install_hook(base + A_DATA_SIGNAL, (void *)data_signal);
+    /* The four input hooks are Rust entry points; they are handed the app's own
+     * functions once, before any event can arrive. */
+    void *t_data = install_hook(base + A_DATA_SIGNAL, (void *)minimod_hook_data);
+    void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)minimod_hook_note_on) : 0;
+    void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)minimod_hook_surface) : 0;
+    void *t_off = (hook_mask & 128) ? install_hook(base + A_NOTE_OFF, (void *)minimod_hook_note_off) : 0;
+    minimod_hook_originals((void *)t_note, (void *)t_off, (void *)t_cs, (void *)t_data);
     if (midi_hook_site_ok()) {
         void *t_midi = install_hook(base + A_MIDI_NOTE_EVENT, (void *)midi_note_event);
         if (t_midi) {
@@ -1887,8 +1879,6 @@ __attribute__((constructor)) static void load(void)
     } else {
         mlog("minimod: MIDI dispatcher mismatch; not hooking\n");
     }
-    if (t_data)
-        orig_data_signal = (void (*)(void *, int))t_data;
     void *t_cc = install_hook(base + 0x159f230, (void *)cc_capture);
     if (t_cc)
         orig_cc = (void (*)(void *, unsigned, float, float))t_cc;
@@ -1899,9 +1889,6 @@ __attribute__((constructor)) static void load(void)
      * 16 Levels the stock code must stay untouched. */
     mlog("minimod: MIDI hook deferred until 16 LEVELS\n");
     void *t_btn = (hook_mask & 16) ? install_hook(base + A_BUTTONS, (void *)buttons) : 0;
-    void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)note_on) : 0;
-    void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)cs_event) : 0;
-    void *t_off = (hook_mask & 128) ? install_hook(base + A_NOTE_OFF, (void *)note_off) : 0;
     void *t_bass_audio = install_hook(base + A_BASS_AUDIO_WRITER, (void *)audio_writer);
     void *t_rp = install_hook(base + A_REPAINT, (void *)repaint_hook);
     if (t_rp)
@@ -1916,12 +1903,6 @@ __attribute__((constructor)) static void load(void)
         orig_sixteen_proc = (void (*)(void *, int, void *))t_proc;
     if (t_btn)
         orig_buttons = (void (*)(void *))t_btn;
-    if (t_note)
-        orig_note_on = (void (*)(void *, int, int, void *, float))t_note;
-    if (t_cs)
-        orig_cs = (void (*)(void *, int, void *))t_cs;
-    if (t_off)
-        orig_note_off = (void (*)(void *, int, int))t_off;
     if (t_bass_audio) {
         orig_bass_audio_writer = (void (*)(void *, void *, size_t, int))t_bass_audio;
     }

@@ -356,6 +356,126 @@ pub extern "C" fn minimod_input_set_data_target(target: usize) {
 /// The state itself.
 static mut STATE: State = State::new();
 
+// The glue owns the screens and the keys; it builds the context for us and
+// hands us its menu's selection slot.
+unsafe extern "C" {
+    fn minimod_glue_context() -> Context;
+    fn minimod_glue_selection() -> *mut i32;
+}
+
+/// The app's own note-on, recorded at install time.
+static mut ORIGINAL_ON: Option<NoteOn> = None;
+/// The app's own note-off.
+static mut ORIGINAL_OFF: Option<NoteOff> = None;
+/// The app's own control-surface handler.
+static mut ORIGINAL_SURFACE: Option<ControlSurface> = None;
+/// The app's own encoder handler.
+static mut ORIGINAL_DATA: Option<DataSignal> = None;
+
+/// Record the displaced hooks, for the glue.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_hook_originals(
+    on: Option<NoteOn>,
+    off: Option<NoteOff>,
+    surface: Option<ControlSurface>,
+    data: Option<DataSignal>,
+) {
+    // SAFETY: the constructor calls this once, before any event can arrive.
+    unsafe {
+        ORIGINAL_ON = on;
+        ORIGINAL_OFF = off;
+        ORIGINAL_SURFACE = surface;
+        ORIGINAL_DATA = data;
+    }
+}
+
+/// A pad press, as the app's own hook.
+///
+/// # Safety
+///
+/// The app calls this with its own event pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hook_note_on(
+    input: usize,
+    src: i32,
+    pad: i32,
+    props: usize,
+    velocity: f32,
+) {
+    // SAFETY: the glue builds the context from state it owns.
+    let context = unsafe { minimod_glue_context() };
+    // SAFETY: the state is a static in this module.
+    let state = core::ptr::addr_of_mut!(STATE);
+    // SAFETY: the original is the app's own hook.
+    unsafe {
+        minimod_input_note_on(
+            state,
+            input,
+            src,
+            pad,
+            props,
+            velocity,
+            context,
+            ORIGINAL_ON,
+        );
+    }
+}
+
+/// A pad release, as the app's own hook.
+///
+/// # Safety
+///
+/// The app calls this with its own event pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hook_note_off(input: usize, src: i32, pad: i32) {
+    // SAFETY: the glue builds the context from state it owns.
+    let context = unsafe { minimod_glue_context() };
+    // SAFETY: the state is a static in this module.
+    let state = core::ptr::addr_of_mut!(STATE);
+    // SAFETY: the original is the app's own hook.
+    unsafe { minimod_input_note_off(state, input, src, pad, context, ORIGINAL_OFF) };
+}
+
+/// A control-surface event, as the app's own hook.
+///
+/// # Safety
+///
+/// The app calls this with its own event pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hook_surface(self_address: usize, code: i32, payload: usize) {
+    // SAFETY: the state is a static in this module.
+    let state = core::ptr::addr_of_mut!(STATE);
+    // SAFETY: the original is the app's own hook.
+    unsafe { minimod_input_surface(state, self_address, code, payload, ORIGINAL_SURFACE) };
+}
+
+/// The encoder, as the app's own hook.
+///
+/// # Safety
+///
+/// The app calls this with its own event pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hook_data(self_address: usize, delta: i32) {
+    // SAFETY: the glue builds the context from state it owns.
+    let context = unsafe { minimod_glue_context() };
+    // SAFETY: the state and the menu's selection are Rust statics; the glue
+    // passes the menu through the context call.
+    let state = core::ptr::addr_of_mut!(STATE);
+    // SAFETY: the glue owns the menu and returns a writable slot for its row.
+    let selection = unsafe { minimod_glue_selection() };
+    // SAFETY: the state, the slot and the original are the caller's.
+    unsafe {
+        minimod_input_data(
+            state,
+            selection,
+            self_address,
+            delta,
+            context,
+            ORIGINAL_DATA,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{MENU_ITEMS, State};
