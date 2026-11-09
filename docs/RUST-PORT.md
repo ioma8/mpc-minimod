@@ -795,3 +795,26 @@ What is now known to differ between the working C constructor and the table:
 
 That is where the next probe goes: install **only** the eight sites the C constructor
 installs first, from the table, and see whether that alone survives.
+
+## A faithful transcription also dies
+
+The obvious last hypothesis was that my table *redesigned* something.  So the C
+constructor was transcribed into `glue::minimod_glue_install` call for call - same
+order, same `minimod_hook_originals` / `minimod_midi_originals` / `minimod_entries_all`
+batch calls, same unconditional sites, same paint install last.
+
+It dies the same way.  So the difference is **not** the order, not the recorders, and
+not the batching.
+
+What is left, and it is a short list:
+
+* the C constructor runs `looper_cfg_load()` and reads the latency environment
+  variables **before** any install; the transcription reads them before the call, so
+  that is equivalent - unless one of those reads matters to a hook;
+* `base` is a C global that `rd`/`mapped`/`FN` use; if `minimod_set_base` were not in
+  effect during the Rust install, every hook would read the wrong image;
+* the C constructor installs `A_SCREEN_VT` through a `static` function in the same
+  translation unit; the transcription calls the same function through `extern "C"`.
+
+The second one is testable in one run: print `minimod_glue_base()` from inside the
+install and compare it with `base`.  That is the next probe, not another rearrangement.
