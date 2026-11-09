@@ -77,6 +77,8 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+void minimod_menu_activate_self(void);
+
 int32_t minimod_job_start_self(int32_t action, uintptr_t base, uintptr_t screen);
 
 int32_t minimod_extract_run(uintptr_t screen, uintptr_t state, const float *buffer,
@@ -757,16 +759,7 @@ static int looper_menu_open(void)
 
 static void hpss_activate(void)
 {
-    struct minimod_menu_hooks hooks = {0};
-    hooks.repaint = hpss_repaint;
-    hooks.start_split = hpss_start;
-    hooks.start_effect = effect_start;
-    hooks.start_spectral = spectral_start;
-    hooks.start_bass = fmbass_start;
-    hooks.start_bass_page = bass_page_open;
-    hooks.start_looper = looper_menu_open;
-    hooks.set_status = hpss_set_status;
-    minimod_menu_activate(&g_menu, &hooks);
+    minimod_menu_activate_self();
 }
 
 static void draw_colour(void *g, uint32_t v);

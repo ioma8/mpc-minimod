@@ -5,6 +5,7 @@
 //! reports.  The extract itself stays a callback because it drives a firmware
 //! handler and waits on the app's writer - the one part that is still glue.
 
+use crate::firmware::base;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
@@ -778,4 +779,77 @@ pub unsafe extern "C" fn minimod_job_start_self(action: i32, base: usize, screen
             core::ptr::from_ref(&hooks),
         )
     }
+}
+
+/// Open the effects menu with the crate's own hooks.
+///
+/// # Safety
+///
+/// The app's objects are live while the page is showing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_menu_activate_self() {
+    let hooks = crate::menu::Hooks {
+        repaint: Some(crate::ui::minimod_repaint_screen),
+        start_split: Some(start_split),
+        start_effect: Some(start_effect),
+        start_spectral: Some(start_spectral),
+        start_bass: Some(start_bass),
+        restore_chop: Some(crate::ui::minimod_restore_chop),
+        start_bass_page: Some(start_bass_page),
+        start_looper: Some(start_looper),
+        set_status: Some(toast_c),
+    };
+    // SAFETY: the menu and the hooks are the crate's own.
+    unsafe {
+        crate::menu::minimod_menu_activate(
+            core::ptr::addr_of_mut!(crate::menu::g_menu),
+            core::ptr::from_ref(&hooks),
+        );
+    }
+}
+
+/// Start a transform job bound to no effect.
+extern "C" fn start_split() {
+    // SAFETY: the app's objects are live.
+    unsafe { minimod_job_start_self(0, base(), crate::paint::screen()) };
+}
+
+/// Start a transform job for one effect.
+extern "C" fn start_effect(action: i32) {
+    // SAFETY: the app's objects are live.
+    unsafe { minimod_job_start_self(action, base(), crate::paint::screen()) };
+}
+
+/// Start a spectral chop.
+unsafe extern "C" fn start_spectral() {
+    let busy = i32::from(crate::menu::state().busy != 0 || busy());
+    // SAFETY: the crate's own state.
+    if unsafe { crate::spectral::minimod_spectral_run_start(busy) } != 0 {
+        // SAFETY: the app's own repaint.
+        unsafe { crate::ui::minimod_repaint_screen() };
+    }
+}
+
+/// Open the bass control page.
+unsafe extern "C" fn start_bass_page() {
+    // SAFETY: the crate's own state.
+    unsafe { crate::menu::minimod_menu_bass_page() };
+}
+
+/// Start the bass synth.
+extern "C" fn start_bass() {
+    // SAFETY: the app's objects are live.
+    unsafe { minimod_job_start_self(4, base(), crate::paint::screen()) };
+}
+
+/// Open the looper, re-reading the device's rings if it opened.
+extern "C" fn start_looper() -> i32 {
+    let opened = crate::looper_ffi::looper_activate();
+    if opened != 0 {
+        // SAFETY: the flag is the audio module's.
+        unsafe { crate::audio::g_buf_dirty = 1 };
+        crate::bass_ffi::minimod_bass_preview_set_active(0);
+        crate::audio::minimod_pump_start();
+    }
+    opened
 }
