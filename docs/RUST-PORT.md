@@ -695,3 +695,23 @@ itself into `audio`, and stopped at three things worth recording before the next
 
 Reverted; the certified build is green and the finding is the plan for the next
 attempt: accessors first, then the statics, then the function.
+
+## The output tap, second attempt: it runs, but the looper hears nothing
+
+Attempt two followed the plan exactly - the five accessors first, then the nine
+statics with their names in Rust, then the function - and it **built, loaded and
+started**, with the Bass Synth suite green.  The Live Looper suite failed with
+`(0, 1024)`, which is the shape of "no audio reached the looper's input".
+
+One bug was found and fixed on the way: the latency source argument is a **letter**
+(`F` for the override, `B` for the ring sizes, `E` for the fallback measurement), not a
+boolean.  Fixing it did not change the failure.
+
+So the port is structurally right and one detail is wrong, and the difference has to
+be in what the tap *does* with the buffer: the nine statics moved with their types
+(`float g_outtap[]` on the C side, `[f32; 88200]` on the Rust side, which are the same
+layout), so the suspicious part is `looper_render_s32` being handed the buffer before
+the app's write, or the channel stride in the peak and tap loops.
+
+Reverted; the certified build is green.  The next attempt starts from the passing
+build and changes **one** of those two things at a time.
