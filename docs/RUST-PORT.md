@@ -363,7 +363,18 @@ matches its object and the menu's row never moves - which is exactly the two
 symptoms.
 
 So the wiring needs that computation moved too, and it belongs with the event
-store.  Reverted; the glue keeps its dispatcher until then.
+store.
+
+A third attempt moved it there (the event store now derives `data_target` from the
+event's context pointer) and still failed the same two ways, and a direct probe
+showed why the diagnosis was incomplete: **the menu never opens**.  SHIFT is
+handled - the chip's own `restore_pending` gets armed on its release, so the entry
+point is running - but the encoder press does not reach `hpss_open`.
+
+What is left to check, in order: whether `state.shift` survives the release that
+the panel sends between presses, whether `ask(page_visible)` is true at that
+moment, and whether the `menu_open` hook is reached at all.  That wants a logging
+build in the same round, not another blind edit.
 
 ## The probe hooks were dead code too
 
