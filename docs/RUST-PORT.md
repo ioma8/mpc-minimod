@@ -383,7 +383,18 @@ loses the app on first interaction (`NRestarts=1`), so something the diagnostic
 build masked is still wrong - most likely one of the four `safe`/`debug`/`mask`
 statics that the old constructor used to set and nothing sets now.
 
-That is the last known gap before the flip lands.
+Setting the three statics from the constructor did **not** fix it: the clean build
+crashes on start (`NRestarts=14`), while the same code with `-DMINIMOD_LOG=1` starts
+and installs fine.
+
+That difference is the clue: with logging the install is slow enough that nothing
+runs before it finishes.  Without it, a hook goes live while the originals are still
+being recorded - `install_input` patches the sites *first* and records their
+originals at the end - and a hook that fires in that window finds nothing.
+
+So the ordering has to change, not the logging: record each original **immediately
+after** patching its site, per hook, before moving to the next.  That is a small,
+mechanical change to the four install functions.
 
 ## The button entry point
 
