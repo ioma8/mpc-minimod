@@ -88,6 +88,7 @@
 #include "cfg_ffi.h"
 #include "autotrim_ffi.h"
 #include "buttons_ffi.h"
+#include "hpss_exec_ffi.h"
 #include "props_ffi.h"
 #include "cc_ffi.h"
 #include "spectral_ffi.h"
@@ -198,7 +199,6 @@ static int g_rng_loaded;
  * kernel a read through an O_RDWR /proc/self/mem returns EIO, which silently
  * breaks every rd() and wedges the UI logic that depends on it. */
 static int mem_rd_fd = -1;
-static int mem_wr_fd = -1;
 static pthread_mutex_t g_mem_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 static int rd(uintptr_t addr, void *dst, size_t n)
@@ -211,15 +211,6 @@ static int rd(uintptr_t addr, void *dst, size_t n)
     return got == (ssize_t)n;
 }
 
-static int wr(uintptr_t addr, const void *src, size_t n)
-{
-    pthread_mutex_lock(&g_mem_mtx);
-    if (mem_wr_fd < 0)
-        mem_wr_fd = open("/proc/self/mem", O_WRONLY);
-    ssize_t put = mem_wr_fd < 0 ? -1 : pwrite(mem_wr_fd, src, n, (off_t)addr);
-    pthread_mutex_unlock(&g_mem_mtx);
-    return put == (ssize_t)n;
-}
 
 static int mapped(const void *p)
 {
@@ -623,56 +614,20 @@ static void hpss_exec_hook(void *cmd)
     for (int i = 0; i < g_hpss_cmd_n; ++i)
         if (g_hpss_cmd[i] == cmd)
             armed = 1;
-    uintptr_t settings = 0;
-    uint64_t old_start = 0, old_end = 0;
-    int patched = 0;
-    if (armed && g_hpss_arm) {
-        g_hpss_write_ok = 0;
-        minimod_substitute_clear();
-        if (g_hpss_arm_buf) {
-            minimod_substitute_arm((uintptr_t)g_hpss_arm_buf, g_hpss_arm_frames,
-                                   g_hpss_arm_source_frames, g_hpss_arm_ch);
-        }
-        /* The constructor stores the settings object by pointer; the execute
-         * method is what copies its range into the slice command.  Patch it
-         * here, for exactly the duration of that copy. */
-        if (rd((uintptr_t)cmd + 0x60, &settings, 8) && settings &&
-            rd(settings + HPSS_RANGE_START, &old_start, 8) &&
-            rd(settings + HPSS_RANGE_END, &old_end, 8)) {
-            uint64_t start = g_hpss_arm_start, end = g_hpss_arm_end;
-            patched = wr(settings + HPSS_RANGE_START, &start, 8) &&
-                      wr(settings + HPSS_RANGE_END, &end, 8);
-            mlog("HPSS exec: cmd=%p settings range %llu..%llu -> %u..%u\n", cmd,
-                 (unsigned long long)old_start, (unsigned long long)old_end,
-                 g_hpss_arm_start, g_hpss_arm_end);
-        }
-        mlog("HPSS exec: cmd=%p armed %u..%u (%zu frames) x %u ch buf=%p\n", cmd,
-             g_hpss_arm_start, g_hpss_arm_end, g_hpss_arm_frames,
-             g_hpss_arm_ch, (void *)g_hpss_arm_buf);
-        if (!g_hpss_arm_buf)
-            g_hpss_write_ok = 1; /* native Extract copies the range itself */
-    }
-    if (orig_hpss_exec)
-        orig_hpss_exec(cmd);
-    if (patched) {
-        wr(settings + HPSS_RANGE_START, &old_start, 8);
-        wr(settings + HPSS_RANGE_END, &old_end, 8);
-    }
-    if (armed && minimod_substitute_active()) {
-        /* The native writer may run on an executor thread.  Wait for it so the
-         * buffer stays alive and the next extraction starts from a clean state. */
-        size_t consumed = 0, total = 0;
-        int spins = 0;
-        minimod_substitute_progress(&consumed, &total);
-        while (consumed < total && spins++ < 3000) {
-            usleep(1000);
-            minimod_substitute_progress(&consumed, &total);
-        }
-        minimod_substitute_clear();
-        g_hpss_write_ok = (consumed == total);
-        mlog("HPSS exec: cmd=%p writer consumed %zu/%zu frames%s\n", cmd, consumed,
-             total, g_hpss_write_ok ? "" : " (INCOMPLETE)");
-    }
+    struct minimod_hpss_arm arm = {
+        .armed = armed && g_hpss_arm,
+        .buffer = (uintptr_t)g_hpss_arm_buf,
+        .frames = g_hpss_arm_frames,
+        .source_frames = g_hpss_arm_source_frames,
+        .channels = g_hpss_arm_ch,
+        .start = g_hpss_arm_start,
+        .end = g_hpss_arm_end,
+        .rename = g_hpss_arm_name,
+    };
+    struct minimod_hpss_outcome outcome =
+        minimod_hpss_exec_run((uintptr_t)cmd, &arm, (void (*)(void *))orig_hpss_exec);
+    if (arm.armed)
+        g_hpss_write_ok = outcome.write_ok;
 }
 
 static void hpss_writer_hook(void *closure, void *block)

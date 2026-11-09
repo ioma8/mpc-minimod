@@ -25,6 +25,7 @@ pub mod effect;
 pub mod effect_ffi;
 pub mod firmware;
 pub mod hooks;
+pub mod hpss_exec;
 pub mod input;
 pub mod job;
 pub mod jobflow;
