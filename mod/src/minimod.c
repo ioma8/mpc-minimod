@@ -930,13 +930,6 @@ struct minimod_cc_context minimod_glue_cc_context(void)
 }
 
 
-void minimod_glue_set_knobs(const float *knobs)
-{
-    g_bass_knob[0] = knobs[0];
-    g_bass_knob[1] = knobs[1];
-    g_bass_knob[2] = knobs[2];
-    bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
-}
 
 void minimod_glue_cc_notice(const char *text)
 {

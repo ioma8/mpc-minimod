@@ -5,9 +5,9 @@
 //! the bass page, and everything else is either swallowed (a modal screen owns
 //! the controls) or handed to the app.
 
-use crate::bass_ffi;
+use crate::bass_ffi::bass_preview_set_params;
 use crate::clock;
-use crate::looper_ffi;
+use crate::looper_ffi::{self, looper_notice};
 use crate::routing;
 
 /// How often the settings file may be written, in milliseconds.
@@ -135,7 +135,7 @@ pub unsafe fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
             knobs[index] = route.amount;
             outcome.knobs = knobs;
             outcome.knobs_changed = 1;
-            bass_ffi::bass_preview_set_params(knobs[0], knobs[1], knobs[2]);
+            bass_preview_set_params(knobs[0], knobs[1], knobs[2]);
             if let Some(repaint) = hooks.repaint {
                 // SAFETY: the glue's own callback.
                 unsafe { repaint() };
@@ -202,8 +202,6 @@ pub unsafe extern "C" fn minimod_cc_handle(
 // context and applies what comes back.
 unsafe extern "C" {
     fn minimod_glue_cc_context() -> Context;
-    fn minimod_glue_set_knobs(knobs: *const f32);
-    fn minimod_glue_cc_notice(text: *const u8);
     fn minimod_glue_save();
 }
 
@@ -241,7 +239,7 @@ pub unsafe extern "C" fn minimod_hook_cc(event: usize, raw: u32, low: f32, range
         original: None,
         repaint: Some(crate::ui::minimod_repaint_screen),
         save: Some(minimod_glue_save),
-        notice: Some(minimod_glue_cc_notice),
+        notice: Some(notice_c),
     };
     // SAFETY: the hooks are the glue's callbacks.
     let outcome = unsafe { handle(context, control, hooks) };
@@ -250,8 +248,11 @@ pub unsafe extern "C" fn minimod_hook_cc(event: usize, raw: u32, low: f32, range
         unsafe { crate::glue::g_lat_extra = outcome.trim_frames };
     }
     if outcome.knobs_changed != 0 {
-        // SAFETY: the glue owns the three values.
-        unsafe { minimod_glue_set_knobs(outcome.knobs.as_ptr()) };
+        // SAFETY: the knobs are the crate's own.
+        unsafe {
+            crate::menu::g_bass_knob = outcome.knobs;
+            bass_preview_set_params(outcome.knobs[0], outcome.knobs[1], outcome.knobs[2]);
+        }
     }
     if outcome.consumed != 0 {
         return;
@@ -261,6 +262,12 @@ pub unsafe extern "C" fn minimod_hook_cc(event: usize, raw: u32, low: f32, range
         // SAFETY: the caller passed the app's event.
         unsafe { original(event, raw, low, range) };
     }
+}
+
+/// Say something about the looper, in the shape the hooks want.
+unsafe extern "C" fn notice_c(text: *const u8) {
+    // SAFETY: the caller promises a NUL-terminated string or null.
+    unsafe { looper_notice(text.cast()) };
 }
 
 #[cfg(test)]
