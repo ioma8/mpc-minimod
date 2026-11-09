@@ -359,6 +359,23 @@ next try:
 
 The attempt was reverted rather than half-landed; the glue is unchanged and green.
 
+Second attempt, with the handled parts:
+
+* `g_screen` **did** have to move to Rust - with the C constructor gone nothing in
+  C made it observable and the linker dropped it (`g_screen missing from the
+  build`).  That is done and certified: the paint state owns the page it painted.
+* the install table itself now compiles clean, split into `install_input`,
+  `install_midi`, `install_ui` and `install_hpss`.
+
+It still failed: with the constructor replaced, the app **does not start**
+(`NRestarts=5`, no pid).  So the Rust install is producing something the loader
+cannot run - the prime suspect is doing allocation or `std::env` work inside a
+constructor that runs before the Rust runtime is up, or a site being patched with a
+handler whose C signature does not match the one declared for it.
+
+Next step is a logging build that prints each install as it happens, so the last
+line before the crash names the site.
+
 ## The button entry point
 
 `ui` runs one button event end to end: it keeps what the dispatcher remembers
