@@ -329,6 +329,33 @@ pub unsafe extern "C" fn minimod_input_data(
     }
 }
 
+/// The input state, for the C glue.
+///
+/// The state lives here now; the glue keeps its field names by pointing at this.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_input_state() -> *mut State {
+    // Taking the address of a static needs no unsafe block; dereferencing it
+    // does, and that happens in the hooks below.
+    core::ptr::addr_of_mut!(STATE)
+}
+
+/// The pad pressed last, for the glue.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_input_last_pad() -> i32 {
+    // SAFETY: see above.
+    unsafe { (*core::ptr::addr_of!(STATE)).last_pad }
+}
+
+/// Remember the encoder's surface, for the glue.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_input_set_data_target(target: usize) {
+    // SAFETY: see above.
+    unsafe { (*core::ptr::addr_of_mut!(STATE)).data_target = target };
+}
+
+/// The state itself.
+static mut STATE: State = State::new();
+
 #[cfg(test)]
 mod tests {
     use super::{MENU_ITEMS, State};

@@ -139,7 +139,8 @@ static struct minimod_menu g_menu __attribute__((used));
 #define g_bass_edit g_menu.bass_edit
 #define g_hpss_data_down g_menu.data_down
 #define g_hpss_restore_pending g_menu.restore_pending
-static struct minimod_input g_input;
+struct minimod_input *minimod_input_state(void);
+#define g_input (*minimod_input_state())
 static void input_context(struct minimod_input_context *ctx);
 static void looper_pump(void);
 
