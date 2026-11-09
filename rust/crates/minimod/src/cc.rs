@@ -202,7 +202,6 @@ pub unsafe extern "C" fn minimod_cc_handle(
 // context and applies what comes back.
 unsafe extern "C" {
     fn minimod_glue_cc_context() -> Context;
-    fn minimod_glue_set_trim(frames: i32);
     fn minimod_glue_set_knobs(knobs: *const f32);
     fn minimod_glue_cc_notice(text: *const u8);
     fn minimod_glue_save();
@@ -248,7 +247,7 @@ pub unsafe extern "C" fn minimod_hook_cc(event: usize, raw: u32, low: f32, range
     let outcome = unsafe { handle(context, control, hooks) };
     if outcome.trim_changed != 0 {
         // SAFETY: the glue owns the value.
-        unsafe { minimod_glue_set_trim(outcome.trim_frames) };
+        unsafe { crate::glue::g_lat_extra = outcome.trim_frames };
     }
     if outcome.knobs_changed != 0 {
         // SAFETY: the glue owns the three values.

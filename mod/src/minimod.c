@@ -807,7 +807,8 @@ static void release_held_pads(void)
  * queried, and callers must then leave the buffer alone. */
 
 static int g_lat_fixed = -1; /* MINIMOD_LOOP_LAT: override the measurement */
-static int g_lat_extra;      /* MINIMOD_LOOP_LAT_EXTRA: calibration trim */
+/* The calibration trim lives in Rust and keeps its name. */
+extern int g_lat_extra;
 /* In-process tap of the last two seconds of written audio (mono, channel 0).
  * The lab's PCM socket does not always reflect what the app writes, so tests
  * read this instead of trusting the host-side capture. */
@@ -928,10 +929,6 @@ struct minimod_cc_context minimod_glue_cc_context(void)
     return context;
 }
 
-void minimod_glue_set_trim(int32_t frames)
-{
-    g_lat_extra = (int)frames;
-}
 
 void minimod_glue_set_knobs(const float *knobs)
 {
