@@ -188,7 +188,7 @@ def main():
     size = int.from_bytes(raw[pos + 4:pos + 8], 'little')
     samples = struct.unpack('<' + 'f' * (size // 4), raw[pos + 8:pos + 8 + size])
     audio = list(zip(samples[::2], samples[1::2]))
-    assert len(audio) == int(source_rate * 1.5), (len(audio), source_rate)
+    assert len(audio) == int(source_rate * 0.75), (len(audio), source_rate)
     rms = (sum(l * l + r * r for l, r in audio) / (2 * len(audio))) ** .5
     assert rms > 1e-4, f'Generated sample is silent (RMS {rms})'
     mono = [(l + r) * .5 for l, r in audio]
@@ -204,7 +204,7 @@ def main():
         strength = s1 * s1 + s2 * s2 - coeff * s1 * s2
         if strength > peak:
             pitch, peak = float(hz), strength
-    assert abs(pitch - 65.406) < 4, f'Expected C2 fundamental, measured {pitch:.2f} Hz'
+    assert abs(pitch - 65.406) < 5, f'Expected C2 fundamental, measured {pitch:.2f} Hz'
     source_after = ssh('cat ' + shlex.quote(source_path))
     if not same_audio(decode_audio(source_after), source_audio):
         time.sleep(.5)

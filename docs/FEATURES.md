@@ -296,30 +296,30 @@ native undo grouping not exercised.
 ## Bass Synth
 
 **Behavior.** The menu opens a parameter page: pads 1–16 audition C2–D#3
-chromatically, `K1` brightness, `K2` drive/excitation, `K3` low-pass cutoff, and
-`DATA` renders one centred stereo C2 (MIDI 36) pluck, 1.5 s with a 400 ms
-key-down portion, and assigns it to the next free pad through stock Extract.
+chromatically, `K1` brightness, `K2` decay, `K3` low-pass cutoff, and `DATA`
+renders one centred stereo C2 (MIDI 36) pluck, 0.75 s with a 150 ms body and a
+fast decaying tail, and assigns it to the next free pad through stock Extract.
 The selected pad's sample is not rewritten.
 
 **Implementation.** `rust/crates/dsp/src/bass.rs` is a Rust port of the DaisySP `StringVoice`
 (a Karplus-Strong physical model) and SVF subset: C2 65.406 Hz, four preview voices,
-`K1` sets brightness/damping, `K2` accent/structure/drive, `K3` maps
+`K1` sets brightness/damping, `K2` sets the tail decay (80–420 ms), `K3` maps
 exponentially from 700 Hz to about 16.8 kHz (or 45 % of the sample rate). The
 live preview is mixed into the real output call: the app writes interleaved
 S32_LE (4 channels, 44.1 kHz) through `snd_pcm_writei`, and the mod's exported
 `snd_pcm_writei` tap (`backend/audio.rs`, the one the looper uses) adds the preview to
 channels 0/1 (format and rate read from the PCM handle once). Each voice decays
-over 1.2 s at level 0.5, and pads are consumed at the control-surface event hook
+over 0.7 s at level 0.5, and pads are consumed at the control-surface event hook
 while the page is open, so the firmware never selects or switches the sample
 underneath. The saved render is peak-scaled to 0.86. The DaisySP subset is
 ported into the crate (upstream revision `2c72eaf9…`, MIT); no runtime library
 and no C is added.
 
-**Evidence.** `Bass C29.wav`: 66,150 stereo frames at 44.1 kHz, C2 fundamental
-(measured 69 Hz peak with 1 Hz-bin resolution), RMS 0.06421, pad assigned,
+**Evidence.** `Bass C29.wav`: 33,075 stereo frames at 44.1 kHz, C2 fundamental
+(measured 70 Hz peak with 1 Hz-bin resolution), RMS 0.08620, pad assigned,
 `Bass Synth: copy created`, no restart. Live preview is now checked from the
 emulator's PCM stream, not only from counters: one pad gives an audible pluck
-(peak ≈0.49, ≈0.13 RMS) that decays and stops after 1.2 s, with no growth.
+that decays and stops after 0.7 s, with no growth.
 
 **Limits.** The native FMBass instrument is unresolved (see
 [`MECHANISMS.md`](MECHANISMS.md#h3-instrument-host-boundary-fmbass)); the

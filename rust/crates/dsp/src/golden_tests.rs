@@ -3,7 +3,8 @@
 //! The fixtures in `tests/golden` were recorded from the original C DSP for a
 //! fixed input (the C sources are in this repository's history, before the
 //! commit that removed them); these tests replay the same input through the
-//! Rust port and compare.  The fixtures are the reference now: change them only
+//! Rust port and compare.  The bass fixture was regenerated for the intentional
+//! short/punchy retune.  The fixtures are the reference now: change them only
 //! on purpose.  A behavioural difference fails here, on the host,
 //! instead of on the device.
 
@@ -251,16 +252,16 @@ fn looper_trace_matches_the_reference() {
 }
 
 #[test]
-fn bass_matches_the_reference() {
-    // The reference was compiled with its `rand()` replaced by the same
-    // deterministic generator `SequenceNoise` implements, so the whole voice
-    // chain is comparable sample for sample.
+fn bass_matches_the_tuned_fixture() {
+    // The fixture was regenerated after the intentional short/punchy retune;
+    // the noise sequence is deterministic, so the whole voice chain is
+    // comparable sample for sample.
     let want = floats("bass_audio.bin");
     let frames = usize::try_from(integers("bass_frames.bin")[0]).unwrap_or(0);
     let got = crate::bass::render_with(
         44_100,
         0.55,
-        0.35,
+        0.25,
         0.62,
         &mut crate::dsp::SequenceNoise::new(1),
     )

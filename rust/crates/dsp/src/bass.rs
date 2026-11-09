@@ -1,8 +1,9 @@
 //! The bass synth: a rendered C2 pluck, and the four-voice realtime preview.
 //!
 //! Both use the same voice ([`StringVoice`]) the reference uses.  The rendered
-//! pluck is a fixed 1.5 s note gated after 0.4 s and normalised to a known peak;
-//! the preview tracks the three knobs and the sixteen pads for live playing.
+//! pluck is a short 0.75 s note with a fast gated tail, so it sounds like a
+//! punchy bass rather than a sustained pad; the preview tracks the three knobs
+//! and the sixteen pads for live playing.
 //!
 //! The preview is a process singleton because it is driven by the audio writer
 //! hook, which exists once.  Its parameters and pending pad strikes are atomics,
@@ -22,16 +23,18 @@ const VOICES: usize = 4;
 /// The rendered pluck's root: C2, MIDI 36.  Written as bits because it has to be
 /// the reference's `65.4063913f` exactly: one ulp here detunes every sample.
 const NOTE_HZ: f32 = f32::from_bits(0x4282_d013);
-/// Rendered note length, in seconds.
-const DURATION: f32 = 1.5;
-/// Where the rendered note is gated, in seconds.
-const GATE: f32 = 0.4;
+/// Rendered note length, in seconds.  Short enough to stay a bass note.
+const DURATION: f32 = 0.75;
+/// Where the rendered note starts its final decay, in seconds.
+const GATE: f32 = 0.15;
+/// Drive/excitation is a fixed character now that the second knob is DECAY.
+const DRIVE: f32 = 0.35;
 /// Peak the rendered pluck is normalised to.
 const OUTPUT_PEAK: f32 = 0.86;
 /// How long a preview voice may sound, in seconds. The preview is an audition,
 /// not the saved sample: it decays from the first sample so a stack of pads can
 /// never turn into a sustained drone.
-const PREVIEW_LENGTH: f32 = 1.2;
+const PREVIEW_LENGTH: f32 = 0.7;
 
 /// Peak the preview mix is allowed to reach before it is clamped.
 const PREVIEW_PEAK: f32 = 0.85;
@@ -72,8 +75,8 @@ impl std::error::Error for BassError {}
 /// # Errors
 ///
 /// Returns [`BassError`] for an unsupported rate or a silent result.
-pub fn render(rate: u32, harmonics: f32, drive: f32, cutoff: f32) -> Result<Pluck, BassError> {
-    render_with(rate, harmonics, drive, cutoff, &mut WhiteNoise::default())
+pub fn render(rate: u32, harmonics: f32, decay: f32, cutoff: f32) -> Result<Pluck, BassError> {
+    render_with(rate, harmonics, decay, cutoff, &mut WhiteNoise::default())
 }
 
 /// Render the C2 pluck with an explicit noise source, for the golden tests.
@@ -84,7 +87,7 @@ pub fn render(rate: u32, harmonics: f32, drive: f32, cutoff: f32) -> Result<Pluc
 pub fn render_with(
     rate: u32,
     harmonics: f32,
-    drive: f32,
+    decay: f32,
     cutoff: f32,
     noise: &mut impl Noise,
 ) -> Result<Pluck, BassError> {
@@ -94,14 +97,14 @@ pub fn render_with(
     let rate_f = rate as f32;
     let frames = f32_to_usize(rate_f * DURATION);
     let harmonics = clamp01(harmonics);
-    let drive = clamp01(drive);
+    let decay = clamp01(decay);
     let cutoff = clamp01(cutoff);
 
     let mut string = StringVoice::new(rate_f);
     string.set_sustain(false);
     string.set_frequency(NOTE_HZ);
-    string.set_accent(0.65 + drive * 0.35);
-    string.set_structure(0.25 + drive * 0.6);
+    string.set_accent(0.65 + DRIVE * 0.35);
+    string.set_structure(0.25 + DRIVE * 0.6);
     string.set_brightness(0.05 + harmonics * 0.9);
     string.set_damping(0.35 + (1.0 - harmonics) * 0.55);
     string.trigger();
@@ -114,11 +117,11 @@ pub fn render_with(
         rate_f * 0.45
     });
     filter.set_resonance(0.05);
-    filter.set_drive(drive * 0.35);
+    filter.set_drive(DRIVE * 0.35);
 
     let mut audio = vec![0.0_f32; frames * 2];
     let gate = f32_to_usize(rate_f * GATE);
-    let decay = 0.48 + drive * 0.25;
+    let tail = 0.08 + decay * 0.34;
     let mut peak = 0.0_f32;
     for i in 0..frames {
         let sample = string.process(i == 0, noise);
@@ -126,7 +129,7 @@ pub fn render_with(
         let mut value = filter.low_pass();
         if i > gate {
             let t = (i - gate) as f32 / rate_f;
-            value *= (-t / decay).exp();
+            value *= (-t / tail).exp();
         }
         audio[2 * i] = value;
         audio[2 * i + 1] = value;
@@ -212,7 +215,7 @@ impl Preview {
         }
     }
 
-    fn trigger(&mut self, pad: usize, velocity: f32, brightness: f32, excite: f32, cutoff: f32) {
+    fn trigger(&mut self, pad: usize, velocity: f32, brightness: f32, decay: f32, cutoff: f32) {
         let rate_f = self.rate as f32;
         let index = self.cursor % VOICES;
         self.cursor = self.cursor.wrapping_add(1);
@@ -222,8 +225,8 @@ impl Preview {
         voice
             .string
             .set_frequency(NOTE_HZ * 2.0_f32.powf(semitones));
-        voice.string.set_accent(0.65 + excite * 0.35);
-        voice.string.set_structure(0.25 + excite * 0.6);
+        voice.string.set_accent(0.65 + DRIVE * 0.35);
+        voice.string.set_structure(0.25 + DRIVE * 0.6);
         voice.string.set_brightness(0.05 + brightness * 0.9);
         voice.string.set_damping(0.35 + (1.0 - brightness) * 0.55);
         voice.string.trigger();
@@ -235,9 +238,9 @@ impl Preview {
             rate_f * 0.45
         });
         voice.filter.set_resonance(0.05);
-        voice.filter.set_drive(excite * 0.35);
+        voice.filter.set_drive(DRIVE * 0.35);
         voice.level = 0.5 * clamp01(velocity);
-        voice.decay = 0.35 + excite * 0.15;
+        voice.decay = 0.08 + decay * 0.30;
         voice.age = 0;
         voice.quiet = 0;
         voice.active = true;
@@ -259,8 +262,8 @@ static RESET: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(false);
 /// Brightness, as f32 bits.
 static BRIGHTNESS: AtomicU32 = AtomicU32::new(0.52_f32.to_bits());
-/// Excitation, as f32 bits.
-static EXCITE: AtomicU32 = AtomicU32::new(0.18_f32.to_bits());
+/// Decay, as f32 bits.
+static DECAY: AtomicU32 = AtomicU32::new(0.25_f32.to_bits());
 /// Filter cutoff, as f32 bits.
 static CUTOFF: AtomicU32 = AtomicU32::new(0.56_f32.to_bits());
 /// Velocity per pad, as f32 bits; zero means "no strike pending".
@@ -285,9 +288,9 @@ pub fn preview_enable(enabled: bool) {
 }
 
 /// Set the three knobs, each 0..1.
-pub fn preview_set_params(brightness: f32, excite: f32, cutoff: f32) {
+pub fn preview_set_params(brightness: f32, decay: f32, cutoff: f32) {
     BRIGHTNESS.store(clamp01(brightness).to_bits(), Ordering::Release);
-    EXCITE.store(clamp01(excite).to_bits(), Ordering::Release);
+    DECAY.store(clamp01(decay).to_bits(), Ordering::Release);
     CUTOFF.store(clamp01(cutoff).to_bits(), Ordering::Release);
 }
 
@@ -348,7 +351,7 @@ pub unsafe fn preview_mix(channels: &mut [*mut f32], frames: usize, rate: u32) -
     }
 
     let brightness = f32::from_bits(BRIGHTNESS.load(Ordering::Acquire));
-    let excite = f32::from_bits(EXCITE.load(Ordering::Acquire));
+    let decay = f32::from_bits(DECAY.load(Ordering::Acquire));
     let cutoff = f32::from_bits(CUTOFF.load(Ordering::Acquire));
     let rate_f = rate as f32;
     let cutoff_hz = 700.0 * 24.0_f32.powf(cutoff);
@@ -367,19 +370,19 @@ pub unsafe fn preview_mix(channels: &mut [*mut f32], frames: usize, rate: u32) -
         for (pad, pending) in PENDING.iter().enumerate() {
             let bits = pending.swap(0, Ordering::AcqRel);
             if bits != 0 {
-                preview.trigger(pad, f32::from_bits(bits), brightness, excite, cutoff);
+                preview.trigger(pad, f32::from_bits(bits), brightness, decay, cutoff);
             }
         }
         for voice in &mut preview.voices {
             if !voice.active {
                 continue;
             }
-            voice.string.set_accent(0.65 + excite * 0.35);
-            voice.string.set_structure(0.25 + excite * 0.6);
+            voice.string.set_accent(0.65 + DRIVE * 0.35);
+            voice.string.set_structure(0.25 + DRIVE * 0.6);
             voice.string.set_brightness(0.05 + brightness * 0.9);
             voice.string.set_damping(0.35 + (1.0 - brightness) * 0.55);
             voice.filter.set_frequency(safe_cutoff);
-            voice.filter.set_drive(excite * 0.35);
+            voice.filter.set_drive(DRIVE * 0.35);
         }
 
         let mut noise = preview.noise;
@@ -443,7 +446,7 @@ mod tests {
     #[test]
     fn the_pluck_is_stereo_centred_and_normalised() {
         let pluck = render(44_100, 0.5, 0.3, 0.6).expect("renders");
-        assert_eq!(pluck.frames, 66_150);
+        assert_eq!(pluck.frames, 33_075);
         assert_eq!(pluck.audio.len(), pluck.frames * 2);
         let peak = pluck.audio.iter().fold(0.0_f32, |p, v| p.max(v.abs()));
         assert!((peak - 0.86).abs() < 1e-3, "peak {peak}");
@@ -454,7 +457,7 @@ mod tests {
                 pluck.audio[frame * 2 + 1].to_bits()
             );
         }
-        // The gate closed at 0.4 s, so the last tenth of a second is much
+        // The gate closed at 0.15 s, so the last tenth of a second is much
         // quieter than the body of the note.
         let tail: f32 = pluck.audio[pluck.audio.len() - 4_410..]
             .iter()
@@ -467,6 +470,28 @@ mod tests {
             .sum::<f32>()
             / 4_410.0;
         assert!(tail < 0.5 * body, "tail {tail} body {body}");
+    }
+
+    #[test]
+    fn the_decay_knob_changes_the_tail_not_the_note_length() {
+        let short =
+            render_with(44_100, 0.55, 0.0, 0.62, &mut SequenceNoise::new(7)).expect("renders");
+        let long =
+            render_with(44_100, 0.55, 1.0, 0.62, &mut SequenceNoise::new(7)).expect("renders");
+        assert_eq!(short.frames, long.frames);
+        let start = short.frames * 3 / 4;
+        let energy = |pluck: &Pluck| {
+            pluck.audio[start * 2..]
+                .iter()
+                .map(|value| value.abs())
+                .sum::<f32>()
+        };
+        assert!(
+            energy(&short) * 2.0 < energy(&long),
+            "short tail {} should be well below long tail {}",
+            energy(&short),
+            energy(&long)
+        );
     }
 
     #[test]

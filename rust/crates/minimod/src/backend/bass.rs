@@ -15,8 +15,8 @@ static AVAILABLE: AtomicBool = AtomicBool::new(false);
 ///
 /// Returns the interleaved stereo audio and its frame count.
 #[must_use]
-pub fn render(rate: u32, harmonics: f32, drive: f32, cutoff: f32) -> Option<(Vec<f32>, usize)> {
-    bass::render(rate, harmonics, drive, cutoff)
+pub fn render(rate: u32, harmonics: f32, decay: f32, cutoff: f32) -> Option<(Vec<f32>, usize)> {
+    bass::render(rate, harmonics, decay, cutoff)
         .ok()
         .map(|pluck| (pluck.audio, pluck.frames))
 }
@@ -27,8 +27,8 @@ pub fn preview_enable(enabled: bool) {
 }
 
 /// Set the three preview knobs.
-pub fn preview_set_params(harmonics: f32, drive: f32, cutoff: f32) {
-    bass::preview_set_params(harmonics, drive, cutoff);
+pub fn preview_set_params(harmonics: f32, decay: f32, cutoff: f32) {
+    bass::preview_set_params(harmonics, decay, cutoff);
 }
 
 /// Play one preview note.

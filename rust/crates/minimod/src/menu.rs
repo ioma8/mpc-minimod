@@ -156,7 +156,7 @@ const TITLES: [&str; MENU_ROWS] = [
 ];
 
 /// The bass page's three knobs.
-const KNOBS: [&str; 3] = ["BRIGHT", "EXCITE", "FILTER"];
+const KNOBS: [&str; 3] = ["BRIGHT", "DECAY", "FILTER"];
 
 /// Draw the menu.
 ///
@@ -318,7 +318,7 @@ pub fn state_mut() -> &'static mut State {
 }
 
 export_static!(#[doc = "The bass page's three knobs, read by the device tests."]
-g_bass_knob: Global<[f32; 3]> = Global::new([0.52, 0.18, 0.56]));
+g_bass_knob: Global<[f32; 3]> = Global::new([0.52, 0.25, 0.56]));
 
 /// Keep the bass preview on while its page is open.
 pub fn follow_preview() {

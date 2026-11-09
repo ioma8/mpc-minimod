@@ -47,11 +47,11 @@ pub fn render(job: &mut RenderJob, knobs: &[f32]) -> Result<(), i32> {
             Ok(())
         }
         ACTION_BASS => {
-            let (harmonics, drive, cutoff) = match knobs {
-                [harmonics, drive, cutoff, ..] => (*harmonics, *drive, *cutoff),
-                _ => (0.5, 0.5, 0.5),
+            let (harmonics, decay, cutoff) = match knobs {
+                [harmonics, decay, cutoff, ..] => (*harmonics, *decay, *cutoff),
+                _ => (0.5, 0.25, 0.5),
             };
-            let Some((audio, frames)) = bass::render(rate, harmonics, drive, cutoff) else {
+            let Some((audio, frames)) = bass::render(rate, harmonics, decay, cutoff) else {
                 return Err(job.kind);
             };
             job.push_output(RenderOutput::with_frames(audio, frames, 2).ok_or(job.kind)?);
