@@ -350,6 +350,260 @@ pub fn input_delay() -> u32 {
     unsafe { minimod_glue_in_delay() }
 }
 
+/// One site the mod patches: its image offset and the handler to put there.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Site {
+    /// Offset from the app's load address.
+    pub offset: usize,
+    /// The entry point to install.
+    pub handler: *const (),
+}
+
+// The handler pointers are code addresses, which never move.
+unsafe impl Sync for Site {}
+unsafe impl Send for Site {}
+
+/// Everything the constructor patches, in the glue's order, with the offsets read
+/// from the glue's own defines.
+static SITES: [Site; 16] = [
+    Site {
+        offset: 0x0154_5a50,
+        handler: crate::entries::minimod_hook_sixteen_ctor as *const (),
+    },
+    Site {
+        offset: 0x0214_72f0,
+        handler: crate::entries::minimod_hook_sixteen_proc as *const (),
+    },
+    Site {
+        offset: 0x0140_dbc0,
+        handler: crate::input::minimod_hook_data as *const (),
+    },
+    Site {
+        offset: 0x01e2_7360,
+        handler: crate::input::minimod_hook_note_on as *const (),
+    },
+    Site {
+        offset: 0x023a_ff60,
+        handler: crate::input::minimod_hook_surface as *const (),
+    },
+    Site {
+        offset: 0x01e2_70d0,
+        handler: crate::input::minimod_hook_note_off as *const (),
+    },
+    Site {
+        offset: 0x0159_f230,
+        handler: crate::cc::minimod_hook_cc as *const (),
+    },
+    Site {
+        offset: 0x027e_4400,
+        handler: crate::entries::minimod_hook_pitch_off as *const (),
+    },
+    Site {
+        offset: 0x0159_f2f0,
+        handler: glue_buttons as *const (),
+    },
+    Site {
+        offset: 0x03f3_98f0,
+        handler: crate::audio::minimod_hook_audio_writer as *const (),
+    },
+    Site {
+        offset: 0x0114_9880,
+        handler: crate::entries::minimod_hook_repaint as *const (),
+    },
+    Site {
+        offset: 0x00f5_35c0,
+        handler: crate::entries::minimod_hook_str_assign as *const (),
+    },
+    Site {
+        offset: 0x0143_ed40,
+        handler: glue_hpss_ctor as *const (),
+    },
+    Site {
+        offset: 0x0143_f0b0,
+        handler: glue_hpss_exec as *const (),
+    },
+    Site {
+        offset: 0x01d8_aff0,
+        handler: crate::entries::minimod_hook_hpss_writer as *const (),
+    },
+    Site {
+        offset: 0x0211_b090,
+        handler: glue_midi_note as *const (),
+    },
+];
+
+// The handlers that are still C.
+unsafe extern "C" {
+    fn ui_buttons(event: usize);
+    fn midi_note_event(app: usize, context: usize, event: usize, source: usize);
+    fn hpss_ctor_hook(
+        one: usize,
+        two: usize,
+        three: usize,
+        four: usize,
+        five: usize,
+        six: usize,
+        seven: usize,
+        eight: usize,
+        nine: usize,
+    );
+    fn hpss_exec_hook(command: usize);
+    fn install_screen_paint() -> i32;
+    fn minimod_glue_set_originals(originals: *const Originals);
+    fn minimod_glue_finished(touched: i32);
+}
+
+/// The displaced functions the glue's own helpers still call.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Originals {
+    /// The app's button dispatch.
+    pub buttons: usize,
+    /// The app's repaint.
+    pub repaint: usize,
+    /// The app's control-surface setter.
+    pub control: usize,
+    /// The app's MIDI note handler.
+    pub midi_note: usize,
+    /// The app's bass preview writer.
+    pub bass_writer: usize,
+    /// The slice command's constructor.
+    pub hpss_ctor: usize,
+    /// The slice command's execute method.
+    pub hpss_exec: usize,
+}
+
+/// The button entry, as the glue installs it.
+unsafe extern "C" fn glue_buttons(event: usize) {
+    // SAFETY: the app calls this with its own event.
+    unsafe { ui_buttons(event) };
+}
+
+/// The slice command's constructor, as the glue installs it.
+unsafe extern "C" fn glue_hpss_ctor(
+    one: usize,
+    two: usize,
+    three: usize,
+    four: usize,
+    five: usize,
+    six: usize,
+    seven: usize,
+    eight: usize,
+    nine: usize,
+) {
+    // SAFETY: the app calls this with its own arguments.
+    unsafe { hpss_ctor_hook(one, two, three, four, five, six, seven, eight, nine) };
+}
+
+/// The slice command's execute, as the glue installs it.
+unsafe extern "C" fn glue_hpss_exec(command: usize) {
+    // SAFETY: the app calls this with its own command.
+    unsafe { hpss_exec_hook(command) };
+}
+
+/// The MIDI note event, as the glue installs it.
+unsafe extern "C" fn glue_midi_note(app: usize, context: usize, event: usize, source: usize) {
+    // SAFETY: the app calls this with its own event.
+    unsafe { midi_note_event(app, context, event, source) };
+}
+
+/// How many sites the glue has to patch.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_site_count() -> usize {
+    SITES.len()
+}
+
+/// The offset of one site.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_site_offset(index: usize) -> usize {
+    SITES.get(index).map_or(0, |site| site.offset)
+}
+
+/// The handler for one site.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_site_handler(index: usize) -> *const () {
+    SITES
+        .get(index)
+        .map_or(core::ptr::null(), |site| site.handler)
+}
+
+/// Whether the note-on hook was installed, which the preview needs.
+static mut NOTE_ON_OK: bool = false;
+/// Whether the audio writer hook was installed.
+static mut WRITER_OK: bool = false;
+
+/// Keep the displaced function for one site and hand it to whoever needs it.
+///
+/// # Safety
+///
+/// Called once per site, immediately after that site is patched.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_site_record(index: usize, original: usize) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        match index {
+            0 => crate::entries::minimod_ctor_original(original),
+            1 => crate::entries::minimod_proc_original(original),
+            2 => crate::input::minimod_data_original(original),
+            3 => {
+                NOTE_ON_OK = original != 0;
+                crate::input::minimod_note_on_original(original);
+            }
+            4 => crate::input::minimod_surface_original(original),
+            5 => crate::input::minimod_note_off_original(original),
+            6 => crate::cc::minimod_hook_cc_original(crate::input::from_address(original)),
+            7 => crate::entries::minimod_pitch_original(original),
+            9 => {
+                WRITER_OK = original != 0;
+                crate::audio::minimod_audio_writer_original_now(original);
+            }
+            10 => crate::entries::minimod_repaint_original(original),
+            11 => crate::entries::minimod_assign_original(original),
+            14 => crate::entries::minimod_writer_original(original),
+            15 => crate::midi::minimod_midi_note_original(original),
+            _ => {}
+        }
+    }
+}
+
+/// Hand the glue the originals its own helpers call, install the paint hook and seal.
+///
+/// # Safety
+///
+/// Called once, after every site has been patched and recorded.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_after_sites(originals: *const Originals) -> i32 {
+    if originals.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's contract.
+    unsafe {
+        minimod_glue_set_originals(originals);
+        install_screen_paint();
+    }
+    // SAFETY: the engine's own queries.
+    let touched = unsafe { minimod_hooks_touched() != 0 };
+    if touched {
+        // SAFETY: sealing is the engine's own call.
+        unsafe { minimod_seal_hooks() };
+    }
+    // The bass preview needs the note hooks and the writer, exactly as the C
+    // constructor required.
+    // SAFETY: the flags are this module's.
+    unsafe {
+        crate::bass_ffi::g_bass_preview_available = i32::from(NOTE_ON_OK && WRITER_OK);
+        minimod_glue_finished(i32::from(touched));
+    }
+    i32::from(touched)
+}
+
+// The hook engine's own calls.
+unsafe extern "C" {
+    fn minimod_hooks_touched() -> i32;
+    fn minimod_seal_hooks();
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FIRMWARE_SITES, PT_LOAD, TEXT_OFFSET};

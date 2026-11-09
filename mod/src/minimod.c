@@ -554,7 +554,7 @@ static void hpss_repaint(void);
 
 
 
-static void hpss_ctor_hook(void *cmd, void *name, int dest, void *settings,
+void hpss_ctor_hook(void *cmd, void *name, int dest, void *settings,
                            void *padstate, void *project, void *s1, void *s2,
                            void *s3)
 {
@@ -577,7 +577,7 @@ static void hpss_ctor_hook(void *cmd, void *name, int dest, void *settings,
                                     uintptr_t))orig_hpss_ctor);
 }
 
-static void hpss_exec_hook(void *cmd)
+void hpss_exec_hook(void *cmd)
 {
     int armed = minimod_hpss_is_armed((uintptr_t)cmd) ? 1 : 0;
     struct minimod_hpss_arm arm = {
@@ -987,7 +987,7 @@ static const struct minimod_ui_hooks g_ui_hooks = {
     .spectral_state = ui_spectral,
 };
 
-static void ui_buttons(void *event)
+void ui_buttons(void *event)
 {
     minimod_hook_buttons(event, &g_ui_hooks);
 }
@@ -1310,7 +1310,7 @@ static void screen_paint(void *p, void *g)
     g_hpss_restore_pending = flags.restore_pending;
 }
 
-static int install_screen_paint(void)
+int install_screen_paint(void)
 {
     if (!minimod_paint_install(base, (const void *)screen_paint))
         return 0;
@@ -1352,7 +1352,7 @@ static void set_filter_text(const char *t)
  * Keep the firmware's MIDI input, note-on/off matching, sustain and audio
  * routing intact. The SampQOL reference confirms the native pitch setter takes
  * the event property block at +0x14 and a semitone delta as argument four. */
-static void midi_note_event(void *app, void *context, void *event,
+void midi_note_event(void *app, void *context, void *event,
                             uintptr_t source)
 {
     minimod_midi_handle((uintptr_t)app, (uintptr_t)context, (unsigned char *)event,
@@ -1424,120 +1424,76 @@ uint32_t minimod_glue_buf_in(void) { return g_buf_in; }
 void minimod_glue_set_buf_in(uint32_t frames) { g_buf_in = frames; }
 uint32_t minimod_glue_in_delay(void) { return g_in_delay; }
 
+struct minimod_originals_glue {
+    uintptr_t buttons;
+    uintptr_t repaint;
+    uintptr_t control;
+    uintptr_t midi_note;
+    uintptr_t bass_writer;
+    uintptr_t hpss_ctor;
+    uintptr_t hpss_exec;
+};
+
+void minimod_glue_set_originals(const struct minimod_originals_glue *originals)
+{
+    orig_buttons = (void (*)(void *))originals->buttons;
+    orig_repaint = (void (*)(void *, uint64_t, uint64_t))originals->repaint;
+    orig_setctl = (void (*)(void *, void *, int, int, float))originals->control;
+    orig_midi_note_event =
+        (void (*)(void *, void *, void *, uintptr_t))originals->midi_note;
+    orig_bass_audio_writer =
+        (void (*)(void *, void *, size_t, int))originals->bass_writer;
+    orig_hpss_ctor = (void (*)(void *, void *, int, void *, void *, void *, void *,
+                               void *, void *))originals->hpss_ctor;
+    orig_hpss_exec = (void (*)(void *))originals->hpss_exec;
+}
+
+void minimod_glue_finished(int32_t touched)
+{
+    /* The preview's availability is decided in the crate, where the sites are. */
+    mlog("minimod: install touched=%d\n", (int)touched);
+}
+
 __attribute__((constructor)) static void load(void)
 {
-#if MINIMOD_LOG
-    log_fd = open("/run/minimod.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-#endif
     uintptr_t found = minimod_find_main();
-    if (!found) {
-        mlog("minimod: stock app not found; not installing\n");
+    if (!found)
         return;
-    }
     base = found;
-    minimod_set_base((uintptr_t)base);
-    if (!minimod_firmware_ok(base)) {
-        mlog("minimod: firmware does not match this build; not installing\n");
+    minimod_set_base(base);
+    if (!minimod_firmware_ok(base))
         return;
-    }
-
     const char *env = getenv("MINIMOD_HOOKS");
     if (env && *env)
         hook_mask = atoi(env);
-    const char *safe_env = getenv("MINIMOD_SAFE");
-    const char *dbg_env = getenv("MINIMOD_DEBUG");
-    safe_mode = safe_env && atoi(safe_env) != 0;
-    debug_mode = dbg_env && atoi(dbg_env) != 0;
-    const char *probe_env = getenv("MINIMOD_PROBE");
-    probe_mode = probe_env && atoi(probe_env) != 0;
+    const char *lat = getenv("MINIMOD_LOOP_LAT");
+    if (lat && *lat)
+        g_lat_fixed = atoi(lat);
+    const char *extra = getenv("MINIMOD_LOOP_LAT_EXTRA");
+    if (extra && *extra)
+        g_lat_extra = atoi(extra);
     looper_cfg_load();
-    {
-        const char *lat = getenv("MINIMOD_LOOP_LAT");
-        if (lat && *lat)
-            g_lat_fixed = atoi(lat);
-        const char *extra = getenv("MINIMOD_LOOP_LAT_EXTRA");
-        if (extra && *extra)
-            g_lat_extra = atoi(extra);
+    /* The sites are the crate's table; the patching stays here. */
+    struct minimod_originals_glue originals = {0};
+    size_t sites = minimod_site_count();
+    for (size_t i = 0; i < sites; ++i) {
+        void *t = install_hook(base + minimod_site_offset(i),
+                               (void *)minimod_site_handler(i));
+        minimod_site_record(i, (uintptr_t)t);
+        if (i == 8)
+            originals.buttons = (uintptr_t)t;
+        else if (i == 6)
+            originals.control = (uintptr_t)t;
+        else if (i == 9)
+            originals.bass_writer = (uintptr_t)t;
+        else if (i == 10)
+            originals.repaint = (uintptr_t)t;
+        else if (i == 12)
+            originals.hpss_ctor = (uintptr_t)t;
+        else if (i == 15)
+            originals.midi_note = (uintptr_t)t;
+        else if (i == 13)
+            originals.hpss_exec = (uintptr_t)t;
     }
-    void *t_ctor = (hook_mask & 1) ? install_hook(base + A_SIXTEEN_CTOR, (void *)minimod_hook_sixteen_ctor) : 0;
-    void *t_proc = (hook_mask & 2) ? install_hook(base + A_SIXTEEN_PROC, (void *)minimod_hook_sixteen_proc) : 0;
-    /* The four input hooks are Rust entry points; they are handed the app's own
-     * functions once, before any event can arrive. */
-    void *t_data = install_hook(base + A_DATA_SIGNAL, (void *)minimod_hook_data);
-    void *t_note = (hook_mask & 32) ? install_hook(base + A_NOTE_ON, (void *)minimod_hook_note_on) : 0;
-    void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)minimod_hook_surface) : 0;
-    void *t_off = (hook_mask & 128) ? install_hook(base + A_NOTE_OFF, (void *)minimod_hook_note_off) : 0;
-    minimod_hook_originals((void *)t_note, (void *)t_off, (void *)t_cs, (void *)t_data);
-    if (1) {
-        void *t_midi = install_hook(base + A_MIDI_NOTE_EVENT, (void *)minimod_hook_midi_note);
-        minimod_midi_originals((void *)t_midi, (void *)orig_pitch_off);
-        if (t_midi) {
-            orig_midi_note_event =
-                (void (*)(void *, void *, void *, uintptr_t))t_midi;
-        }
-    } else {
-        mlog("minimod: MIDI dispatcher mismatch; not hooking\n");
-    }
-    void *t_cc = install_hook(base + 0x159f230, (void *)minimod_hook_cc);
-    minimod_hook_cc_original((void (*)(void *, uint32_t, float, float))t_cc);
-    void *t_poff = install_hook(base + A_PITCH_OFF, (void *)minimod_hook_pitch_off);
-    if (t_poff)
-        orig_pitch_off = (void (*)(void *, uint64_t, uint64_t, int))t_poff;
-    /* The MIDI dispatcher is hooked lazily by midi_hook_set(): outside
-     * 16 Levels the stock code must stay untouched. */
-    mlog("minimod: MIDI hook deferred until 16 LEVELS\n");
-    void *t_btn = (hook_mask & 16) ? install_hook(base + A_BUTTONS, (void *)ui_buttons) : 0;
-    void *t_bass_audio = install_hook(base + A_BASS_AUDIO_WRITER, (void *)minimod_hook_audio_writer);
-    void *t_rp = install_hook(base + A_REPAINT, (void *)minimod_hook_repaint);
-    if (t_rp)
-        orig_repaint = (void (*)(void *, uint64_t, uint64_t))t_rp;
-    void *t_sa = install_hook(base + A_STR_ASSIGN, (void *)minimod_hook_str_assign);
-
-    void *t_lt = 0;   /* Label::getText hook removed: wrong ABI, crashed the sample browser */
-    void *t_dt = 0;   /* drawText overlay removed: the third slot is never drawn through it */
-    if (t_ctor)
-        orig_sixteen_ctor = (void *(*)(void *, void *, void *, void *))t_ctor;
-    if (t_proc)
-        orig_sixteen_proc = (void (*)(void *, int, void *))t_proc;
-    if (t_btn)
-        orig_buttons = (void (*)(void *))t_btn;
-    if (t_bass_audio) {
-        orig_bass_audio_writer = (void (*)(void *, void *, size_t, int))t_bass_audio;
-    }
-    minimod_audio_writer_original((void *)t_bass_audio);
-    g_bass_preview_available = t_note && t_off && t_bass_audio;
-    if (t_sa)
-        orig_str_assign = (void (*)(void *, const char *))t_sa;
-    if (t_lt)
-        orig_label_text = (void *(*)(void *))t_lt;
-    if (t_dt)
-        orig_draw_text = (void (*)(void *, const uint64_t *, int, int, int, int, int, int, float))t_dt;
-    {
-        void *t = 0;
-        t = install_hook(base + A_HPSS_EXTRACT_CTOR, (void *)hpss_ctor_hook);
-        if (t)
-            orig_hpss_ctor = (void (*)(void *, void *, int, void *, void *, void *,
-                                       void *, void *, void *))t;
-        t = install_hook(base + A_HPSS_EXTRACT_EXEC, (void *)hpss_exec_hook);
-        if (t)
-            orig_hpss_exec = (void (*)(void *))t;
-        t = install_hook(base + A_HPSS_WRITE_CB, (void *)minimod_hook_hpss_writer);
-        minimod_entries_originals((void *)t_ctor, (void *)t_proc, (void *)t_poff,
-                                  (void *)t_rp, (void *)t_sa, (void *)t);
-        if (t)
-            orig_hpss_writer = (void (*)(void *, void *))t;
-        mlog("HPSS hooks: ctor=%p exec=%p writer=%p\n",
-             (void *)orig_hpss_ctor, (void *)orig_hpss_exec,
-             (void *)orig_hpss_writer);
-    }
-    install_screen_paint();
-    if (!minimod_hooks_touched()) {
-        mlog("minimod: no hook installed\n");
-        return;
-    }
-    /* Hardening failures must never take the host app down: the engine leaves
-     * the pages writable and the app keeps running. */
-    minimod_seal_hooks();
-    mlog("minimod: base=%p mask=%d safe=%d probe=%d (ctor=%d proc=%d plus=%d minus=%d)\n",
-         (void *)base, hook_mask, safe_mode, probe_mode, t_ctor != 0, t_proc != 0);
+    minimod_after_sites(&originals);
 }
