@@ -24,6 +24,7 @@ pub mod clock;
 pub mod effect;
 pub mod effect_ffi;
 pub mod firmware;
+pub mod glue;
 pub mod hooks;
 pub mod hpss_exec;
 pub mod input;

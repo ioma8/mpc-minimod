@@ -92,6 +92,7 @@
 #include "props_ffi.h"
 
 #include "ui_ffi.h"
+#include "glue_ffi.h"
 
 struct minimod_ui_state *minimod_ui_state(void);
 #define g_shift (minimod_ui_state()->shift)
@@ -265,42 +266,6 @@ static int mapped(const void *p)
 /* First instruction of every site this build hooks, read from firmware
  * 1.3.0.12. If any of them does not match, nothing is installed: patching an
  * offset in a different build would overwrite a random instruction. */
-static int firmware_ok(void)
-{
-    static const struct {
-        uintptr_t off;
-        uint32_t word;
-    } sites[] = {
-        {0x00f535c0, 0xd503233f}, {0x01149880, 0xd503233f},
-        {0x013bb930, 0xd503233f}, {0x0140dbc0, 0xd503233f},
-        {0x0143ed40, 0xd503233f}, {0x0143f0b0, 0xd503233f},
-        {0x014a7580, 0xd503233f}, {0x01545a50, 0xd503233f},
-        {0x0159f230, 0x39402003}, {0x0159f2f0, 0xd503245f},
-        {0x015e70c0, 0xd503233f}, {0x016b6060, 0xd503245f},
-        {0x0192d040, 0xd503233f}, {0x0195cf40, 0xd503233f},
-        {0x0195d1c0, 0xd503233f}, {0x01960af0, 0xd503233f},
-        {0x01960d50, 0xd503233f}, {0x01968020, 0xd503233f},
-        {0x01d8aff0, 0xd503233f}, {0x01e270d0, 0xd503233f},
-        {0x01e27360, 0xd503233f}, {0x020a3b10, 0xd503233f},
-        {0x020a7140, 0xd503233f}, {0x020a9fa0, 0xd503233f},
-        {0x020aa9e0, 0xd503233f}, {0x0211b090, 0xd503233f},
-        {0x021472f0, 0xd503233f}, {0x023aff60, 0xd503233f},
-        {0x027e4400, 0xd503233f}, {0x02804e90, 0xd503233f},
-        {0x0280dca0, 0xd503233f}, {0x028100c0, 0xd503233f},
-        {0x02812f10, 0xd503245f}, {0x02814ec0, 0xd503233f},
-        {0x02822260, 0xd503233f}, {0x02941ff0, 0xd503245f},
-        {0x03f398f0, 0xd503233f},
-    };
-    for (unsigned i = 0; i < sizeof sites / sizeof sites[0]; ++i) {
-        uint32_t w = 0;
-        if (!rd(base + sites[i].off, &w, 4) || w != sites[i].word) {
-            mlog("minimod: site %#lx is %08x, expected %08x - firmware mismatch\n",
-                 (unsigned long)sites[i].off, w, sites[i].word);
-            return 0;
-        }
-    }
-    return 1;
-}
 
 /* The engine that maps the pages, displaces the prologue and patches the site
  * lives in Rust; this is only the C name the constructor calls. */
@@ -1758,44 +1723,20 @@ static void do_autotrim(void)
 /* Re-arms the software watchpoint from /run/minimod.watch (hex address), so the
  * address can be set after the app has started and picked a new heap. */
 
-static int find_main(struct dl_phdr_info *info, size_t size, void *out)
-{
-    (void)size;
-    mlog("minimod: entry '%s' addr=%p phnum=%u\n", info->dlpi_name ? info->dlpi_name : "",
-         (void *)info->dlpi_addr, (unsigned)info->dlpi_phnum);
-    for (unsigned i = 0; i < info->dlpi_phnum; ++i) {
-        const ElfW(Phdr) *p = &info->dlpi_phdr[i];
-        if (p->p_type == PT_LOAD)
-            mlog("minimod:   PT_LOAD vaddr=%p memsz=%p filesz=%p\n",
-                 (void *)p->p_vaddr, (void *)p->p_memsz, (void *)p->p_filesz);
-    }
-    if (info->dlpi_name && *info->dlpi_name)
-        return 0;
-    for (unsigned i = 0; i < info->dlpi_phnum; ++i) {
-        const ElfW(Phdr) *p = &info->dlpi_phdr[i];
-        /* The stock app is the only PT_LOAD whose mapped range covers .text. */
-        if (p->p_type == PT_LOAD && 0xb55b00u >= p->p_vaddr &&
-            0xb55b00u < p->p_vaddr + p->p_memsz) {
-            *(uintptr_t *)out = info->dlpi_addr;
-            return 1;
-        }
-    }
-    return 0;
-}
 
 __attribute__((constructor)) static void load(void)
 {
 #if MINIMOD_LOG
     log_fd = open("/run/minimod.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
 #endif
-    uintptr_t found = 0;
-    if (!dl_iterate_phdr(find_main, &found)) {
+    uintptr_t found = minimod_find_main();
+    if (!found) {
         mlog("minimod: stock app not found; not installing\n");
         return;
     }
     base = found;
     minimod_set_base((uintptr_t)base);
-    if (!firmware_ok()) {
+    if (!minimod_firmware_ok(base)) {
         mlog("minimod: firmware does not match this build; not installing\n");
         return;
     }
