@@ -87,6 +87,11 @@ extern uint32_t g_out_peak_bits;
 extern uint32_t g_out_write_calls;
 extern float g_outtap[];
 extern uint32_t g_outtap_w;
+extern uint32_t g_audio_in_calls;
+extern uint32_t g_in_ch;
+extern int32_t g_in_s32;
+extern uint32_t g_in_delay;
+extern uint32_t g_buf_in;
 
 void minimod_hook_midi_note(void *app, void *context, void *event, uintptr_t source);
 void minimod_midi_originals(void *note, void *pitch);
@@ -108,6 +113,11 @@ extern uint32_t g_out_peak_bits;
 extern uint32_t g_out_write_calls;
 extern float g_outtap[];
 extern uint32_t g_outtap_w;
+extern uint32_t g_audio_in_calls;
+extern uint32_t g_in_ch;
+extern int32_t g_in_s32;
+extern uint32_t g_in_delay;
+extern uint32_t g_buf_in;
 
 void minimod_hook_midi_note(void *app, void *context, void *event, uintptr_t source);
 
@@ -148,6 +158,11 @@ extern uint32_t g_out_peak_bits;
 extern uint32_t g_out_write_calls;
 extern float g_outtap[];
 extern uint32_t g_outtap_w;
+extern uint32_t g_audio_in_calls;
+extern uint32_t g_in_ch;
+extern int32_t g_in_s32;
+extern uint32_t g_in_delay;
+extern uint32_t g_buf_in;
 
 void minimod_hook_midi_note(void *app, void *context, void *event, uintptr_t source);
 
@@ -427,7 +442,6 @@ static void (*orig_pitch_off)(void *, uint64_t, uint64_t, int);
 static void (*orig_buttons)(void *);
 static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
 static void (*orig_bass_audio_writer)(void *, void *, size_t, int);
-static volatile unsigned g_audio_in_calls;
 /* The Sample page (0x2468 bytes) captured from SamplePage_Ctor; it owns the
  * Start/End widgets and is what must be repainted after a property change. */
 typedef void (*pagector_fn)(void *, void *, void *, void *, void *, void *,
@@ -884,9 +898,6 @@ static void looper_cfg_save(void);
  * both of its rings full, so one buffer per direction is the latency it works
  * with - the number the sampler itself uses, no probe needed. */
 static volatile unsigned g_buf_out;
-static volatile unsigned g_buf_in;
-static volatile unsigned g_in_ch;
-static volatile int g_in_s32;       /* input stream is S32_LE */
 
 
 static void looper_pump(void)
@@ -1041,8 +1052,6 @@ static void release_held_pads(void)
  * points it uses and forwards to the real libasound through dlsym. LD_PRELOAD
  * puts us ahead of libasound in the global scope, so every read in the process
  * lands here, whichever device object owns the pcm handle. */
-static long (*real_snd_pcm_readi)(void *, void *, unsigned long);
-static long (*real_snd_pcm_avail)(void *);
 
 /* ALSA's SND_PCM_FORMAT_S32_LE; minimod has no ALSA headers. */
 #define MM_FMT_S32_LE 10
@@ -1053,7 +1062,6 @@ static long (*real_snd_pcm_avail)(void *);
  * all from the stream's own hw params. Returns 0 when the device cannot be
  * queried, and callers must then leave the buffer alone. */
 
-static volatile unsigned g_in_delay;
 static int g_lat_fixed = -1; /* MINIMOD_LOOP_LAT: override the measurement */
 static int g_lat_extra;      /* MINIMOD_LOOP_LAT_EXTRA: calibration trim */
 /* In-process tap of the last two seconds of written audio (mono, channel 0).
@@ -1077,52 +1085,6 @@ int snd_pcm_hw_params_set_channels(void *params, unsigned channels)
 }
 
 
-long snd_pcm_readi(void *pcm, void *buffer, unsigned long size)
-{
-    if (!real_snd_pcm_readi)
-        real_snd_pcm_readi =
-            (long (*)(void *, void *, unsigned long))dlsym(RTLD_NEXT, "snd_pcm_readi");
-    if (!real_snd_pcm_readi)
-        return -1;
-    if (looper_is_open()) {
-        long avail = 0;
-        if (!real_snd_pcm_avail)
-            real_snd_pcm_avail = (long (*)(void *))dlsym(RTLD_NEXT, "snd_pcm_avail");
-        if (real_snd_pcm_avail && (avail = real_snd_pcm_avail(pcm)) > 0)
-            g_in_delay = (unsigned)avail;
-    }
-#if MINIMOD_LOG
-    {
-        static int n;
-        if (n < 6) {
-            n++;
-            uintptr_t lr = (uintptr_t)__builtin_return_address(0);
-            mlog("minimod: READI caller=%p file=%#lx size=%lu\n", (void *)lr,
-                 (unsigned long)(lr - base), (unsigned long)size);
-        }
-    }
-#endif
-    if (!g_buf_in || g_buf_dirty) {
-        unsigned c = 0;
-        int s32 = 0;
-        g_buf_in = minimod_stream_geometry((uintptr_t)pcm, &c, &s32);
-        if (c) {
-            g_in_ch = c;
-            g_in_s32 = s32;
-        }
-        if (g_buf_in && g_buf_out)
-            g_buf_dirty = 0;
-    }
-    long got = real_snd_pcm_readi(pcm, buffer, size);
-    if (got > 0) {
-
-        __atomic_add_fetch(&g_audio_in_calls, 1, __ATOMIC_RELAXED);
-        if (looper_is_open() && buffer && g_in_ch && g_in_s32)
-            looper_input_s32_interleaved((const int32_t *)buffer, g_in_ch,
-                                         (unsigned)got);
-    }
-    return got;
-}
 
 long snd_pcm_readn(void *pcm, void **bufs, unsigned long size)
 {
@@ -1499,6 +1461,7 @@ uint32_t minimod_glue_lat_extra(void) { return g_lat_extra > 0 ? (uint32_t)g_lat
 uint32_t minimod_glue_buf_out(void) { return g_buf_out; }
 void minimod_glue_set_buf_out(uint32_t frames) { g_buf_out = frames; }
 uint32_t minimod_glue_buf_in(void) { return g_buf_in; }
+void minimod_glue_set_buf_in(uint32_t frames) { g_buf_in = frames; }
 uint32_t minimod_glue_in_delay(void) { return g_in_delay; }
 
 __attribute__((constructor)) static void load(void)

@@ -601,6 +601,129 @@ unsafe fn record_output(buffer: *const i32, written: i64, channels: u32) {
     }
 }
 
+/// How many times the app asked for input audio.
+#[unsafe(no_mangle)]
+pub static mut g_audio_in_calls: u32 = 0;
+/// The input stream's channel count.
+#[unsafe(no_mangle)]
+pub static mut g_in_ch: u32 = 0;
+/// Whether the input stream carries 32-bit samples.
+#[unsafe(no_mangle)]
+pub static mut g_in_s32: i32 = 0;
+/// The input ring's size in frames, as last read.
+#[unsafe(no_mangle)]
+pub static mut g_in_delay: u32 = 0;
+/// The input ring's size in frames.
+#[unsafe(no_mangle)]
+pub static mut g_buf_in: u32 = 0;
+
+/// The app's own `snd_pcm_readi`.
+static mut REAL_READI: Option<unsafe extern "C" fn(usize, *mut u8, u64) -> i64> = None;
+/// The app's own `snd_pcm_avail`.
+static mut REAL_AVAIL: Option<unsafe extern "C" fn(usize) -> i64> = None;
+
+/// The input tap: measure how much is waiting and feed the looper what arrived.
+///
+/// # Safety
+///
+/// `buffer` must hold `size` bytes, as the app's own reader requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn snd_pcm_readi(pcm: usize, buffer: *mut i32, size: u64) -> i64 {
+    // SAFETY: the static is this module's.
+    let mut real = unsafe { *core::ptr::addr_of!(REAL_READI) };
+    if real.is_none() {
+        real = look_up(c"snd_pcm_readi");
+        // SAFETY: written once.
+        unsafe { REAL_READI = real };
+    }
+    let Some(capture) = real else {
+        return -1;
+    };
+    let looper = crate::looper_ffi::looper_is_open() != 0;
+    if looper {
+        // SAFETY: this module's statics.
+        unsafe { measure_input_delay(pcm) };
+    }
+    // The rings are only readable once the stream exists, so this is retried
+    // until both directions report one.
+    // SAFETY: the static is this module's.
+    let stale = unsafe { g_buf_dirty } != 0;
+    if crate::glue::buffer_in() == 0 || stale {
+        // SAFETY: the statics are this module's.
+        unsafe { refresh_input_ring(pcm) };
+    }
+    // SAFETY: the app's own reader takes these.
+    let got = unsafe { capture(pcm, buffer.cast::<u8>(), size) };
+    if got > 0 {
+        // SAFETY: this module's statics.
+        unsafe {
+            g_audio_in_calls = g_audio_in_calls.wrapping_add(1);
+        }
+        // SAFETY: the buffer holds the frames just read.
+        unsafe {
+            if looper && !buffer.is_null() && g_in_ch != 0 && g_in_s32 != 0 {
+                crate::looper_ffi::looper_input_s32_interleaved(
+                    buffer,
+                    g_in_ch,
+                    u32::try_from(got).unwrap_or(0),
+                );
+            }
+        }
+    }
+    got
+}
+
+/// How many frames the device has waiting, when the looper needs to know.
+///
+/// # Safety
+///
+/// `pcm` is the app's live handle.
+unsafe fn measure_input_delay(pcm: usize) {
+    // SAFETY: this module's statics.
+    unsafe {
+        let mut real = *core::ptr::addr_of!(REAL_AVAIL);
+        if real.is_none() {
+            real = look_up(c"snd_pcm_avail");
+            REAL_AVAIL = real;
+        }
+        if let Some(avail_of) = real {
+            let avail = avail_of(pcm);
+            if avail > 0 {
+                g_in_delay = u32::try_from(avail).unwrap_or(0);
+            }
+        }
+    }
+}
+
+/// Read the input ring's geometry.
+///
+/// # Safety
+///
+/// `pcm` is the app's live handle.
+unsafe fn refresh_input_ring(pcm: usize) {
+    let mut channels = 0_u32;
+    let mut s32 = 0_i32;
+    // SAFETY: the geometry reads the stream's own parameters.
+    let frames = unsafe {
+        minimod_stream_geometry(
+            pcm,
+            core::ptr::from_mut(&mut channels),
+            core::ptr::from_mut(&mut s32),
+        )
+    };
+    // SAFETY: this module's statics and the glue's ring sizes.
+    unsafe {
+        crate::glue::set_buffer_in(frames);
+        if channels != 0 {
+            g_in_ch = channels;
+            g_in_s32 = s32;
+        }
+        if frames != 0 && crate::glue::buffer_out() != 0 {
+            g_buf_dirty = 0;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CHANNEL_LIMIT, INPUT_ALT, INPUT_CHANNELS, OUTPUT_ALT, OUTPUT_CHANNELS, channels};

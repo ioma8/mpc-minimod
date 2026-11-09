@@ -327,6 +327,19 @@ pub fn buffer_in() -> u32 {
     unsafe { minimod_glue_buf_in() }
 }
 
+/// Record the input ring's size.
+///
+/// # Safety
+///
+/// The glue owns the value.
+pub unsafe fn set_buffer_in(frames: u32) {
+    unsafe extern "C" {
+        fn minimod_glue_set_buf_in(frames: u32);
+    }
+    // SAFETY: the glue's own setter.
+    unsafe { minimod_glue_set_buf_in(frames) }
+}
+
 /// The input delay the device reported.
 #[must_use]
 pub fn input_delay() -> u32 {
