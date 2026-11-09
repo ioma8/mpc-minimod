@@ -25,8 +25,8 @@ dependencies = [
 
 [[package]]
 name = "mpc-sample-sdk"
-version = "0.1.1"
-source = "git+https://github.com/ioma8/mpc-sample-sdk?tag=v0.1.1#0ec5799ed6c185deca58fb76818f3be308a93b29"
+version = "0.1.2"
+source = "git+https://github.com/ioma8/mpc-sample-sdk?tag=v0.1.2#836195009ae619dbb8d91f21b005ea9535f70b20"
 dependencies = [
  "libc",
 ]
