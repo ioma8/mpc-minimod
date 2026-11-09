@@ -563,6 +563,73 @@ pub unsafe extern "C" fn minimod_after_sites(originals: *const Originals) -> i32
 unsafe extern "C" {
     fn minimod_hooks_touched() -> i32;
     fn minimod_seal_hooks();
+    fn minimod_install_hook(base: usize, site: usize, handler: usize) -> *mut u8;
+    fn minimod_glue_set_base(found: usize);
+}
+
+/// The calibration trim the config file carries.
+#[unsafe(no_mangle)]
+pub static mut g_lat_extra: i32 = 0;
+
+/// Read the saved calibration and apply it.
+fn load_config() {
+    let mut trim = 0_i32;
+    let mut master = -1_i32;
+    // SAFETY: both pointers are this frame's.
+    if unsafe { crate::cfg_ffi::minimod_cfg_load(&raw mut trim, &raw mut master) } == 0 {
+        return;
+    }
+    // SAFETY: the static is this module's.
+    unsafe { g_lat_extra = trim };
+    if master >= 0 {
+        crate::looper_ffi::looper_set_master(u32::try_from(master).unwrap_or(0));
+    }
+}
+
+/// Install the mod: find the app, check the image, patch every site.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_load() {
+    let found = minimod_find_main();
+    if found == 0 {
+        return;
+    }
+    firmware::minimod_set_base(found);
+    // SAFETY: the glue keeps the copy its own code reads.
+    unsafe { minimod_glue_set_base(found) };
+    // SAFETY: the image check reads the mapped file.
+    let ok = unsafe { minimod_firmware_ok(found) };
+    if ok == 0 {
+        return;
+    }
+    load_config();
+    patch_sites(found);
+}
+
+/// Patch the sites the table names, in order.
+fn patch_sites(base: usize) {
+    let count = minimod_site_count();
+    let mut originals = Originals::default();
+    for index in 0..count {
+        let site = base + minimod_site_offset(index);
+        let handler = minimod_site_handler(index) as usize;
+        // SAFETY: the site is a checked image offset and the handler is ours.
+        let trampoline = unsafe { minimod_install_hook(base, site, handler) };
+        let trampoline = trampoline as usize;
+        // SAFETY: the recorders take this site's number.
+        unsafe { minimod_site_record(index, trampoline) };
+        match index {
+            8 => originals.buttons = trampoline,
+            6 => originals.control = trampoline,
+            9 => originals.bass_writer = trampoline,
+            10 => originals.repaint = trampoline,
+            12 => originals.hpss_ctor = trampoline,
+            13 => originals.hpss_exec = trampoline,
+            15 => originals.midi_note = trampoline,
+            _ => {}
+        }
+    }
+    // SAFETY: the crate's own finish.
+    unsafe { minimod_after_sites(core::ptr::from_ref(&originals)) };
 }
 
 #[cfg(test)]

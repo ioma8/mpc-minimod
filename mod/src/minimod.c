@@ -77,6 +77,9 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+void minimod_load(void);
+void minimod_glue_set_base(uintptr_t found);
+
 void minimod_overlay_menu_draw(uintptr_t graphics);
 void minimod_overlay_finalize(void);
 void minimod_overlay_paint_self(uintptr_t component, uintptr_t graphics);
@@ -280,6 +283,12 @@ struct minimod_ui_state *minimod_ui_state(void);
 
 /* ---------------------------------------------------------------- state */
 static uintptr_t base;
+
+/* The crate finds the app; the glue keeps the value its own code reads. */
+void minimod_glue_set_base(uintptr_t found)
+{
+    base = found;
+}
 static int hook_mask = 0xf2; /* 2 proc, 16 buttons, 32 note_on, 64 cs, 128 note_off */ /* 1 ctor (crashes, disabled), 2 proc, 16 buttons,
                                 32 note_on, 64 cs_event, 128 note_off */ /* 1 ctor, 2 proc, 4 plus, 8 minus, 16 buttons,
                                 32 note_on, 64 cs_event, 128 note_off */
@@ -1203,46 +1212,5 @@ uintptr_t minimod_glue_repaint_address(void) { return (uintptr_t)orig_repaint; }
 
 __attribute__((constructor)) static void load(void)
 {
-    uintptr_t found = minimod_find_main();
-    if (!found)
-        return;
-    base = found;
-    minimod_set_base(base);
-    if (!minimod_firmware_ok(base))
-        return;
-    const char *env = getenv("MINIMOD_HOOKS");
-    if (env && *env)
-        hook_mask = atoi(env);
-    const char *lat = getenv("MINIMOD_LOOP_LAT");
-    if (lat && *lat)
-        g_lat_fixed = atoi(lat);
-    const char *extra = getenv("MINIMOD_LOOP_LAT_EXTRA");
-    if (extra && *extra)
-        g_lat_extra = atoi(extra);
-    looper_cfg_load();
-    /* The sites are the crate's table; the patching stays here. */
-    struct minimod_originals_glue originals = {0};
-    size_t sites = minimod_site_count();
-    for (size_t i = 0; i < sites; ++i) {
-        void *t = install_hook(base + minimod_site_offset(i),
-                               (void *)minimod_site_handler(i));
-        minimod_site_record(i, (uintptr_t)t);
-        if (i == 8) {
-            originals.buttons = (uintptr_t)t;
-            minimod_buttons_original((uintptr_t)t);
-        }
-        else if (i == 6)
-            originals.control = (uintptr_t)t;
-        else if (i == 9)
-            originals.bass_writer = (uintptr_t)t;
-        else if (i == 10)
-            originals.repaint = (uintptr_t)t;
-        else if (i == 12)
-            originals.hpss_ctor = (uintptr_t)t;
-        else if (i == 15)
-            originals.midi_note = (uintptr_t)t;
-        else if (i == 13)
-            originals.hpss_exec = (uintptr_t)t;
-    }
-    minimod_after_sites(&originals);
+    minimod_load();
 }
