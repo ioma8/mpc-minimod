@@ -1525,24 +1525,10 @@ static void screen_paint(void *p, void *g)
 
 static int install_screen_paint(void)
 {
-    uintptr_t vtaddr = base + A_SCREEN_VT;
-    if (!mapped((void *)vtaddr))
+    if (!minimod_paint_install(base, (const void *)screen_paint))
         return 0;
-    uintptr_t *vt = (uintptr_t *)vtaddr;
-    orig_screen_paint = (void (*)(void *, void *))vt[27];
-    mlog("minimod: paint fn = %p (file %#lx)\n",
-         (void *)orig_screen_paint, (unsigned long)((uintptr_t)orig_screen_paint - base));
-    if (!orig_screen_paint)
-        return 0;
-    uintptr_t page = vtaddr & ~(uintptr_t)0xfff;
-    if (mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE) != 0) {
-        mlog("minimod: screen vtable mprotect failed: %s\n", strerror(errno));
-        return 0;
-    }
-    vt[27] = (uintptr_t)screen_paint;
-    mprotect((void *)page, 0x1000, PROT_READ);
-    mlog("minimod: screen paint hooked (stock %p)\n", (void *)orig_screen_paint);
-    return 1;
+    orig_screen_paint = minimod_paint_original();
+    return orig_screen_paint ? 1 : 0;
 }
 
 /* The soft-key row is rebuilt on SHIFT, and every rebuild assigns the label

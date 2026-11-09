@@ -197,6 +197,76 @@ pub unsafe extern "C" fn mapped(address: *const u8) -> i32 {
     )
 }
 
+/// The page's own paint, displaced by the mod.
+static mut ORIGINAL_PAINT: Option<unsafe extern "C" fn(usize, usize)> = None;
+
+/// The page's own paint, for the glue.
+#[must_use]
+pub fn original_paint() -> Option<unsafe extern "C" fn(usize, usize)> {
+    // SAFETY: written once at install.
+    unsafe { *core::ptr::addr_of!(ORIGINAL_PAINT) }
+}
+
+/// Install the paint hook in the screen's vtable.
+///
+/// # Safety
+///
+/// `base` must be the app's load address and `handler` the entry point to store.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_paint_install(base: usize, handler: *const ()) -> i32 {
+    let address = base + 0x6e2_12a0;
+    if unsafe { !is_mapped(address as *const u8) } {
+        return 0;
+    }
+    // SAFETY: the address is inside the app's screen vtable.
+    let slot = unsafe { (address as *mut usize).add(27) };
+    // SAFETY: see above.
+    let original = unsafe { *slot };
+    if original == 0 {
+        return 0;
+    }
+    // SAFETY: the original is the app's own paint.
+    unsafe {
+        ORIGINAL_PAINT =
+            core::mem::transmute::<usize, Option<unsafe extern "C" fn(usize, usize)>>(original);
+    }
+    let page = address & !0xfff;
+    // SAFETY: the page is inside the app's image.
+    let unlocked = unsafe {
+        libc::mprotect(
+            page as *mut libc::c_void,
+            0x1000,
+            libc::PROT_READ | libc::PROT_WRITE,
+        )
+    } == 0;
+    if !unlocked {
+        return 0;
+    }
+    // SAFETY: the page is writable now.
+    unsafe {
+        *slot = handler as usize;
+        libc::mprotect(page as *mut libc::c_void, 0x1000, libc::PROT_READ);
+    }
+    1
+}
+
+/// The paint the mod displaced, for the glue.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_paint_original() -> Option<unsafe extern "C" fn(usize, usize)> {
+    // SAFETY: written once at install.
+    unsafe { *core::ptr::addr_of!(ORIGINAL_PAINT) }
+}
+
+/// The glue's mapping test, from the crate's side.
+///
+/// # Safety
+///
+/// The pointer is only compared.
+unsafe fn is_mapped(address: *const u8) -> bool {
+    // SAFETY: the glue's own test.
+    unsafe { mapped(address) != 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FIRMWARE_SITES, PT_LOAD, TEXT_OFFSET};

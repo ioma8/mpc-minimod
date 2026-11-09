@@ -8,4 +8,7 @@
 int32_t minimod_firmware_ok(uintptr_t base);
 uintptr_t minimod_find_main(void);
 
+int32_t minimod_paint_install(uintptr_t base, const void *handler);
+void (*minimod_paint_original(void))(void *, void *);
+
 #endif
