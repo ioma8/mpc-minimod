@@ -78,6 +78,8 @@
 #include "audio_ffi.h"
 
 void minimod_spectral_key_press(void);
+int32_t minimod_spectral_run_start(int32_t busy);
+void minimod_menu_bass_page(void);
 void minimod_spectral_frame(uintptr_t base, uintptr_t screen);
 
 void minimod_repaint_screen(void);
@@ -529,7 +531,7 @@ static void (*orig_hpss_writer)(void *, void *);
 /* One armed output.  The constructor hook maps the command it sees to this
  * buffer, and the writer callback consumes the buffer sequentially. */
 
-static float g_bass_knob[3] = {0.52f, 0.18f, 0.56f};
+extern float g_bass_knob[3];
 static uint32_t bass_float_bits(float value)
 {
     uint32_t bits;
@@ -678,8 +680,7 @@ extern struct minimod_spectral_state g_spectral;
 
 static void spectral_start(void)
 {
-    if (minimod_spectral_start(&g_spectral, g_hpss_btn, (int32_t)sizeof g_hpss_btn,
-                               g_hpss_busy || minimod_job_busy()))
+    if (minimod_spectral_run_start(g_hpss_busy || minimod_job_busy()))
         hpss_repaint();
 }
 
@@ -763,10 +764,7 @@ static void hpss_close(void)
 
 static void bass_page_open(void)
 {
-    g_menu.bass_edit = 1;
-    bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
-    bass_preview_set_active(1);
-    hpss_set_status(g_bass_preview_available ? "" : "Live preview unavailable");
+    minimod_menu_bass_page();
 }
 
 static int looper_menu_open(void)

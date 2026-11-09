@@ -365,6 +365,25 @@ unsafe extern "C" fn minimod_status_c(text: *const u8) {
     crate::status::set_status(&text.to_string_lossy());
 }
 
+/// Start a chop from the crate's own record and the event that started it.
+///
+/// # Safety
+///
+/// Reads the crate's own state.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_spectral_run_start(busy: i32) -> i32 {
+    let event = crate::ui::event_copy();
+    // SAFETY: the record is this module's.
+    unsafe {
+        minimod_spectral_start(
+            core::ptr::addr_of_mut!(g_spectral),
+            event.as_ptr(),
+            i32::try_from(event.len()).unwrap_or(0),
+            busy,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{State, start};

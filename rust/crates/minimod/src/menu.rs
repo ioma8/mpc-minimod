@@ -456,6 +456,32 @@ pub fn state_mut() -> &'static mut State {
     unsafe { &mut *core::ptr::addr_of_mut!(g_menu) }
 }
 
+/// The bass control page's three knobs.
+#[unsafe(no_mangle)]
+pub static mut g_bass_knob: [f32; 3] = [0.52, 0.18, 0.56];
+
+/// Show the bass control page and start its preview.
+///
+/// # Safety
+///
+/// The app's own calls are used.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_menu_bass_page() {
+    // SAFETY: the array is this module's.
+    let knobs = unsafe { *core::ptr::addr_of!(g_bass_knob) };
+    let menu = state_mut();
+    menu.bass_edit = 1;
+    crate::bass_ffi::bass_preview_set_params(knobs[0], knobs[1], knobs[2]);
+    crate::bass_ffi::minimod_bass_preview_set_active(1);
+    // SAFETY: the flag is the bass module's.
+    let available = unsafe { crate::bass_ffi::g_bass_preview_available } != 0;
+    crate::status::set_status(if available {
+        ""
+    } else {
+        "Live preview unavailable"
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Hooks, ROW_HPSS, State, close, open};

@@ -479,6 +479,13 @@ pub unsafe extern "C" fn minimod_hook_buttons(event: usize, hooks: *const Hooks)
 /// The app's own button dispatch, recorded at install.
 static mut ORIGINAL_BUTTONS: Option<unsafe extern "C" fn(usize)> = None;
 
+/// The event the page last sent, copied.
+#[must_use]
+pub fn event_copy() -> [u8; 16] {
+    // SAFETY: only the UI thread writes it.
+    unsafe { (*core::ptr::addr_of!(STATE)).event }
+}
+
 /// The app's own button dispatch.
 #[must_use]
 pub fn original_buttons() -> Option<unsafe extern "C" fn(usize)> {
