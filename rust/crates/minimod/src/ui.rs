@@ -427,6 +427,13 @@ pub fn set_octave(value: i32) {
     unsafe { (*core::ptr::addr_of_mut!(STATE)).octave = value };
 }
 
+/// Which press of the trim cycle this is.
+#[must_use]
+pub fn trim_step() -> i32 {
+    // SAFETY: only the UI thread writes it.
+    unsafe { (*core::ptr::addr_of!(STATE)).trim_step }
+}
+
 /// Whether SHIFT is held.
 #[must_use]
 pub fn shift() -> i32 {

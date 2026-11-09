@@ -77,6 +77,8 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+void minimod_autotrim_cycle(void);
+
 extern uint32_t g_bass_preview_notes;
 extern int32_t g_bass_preview_available;
 void minimod_bass_preview_set_active(int32_t active);
@@ -1372,17 +1374,7 @@ void midi_note_event(void *app, void *context, void *event,
  * the knobs keep (boundary object and layer). */
 static void do_autotrim(void)
 {
-    struct minimod_autotrim_hooks hooks = {0};
-    hooks.set_control = (void (*)(void *, void *, int32_t, int32_t, float))orig_setctl;
-    hooks.repaint = (void (*)(void *, uint64_t, uint64_t))orig_repaint;
-    struct minimod_autotrim_context context = {
-        .surface = (uintptr_t)g_surface,
-        .control = (uintptr_t)g_control_context,
-        .component = (uintptr_t)(g_paint_comp ? g_paint_comp : g_screen),
-        .step = g_trim_step,
-        .last_pad = g_input.last_pad,
-    };
-    minimod_autotrim_run(&context, &hooks);
+    minimod_autotrim_cycle();
 }
 
 
@@ -1453,6 +1445,11 @@ void minimod_glue_finished(int32_t touched)
     /* The preview's availability is decided in the crate, where the sites are. */
     mlog("minimod: install touched=%d\n", (int)touched);
 }
+
+uintptr_t minimod_glue_surface(void) { return (uintptr_t)g_surface; }
+uintptr_t minimod_glue_control_context(void) { return (uintptr_t)g_control_context; }
+uintptr_t minimod_glue_set_control(void) { return (uintptr_t)orig_setctl; }
+uintptr_t minimod_glue_repaint_address(void) { return (uintptr_t)orig_repaint; }
 
 __attribute__((constructor)) static void load(void)
 {

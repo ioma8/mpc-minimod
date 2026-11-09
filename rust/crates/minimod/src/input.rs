@@ -353,6 +353,13 @@ pub extern "C" fn minimod_input_set_data_target(target: usize) {
     unsafe { (*core::ptr::addr_of_mut!(STATE)).data_target = target };
 }
 
+/// The pad the user pressed last, or -1.
+#[must_use]
+pub fn last_pad() -> i32 {
+    // SAFETY: only the UI thread writes it.
+    unsafe { (*core::ptr::addr_of!(STATE)).last_pad }
+}
+
 /// Record the encoder's surface.
 pub fn set_data_target(target: usize) {
     // SAFETY: only the UI thread writes the input state.

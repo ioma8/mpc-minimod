@@ -617,6 +617,13 @@ pub static mut g_in_delay: u32 = 0;
 #[unsafe(no_mangle)]
 pub static mut g_buf_in: u32 = 0;
 
+/// The component the page last painted, or zero.
+#[must_use]
+pub fn painted() -> usize {
+    // SAFETY: only the UI thread writes it.
+    unsafe { g_paint_comp }
+}
+
 /// The app's own `snd_pcm_readi`.
 static mut REAL_READI: Option<unsafe extern "C" fn(usize, *mut u8, u64) -> i64> = None;
 /// The app's own `snd_pcm_avail`.
