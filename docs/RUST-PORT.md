@@ -715,3 +715,34 @@ the app's write, or the channel stride in the peak and tap loops.
 
 Reverted; the certified build is green.  The next attempt starts from the passing
 build and changes **one** of those two things at a time.
+
+## The constructor crash: found by bisection
+
+The bisect worked.  The install table took a mask from `/run/minimod.hooks` (a file, so
+each probe was a restart rather than a rebuild), and every bit was a group of sites:
+
+| mask | result |
+|---|---|
+| `0` | runs - the install machinery itself is sound |
+| `1000` data signal | runs |
+| `10` buttons | runs |
+| `ff0` input + controls | runs |
+| `10000` bass writer | runs |
+| `20000` repaint | runs |
+| `80000` screen paint | runs |
+| `40000` **label assign** | **crash loop** |
+| `fffff` (all) | crash loop |
+
+So the constructor was never the problem: **one hook does it**.  `A_STR_ASSIGN` (the
+soft-key label assignment at `0x102d5e0`) crashes when the Rust install patches it -
+and the same Rust function was fine when the C constructor patched it, which points at
+what happens *around* the patch rather than the hook itself: the original not being
+recorded yet, or the recorder being called for a site whose handler was installed from
+a different module.
+
+Two things made this findable at last: a mask that could be changed without a rebuild,
+and probing one bit at a time.  Seven earlier attempts guessed at the shape of the
+problem; this one measured it in nine restarts.
+
+Next: reproduce with the mask on `40000` alone and a log, and compare
+`minimod_assign_original` against the C constructor's `orig_str_assign = t_sa`.
