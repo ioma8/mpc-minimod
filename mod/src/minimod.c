@@ -77,6 +77,10 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+extern uint32_t g_bass_preview_notes;
+extern int32_t g_bass_preview_available;
+void minimod_bass_preview_set_active(int32_t active);
+
 int minimod_levels_bump(int32_t steps);
 
 /* The channel count and the last two taps live in Rust. */
@@ -531,8 +535,6 @@ static int g_hpss_arm_name;
 static volatile int g_hpss_write_ok;
 
 static float g_bass_knob[3] = {0.52f, 0.18f, 0.56f};
-static volatile unsigned g_bass_preview_notes;
-static volatile int g_bass_preview_available;
 static uint32_t bass_float_bits(float value)
 {
     uint32_t bits;
@@ -541,15 +543,7 @@ static uint32_t bass_float_bits(float value)
 }
 static void bass_preview_set_active(int active)
 {
-    if (active && !g_bass_preview_available)
-        active = 0;
-    if (active) {
-        __atomic_store_n(&g_bass_preview_notes, 0, __ATOMIC_RELAXED);
-        __atomic_store_n(&g_bass_preview_blocks, 0, __ATOMIC_RELAXED);
-        __atomic_store_n(&g_bass_preview_peak_bits, 0, __ATOMIC_RELAXED);
-    }
-    __atomic_store_n(&g_bass_preview_active, active != 0, __ATOMIC_RELEASE);
-    bass_preview_enable(active);
+    minimod_bass_preview_set_active(active);
 }
 /* Native DATA input: the decoded control surface emits signed deltas through
  * Ghidra FUN_0150dbc0(surface + 0x2da8, delta). Unlike the float broadcaster,

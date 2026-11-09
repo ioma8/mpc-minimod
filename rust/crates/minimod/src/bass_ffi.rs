@@ -105,3 +105,30 @@ pub unsafe extern "C" fn bass_preview_mix(
         bass::preview_mix(&mut [first, second], frames, rate)
     }
 }
+
+/// Whether the bass preview can run: the note and audio hooks are installed.
+#[unsafe(no_mangle)]
+pub static mut g_bass_preview_available: i32 = 0;
+
+/// How many notes the preview has replayed.
+#[unsafe(no_mangle)]
+pub static mut g_bass_preview_notes: u32 = 0;
+
+/// Turn the bass preview on or off, resetting its counters when it starts.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_bass_preview_set_active(active: i32) {
+    // SAFETY: only the UI thread writes the flag.
+    let available = unsafe { g_bass_preview_available } != 0;
+    let active = i32::from(active != 0 && available);
+    if active != 0 {
+        // SAFETY: the counters are this module's.
+        unsafe {
+            g_bass_preview_notes = 0;
+            crate::audio::g_bass_preview_blocks = 0;
+            crate::audio::g_bass_preview_peak_bits = 0;
+        }
+    }
+    // SAFETY: the flag is this module's.
+    unsafe { crate::audio::g_bass_preview_active = active };
+    bass_preview_enable(active);
+}
