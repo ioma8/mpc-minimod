@@ -137,6 +137,7 @@ Release description format and the complete feature overview are in
 - [`docs/ADDIN-ECOSYSTEM.md`](docs/ADDIN-ECOSYSTEM.md) — the 2026 addin projects, their loading rules and what we can reuse
 - [`docs/LIVE-LOOPER.md`](docs/LIVE-LOOPER.md) — the Live Looper: state machine, latency, sync
 - [`docs/RUST-PORT.md`](docs/RUST-PORT.md) — the Rust rewrite: layout, lint policy, what is ported and how it is proven
+- [SDK autonomous emulator loop](https://github.com/ioma8/mpc-sample-sdk/blob/main/docs/23-autonomous-development.md) — fast build → preload → test loop for agents
 - [`mod/README.md`](mod/README.md) — controls, anchors, build
 - [`tools/hpss/`](tools/hpss/) — Python reference implementations and WAV helpers
 - [`converter/`](converter/) — separate tool: project → per-pad stems
