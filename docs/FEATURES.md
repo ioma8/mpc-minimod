@@ -14,7 +14,7 @@ measured, and what is still open. Mechanisms are catalogued in
 | HPSS | menu → HPSS | emulator-verified |
 | Spectral Chop | menu → Spectral Chop | emulator-verified (exact boundaries) |
 | Add Reverb / Vinyl / Lo-Fi | menu → effect | emulator-verified |
-| Bass Synth | menu → Bass Synth | emulator-verified |
+| Synth | menu → Synth | host + emulator-verified |
 
 Two invariants hold across the mod: **it never writes a sample file** and it
 refuses rather than guesses. Every action either reports what it did
@@ -135,7 +135,7 @@ slice-versus-pitch setting.
 ## SAMPLE OPTIONS menu
 
 **Behavior.** On the Sample page, `SHIFT`+`DATA` opens a seven-row overlay —
-HPSS, Spectral Chop, Add Reverb, Vinyl, Lo-Fi (Decimator), Bass Synth, Close.
+HPSS, Spectral Chop, Add Reverb, Vinyl, Lo-Fi (Decimator), Synth, Close.
 The DATA wheel moves the highlight, `DATA` confirms, `SHIFT`+`DATA` closes.
 While the overlay owns input, other controls are suppressed; a status line
 reports the outcome of the last action, and a one-second toast repeats it.
@@ -293,40 +293,52 @@ native undo grouping not exercised.
 
 ---
 
-## Bass Synth
+## Synth characters
 
-**Behavior.** The menu opens a parameter page: pads 1–16 audition C2–D#3
-chromatically, `K1` brightness, `K2` decay, `K3` low-pass cutoff, and `DATA`
-renders one centred stereo C2 (MIDI 36) pluck, 0.75 s with a 150 ms body and a
-fast decaying tail, and assigns it to the next free pad through stock Extract.
-The selected pad's sample is not rewritten.
+**Behavior.** The menu opens a synth parameter page. Pads 1–16 audition
+C2–D#3 chromatically; the **DATA encoder switches the character**, and `DATA`
+renders the selected character's C2 (MIDI 36) note to the next free pad through
+stock Extract. The selected source sample is not rewritten. The page title shows
+the selected character and the three knobs change with it:
 
-**Implementation.** `rust/crates/dsp/src/bass.rs` is a Rust port of the DaisySP `StringVoice`
-(a Karplus-Strong physical model) and SVF subset: C2 65.406 Hz, four preview voices,
-`K1` sets brightness/damping, `K2` sets the tail decay (80–420 ms), `K3` maps
-exponentially from 700 Hz to about 16.8 kHz (or 45 % of the sample rate). The
-live preview is mixed into the real output call: the app writes interleaved
-S32_LE (4 channels, 44.1 kHz) through `snd_pcm_writei`, and the mod's exported
-`snd_pcm_writei` tap (`backend/audio.rs`, the one the looper uses) adds the preview to
-channels 0/1 (format and rate read from the PCM handle once). Each voice decays
-over 0.7 s at level 0.5, and pads are consumed at the control-surface event hook
-while the page is open, so the firmware never selects or switches the sample
-underneath. The saved render is peak-scaled to 0.86. The DaisySP subset is
-ported into the crate (upstream revision `2c72eaf9…`, MIT); no runtime library
-and no C is added.
+| character | K1 | K2 | K3 | model |
+|---|---|---|---|---|
+| **BASS** | BRIGHT | DECAY | FILTER | Karplus-Strong pluck, 0.75 s |
+| **PIANO** | BRIGHT | DECAY | TONE | additive hammered harmonics |
+| **PADS** | ATTACK | BRIGHT | WIDTH | detuned triangle ensemble |
+| **LEAD** | BRIGHT | BITE | FILTER | saw plus square edge |
+| **BELLS** | BRIGHT | DECAY | RATIO | two-operator FM |
+| **STRINGS** | ATTACK | BRIGHT | WIDTH | detuned bowed ensemble |
+| **VOICE** | VOWEL | BRIGHT | FILTER | three formant sines |
+| **ORGAN** | DRAWBAR | BRIGHT | FILTER | additive drawbars |
 
-**Evidence.** `Bass C29.wav`: 33,075 stereo frames at 44.1 kHz, C2 fundamental
-(measured 70 Hz peak with 1 Hz-bin resolution), RMS 0.08620, pad assigned,
-`Bass Synth: copy created`, no restart. Live preview is now checked from the
-emulator's PCM stream, not only from counters: one pad gives an audible pluck
-that decays and stops after 0.7 s, with no growth.
+Switching character resets its three knobs to that character's defaults. The
+bass keeps its short 0.75 s punch; the other characters use their own lengths
+(0.8–1.5 s) so a piano or bell can ring while the bass stays tight.
+
+**Implementation.** `rust/crates/dsp/src/bass.rs` is the Karplus-Strong bass
+(`StringVoice` + SVF subset) and the character table. `rust/crates/dsp/src/synth.rs`
+is the shared oscillator/envelope engine for the other seven characters. Both
+render centred stereo at the source rate and normalise to peak 0.86. The live
+preview is mixed into the real output call: the app writes interleaved S32_LE
+(4 channels, 44.1 kHz) through `snd_pcm_writei`, and the exported tap
+(`backend/audio.rs`) adds the preview to channels 0/1. Four voices are mixed;
+pads are consumed at the control-surface event hook while the page is open, so
+the firmware never selects or switches the sample underneath. The saved render
+is named after the selected character (`Bass C2`, `Piano C2`, …).
+
+**Evidence.** The default bass render is 33,075 stereo frames at 44.1 kHz with
+C2 fundamental (measured 70 Hz peak), RMS 0.08620, pad assigned,
+`Synth: copy created`, no restart. Host tests render all eight characters and
+check their declared length, non-silence and normalised peak. Live preview is
+checked from the emulator's PCM stream: a pad gives an audible pluck that decays
+and stops with no growth.
 
 **Limits.** The native FMBass instrument is unresolved (see
-[`MECHANISMS.md`](MECHANISMS.md#h3-instrument-host-boundary-fmbass)); the
-shipped renderer is the local DaisySP model, which sounds like a pluck, not the
-firmware's synth. Real hardware untested. The investigation probe for the native class
-(`fmbass_sample.c`) was never shipped and went with the C; it is in `main`.
-
+[`MECHANISMS.md`](MECHANISMS.md#h3-instrument-host-boundary-fmbass)); these are
+local synthesis models, not the firmware's instruments. Real hardware untested.
+The investigation probe for the native class (`fmbass_sample.c`) was never
+shipped and went with the C; it is in `main`.
 ---
 
 ## Build and verification

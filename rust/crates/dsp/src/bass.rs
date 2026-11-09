@@ -16,6 +16,128 @@ use crate::dsp::string_voice::StringVoice;
 use crate::dsp::{Noise, WhiteNoise, fclamp};
 use crate::num::f32_to_usize;
 
+/// The eight synth characters the control page can select.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Short Karplus-Strong bass.
+    Bass,
+    /// Bright, decaying piano.
+    Piano,
+    /// Slow, detuned pad.
+    Pads,
+    /// Focused lead with bite.
+    Lead,
+    /// FM bell.
+    Bells,
+    /// Bowed string ensemble.
+    Strings,
+    /// Formant voice.
+    Voice,
+    /// Additive drawbar organ.
+    Organ,
+}
+
+impl Kind {
+    /// All kinds, in encoder order.
+    pub const ALL: [Self; 8] = [
+        Self::Bass,
+        Self::Piano,
+        Self::Pads,
+        Self::Lead,
+        Self::Bells,
+        Self::Strings,
+        Self::Voice,
+        Self::Organ,
+    ];
+
+    /// The name shown on the control page.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Bass => "BASS",
+            Self::Piano => "PIANO",
+            Self::Pads => "PADS",
+            Self::Lead => "LEAD",
+            Self::Bells => "BELLS",
+            Self::Strings => "STRINGS",
+            Self::Voice => "VOICE",
+            Self::Organ => "ORGAN",
+        }
+    }
+
+    /// The three knob labels for this character.
+    #[must_use]
+    pub const fn knobs(self) -> [&'static str; 3] {
+        match self {
+            Self::Bass => ["BRIGHT", "DECAY", "FILTER"],
+            Self::Piano => ["BRIGHT", "DECAY", "TONE"],
+            Self::Pads | Self::Strings => ["ATTACK", "BRIGHT", "WIDTH"],
+            Self::Lead => ["BRIGHT", "BITE", "FILTER"],
+            Self::Bells => ["BRIGHT", "DECAY", "RATIO"],
+            Self::Voice => ["VOWEL", "BRIGHT", "FILTER"],
+            Self::Organ => ["DRAWBAR", "BRIGHT", "FILTER"],
+        }
+    }
+
+    /// Default knob positions for this character.
+    #[must_use]
+    pub const fn defaults(self) -> [f32; 3] {
+        match self {
+            Self::Bass => [0.52, 0.25, 0.56],
+            Self::Piano => [0.58, 0.35, 0.62],
+            Self::Pads => [0.35, 0.48, 0.45],
+            Self::Lead => [0.55, 0.42, 0.62],
+            Self::Bells => [0.50, 0.35, 0.45],
+            Self::Strings => [0.25, 0.46, 0.50],
+            Self::Voice => [0.35, 0.50, 0.58],
+            Self::Organ => [0.55, 0.50, 0.60],
+        }
+    }
+
+    /// The rendered note length, in seconds.
+    #[must_use]
+    pub const fn duration(self) -> f32 {
+        match self {
+            Self::Bass => 0.75,
+            Self::Piano => 1.2,
+            Self::Pads => 1.4,
+            Self::Lead => 0.8,
+            Self::Bells => 1.5,
+            Self::Strings => 1.3,
+            Self::Voice => 1.0,
+            Self::Organ => 0.9,
+        }
+    }
+
+    /// The index in [`Kind::ALL`].
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Bass => 0,
+            Self::Piano => 1,
+            Self::Pads => 2,
+            Self::Lead => 3,
+            Self::Bells => 4,
+            Self::Strings => 5,
+            Self::Voice => 6,
+            Self::Organ => 7,
+        }
+    }
+
+    /// The kind at an encoder index, wrapping.
+    #[must_use]
+    pub fn from_index(index: i32) -> Self {
+        let wrapped = index.rem_euclid(8);
+        Self::ALL[usize::try_from(wrapped).unwrap_or(0)]
+    }
+
+    /// The next kind in the requested direction.
+    #[must_use]
+    pub fn step(self, delta: i32) -> Self {
+        Self::from_index(i32::try_from(self.index()).unwrap_or(0) + delta)
+    }
+}
+
 /// Pads the preview can play.
 pub const PADS: usize = 16;
 /// Voices the preview mixes.
@@ -57,6 +179,8 @@ pub enum BassError {
     UnsupportedRate,
     /// The synth produced silence, which means a parameter is unusable.
     Silent,
+    /// The requested character is not handled by this renderer.
+    UnsupportedKind,
 }
 
 impl core::fmt::Display for BassError {
@@ -64,6 +188,7 @@ impl core::fmt::Display for BassError {
         match self {
             Self::UnsupportedRate => f.write_str("unsupported sample rate"),
             Self::Silent => f.write_str("the synth produced silence"),
+            Self::UnsupportedKind => f.write_str("unsupported synth character"),
         }
     }
 }
@@ -77,6 +202,22 @@ impl std::error::Error for BassError {}
 /// Returns [`BassError`] for an unsupported rate or a silent result.
 pub fn render(rate: u32, harmonics: f32, decay: f32, cutoff: f32) -> Result<Pluck, BassError> {
     render_with(rate, harmonics, decay, cutoff, &mut WhiteNoise::default())
+}
+
+/// Render one synth character.
+///
+/// The bass keeps its dedicated string model; the other characters live in
+/// [`crate::synth`].
+///
+/// # Errors
+///
+/// Returns [`BassError`] when the synth cannot render.
+pub fn render_kind(kind: Kind, rate: u32, params: [f32; 3]) -> Result<Pluck, BassError> {
+    if kind == Kind::Bass {
+        render(rate, params[0], params[1], params[2])
+    } else {
+        crate::synth::render(kind, rate, params)
+    }
 }
 
 /// Render the C2 pluck with an explicit noise source, for the golden tests.
@@ -260,6 +401,8 @@ static PREVIEW: PreviewCell = PreviewCell(core::cell::UnsafeCell::new(None));
 /// A reset the audio thread has not run yet.
 static RESET: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(false);
+/// The selected synth character, as a [`Kind::ALL`] index.
+static KIND: AtomicU32 = AtomicU32::new(0);
 /// Brightness, as f32 bits.
 static BRIGHTNESS: AtomicU32 = AtomicU32::new(0.52_f32.to_bits());
 /// Decay, as f32 bits.
@@ -278,6 +421,19 @@ fn with_preview<R>(f: impl FnOnce(&mut Preview) -> R) -> R {
     }
 }
 
+/// Select the synth character and silence any old voices.
+pub fn preview_set_kind(kind: Kind) {
+    KIND.store(u32::try_from(kind.index()).unwrap_or(0), Ordering::Release);
+    preview_reset();
+    crate::synth::preview_set_kind(kind);
+}
+
+/// The selected synth character.
+#[must_use]
+pub fn preview_kind() -> Kind {
+    Kind::from_index(i32::try_from(KIND.load(Ordering::Acquire)).unwrap_or(0))
+}
+
 /// Turn the preview on or off.
 ///
 /// Only the flag is written here: the synth belongs to the audio thread, which
@@ -292,6 +448,7 @@ pub fn preview_set_params(brightness: f32, decay: f32, cutoff: f32) {
     BRIGHTNESS.store(clamp01(brightness).to_bits(), Ordering::Release);
     DECAY.store(clamp01(decay).to_bits(), Ordering::Release);
     CUTOFF.store(clamp01(cutoff).to_bits(), Ordering::Release);
+    crate::synth::preview_set_params([brightness, decay, cutoff]);
 }
 
 /// Strike one pad; the audio thread picks the velocity up.
@@ -308,6 +465,7 @@ pub fn preview_note(pad: usize, velocity: f32) {
 /// its next block, so a page that just opened never plays a stale note.
 pub fn preview_reset() {
     RESET.store(true, Ordering::Release);
+    crate::synth::preview_reset();
 }
 
 /// Mix the preview into up to two channel slices.
@@ -315,6 +473,9 @@ pub fn preview_reset() {
 /// The slices must all be at least `frames` long; extra channels are ignored,
 /// matching the stereo preview.
 pub fn preview_mix_slices(channels: &mut [&mut [f32]], frames: usize, rate: u32) -> f32 {
+    if preview_kind() != Kind::Bass {
+        return crate::synth::preview_mix_slices(channels, frames, rate);
+    }
     let mut pointers: [*mut f32; 2] = [core::ptr::null_mut(); 2];
     let count = channels.len().min(2);
     for (slot, channel) in pointers.iter_mut().zip(channels.iter_mut()).take(count) {

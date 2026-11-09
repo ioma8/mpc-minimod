@@ -131,7 +131,7 @@ def main():
     status_addr = mod_base + symbol('g_hpss_status')
     busy_addr = mod_base + symbol('g_menu') + 4  # busy is the second i32
 
-    # Open SAMPLE OPTIONS, select Bass Synth (row 5), then open its control page.
+    # Open SAMPLE OPTIONS, select Synth (row 5), then open its control page.
     control('SHIFT', 'press', 127)
     tap('DATA')
     control('SHIFT', 'release')
@@ -168,14 +168,14 @@ def main():
     while time.monotonic() < deadline:
         status = read_mem(status_addr, 96).split(b'\0', 1)[0].decode(errors='replace')
         busy = int.from_bytes(read_mem(busy_addr, 4), 'little', signed=True)
-        if status == 'Bass Synth: copy created' and not busy:
+        if status == 'Synth: copy created' and not busy:
             break
-        if status.startswith('Bass Synth:') and not status.startswith('Rendering') and not busy:
+        if status.startswith('Synth:') and not status.startswith('Rendering') and not busy:
             raise AssertionError(status)
         time.sleep(.2)
-    assert status == 'Bass Synth: copy created', f'Unexpected result: {status}'
+    assert status == 'Synth: copy created', f'Unexpected result: {status}'
     time.sleep(1.5)
-    panel_screen.assert_no_modal(args.panel, 'Bass Synth')
+    panel_screen.assert_no_modal(args.panel, 'Synth')
     current = bass_outputs()
     changed = [path for path, digest in current.items() if before.get(path) != digest]
     assert current, 'Native Extract did not write a Bass C2 WAV'

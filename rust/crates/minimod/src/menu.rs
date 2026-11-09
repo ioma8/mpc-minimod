@@ -4,6 +4,7 @@
 //! it, the encoder picks a row, and a press runs it.  The state it keeps is the
 //! open flag, the selected row and whether the bass control page is showing.
 
+use crate::backend::bass::Kind;
 use crate::paint;
 use mpc_sample_sdk::export_static;
 use mpc_sample_sdk::state::Global;
@@ -150,13 +151,10 @@ const TITLES: [&str; MENU_ROWS] = [
     "Add Reverb",
     "Vinyl",
     "Lo-Fi (Decimator)",
-    "Bass Synth",
+    "Synth",
     "Live Looper",
     "Close",
 ];
-
-/// The bass page's three knobs.
-const KNOBS: [&str; 3] = ["BRIGHT", "DECAY", "FILTER"];
 
 /// Draw the menu.
 ///
@@ -213,8 +211,18 @@ pub fn draw(graphics: usize, state: &State, busy: bool, status: &str, knobs: [f3
 /// The bass control page.
 fn draw_knobs(graphics: usize, area: (i32, i32, i32), status: &str, knobs: [f32; 3]) {
     let (x, y, w) = area;
+    let kind = bass_kind();
+    let labels = kind.knobs();
     paint::colour(graphics, ACCENT);
-    paint::text(graphics, "BASS SYNTH", x + 12, y + 6, w - 24, 22, 18.0);
+    paint::text(
+        graphics,
+        &format!("SYNTH  {}", kind.name()),
+        x + 12,
+        y + 6,
+        w - 24,
+        22,
+        18.0,
+    );
     paint::colour(graphics, MUTED);
     paint::text(
         graphics,
@@ -238,7 +246,7 @@ fn draw_knobs(graphics: usize, area: (i32, i32, i32), status: &str, knobs: [f32;
             11.0,
         );
         paint::colour(graphics, WHITE);
-        paint::text(graphics, KNOBS[index], *column, y + 90, 76, 18, 12.0);
+        paint::text(graphics, labels[index], *column, y + 90, 76, 18, 12.0);
         paint::colour(graphics, SLOT);
         paint::rect(graphics, *column, y + 116, 76, 4);
         paint::colour(graphics, ACCENT);
@@ -318,7 +326,31 @@ pub fn state_mut() -> &'static mut State {
 }
 
 export_static!(#[doc = "The bass page's three knobs, read by the device tests."]
-g_bass_knob: Global<[f32; 3]> = Global::new([0.52, 0.25, 0.56]));
+g_bass_knob: Global<[f32; 3]> = Global::new(Kind::Bass.defaults()));
+
+export_static!(#[doc = "The selected synth character, read by the device tests."]
+g_bass_kind: Global<i32> = Global::new(0));
+
+/// The selected synth character.
+#[must_use]
+pub fn bass_kind() -> Kind {
+    Kind::from_index(*g_bass_kind.get())
+}
+
+/// Select a synth character and reset its three knobs to that character's
+/// defaults.
+pub fn set_bass_kind(kind: Kind) {
+    *g_bass_kind.get_mut() = i32::try_from(kind.index()).unwrap_or(0);
+    *g_bass_knob.get_mut() = kind.defaults();
+}
+
+/// Move the synth selection by `delta` encoder steps.
+#[must_use]
+pub fn step_bass_kind(delta: i32) -> Kind {
+    let kind = bass_kind().step(delta);
+    set_bass_kind(kind);
+    kind
+}
 
 /// Keep the bass preview on while its page is open.
 pub fn follow_preview() {
@@ -352,6 +384,7 @@ pub fn set_bass_knobs(knobs: [f32; 3]) {
 pub fn bass_page(state: &mut State) {
     let knobs = bass_knobs();
     state.bass_edit = 1;
+    crate::backend::bass::preview_set_kind(bass_kind());
     crate::backend::bass::preview_set_params(knobs[0], knobs[1], knobs[2]);
     crate::backend::bass::preview_set_active(true);
     let available = crate::backend::bass::available();

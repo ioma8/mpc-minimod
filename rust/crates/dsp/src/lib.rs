@@ -21,6 +21,7 @@ pub mod looper;
 pub mod num;
 pub mod sample;
 pub mod spectral;
+pub mod synth;
 pub mod time;
 
 #[cfg(test)]

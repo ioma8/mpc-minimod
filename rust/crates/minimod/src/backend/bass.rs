@@ -3,7 +3,7 @@
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use minimod_dsp::bass;
-pub use minimod_dsp::bass::PADS;
+pub use minimod_dsp::bass::{Kind, PADS};
 
 /// Whether the preview is audible.
 pub static G_BASS_PREVIEW_ACTIVE: AtomicI32 = AtomicI32::new(0);
@@ -15,8 +15,8 @@ static AVAILABLE: AtomicBool = AtomicBool::new(false);
 ///
 /// Returns the interleaved stereo audio and its frame count.
 #[must_use]
-pub fn render(rate: u32, harmonics: f32, decay: f32, cutoff: f32) -> Option<(Vec<f32>, usize)> {
-    bass::render(rate, harmonics, decay, cutoff)
+pub fn render(kind: Kind, rate: u32, params: [f32; 3]) -> Option<(Vec<f32>, usize)> {
+    bass::render_kind(kind, rate, params)
         .ok()
         .map(|pluck| (pluck.audio, pluck.frames))
 }
@@ -29,6 +29,13 @@ pub fn preview_enable(enabled: bool) {
 /// Set the three preview knobs.
 pub fn preview_set_params(harmonics: f32, decay: f32, cutoff: f32) {
     bass::preview_set_params(harmonics, decay, cutoff);
+}
+
+/// Select the synth character shown on the control page.
+pub fn preview_set_kind(kind: Kind) {
+    bass::preview_set_kind(kind);
+    let active = preview_active();
+    preview_set_active(active);
 }
 
 /// Play one preview note.
@@ -62,6 +69,7 @@ pub fn preview_active() -> bool {
 pub fn preview_set_active(active: bool) {
     let on = active && available();
     bass::preview_enable(on);
+    minimod_dsp::synth::preview_enable(on && bass::preview_kind() != Kind::Bass);
     G_BASS_PREVIEW_ACTIVE.store(i32::from(on), Ordering::Release);
 }
 

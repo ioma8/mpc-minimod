@@ -135,10 +135,18 @@ pub fn encoder(event: EncoderEvent) -> EncoderFlow {
     {
         return EncoderFlow::Forward;
     }
-    if context.menu_open != 0 && context.busy == 0 && event.delta != 0 && context.bass_edit == 0 {
-        let step = if event.delta > 0 { 1 } else { 7 };
-        let selection = &mut crate::menu::state_mut().selection;
-        *selection = (*selection + step) % MENU_ITEMS;
+    if context.menu_open != 0 && context.busy == 0 && event.delta != 0 {
+        if context.bass_edit != 0 {
+            let direction = if event.delta > 0 { 1 } else { -1 };
+            let kind = crate::menu::step_bass_kind(direction);
+            crate::backend::bass::preview_set_kind(kind);
+            let knobs = crate::menu::bass_knobs();
+            crate::backend::bass::preview_set_params(knobs[0], knobs[1], knobs[2]);
+        } else {
+            let step = if event.delta > 0 { 1 } else { 7 };
+            let selection = &mut crate::menu::state_mut().selection;
+            *selection = (*selection + step) % MENU_ITEMS;
+        }
         // the app's own repaint; the UI thread is here.
         crate::ui::minimod_repaint_screen();
     }

@@ -27,7 +27,7 @@ pub const ACTION_BASS: i32 = 4;
 /// # Errors
 ///
 /// Returns the action code when the backend cannot produce the expected output.
-pub fn render(job: &mut RenderJob, knobs: &[f32]) -> Result<(), i32> {
+pub fn render(job: &mut RenderJob, knobs: &[f32], kind: bass::Kind) -> Result<(), i32> {
     let channels = usize::from(job.source.channels);
     let rate = job.source.rate;
     match job.kind {
@@ -47,11 +47,11 @@ pub fn render(job: &mut RenderJob, knobs: &[f32]) -> Result<(), i32> {
             Ok(())
         }
         ACTION_BASS => {
-            let (harmonics, decay, cutoff) = match knobs {
-                [harmonics, decay, cutoff, ..] => (*harmonics, *decay, *cutoff),
-                _ => (0.5, 0.25, 0.5),
+            let params = match knobs {
+                [a, b, c, ..] => [*a, *b, *c],
+                _ => [0.5, 0.25, 0.5],
             };
-            let Some((audio, frames)) = bass::render(rate, harmonics, decay, cutoff) else {
+            let Some((audio, frames)) = bass::render(kind, rate, params) else {
                 return Err(job.kind);
             };
             job.push_output(RenderOutput::with_frames(audio, frames, 2).ok_or(job.kind)?);
@@ -83,6 +83,7 @@ pub fn render(job: &mut RenderJob, knobs: &[f32]) -> Result<(), i32> {
 #[cfg(test)]
 mod tests {
     use super::{ACTION_BASS, ACTION_SPLIT, render};
+    use crate::backend::bass;
     use mpc_sample_sdk::platform::selection::Selection;
     use mpc_sample_sdk::render::RenderJob;
 
@@ -100,7 +101,7 @@ mod tests {
     #[test]
     fn an_unknown_action_reaches_the_effect_path_and_fails_without_an_image() {
         let mut job = RenderJob::new(source(), 9, vec![0.0; 8]);
-        assert_eq!(render(&mut job, &[]), Err(9));
+        assert_eq!(render(&mut job, &[], bass::Kind::Bass), Err(9));
         assert!(job.outputs.is_empty());
     }
 

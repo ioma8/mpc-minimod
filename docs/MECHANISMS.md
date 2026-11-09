@@ -466,11 +466,11 @@ no FMBass render node, and the voice's DSP countdown at `+0x3dc` never advances.
 Direct part-renderer calls are not proven safe. This is why the shipped Bass
 Synth renders with DaisySP instead — see [`FEATURES.md`](FEATURES.md#bass-synth).
 
-### Bass Synth live preview
+### Synth live preview
 
 Stock note-on/off hooks (`0x1e27360` / `0x1e270d0`) receive the pad index. While
-the Bass Synth page is open, pad indices 0–15 queue C2–D#3 to a four-voice
-DaisySP preview. The device output is `snd_pcm_writei`: interleaved **S32_LE,
+the Synth page is open, pad indices 0–15 queue C2–D#3 to a four-voice
+DaisySP/non-bass synth preview. The device output is `snd_pcm_writei`: interleaved **S32_LE,
 4 channels, 44100 Hz** (read from the app's hw params on the first write). The
 app imports `snd_pcm_writei@ALSA_0.9`. The last C revision concluded that an
 unversioned preload symbol does not interpose and patched the app's PLT stub
@@ -537,7 +537,7 @@ established. See [`DEVICE-NOTES.md`](DEVICE-NOTES.md#4-preferences--the-hidden-t
 | control-surface / input | `buttons()`, `cc_capture()`, `data_signal()` | must not touch the model; publish a request only |
 | UI / paint | `screen_paint()`, after the stock paint | the only place model calls are safe |
 | worker | HPSS/effects DSP and file reads | never touches the model; commits through the native command on the UI thread |
-| audio | playback; marker resolver for the playing slice; Bass Synth mixes into a private planar block before the native writer | no model access, no allocation, no locks |
+| audio | playback; marker resolver for the playing slice; Synth mixes into a private planar block before the native writer | no model access, no allocation, no locks |
 
 Cross-thread hand-off is an atomic flag plus a phase machine advanced one phase
 per paint pass. [rt] — blocking the input thread and polling for a page switch

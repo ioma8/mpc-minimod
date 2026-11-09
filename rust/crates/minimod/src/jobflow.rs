@@ -4,9 +4,11 @@
 //! feature owns what to read, what each output means and what to tell the user.
 //! `TASK` is the feature's only handle — it is not a result slot or a flag.
 
+use core::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::actions::{ACTION_BASS, ACTION_LOFI, ACTION_REVERB, ACTION_SPLIT, ACTION_VINYL};
+use crate::backend::bass::Kind;
 use crate::paint::{self, show_toast};
 use crate::{pads, selection, status};
 use mpc_sample_sdk::platform::extract;
@@ -16,6 +18,8 @@ use mpc_sample_sdk::task::{Task, TaskError};
 
 /// The one render the UI has started and not finished.
 static TASK: Mutex<Option<Task<RenderJob>>> = Mutex::new(None);
+/// The synth character of the running render, used for its pad name.
+static JOB_KIND: AtomicI32 = AtomicI32::new(0);
 /// One failure: what to put in the status line and what to toast.
 #[derive(Clone, Copy)]
 struct Report {
@@ -87,7 +91,7 @@ pub fn action_name(action: i32) -> &'static str {
         ACTION_REVERB => "Reverb",
         ACTION_VINYL => "Vinyl",
         ACTION_LOFI => "Lo-Fi",
-        ACTION_BASS => "Bass Synth",
+        ACTION_BASS => "Synth",
         _ => "HPSS",
     }
 }
@@ -100,7 +104,21 @@ fn names() -> [&'static core::ffi::CStr; 6] {
         c"Reverb",
         c"Vinyl",
         c"Lo-Fi",
+        c"Synth C2",
+    ]
+}
+
+/// The names of the synth characters' rendered C2 notes.
+fn synth_names() -> [&'static core::ffi::CStr; 8] {
+    [
         c"Bass C2",
+        c"Piano C2",
+        c"Pads C2",
+        c"Lead C2",
+        c"Bells C2",
+        c"Strings C2",
+        c"Voice C2",
+        c"Organ C2",
     ]
 }
 
@@ -155,7 +173,12 @@ fn extract_take(job: &RenderJob) -> Result<(), Report> {
             toast: "Effect: write failed",
         });
     };
-    let name = names()[usize::try_from(job.kind + 1).unwrap_or(5).min(5)];
+    let name = if job.kind == ACTION_BASS {
+        let kind = Kind::from_index(JOB_KIND.load(Ordering::Acquire));
+        synth_names()[kind.index()]
+    } else {
+        names()[usize::try_from(job.kind + 1).unwrap_or(5).min(5)]
+    };
     // The app's Extract takes the source length for an effect; a synth take may
     // be shorter than its source and then uses its own frame count.
     let rendered = u32::try_from(output.frames).unwrap_or(job.source.frames);
@@ -336,9 +359,16 @@ pub fn start(action: i32, screen: usize, menu: &mut crate::menu::State) -> bool 
         }
     };
     let job = RenderJob::new(source, action, input);
+    if action == ACTION_BASS {
+        JOB_KIND.store(
+            i32::try_from(crate::menu::bass_kind().index()).unwrap_or(0),
+            Ordering::Release,
+        );
+    }
     let knobs = crate::menu::bass_knobs();
+    let kind = crate::menu::bass_kind();
     let task = Task::spawn(screen, job, move |job| {
-        let outcome = crate::actions::render(job, &knobs);
+        let outcome = crate::actions::render(job, &knobs, kind);
         // The worker's completion is the only event that will reach the UI when
         // the user is idle; ask for the frame that takes the result.
         crate::ui::minimod_repaint_screen();
@@ -488,6 +518,6 @@ mod tests {
         assert_eq!(action_name(1), "Reverb");
         assert_eq!(action_name(2), "Vinyl");
         assert_eq!(action_name(3), "Lo-Fi");
-        assert_eq!(action_name(4), "Bass Synth");
+        assert_eq!(action_name(4), "Synth");
     }
 }

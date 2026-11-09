@@ -44,11 +44,11 @@ level of the SD card and power on; see [Install](#install).
 | **Spectral Chop** — cuts the selected sample into musical regions — a new chord, a new phrase, a different drum — and chops that same pad at those boundaries (Manual slice markers, up to 16) | `SHIFT` + `DATA`, choose **Spectral Chop**, `DATA` |
 | **Add Reverb** — adds the firmware's stereo reverb and a rendered tail to a new pad copy | `SHIFT` + `DATA`, choose **Add Reverb**, `DATA` |
 | **Vinyl / Lo-Fi** — applies the firmware's Vinyl or Decimator effect to a new pad copy | `SHIFT` + `DATA`, choose **Vinyl** or **Lo-Fi**, `DATA` |
-| **Bass Synth** — previews C2–D#3 from pads 1–16 and saves a shaped C2 pluck to a new pad | `SHIFT` + `DATA`, choose **Bass Synth**; K1/K2/K3 shape it |
+| **Synth** — eight characters (bass, piano, pads, lead, bells, strings, voice, organ); previews C2–D#3 from pads 1–16 and saves the selected character's C2 note to a new pad | `SHIFT` + `DATA`, choose **Synth**; turn `DATA` to switch character, K1/K2/K3 shape it |
 | **Live Looper** — a fullscreen 16-pad looper: each pad records a loop from the selected input source and plays it back; overdub, per-pad clear, stop-all, sync pulse with loop-length quantization and self-calibrated latency | `SHIFT` + `DATA`, choose **Live Looper**; pads record/play/stop, `SHIFT`+pad overdubs, `ERASE`+pad clears, `STOP` stops all, `LOOP` syncs, `K1` trims latency, `SHIFT`+`DATA` exits |
 
 The trim and pitch changes confirm themselves on screen for a second. HPSS,
-Spectral Chop, Add Reverb, Vinyl, Lo-Fi and Bass Synth are in the small
+Spectral Chop, Add Reverb, Vinyl, Lo-Fi and Synth are in the small
 **SAMPLE OPTIONS** menu; turn the DATA encoder to choose an action, press DATA
 to confirm, or press `SHIFT+DATA` to close. HPSS needs two empty pads and
 creates `HPSS Harmonic` and `HPSS Percussive`.
