@@ -763,3 +763,35 @@ and the Live Looper suite passes again.
 Lesson for the next sweep: check `pidof` *and* `/proc/<pid>/maps` for `minimod.so`
 before believing a negative result, and restart the lab if the MIDI port message
 appears.
+
+## Re-measured on a clean lab, with a validity check per probe
+
+Every probe now asserts both `pidof` and `minimod.so` in `/proc/<pid>/maps`, and each
+crash probe starts from a rebooted lab - because the emulator's ALSA sequencer wedges
+after the first failing run and makes every later probe look identical.
+
+Fresh-lab results:
+
+| probe | result |
+|---|---|
+| `0` (no hooks) | runs, mod mapped |
+| `40000` (label assign alone) | **dies before the first paint** |
+| `fffff` (all) | dies |
+| hybrid: glue installs the label site, Rust installs the rest | dies |
+
+Two things follow.  First, the `40000` result is real and not lab contamination: on a
+clean lab the app dies without the MIDI-port message, i.e. it crashes rather than
+exiting.  Second, the hybrid still dies, so **the label site is not the only
+difference** - something about installing the rest from the table does it too, and the
+label site merely reproduces it alone.
+
+What is now known to differ between the working C constructor and the table:
+
+* the C constructor calls `minimod_hook_originals(...)` for the four input hooks and
+  `minimod_entries_partial(...)` for repaint and label; the table records each one
+  individually - same values, different call;
+* the C constructor installs eight sites before the first input hook; the table starts
+  with them.
+
+That is where the next probe goes: install **only** the eight sites the C constructor
+installs first, from the table, and see whether that alone survives.
