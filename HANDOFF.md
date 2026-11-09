@@ -1,7 +1,7 @@
 # Handoff: minimod on the Rust crates
 
 **Branch** `main`
-**State** the mod is Rust only (`rust/crates/dsp`, `rust/crates/mpc-sample-sdk`,
+**State** the mod is Rust only (`rust/crates/dsp` plus the public [`mpc-sample-sdk`](https://github.com/ioma8/mpc-sample-sdk),
 `rust/crates/minimod`). The
 port is merged; no C or C++ is compiled for the mod. Nothing at `HEAD` is tagged
 (the last release tag is `v0.7.0`).
@@ -13,7 +13,7 @@ port is merged; no C or C++ is compiled for the mod. Nothing at `HEAD` is tagged
   `minimod` crate as a `cdylib` and cross-links it with
   `zig-cc-aarch64-linux-gnu`; it fails on unresolved non-glibc symbols and on
   glibc versions newer than 2.39.
-- **The crates.** `crates/mpc-sample-sdk` is the universal SDK: firmware image and
+- **The crates.** The public [`mpc-sample-sdk`](https://github.com/ioma8/mpc-sample-sdk) is the universal SDK: firmware image and
   the 36-word check, the hook engine and all 16 sites, the `Mod` trait and event
   decoding, the ALSA taps, drawing, and typed access to the app's page, sample,
   pad, slice, WAV, control-surface, effect and Extract objects.  `crates/minimod`
@@ -34,9 +34,10 @@ port is merged; no C or C++ is compiled for the mod. Nothing at `HEAD` is tagged
 
 - `rust/check.sh` passes: fmt, clippy `all` + `pedantic` + `cargo` with
   `-D warnings`, a rustdoc build with warnings denied, a guard that
-  `crates/minimod/src` contains no `unsafe` token,
-  **59 SDK tests**, **35 minimod tests** and **37 dsp tests** (including the
-  golden fixtures), and the aarch64 release build.
+  `crates/minimod/src` contains no `unsafe` token, **35 minimod tests** and
+  **37 dsp tests** in this workspace (including the golden fixtures), and the
+  aarch64 release build. The standalone `mpc-sample-sdk` repo has its own
+  **59 SDK tests**.
 - **Golden fixtures:** the DSP is compared with the original C where the
   arithmetic is deterministic: the looper trace and loop buffers are
   bit-identical, the bass render is bit-identical, HPSS stays under 1e-4, and the

@@ -2,7 +2,7 @@
 
 The firmware mod, rewritten in Rust:
 
-* `crates/mpc-sample-sdk` — the universal mod SDK: firmware image and verification,
+* [`mpc-sample-sdk`](https://github.com/ioma8/mpc-sample-sdk) — the universal mod SDK: firmware image and verification,
   the hook engine and all 16 sites, the `Mod` trait and event decoding, the ALSA
   taps, drawing, the generic `Task<T>` worker and `RenderJob`, and typed access
   to the app's page, sample, pad, slice, WAV, control-surface, effect and
@@ -15,6 +15,9 @@ The firmware mod, rewritten in Rust:
   `mod/build.sh` builds it as a `cdylib`.
 * `crates/dsp` — audio DSP (looper, HPSS, onset detection, filters, synths). Pure
   computation over slices, no firmware addresses, host-testable.
+
+The hands-on SDK guide is
+[`mpc-sample-sdk/docs/README.md`](https://github.com/ioma8/mpc-sample-sdk/blob/main/docs/README.md).
 
 ```sh
 ./check.sh                                  # fmt, clippy, tests, cross build

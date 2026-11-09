@@ -78,7 +78,7 @@ sits at 72, not 20) and handles PCM 16/24/32-bit and IEEE float32, including
 | float32 A09 (98,280 frames) | `76..83103` |
 | current emulator check, 10,501 frames | `14..8159`, `23..7503`, `24..7453`, clear `0..10500`, start mirror consistent, no restart |
 
-The unit tests of `rust/crates/mpc-sample-sdk/src/platform/{wav,trim}.rs` check the parser and the
+The unit tests of [`mpc-sample-sdk/src/platform/{wav,trim}.rs`](https://github.com/ioma8/mpc-sample-sdk/tree/main/src/platform) check the parser and the
 scan (PCM16/24/32 + float32, negative full-scale, malformed headers, the
 memory path); `mod/tests/emulator_autotrim.py` reads the trim bounds from the
 live model (`layer+0x7b8` start, `+0x810` end, `+0x868` mirror) and asserts the
@@ -255,7 +255,7 @@ The source is not replaced. If there is no free pad, or the selected sample
 changes during processing, the action stops without submitting output.
 
 **Implementation.** The input audio is the selected sample's in-memory float32
-buffer, with the WAV as the fallback for streamed samples. `rust/crates/mpc-sample-sdk/src/platform/effect.rs`
+buffer, with the WAV as the fallback for streamed samples. [`mpc-sample-sdk/src/platform/effect.rs`](https://github.com/ioma8/mpc-sample-sdk/blob/main/src/platform/effect.rs)
 creates a standalone effect instance
 (factory by mod offset, context `{rate, 0, 512}`, vtable slot 9 setup with the
 context pointer, slot 11 per stereo block, slot 1 destroy). Parameters are

@@ -229,7 +229,7 @@ on this kernel a read through an `O_RDWR` descriptor returns `EIO`, which once
 froze the UI.
 
 Hook templates: `install_hook(base + offset, fn)` (Rust: `Hooks::install` in
-`rust/crates/mpc-sample-sdk/src/hook.rs`) allocates a relay slot and a
+[`mpc-sample-sdk/src/hook.rs`](https://github.com/ioma8/mpc-sample-sdk/blob/main/src/hook.rs)) allocates a relay slot and a
 trampoline within ±128 MB, verifies the prologue and refuses if it starts
 PC-relative. `FN(offset, type)` calls an app function by mod offset. The
 technique and its rules are in [`MODDING.md`](MODDING.md).

@@ -78,7 +78,7 @@ cd mod && ./build.sh && ./pack.sh
 
 That writes `mod/build/minimod.zip` — the same package as the release.
 
-The mod is Rust throughout: `rust/crates/mpc-sample-sdk` is the universal SDK
+The mod is Rust throughout: [`mpc-sample-sdk`](https://github.com/ioma8/mpc-sample-sdk) is the universal SDK
 (firmware image, hooks, input/audio/MIDI, drawing, typed platform objects),
 `rust/crates/minimod` is the feature code built only on that SDK, and
 `rust/crates/dsp` is the host-testable audio DSP.  The preload library is a

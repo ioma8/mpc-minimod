@@ -23,6 +23,9 @@ time; where it contradicts this section, this section is right.
 
 ### The SDK split
 
+The hands-on SDK guide is
+[`mpc-sample-sdk/docs/README.md`](https://github.com/ioma8/mpc-sample-sdk/blob/main/docs/README.md).
+
 `mpc-sample-sdk` is the part another mod would reuse unchanged.  It owns the
 `unsafe` and the process-wide state (`state::Global`, `export_static!`), so a mod
 writes safe feature code only. It owns:
@@ -108,7 +111,7 @@ Things worth knowing that the journal below does not say plainly:
 
 ```
 rust/
-  crates/mpc-sample-sdk  universal SDK: image, hooks, sites, input/audio/MIDI,
+  mpc-sample-sdk (GitHub) universal SDK: image, hooks, sites, input/audio/MIDI,
                          drawing, and typed platform objects.
   crates/minimod         the LD_PRELOAD library: the `Mod` impl and the features.
   crates/dsp             audio DSP.  Pure computation over slices: no firmware

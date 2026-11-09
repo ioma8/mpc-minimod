@@ -29,6 +29,6 @@ Shared anchors (file VAs; runtime = `base + addr`):
 | control dispatch `(ctx, surface, pad, controlId, value)` | `0x1968020` |
 | repaint `(comp, x, y)` | `0x1149880` |
 | paint hook | `SampleModeScreen` vtable `0x6e212a0`, slot 27 |
-| toast | `draw::show_toast` in `rust/crates/mpc-sample-sdk/src/draw.rs` |
+| toast | `draw::show_toast` in [`mpc-sample-sdk/src/draw.rs`](https://github.com/ioma8/mpc-sample-sdk/blob/main/src/draw.rs) |
 
 Status of every task: **not started.**
