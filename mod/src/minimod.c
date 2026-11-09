@@ -77,6 +77,8 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+int minimod_levels_bump(int32_t steps);
+
 /* The channel count and the last two taps live in Rust. */
 extern uint32_t g_pcm_channels;
 
@@ -393,14 +395,7 @@ static int levels_active(void)
 
 static int bump_octave(int d)
 {
-    int next = 0;
-    if (!minimod_levels_shift(g_octave, d, &next))
-        return 0;
-    g_octave = next;
-    char buf[48];
-    snprintf(buf, sizeof buf, "Pitch %+d semitones", next * 8);
-    toast(next == 0 ? "Pitch reset" : buf);
-    return 1;
+    return minimod_levels_bump(d);
 }
 
 

@@ -121,6 +121,28 @@ pub unsafe extern "C" fn minimod_pitch_off(
     }
 }
 
+/// Move the 16 Levels row by `steps` and say so.
+///
+/// Returns 1 when the shift was applied.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_levels_bump(steps: i32) -> i32 {
+    let mut next = 0;
+    // SAFETY: the out pointer is this frame's.
+    if unsafe { minimod_levels_shift(crate::ui::octave(), steps, core::ptr::from_mut(&mut next)) }
+        == 0
+    {
+        return 0;
+    }
+    crate::ui::set_octave(next);
+    let text = if next == 0 {
+        "Pitch reset".to_string()
+    } else {
+        format!("Pitch {:+} semitones", next * 8)
+    };
+    crate::paint::show_toast(&text);
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SEMITONES_PER_STEP, STEP_LIMIT, describe, pitch_offset, shift};

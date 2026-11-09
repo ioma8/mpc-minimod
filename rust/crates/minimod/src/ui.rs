@@ -421,6 +421,12 @@ pub fn octave() -> i32 {
     unsafe { (*core::ptr::addr_of!(STATE)).octave }
 }
 
+/// Move the 16 Levels octave shift.
+pub fn set_octave(value: i32) {
+    // SAFETY: only the UI thread writes it.
+    unsafe { (*core::ptr::addr_of_mut!(STATE)).octave = value };
+}
+
 /// Whether SHIFT is held.
 #[must_use]
 pub fn shift() -> i32 {
