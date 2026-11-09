@@ -93,6 +93,10 @@
 
 #include "ui_ffi.h"
 
+/* The memory window is Rust now; the call sites did not change. */
+int rd(uintptr_t address, void *dst, size_t length);
+int mapped(const void *address);
+
 /* The page the mod last painted lives in Rust, with the rest of the paint state. */
 uintptr_t *minimod_screen_slot(void);
 #define g_screen (*(void **)minimod_screen_slot())
@@ -224,31 +228,8 @@ static int g_rng_loaded;
 static int mem_rd_fd = -1;
 static pthread_mutex_t g_mem_mtx = PTHREAD_MUTEX_INITIALIZER;
 
-static int rd(uintptr_t addr, void *dst, size_t n)
-{
-    pthread_mutex_lock(&g_mem_mtx);
-    if (mem_rd_fd < 0)
-        mem_rd_fd = open("/proc/self/mem", O_RDONLY);
-    ssize_t got = mem_rd_fd < 0 ? -1 : pread(mem_rd_fd, dst, n, (off_t)addr);
-    pthread_mutex_unlock(&g_mem_mtx);
-    return got == (ssize_t)n;
-}
 
 
-static int mapped(const void *p)
-{
-    /* Ranges are loaded lazily (the heap grows after load), so "unknown" must
-     * stay permissive: rd()/wr() fail safely on unmapped memory anyway. The only
-     * writer that trusted this blindly was the debug `set` channel, which is now
-     * compiled out of release builds. */
-    if (!g_rng_loaded)
-        return 1;
-    uintptr_t a = (uintptr_t)p;
-    for (int i = 0; i < g_nrng; ++i)
-        if (a >= g_rng[i].lo && a < g_rng[i].hi)
-            return 1;
-    return 0;
-}
 
 
 /* ------------------------------------------------------------ hook engine */

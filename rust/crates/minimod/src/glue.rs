@@ -143,6 +143,60 @@ unsafe extern "C" fn find_main(info: *mut ModuleInfo, _size: usize, out: *mut us
     0
 }
 
+/// Read process memory, as the glue's own reader does.
+///
+/// # Safety
+///
+/// `dst` must be writable for `length` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rd(address: usize, dst: *mut u8, length: usize) -> i32 {
+    if dst.is_null() || length == 0 {
+        return 0;
+    }
+    // SAFETY: the caller promises the buffer.
+    let buffer = unsafe { core::slice::from_raw_parts_mut(dst, length) };
+    i32::from(firmware::read(address, buffer))
+}
+
+/// Whether an address lies inside any mapping.
+///
+/// The glue asks this about the app's read-only pages too - the screen's vtable
+/// among them - so this keeps every range, not only the writable ones.  Unknown
+/// stays permissive: the reads and writes fail safely on their own.
+///
+/// # Safety
+///
+/// The pointer is only compared, never dereferenced.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mapped(address: *const u8) -> i32 {
+    use std::sync::OnceLock;
+    static RANGES: OnceLock<Vec<(usize, usize)>> = OnceLock::new();
+    let ranges = RANGES.get_or_init(|| {
+        let Ok(text) = std::fs::read_to_string("/proc/self/maps") else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter_map(|line| {
+                let span = line.split_whitespace().next()?;
+                let (low, high) = span.split_once('-')?;
+                Some((
+                    usize::from_str_radix(low, 16).ok()?,
+                    usize::from_str_radix(high, 16).ok()?,
+                ))
+            })
+            .collect()
+    });
+    if ranges.is_empty() {
+        return 1;
+    }
+    let address = address as usize;
+    i32::from(
+        ranges
+            .iter()
+            .any(|&(low, high)| address >= low && address < high),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FIRMWARE_SITES, PT_LOAD, TEXT_OFFSET};
