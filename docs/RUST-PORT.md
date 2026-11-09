@@ -881,3 +881,29 @@ Corrected, the table still did not run - there is at least one more difference -
 is the first *factual* error found in the twelve attempts, and it invalidates the earlier
 conclusion that "the calling context" was the last variable.  The next attempt starts
 from the corrected table.
+
+## The constructor ran for the first time
+
+Round 58's discovery (nine invented offsets) plus the two-word fix that kept getting
+lost on revert (**the C handlers must be global, not `static`**) made the Rust site table
+work:
+
+```
+built build/minimod.so ... 
+RUN maps=7
+emulator_looper        exit=0
+emulator_spectral      exit=0
+```
+
+The table is data in `glue` (`Site { offset, handler }`, sixteen entries with the
+offsets read from the glue's own defines); the glue walks it and calls `install_hook`
+itself, which keeps the patching in the translation unit where it has always worked.
+
+**One path regressed**: `emulator_bass_sample` fails with `Bass Synth: output failed`
+while spectral and looper pass.  That is the last delta and it is now narrow: the bass
+job renders through the audio writer hook and the MIDI pitch path, so the difference is
+between how those two originals reach Rust (`minimod_site_record` index 9 and 7) and how
+the C constructor handed them over.
+
+The attempt is stashed as `constructor-via-table`; the certified build is restored and
+green.
