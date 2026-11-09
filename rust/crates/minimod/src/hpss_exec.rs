@@ -475,6 +475,94 @@ pub unsafe extern "C" fn minimod_hpss_exec_entry(command: usize) {
     }
 }
 
+/// Run one native Extract over source frames `[start, end)`.
+///
+/// With a buffer the writer substitutes it; without one the app copies its own
+/// range, which is what the spectral chop uses.
+///
+/// # Safety
+///
+/// `screen` and `state` are the app's live objects; `dest` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_extract_run(
+    screen: usize,
+    state: usize,
+    buffer: *const f32,
+    start: u32,
+    end: u32,
+    source_frames: u32,
+    buffer_frames: u32,
+    channels: u32,
+    name: i32,
+    dest: *mut i32,
+) -> i32 {
+    if !dest.is_null() {
+        // SAFETY: the caller passed a writable slot.
+        unsafe { *dest = -1 };
+    }
+    if screen == 0 || start >= end || channels == 0 {
+        return 0;
+    }
+    let mut raw = [0_u8; 8];
+    if !firmware::read(state + 0x2310, &mut raw) {
+        return 0;
+    }
+    let program = u64::from_le_bytes(raw);
+    let program = usize::try_from(program).unwrap_or(0);
+    if program == 0 {
+        return 0;
+    }
+    let before = crate::pads::minimod_pads_free_pad(firmware::base(), program);
+    if before < 0 {
+        return 0;
+    }
+    if !dest.is_null() {
+        // SAFETY: see above.
+        unsafe { *dest = before };
+    }
+    let frames = if buffer.is_null() {
+        end - start
+    } else {
+        buffer_frames
+    };
+    // SAFETY: the arm and the app's handler are the caller's.
+    unsafe {
+        minimod_hpss_forget();
+        minimod_hpss_arm(
+            state,
+            buffer as usize,
+            frames as usize,
+            source_frames as usize,
+            channels,
+            start,
+            end,
+            name,
+        );
+        let handler: unsafe extern "C" fn(usize) = core::mem::transmute::<
+            usize,
+            unsafe extern "C" fn(usize),
+        >(firmware::base() + 0x0165_80d0);
+        handler(screen);
+        minimod_hpss_disarm();
+    }
+    // The command may run on an executor thread after the handler returns, so
+    // wait for the pad to change before starting the next one.
+    let mut after = before;
+    for _ in 0..3000 {
+        if after != before {
+            break;
+        }
+        std::thread::sleep(core::time::Duration::from_millis(1));
+        after = crate::pads::minimod_pads_free_pad(firmware::base(), program);
+    }
+    let write_ok = if buffer.is_null() {
+        1
+    } else {
+        minimod_hpss_write_ok()
+    };
+    i32::from(after != before && write_ok != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Outcome, RANGE_END, RANGE_START};

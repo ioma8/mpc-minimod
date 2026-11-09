@@ -77,6 +77,11 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+int32_t minimod_extract_run(uintptr_t screen, uintptr_t state, const float *buffer,
+                            uint32_t start, uint32_t end, uint32_t source_frames,
+                            uint32_t buffer_frames, uint32_t channels, int32_t name,
+                            int32_t *dest);
+
 void minimod_spectral_key_press(void);
 int32_t minimod_spectral_run_start(int32_t busy);
 void minimod_menu_bass_page(void);
@@ -572,38 +577,8 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
                             unsigned buffer_frames, unsigned ch, int name,
                             int *dest)
 {
-    if (dest)
-        *dest = -1;
-    uintptr_t program = 0;
-    if (!screen || start >= end || !ch ||
-        !rd(state + 0x2310, &program, 8) || !program)
-        return 0;
-    int before = minimod_pads_free_pad(base, (uintptr_t)program);
-    if (before < 0)
-        return 0;
-    if (dest)
-        *dest = before;
-
-    minimod_hpss_forget();
-    minimod_hpss_arm((uintptr_t)state, (uintptr_t)buf,
-                     buf ? buffer_frames : end - start, source_frames, ch, start, end,
-                     name);
-    FN(A_HPSS_EXTRACT_HANDLER, void (*)(void *))(screen);
-    minimod_hpss_disarm();
-
-    /* The command may be executed on an executor thread after the handler
-     * returns.  Wait for the pad to change before starting the next one. */
-    int after = before;
-    for (int i = 0; i < 3000 && after == before; ++i) {
-        usleep(1000);
-        after = minimod_pads_free_pad(base, (uintptr_t)program);
-    }
-    int write_ok = buf ? minimod_hpss_write_ok() : 1;
-    int ok = after != before && write_ok;
-    mlog("HPSS extract: pad %d -> free %d (%s, write %s) range %u..%u\n", before,
-         after, after != before ? "assigned" : "NO ASSIGNMENT",
-         write_ok ? "complete" : "INCOMPLETE", start, end);
-    return ok;
+    return minimod_extract_run((uintptr_t)screen, state, buf, start, end, source_frames,
+                               buffer_frames, ch, name, dest);
 }
 
 
