@@ -235,6 +235,23 @@ pub extern "C" fn minimod_toast_visible(now: i64) -> i32 {
     i32::from(toast_visible(now))
 }
 
+/// The Sample page the mod last painted.  It keeps its name because the device
+/// tests find the page through it.
+#[unsafe(no_mangle)]
+pub static mut g_screen: usize = 0;
+
+/// The screen slot, for the glue: it reads and writes the same object.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_screen_slot() -> *mut usize {
+    core::ptr::addr_of_mut!(g_screen)
+}
+
+/// The sample page the mod last painted, or zero.
+#[must_use]
+pub fn screen() -> usize {
+    // SAFETY: only the UI thread writes it.
+    unsafe { core::ptr::addr_of!(g_screen).read() }
+}
 #[cfg(test)]
 mod tests {
     use super::toast_visible;

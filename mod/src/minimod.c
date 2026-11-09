@@ -92,6 +92,10 @@
 #include "props_ffi.h"
 
 #include "ui_ffi.h"
+
+/* The page the mod last painted lives in Rust, with the rest of the paint state. */
+uintptr_t *minimod_screen_slot(void);
+#define g_screen (*(void **)minimod_screen_slot())
 #include "entries_ffi.h"
 #include "glue_ffi.h"
 
@@ -151,7 +155,6 @@ static int probe_mode;
 static void mlog(const char *fmt, ...);
 static void toast(const char *text);
 #include "clock_ffi.h"
-static void *g_screen;
 static struct minimod_menu g_menu __attribute__((used));
 #define g_hpss_menu g_menu.open
 #define g_hpss_busy g_menu.busy
