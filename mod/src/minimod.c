@@ -103,6 +103,14 @@ uint32_t minimod_stream_geometry(uintptr_t pcm, uint32_t *channels, int32_t *s32
 #include "autotrim_ffi.h"
 #include "buttons_ffi.h"
 #include "hpss_exec_ffi.h"
+
+int32_t minimod_hpss_is_armed(uintptr_t command);
+void minimod_hpss_forget(void);
+void minimod_hook_hpss_ctor(uintptr_t command, uintptr_t name, int32_t destination,
+                            uintptr_t settings, uintptr_t pad_state, uintptr_t project,
+                            uintptr_t extra1, uintptr_t extra2, uintptr_t extra3,
+                            const struct minimod_hpss_arm *arm, uintptr_t source,
+                            void *forward);
 #include "props_ffi.h"
 
 #include "ui_ffi.h"
@@ -477,11 +485,7 @@ static unsigned g_hpss_arm_end;
 static unsigned g_hpss_arm_ch;
 static int g_hpss_arm_name;
 static volatile int g_hpss_write_ok;
-static void *g_hpss_cmd[4];
-static int g_hpss_cmd_n;
 
-static uint64_t g_hpss_name[6];
-static int g_hpss_names_ready;
 static float g_bass_knob[3] = {0.52f, 0.18f, 0.56f};
 static volatile unsigned g_bass_preview_notes;
 static volatile int g_bass_preview_available;
@@ -510,44 +514,33 @@ static void bass_preview_set_active(int active)
 static void hpss_repaint(void);
 
 
-static void hpss_make_names(void)
-{
-    if (g_hpss_names_ready)
-        return;
-    FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[0], "HPSS Harmonic");
-    FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[1], "HPSS Percussive");
-    FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[2], "Reverb");
-    FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[3], "Vinyl");
-    FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[4], "Lo-Fi");
-    FN(0xf535c0, void (*)(void *, const char *))(&g_hpss_name[5], "Bass C2");
-    g_hpss_names_ready = 1;
-}
 
 static void hpss_ctor_hook(void *cmd, void *name, int dest, void *settings,
                            void *padstate, void *project, void *s1, void *s2,
                            void *s3)
 {
-    if (g_hpss_arm && (uintptr_t)padstate == g_hpss_arm_source) {
-        hpss_make_names();
-        int ni = g_hpss_arm_name;
-        if (ni < 0 || ni >= 6)
-            ni = 0;
-        name = (void *)&g_hpss_name[ni];
-        if (g_hpss_cmd_n < 4)
-            g_hpss_cmd[g_hpss_cmd_n++] = cmd;
-        mlog("HPSS ctor: cmd=%p dest=%d settings=%p name_index=%d\n", cmd, dest,
-             settings, ni);
-    }
-    if (orig_hpss_ctor)
-        orig_hpss_ctor(cmd, name, dest, settings, padstate, project, s1, s2, s3);
+    struct minimod_hpss_arm arm = {
+        .armed = g_hpss_arm,
+        .buffer = (uintptr_t)g_hpss_arm_buf,
+        .frames = g_hpss_arm_frames,
+        .source_frames = g_hpss_arm_source_frames,
+        .channels = g_hpss_arm_ch,
+        .start = g_hpss_arm_start,
+        .end = g_hpss_arm_end,
+        .rename = g_hpss_arm_name,
+    };
+    minimod_hook_hpss_ctor((uintptr_t)cmd, (uintptr_t)name, dest, (uintptr_t)settings,
+                           (uintptr_t)padstate, (uintptr_t)project, (uintptr_t)s1,
+                           (uintptr_t)s2, (uintptr_t)s3, &arm,
+                           g_hpss_arm_source,
+                           (void (*)(uintptr_t, uintptr_t, int32_t, uintptr_t, uintptr_t,
+                                    uintptr_t, uintptr_t, uintptr_t,
+                                    uintptr_t))orig_hpss_ctor);
 }
 
 static void hpss_exec_hook(void *cmd)
 {
-    int armed = 0;
-    for (int i = 0; i < g_hpss_cmd_n; ++i)
-        if (g_hpss_cmd[i] == cmd)
-            armed = 1;
+    int armed = minimod_hpss_is_armed((uintptr_t)cmd) ? 1 : 0;
     struct minimod_hpss_arm arm = {
         .armed = armed && g_hpss_arm,
         .buffer = (uintptr_t)g_hpss_arm_buf,
@@ -596,7 +589,7 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
     if (dest)
         *dest = before;
 
-    g_hpss_cmd_n = 0;
+    minimod_hpss_forget();
     g_hpss_arm_source = state;
     g_hpss_arm_buf = buf;
     g_hpss_arm_frames = buf ? buffer_frames : end - start;

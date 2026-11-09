@@ -153,6 +153,142 @@ pub unsafe extern "C" fn minimod_hpss_exec_run(
     unsafe { run(command, arm, execute) }
 }
 
+/// The six effects the mod can render, as the app's own `String` objects.
+static mut NAMES: [[u64; 1]; 6] = [[0; 1]; 6];
+/// Whether they were built.
+static mut NAMES_READY: bool = false;
+/// The commands the mod armed, so the execute hook knows which is running.
+static mut ARMED_COMMANDS: [usize; 4] = [0; 4];
+/// How many of those slots are used.
+static mut ARMED_COUNT: usize = 0;
+
+/// The effects' names, in the menu's order.
+const NAMES_TEXT: [&core::ffi::CStr; 6] = [
+    c"HPSS Harmonic",
+    c"HPSS Percussive",
+    c"Reverb",
+    c"Vinyl",
+    c"Lo-Fi",
+    c"Bass C2",
+];
+
+/// Build the six name objects through the app's own `String` constructor.
+///
+/// # Safety
+///
+/// `base` must be the app's load address.
+pub unsafe fn make_names(base: usize) {
+    // SAFETY: only the UI thread writes the table.
+    if unsafe { NAMES_READY } {
+        return;
+    }
+    // SAFETY: the site is the app's `String(const char *)`.
+    let construct: unsafe extern "C" fn(usize, *const u8) = unsafe {
+        core::mem::transmute::<usize, unsafe extern "C" fn(usize, *const u8)>(base + 0x00f5_35c0)
+    };
+    for (index, text) in NAMES_TEXT.iter().enumerate() {
+        // SAFETY: each slot is a distinct object and the text is static.
+        unsafe {
+            let slot = core::ptr::addr_of_mut!(NAMES).cast::<u64>().add(index);
+            construct(slot as usize, text.as_ptr().cast());
+        }
+    }
+    // SAFETY: see above.
+    unsafe { NAMES_READY = true };
+}
+
+/// The constructor the app calls for one effect: rename it and remember the
+/// command so its execute can be recognised.
+///
+/// # Safety
+///
+/// The app calls this with its own arguments, and `forward` is its own
+/// constructor.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hook_hpss_ctor(
+    command: usize,
+    name: usize,
+    destination: i32,
+    settings: usize,
+    pad_state: usize,
+    project: usize,
+    extra1: usize,
+    extra2: usize,
+    extra3: usize,
+    arm: *const Arm,
+    source: usize,
+    forward: Option<
+        unsafe extern "C" fn(usize, usize, i32, usize, usize, usize, usize, usize, usize),
+    >,
+) {
+    let mut name = name;
+    if arm.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    let arm = unsafe { *arm };
+    if arm.armed != 0 && pad_state == source {
+        // SAFETY: the names were built during this same install.
+        unsafe { make_names(firmware::base()) };
+        let index = usize::try_from(arm.rename)
+            .ok()
+            .filter(|index| *index < 6)
+            .unwrap_or(0);
+        // SAFETY: the table holds six objects.
+        name = unsafe { core::ptr::addr_of!(NAMES).cast::<u64>().add(index) as usize };
+        // SAFETY: only the UI thread writes them.
+        unsafe {
+            if ARMED_COUNT < 4 {
+                let slot = core::ptr::addr_of_mut!(ARMED_COMMANDS).cast::<usize>();
+                slot.add(ARMED_COUNT).write(command);
+                ARMED_COUNT += 1;
+            }
+        }
+    }
+    if let Some(forward) = forward {
+        // SAFETY: the app's own call.
+        unsafe {
+            forward(
+                command,
+                name,
+                destination,
+                settings,
+                pad_state,
+                project,
+                extra1,
+                extra2,
+                extra3,
+            );
+        }
+    }
+}
+
+/// Whether a command is one the mod armed.
+///
+/// # Safety
+///
+/// Read from the UI thread.
+/// Forget the commands armed by the last extraction.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_hpss_forget() {
+    // SAFETY: only the UI thread writes the list.
+    unsafe { ARMED_COUNT = 0 };
+}
+
+/// Whether the command is one the mod armed for this extraction.
+///
+/// # Safety
+///
+/// Read from the UI thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hpss_is_armed(command: usize) -> i32 {
+    // SAFETY: see above.
+    i32::from(unsafe {
+        let slot = core::ptr::addr_of!(ARMED_COMMANDS).cast::<usize>();
+        (0..ARMED_COUNT).any(|index| slot.add(index).read() == command)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Outcome, RANGE_END, RANGE_START};
