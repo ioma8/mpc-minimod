@@ -677,3 +677,21 @@ The one remedy not tried is the obvious one for this shape of problem: install t
 hooks **one at a time**, testing after each, rather than all eighteen per build. That
 is eleven device runs, and the remaining rounds are better spent deleting the helpers
 the constructor protects.
+
+## The output tap: measured, not attempted again
+
+`snd_pcm_writei` is the largest single piece left (94 lines) and the next obvious
+target.  An attempt this round got as far as moving its nine statics and the function
+itself into `audio`, and stopped at three things worth recording before the next try:
+
+* the nine statics are read by `readi`, the pump, the cfg save and the device tests,
+  so they have to keep their names - the same trick as `g_screen` and `g_midi`;
+* the latency path needs five glue accessors (`fixed_latency`, `extra_latency`,
+  `buffer_out`, `buffer_in`, `input_delay`) that do not exist yet; they are four lines
+  each, but they are what the port hangs on;
+* `audio.rs` already has a `look_up` helper for ALSA, so the second copy has to reuse
+  it rather than be added beside it - the edit that removed the duplicate cut the
+  wrong span and duplicated four definitions instead.
+
+Reverted; the certified build is green and the finding is the plan for the next
+attempt: accessors first, then the statics, then the function.
