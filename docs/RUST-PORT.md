@@ -818,3 +818,38 @@ What is left, and it is a short list:
 
 The second one is testable in one run: print `minimod_glue_base()` from inside the
 install and compare it with `base`.  That is the next probe, not another rearrangement.
+
+## The base probe: answered
+
+```
+glue=0xaaaaaaaa0000 crate=0xaaaaaaaa0000
+```
+
+Both sides agree, before and during the install.  So the third candidate is gone too:
+the crate's base is in effect, and `rd`/`mapped`/`FN` inside the hooks are reading the
+right image.
+
+## The elimination table, after twelve attempts
+
+| candidate | ruled out by |
+|---|---|
+| struct layout drift | round 4 (a shifted `#[repr(C)]`) |
+| dropped statics | round 31 (`g_screen`) |
+| static handlers not linkable | round 33 (`undefined symbol`) |
+| install ordering / recorders / batching | round 51 (faithful transcription) |
+| the label site alone | round 50 (it does crash alone - but so does everything) |
+| lab artefacts (sequencer wedge, lost drop-in) | round 49 |
+| the base not being in effect | round 53 (this probe) |
+
+What is left is the one thing that has never been varied: **who calls the install**.
+The C constructor succeeds; a Rust function called from the same C constructor, with
+the same base, the same sites in the same order and the same originals, crashes before
+the first paint.  That is a difference in the calling context, not in the table - and it
+is the kind of difference that needs a debugger, not another build.
+
+## Decision
+
+Twelve attempts, no landing.  The constructor stays in C, and this document says so
+plainly rather than leaving it as an unfinished intention.  The remaining rounds go to
+the pieces that still *can* be moved, so the C file shrinks to the constructor and the
+handful of handlers it names - which is the smallest it can be without the answer above.
