@@ -77,9 +77,17 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+void minimod_hook_midi_note(void *app, void *context, void *event, uintptr_t source);
+void minimod_midi_originals(void *note, void *pitch);
+
+/* The MIDI state lives in Rust and keeps its name. */
+extern struct minimod_midi_state g_midi;
+
 /* The device geometry is Rust; it resolves ALSA itself. */
 uint32_t minimod_stream_geometry(uintptr_t pcm, uint32_t *channels, int32_t *s32);
 #include "audio_ffi.h"
+
+void minimod_hook_midi_note(void *app, void *context, void *event, uintptr_t source);
 
 /* The device geometry is Rust; it resolves ALSA itself. */
 uint32_t minimod_stream_geometry(uintptr_t pcm, uint32_t *channels, int32_t *s32);
@@ -99,6 +107,8 @@ uint32_t minimod_stream_geometry(uintptr_t pcm, uint32_t *channels, int32_t *s32
 
 #include "ui_ffi.h"
 #include "audio_ffi.h"
+
+void minimod_hook_midi_note(void *app, void *context, void *event, uintptr_t source);
 
 /* The device geometry is Rust; it resolves ALSA itself. */
 uint32_t minimod_stream_geometry(uintptr_t pcm, uint32_t *channels, int32_t *s32);
@@ -282,19 +292,7 @@ static void *install_hook(uintptr_t site, void *hook)
  * entry instruction is swapped in when 16 Levels turns on and restored when
  * it turns off or the Sample page goes away. */
 static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
-static void midi_note_event(void *app, void *context, void *event,
-                            uintptr_t source);
-static int g_midi_ready;
-/* A physical pad press identifies its pad through property 0 of the note event
- * (event+0x16), whose value is the bank's pad-note base plus the pad index.
- * Learn that base from a real pad press so MIDI can address the same row. */
-static struct minimod_midi_state g_midi;
-
-static int midi_hook_site_ok(void)
-{
-    return minimod_midi_site_ok(base);
-}
-
+static 
 static void midi_hook_set(int on)
 {
     /* The dispatcher is hooked once at load; this only changes behaviour, so no
@@ -1619,12 +1617,12 @@ __attribute__((constructor)) static void load(void)
     void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)minimod_hook_surface) : 0;
     void *t_off = (hook_mask & 128) ? install_hook(base + A_NOTE_OFF, (void *)minimod_hook_note_off) : 0;
     minimod_hook_originals((void *)t_note, (void *)t_off, (void *)t_cs, (void *)t_data);
-    if (midi_hook_site_ok()) {
-        void *t_midi = install_hook(base + A_MIDI_NOTE_EVENT, (void *)midi_note_event);
+    if (1) {
+        void *t_midi = install_hook(base + A_MIDI_NOTE_EVENT, (void *)minimod_hook_midi_note);
+        minimod_midi_originals((void *)t_midi, (void *)orig_pitch_off);
         if (t_midi) {
             orig_midi_note_event =
                 (void (*)(void *, void *, void *, uintptr_t))t_midi;
-            g_midi_ready = 1;
         }
     } else {
         mlog("minimod: MIDI dispatcher mismatch; not hooking\n");

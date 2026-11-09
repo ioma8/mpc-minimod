@@ -330,6 +330,71 @@ fn forward(
     }
 }
 
+/// The MIDI state.  It keeps its name because the glue and the device tests read
+/// its fields directly.
+#[unsafe(no_mangle)]
+pub static mut g_midi: MidiState = MidiState {
+    on: 0,
+    levels: 0,
+    pad_ctx: 0,
+    pad_level_byte: 0,
+    pad_tune_mode: 0,
+    pad_prop_val: 0,
+    pad_prop_pending: 0,
+    replayed: [0; 128],
+    chromatic_count: 0,
+    chromatic_note: 0,
+    chromatic_delta: 0,
+};
+
+/// The app's own MIDI note handler and pitch handler.
+static mut ORIGINAL_NOTE_EVENT: Option<NoteEvent> = None;
+/// The pitch handler.
+static mut ORIGINAL_PITCH: Option<levels::PitchOffset> = None;
+
+/// Record the displaced handlers, for the glue.
+///
+/// # Safety
+///
+/// The constructor calls this once, before any note can arrive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_midi_originals(
+    note: Option<NoteEvent>,
+    pitch: Option<levels::PitchOffset>,
+) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        ORIGINAL_NOTE_EVENT = note;
+        ORIGINAL_PITCH = pitch;
+    }
+}
+
+/// The MIDI note event, as the app's own hook.
+///
+/// # Safety
+///
+/// The app calls this with its own event objects.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hook_midi_note(
+    app: usize,
+    context: usize,
+    event: *mut u8,
+    source: usize,
+) {
+    // SAFETY: the state is a static and the originals are the app's.
+    unsafe {
+        minimod_midi_handle(
+            app,
+            context,
+            event,
+            source,
+            core::ptr::addr_of_mut!(g_midi),
+            *core::ptr::addr_of!(ORIGINAL_NOTE_EVENT),
+            *core::ptr::addr_of!(ORIGINAL_PITCH),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Note, decode};
