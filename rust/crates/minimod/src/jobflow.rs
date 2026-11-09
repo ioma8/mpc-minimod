@@ -762,7 +762,7 @@ extern "C" fn preview_off() {
 }
 
 /// The hooks the crate uses for every job it starts.
-fn glue_hooks() -> GlueHooks {
+pub fn glue_hooks() -> GlueHooks {
     GlueHooks {
         finished: Some(finished_noop),
         repaint: Some(crate::ui::minimod_repaint_screen),

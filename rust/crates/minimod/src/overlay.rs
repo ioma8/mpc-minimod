@@ -219,6 +219,25 @@ pub unsafe extern "C" fn minimod_overlay_menu_draw(graphics: usize) {
     }
 }
 
+/// Finish a render the worker completed, with the crate's own hooks.
+///
+/// # Safety
+///
+/// The crate's own state and the app's objects.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_overlay_finalize() {
+    let hooks = crate::jobflow::glue_hooks();
+    // SAFETY: the menu and the hooks are the crate's own.
+    unsafe {
+        crate::jobflow::minimod_glue_finish(
+            crate::firmware::base(),
+            paint::screen(),
+            core::ptr::addr_of_mut!(crate::menu::g_menu),
+            core::ptr::from_ref(&hooks),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Flags, Hooks, Outcome};

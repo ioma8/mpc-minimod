@@ -78,6 +78,7 @@
 #include "audio_ffi.h"
 
 void minimod_overlay_menu_draw(uintptr_t graphics);
+void minimod_overlay_finalize(void);
 
 struct minimod_ui_hooks minimod_ui_hooks_self(void);
 
@@ -718,7 +719,7 @@ static const struct minimod_glue_hooks g_job_hooks = {
 
 static void hpss_finalize(void)
 {
-    minimod_glue_finish(base, (uintptr_t)g_screen, &g_menu, &g_job_hooks);
+    minimod_overlay_finalize();
 }
 
 static void hpss_open(void)
