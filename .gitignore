@@ -23,3 +23,8 @@ ztmp/
 
 # macOS
 .DS_Store
+
+# Build outputs: rebuild with mod/build.sh and `make device` in tools/device
+*.so
+*.elf
+*.dylib

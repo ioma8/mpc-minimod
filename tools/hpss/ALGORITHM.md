@@ -1,7 +1,8 @@
 # HPSS — the exact algorithm and the constants we settled on
 
 Reference implementation: [`hpss.py`](hpss.py). This file is the specification
-for the C port that ships in the mod (`mod/src/hpss.c`); the parity results are
+for the Rust port that ships in the mod (`rust/crates/dsp/src/hpss.rs`, pinned to
+the original C by golden fixtures); the parity results are
 in [`../../docs/FEATURES.md`](../../docs/FEATURES.md#hpss).
 
 Verdict date: **2026-11-04**, tuned by ear on `Project1`'s mixdown and checked

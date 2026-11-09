@@ -8,7 +8,7 @@ as it was.
 
 ## Where it lives
 
-![Live Looper](../LIVE-LOOPER.png)
+![Live Looper](LIVE-LOOPER.png)
 
 `SHIFT` + `DATA` opens **SAMPLE OPTIONS**, `DATA` selects **Live Looper**, `DATA`
 confirms. The view covers the whole 320×240 screen; the stock page keeps painting

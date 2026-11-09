@@ -1,7 +1,7 @@
 # HPSS prototype — harmonic / percussive split
 
 Reference implementation of the HPSS transform that ships in the mod
-(`mod/src/hpss.c`): split one sample into what **rings** (chords, bass, vocals)
+(`rust/crates/dsp/src/hpss.rs`): split one sample into what **rings** (chords, bass, vocals)
 and what **hits** (drums, clicks, transients), written as two new samples. The C
 port is validated sample-by-sample against this code; see
 [`../../docs/FEATURES.md`](../../docs/FEATURES.md#hpss).
@@ -100,9 +100,10 @@ the mask starts to act like a hard gate and thins the hits.
 
 ## Status
 
-Reference prototype, not the device code. The shipped transform is the C port in
-[`rust/crates/dsp/src/hpss.rs`](../../rust/crates/dsp/src/hpss.rs); this Python version was used to settle
-the constants and to check the native output sample by sample. The device flow
+Reference prototype, not the device code. The shipped transform is the Rust port in
+[`rust/crates/dsp/src/hpss.rs`](../../rust/crates/dsp/src/hpss.rs), which is pinned
+to the original C by golden fixtures; this Python version was used to settle the
+constants and to check the output sample by sample. The device flow
 that writes the two results to empty pads is `jobflow.rs`/`hpss_exec.rs` in
 `rust/crates/minimod/src` (SAMPLE OPTIONS → HPSS).
 
