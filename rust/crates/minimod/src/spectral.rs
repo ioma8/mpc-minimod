@@ -78,13 +78,22 @@ pub fn claim_expired(state: &State, now: i64) -> bool {
 
 /// Abandon a run and put the flags back.
 pub fn finish(state: &mut State, menu_state: &mut menu::State, hooks: Hooks, error: Option<&str>) {
-    let message = match error {
-        Some(error) => format!("Spectral: {error}"),
-        None => format!("Spectral: {} slices on this pad", state.slices),
+    let message = if let Some(error) = error {
+        format!("Spectral: {error}")
+    } else {
+        let noun = if state.slices == 1 { "slice" } else { "slices" };
+        format!("Spectral: {} {noun} on this pad", state.slices)
     };
     state.phase = 0;
     state.active = 0;
     menu_state.busy = 0;
+    if error.is_some() {
+        // A failure must be visible: the app's status line and the toast are
+        // drawn behind the open menu, so close the menu before reporting.
+        menu_state.open = 0;
+        menu_state.bass_edit = 0;
+        menu_state.data_down = 0;
+    }
     if let Some(status) = hooks.set_status {
         status(&message);
     }
@@ -272,5 +281,33 @@ mod tests {
         // Once the page has picked the claim up it is a run, not a claim.
         state.phase = 1;
         assert!(!claim_expired(&state, state.deadline + 1));
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::{Hooks, State, finish};
+    use crate::menu;
+
+    #[test]
+    fn a_failure_closes_the_menu_so_the_message_is_visible() {
+        let mut state = State::default();
+        let mut menu_state = menu::State {
+            open: 1,
+            bass_edit: 1,
+            ..menu::State::default()
+        };
+        finish(
+            &mut state,
+            &mut menu_state,
+            Hooks {
+                set_status: None,
+                repaint: None,
+            },
+            Some("no onsets"),
+        );
+        assert_eq!(menu_state.open, 0);
+        assert_eq!(menu_state.bass_edit, 0);
+        assert_eq!(state.active, 0);
     }
 }

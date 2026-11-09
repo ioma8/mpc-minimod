@@ -79,7 +79,9 @@ pub fn begin(
         return Step::Failed("no onsets");
     };
     let count = detected.len().min(MAX_SLICES);
-    if count < 2 {
+    // One boundary is still a meaningful two-region chop; only no boundary at
+    // all is an error.
+    if count == 0 {
         return Step::Failed("no onsets");
     }
     let mut positions = [0_u32; MAX_SLICES];
