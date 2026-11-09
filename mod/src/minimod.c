@@ -86,9 +86,10 @@
 #include "chop_ffi.h"
 #include "pads_ffi.h"
 #include "cfg_ffi.h"
-#include "props_ffi.h"
 #include "autotrim_ffi.h"
 #include "buttons_ffi.h"
+#include "props_ffi.h"
+#include "cc_ffi.h"
 #include "spectral_ffi.h"
 #include "menu_ffi.h"
 #include "overlay_ffi.h"
@@ -125,10 +126,7 @@ static int hook_mask = 0xf2; /* 2 proc, 16 buttons, 32 note_on, 64 cs, 128 note_
 static int safe_mode;
 static int debug_mode;
 static int probe_mode;
-static int probe_bits = 0x7f;
 
-static volatile int g_cc_recover;
-static sigjmp_buf g_cc_jmp;
 
 static void mlog(const char *fmt, ...);
 static void toast(const char *text);
@@ -143,7 +141,6 @@ static struct minimod_menu g_menu __attribute__((used));
 static struct minimod_input g_input;
 static void input_context(struct minimod_input_context *ctx);
 static void looper_pump(void);
-static int prop_references(uintptr_t P, uintptr_t param);
 
 #define MAXW 12
 
@@ -151,8 +148,6 @@ static int prop_references(uintptr_t P, uintptr_t param);
 
 
 
-static volatile int g_cc_recover;
-static sigjmp_buf g_cc_jmp;
 
 #define LOG_CAP (256u * 1024u)
 
@@ -241,27 +236,6 @@ static int mapped(const void *p)
     return 0;
 }
 
-static void ranges_load(void)
-{
-    if (g_rng_loaded)
-        return;
-    FILE *f = fopen("/proc/self/maps", "r");
-    if (!f)
-        return;
-    char line[512];
-    while (fgets(line, sizeof line, f) && g_nrng < 512) {
-        unsigned long lo = 0, hi = 0;
-        char perms[8] = {0};
-        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3)
-            continue;
-        g_rng[g_nrng].lo = lo;
-        g_rng[g_nrng].hi = hi;
-        g_rng[g_nrng].w = perms[1] == 'w';
-        g_nrng++;
-    }
-    fclose(f);
-    g_rng_loaded = 1;
-}
 
 /* ------------------------------------------------------------ hook engine */
 /* A site is patched at entry+4 (the instruction after `paciasp`/`bti c`):
@@ -421,19 +395,9 @@ static int g_b3_down;      /* edge detection: the button auto-repeats while held
 #define A_BINDING_VT 0x6e08a10
 
 
-/* Properties seen in a real broadcast; the newest 256 are kept. */
-static struct {
-    uintptr_t p;
-    float v;
-} g_bc[256];
-static volatile int g_nbc;
 
-/* param -> property learned from a knob move (x20 inside the broadcaster). */
-static struct {
-    uintptr_t param;
-    uintptr_t prop;
-} g_pm[8];
-static volatile int g_npm;
+
+
 
 
 /* A property seen in a real broadcast whose cached value is exactly the
@@ -446,7 +410,6 @@ static volatile int g_npm;
 
 
 /* ------------------------------------------------------------- app hooks */
-static uintptr_t g_trim_layer; /* layer the trim page is editing */
 static void *(*orig_sixteen_ctor)(void *, void *, void *, void *);
 static void (*orig_sixteen_proc)(void *, int, void *);
 static void (*orig_pitch_off)(void *, uint64_t, uint64_t, int);
@@ -458,10 +421,8 @@ static void (*orig_bass_audio_writer)(void *, void *, size_t, int);
 static volatile unsigned g_audio_in_calls;
 static volatile unsigned g_audio_out_calls;
 static void (*orig_cs)(void *, int, void *);
-static void (*orig_trim)(void *, float);
 /* The Sample page (0x2468 bytes) captured from SamplePage_Ctor; it owns the
  * Start/End widgets and is what must be repainted after a property change. */
-static void *g_page;
 typedef void (*pagector_fn)(void *, void *, void *, void *, void *, void *,
                             void *, void *, void *, void *, void *, void *);
 
@@ -476,7 +437,6 @@ static void (*orig_setctl)(void *, void *, int, int, float);
 
 /* The page object, captured from the control handler FUN_02904e90(page, id, ...)
  * - refreshed on every knob turn, so it is always a live pointer. */
-static void *g_livepage;
 
 
 /* FUN_02912f10(padBlock) returns the object the page reads its trim from
@@ -487,19 +447,13 @@ static void *g_livepage;
  * Start/End widgets (pad+0x1588 -> widget value, pad+0x15e0 -> End). */
 
 
-static void (*orig_bcast)(void *, float);
 static void (*orig_cc)(void *, unsigned, float, float);
-static void (*orig_sync)(void *, void *, void *, void *);
 
-static uintptr_t g_bp[8];
-static volatile int g_nbp;
 
 /* AC50WaveformLocator::bounds (0x16b6060): x = pos[+0x168] * view->w[+0x28] - 2.
  * Hooking it records the locators that are actually painting, which is the only
  * way to know which objects the page positions. */
 #define MAX_LOC 12
-static uintptr_t g_loc[MAX_LOC];
-static volatile int g_nloc;
 
 static void (*orig_str_assign)(void *, const char *);
 static void *(*orig_label_text)(void *);
@@ -512,7 +466,6 @@ static void do_autotrim(void);
 static volatile int g_shift;
 static volatile int g_erase_down;
 static volatile int g_buf_dirty; /* re-read the device rings on the audio thread */
-static volatile int g_core_hit;
 static int g_dbg;
 
 static void *sixteen_ctor(void *a, void *b, void *c, void *d)
@@ -548,11 +501,6 @@ static uintptr_t g_last_press_obj;
  * this float. Run with two knob values and intersect to find the stored state. */
 
 static void (*orig_screen_paint)(void *, void *);
-static volatile int g_pending_ctl;
-static float g_pending_v0, g_pending_v1;
-static int g_pending_r0, g_pending_r1;
-static void (*orig_setctl2)(void *, void *, int, int, float);
-static void *g_surface2;
 
 
 /* Write the property values immediately before the app paints, so the paint
@@ -560,16 +508,7 @@ static void *g_surface2;
 
 static void *g_paint_comp;
 static void *g_paint_gfx;
-static volatile int g_poke_which = -1;
-static void do_poke(void);
-static volatile float g_poke_value;
 static float g_mark_v0 = -1.0f, g_mark_v1 = -1.0f;
-static volatile int g_pending_cc;
-static volatile int g_in_inject;
-static int g_cc_step;
-static uintptr_t g_cc_obj;
-static unsigned g_cc_r0, g_cc_r1;
-static void commit_trim(void);
 
 /* ---------------------------------------------------------- HPSS bridge */
 /* Stock Chop Extract, used as the sample-creation/assignment mechanism.  The
@@ -1049,7 +988,6 @@ static void draw_text(void *g, const char *s, int x, int y, int w, int h,
 static volatile int g_looper_pump_started;
 
 static void looper_cfg_save(void);
-static long long g_cfg_saved_at;
 
 /* Buffer geometry of the two streams, read once from ALSA. The firmware keeps
  * both of its rings full, so one buffer per direction is the latency it works
@@ -1567,27 +1505,17 @@ static void cs_event(void *self, int code, void *payload)
 
 /* The trim core is called by the broadcaster's listener loop, which keeps the
  * property in x20: learning that pair is what lets autotrim drive the page. */
-static volatile int g_own_call;
-static struct { uintptr_t param, listener; } g_lis[8];
-static volatile int g_nlis;
-static struct { uintptr_t param, slider; } g_ps[8];
-static volatile int g_nps;
 
 uintptr_t slider_for_value(float pct)
 {
     return minimod_slider_for_value((uintptr_t)g_screen, base, pct);
 }
 
-static void *g_obs[8];
-static int g_nobs;
 
 
 
 
 /* ------------------------------------------------------- message-thread pump */
-static void *g_trim_param0, *g_trim_param1;
-static float g_trim_v0, g_trim_v1;
-static unsigned g_trim_frames;
 
 /* Broadcast a unique value to one candidate property: if the app's own
  * listener chain reaches the trim core for *our* parameter, that property owns
@@ -1649,10 +1577,6 @@ int prop_references(uintptr_t P, uintptr_t param)
  * keeps its target (tagged) at +0x18 and its next at +8; the last next in the
  * chain is the sentinel, so P = sentinel - 8. Validation: P+0x10 must be a
  * mapped node and P+0x50 a plausible float. */
-static uintptr_t prop_of_param(uintptr_t param)
-{
-    return minimod_prop_of_param(param, base);
-}
 
 /* The app's own CC path: 0x159f230(range, event, raw) divides raw by range and
  * broadcasts through the property at *(event[0]+0x10) + 0x1ac0 (CC 0x10 = K1)
@@ -1664,90 +1588,38 @@ uintptr_t ctl_obj_for(uintptr_t surface)
 
 /* A real CC event captured from the app, replayed with our own number so the
  * app performs exactly what a knob does. */
-static unsigned char g_cc_ev[32];
-static int g_cc_ev_valid;
-static unsigned char g_cc_k3_ev[32];
-static volatile int g_cc_k3_valid;
-static unsigned g_cc_raw[2];
-static float g_cc_range[2] = {127.0f, 127.0f};
-static int g_cc_seen[2];
 static int g_in_cc_replay;
 
 static void cc_capture(void *ev, unsigned raw, float lo, float range)
 {
     unsigned cc = ev ? ((unsigned char *)ev)[8] : 0xffffu;
-    struct minimod_route r = minimod_cc_route(
-        g_in_cc_replay ? 1 : 0, cc, raw, range, looper_is_open() ? 1 : 0,
-        g_hpss_menu ? 1 : 0, g_bass_edit ? 1 : 0, g_hpss_busy ? 1 : 0,
-        g_spectral.active == 1 ? 1 : 0,
-        g_lat_extra);
-    switch (r.kind) {
-    case 1: /* MAIN VOLUME drives the loops, then the app's own mix */
-        looper_set_master(raw);
-        if (minimod_now_ms() > g_cfg_saved_at + 5000) {
-            g_cfg_saved_at = minimod_now_ms();
-            looper_cfg_save();
-        }
-        break;
-    case 2: { /* trim: the knob's movement, one millisecond per step */
-        long frames = r.value;
-        g_lat_extra = (int)frames;
-        if (minimod_now_ms() > g_cfg_saved_at + 5000) {
-            g_cfg_saved_at = minimod_now_ms();
-            looper_cfg_save();
-        }
-        char line[40];
-        snprintf(line, sizeof line, "TRIM %+ld ms", frames / 44L);
-        looper_notice(line);
-        return;
+    struct minimod_cc_hooks hooks = {0};
+    hooks.original = (void (*)(void *, uint32_t, float, float))orig_cc;
+    hooks.repaint = hpss_repaint;
+    hooks.save = looper_cfg_save;
+    hooks.notice = (void (*)(const char *))looper_notice;
+    struct minimod_cc_context context = {
+        .replaying = g_in_cc_replay ? 1 : 0,
+        .value = raw,
+        .range = range,
+        .looper_open = looper_is_open() ? 1 : 0,
+        .menu_open = g_hpss_menu ? 1 : 0,
+        .bass_edit = g_bass_edit ? 1 : 0,
+        .busy = g_hpss_busy ? 1 : 0,
+        .spectral_active = g_spectral.active == 1 ? 1 : 0,
+        .trim_frames = g_lat_extra,
+        .knobs = {g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]},
+    };
+    struct minimod_cc_outcome outcome = minimod_cc_handle(&context, cc, &hooks);
+    if (outcome.trim_changed)
+        g_lat_extra = outcome.trim_frames;
+    if (outcome.knobs_changed) {
+        g_bass_knob[0] = outcome.knobs[0];
+        g_bass_knob[1] = outcome.knobs[1];
+        g_bass_knob[2] = outcome.knobs[2];
     }
-    case 3: /* the bass control page owns the three knobs */
-        g_bass_knob[r.value] = r.amount;
-        bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
-        hpss_repaint();
+    if (outcome.consumed)
         return;
-    case 4: /* swallowed: a modal screen keeps the app away from the sample */
-        return;
-    default:
-        break;
-    }
-    /* Keep the stock decoder/transport intact. Only DATA reaches the native
-     * integer signal while our modal menu owns controls; knobs must not edit
-     * the sample behind it. Replayed internal commands are not user input. */
-    if (!g_in_cc_replay && ev &&
-        (g_hpss_menu || g_spectral.active) &&
-        ((unsigned char *)ev)[8] != 0x64)
-        return;
-    if (!g_in_cc_replay && ev) {
-        unsigned char cc = ((unsigned char *)ev)[8];
-        static int allc;
-        if (allc < 16) {
-            allc++;
-            mlog("minimod: cc_in cc=0x%x raw=%u range=%.1f ev0=%p\n", cc, raw,
-                 (double)range, *(void **)ev);
-        }
-        int idx = -1;
-        if (cc == 0x10)
-            idx = 0;
-        else if (cc == 0x11)
-            idx = 1;
-        if (idx >= 0) {
-            if (!g_cc_ev_valid) {
-                memcpy(g_cc_ev, ev, sizeof g_cc_ev);
-                g_cc_ev_valid = 1;
-                mlog("minimod: captured CC event (cc=0x%x raw=%u range=%.1f)\n", cc,
-                     raw, (double)range);
-            }
-            g_cc_raw[idx] = raw;
-            if (range > 1.0f)
-                g_cc_range[idx] = range;
-            g_cc_seen[idx] = 1;
-        }
-        if (cc == 0x12 && !g_cc_k3_valid) {
-            memcpy(g_cc_k3_ev, ev, sizeof g_cc_k3_ev);
-            g_cc_k3_valid = 1;
-        }
-    }
     if (orig_cc)
         orig_cc(ev, raw, lo, range);
 }
@@ -1777,10 +1649,6 @@ uintptr_t find_knob_props(void)
 /* Every listener of a real property has a vtable inside the app's
  * .data.rel.ro. If one does not, the property is not the one the page uses and
  * broadcasting through it would jump into garbage. */
-static int prop_listeners_sane(uintptr_t P)
-{
-    return minimod_prop_listeners_sane(P, base);
-}
 
 /* The trim parameter is the listener of the knob's property whose vtable is
  * TrimParameter's. That makes the Start/End pair exact, with no scanning and no
@@ -1841,13 +1709,12 @@ static void screen_paint(void *p, void *g)
     hooks.restore_chop = hpss_restore_chop;
     hooks.looper_pump = looper_pump;
     hooks.menu_draw = (void (*)(void *))hpss_draw_menu;
-    struct minimod_overlay_flags flags = {g_pending_cc, g_hpss_restore_pending};
+    struct minimod_overlay_flags flags = {0, g_hpss_restore_pending};
     float marks[2] = {g_mark_v0, g_mark_v1};
     minimod_overlay_paint((uintptr_t)p, (uintptr_t)g, base, &hooks, &flags,
                           (uintptr_t *)&g_screen,
                           g_shift, in_chop_mode(), looper_is_open(), g_hpss_menu,
                           marks);
-    g_pending_cc = flags.pending_cc;
     g_hpss_restore_pending = flags.restore_pending;
 }
 
@@ -2051,9 +1918,6 @@ __attribute__((constructor)) static void load(void)
         if (extra && *extra)
             g_lat_extra = atoi(extra);
     }
-    const char *bits_env = getenv("MINIMOD_PROBES");
-    if (bits_env && *bits_env)
-        probe_bits = atoi(bits_env);
     void *t_ctor = (hook_mask & 1) ? install_hook(base + A_SIXTEEN_CTOR, (void *)sixteen_ctor) : 0;
     void *t_proc = (hook_mask & 2) ? install_hook(base + A_SIXTEEN_PROC, (void *)sixteen_proc) : 0;
     void *t_data = install_hook(base + A_DATA_SIGNAL, (void *)data_signal);

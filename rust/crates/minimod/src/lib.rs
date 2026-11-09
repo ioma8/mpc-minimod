@@ -16,6 +16,7 @@ pub mod audio;
 pub mod autotrim;
 pub mod bass_ffi;
 pub mod buttons;
+pub mod cc;
 pub mod cfg;
 pub mod cfg_ffi;
 pub mod chop;
