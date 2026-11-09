@@ -655,3 +655,25 @@ equally safe to cut.  In order:
 The pattern for each step is fixed: move the logic, keep a `*_ffi.h` with the old
 signatures, delete the C, rebuild, run the device test that covers the feature,
 and only then remove the header.
+
+## The constructor: abandoned after seven attempts
+
+Attempt seven had the install ordering fixed (each original recorded the moment its
+site is patched, which was the round-33 diagnosis) and failed the same way, after two
+more findings:
+
+1. the load failed with `undefined symbol: midi_note_event` - the C handlers must be
+   **global**, and they had drifted back to `static` when the table was reverted;
+2. with that resolved the app starts and then crash-loops (13 restarts) inside the
+   install.
+
+Decision: **stop**. Seven rounds have gone into 200 lines that fail *silently* - the
+.so loads, the app starts, and the install dies somewhere inside eighteen patches,
+with no log unless `MINIMOD_LOG=1` and with `MINIMOD_LOG=1` the timing changes enough
+that it does not die at all. Every other piece of this port failed loudly and was
+fixed in one round; this one is a heisenbug in a debug build.
+
+The one remedy not tried is the obvious one for this shape of problem: install the
+hooks **one at a time**, testing after each, rather than all eighteen per build. That
+is eleven device runs, and the remaining rounds are better spent deleting the helpers
+the constructor protects.
