@@ -390,6 +390,17 @@ pub unsafe extern "C" fn minimod_stream_geometry(
     frames
 }
 
+/// Record the app's audio writer at install time.
+///
+/// # Safety
+///
+/// Called once, before any audio can arrive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_audio_writer_original_now(original: usize) {
+    // SAFETY: the caller's contract.
+    unsafe { ORIGINAL_WRITER = crate::input::from_address(original) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CHANNEL_LIMIT, INPUT_ALT, INPUT_CHANNELS, OUTPUT_ALT, OUTPUT_CHANNELS, channels};

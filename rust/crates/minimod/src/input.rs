@@ -482,6 +482,60 @@ pub unsafe extern "C" fn minimod_hook_data(self_address: usize, delta: i32) {
     }
 }
 
+/// Record the app's note-on handler.
+///
+/// # Safety
+///
+/// Called once at install, before any note can arrive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_note_on_original(original: usize) {
+    // SAFETY: the caller's contract.
+    unsafe { ORIGINAL_ON = from_address(original) };
+}
+
+/// Record the app's note-off handler.
+///
+/// # Safety
+///
+/// Called once at install, before any note can arrive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_note_off_original(original: usize) {
+    // SAFETY: the caller's contract.
+    unsafe { ORIGINAL_OFF = from_address(original) };
+}
+
+/// Record the app's control-surface handler.
+///
+/// # Safety
+///
+/// Called once at install, before any event can arrive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_surface_original(original: usize) {
+    // SAFETY: the caller's contract.
+    unsafe { ORIGINAL_SURFACE = from_address(original) };
+}
+
+/// Record the app's data-signal handler.
+///
+/// # Safety
+///
+/// Called once at install, before any event can arrive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_data_original(original: usize) {
+    // SAFETY: the caller's contract.
+    unsafe { ORIGINAL_DATA = from_address(original) };
+}
+
+/// One displaced function, from its address.
+#[must_use]
+pub fn from_address<T: Copy>(address: usize) -> Option<T> {
+    if address == 0 {
+        return None;
+    }
+    // SAFETY: the caller names the shape the site has.
+    Some(unsafe { core::mem::transmute_copy::<usize, T>(&address) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{MENU_ITEMS, State};

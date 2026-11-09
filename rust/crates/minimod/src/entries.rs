@@ -180,6 +180,57 @@ pub extern "C" fn minimod_filter_dest() -> usize {
     unsafe { FILTER_DEST }
 }
 
+macro_rules! record {
+    ($name:ident, $slot:ident, $ty:ty) => {
+        /// Record one displaced function, at install time.
+        ///
+        /// # Safety
+        ///
+        /// Called once, before the hook can run.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(original: usize) {
+            // SAFETY: the caller names the shape the site has.
+            unsafe { $slot = crate::input::from_address::<$ty>(original) };
+        }
+    };
+}
+
+record!(
+    minimod_pitch_original,
+    ORIGINAL_PITCH,
+    unsafe extern "C" fn(usize, u64, u64, i32)
+);
+record!(
+    minimod_repaint_original,
+    ORIGINAL_REPAINT,
+    unsafe extern "C" fn(usize, u64, u64)
+);
+record!(
+    minimod_assign_original,
+    ORIGINAL_STR_ASSIGN,
+    unsafe extern "C" fn(usize, *const u8)
+);
+record!(
+    minimod_ctor_original,
+    ORIGINAL_CTOR,
+    unsafe extern "C" fn(usize, usize, usize, usize) -> usize
+);
+record!(
+    minimod_proc_original,
+    ORIGINAL_PROC,
+    unsafe extern "C" fn(usize, i32, usize)
+);
+/// Record the app's slice writer.
+///
+/// # Safety
+///
+/// Called once, before the hook can run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_writer_original(original: usize) {
+    // SAFETY: the caller names the shape the site has.
+    unsafe { ORIGINAL_WRITER = crate::input::from_address(original) };
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

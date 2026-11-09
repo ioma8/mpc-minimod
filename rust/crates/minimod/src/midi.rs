@@ -395,6 +395,17 @@ pub unsafe extern "C" fn minimod_hook_midi_note(
     }
 }
 
+/// Record the app's MIDI note handler.
+///
+/// # Safety
+///
+/// Called once at install, before any note can arrive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_midi_note_original(original: usize) {
+    // SAFETY: the caller's contract.
+    unsafe { ORIGINAL_NOTE_EVENT = crate::input::from_address(original) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Note, decode};
