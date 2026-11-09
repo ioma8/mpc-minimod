@@ -238,6 +238,56 @@ pub unsafe extern "C" fn minimod_overlay_finalize() {
     }
 }
 
+/// The page's paint, with the mod's overlay on top.
+///
+/// # Safety
+///
+/// The app calls this with its own component and graphics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_overlay_paint_self(component: usize, graphics: usize) {
+    let hooks = Hooks {
+        original: crate::glue::minimod_paint_original(),
+        commit_trim: None,
+        spectral_tick: Some(minimod_spectral_tick_c),
+        finalize: Some(minimod_overlay_finalize),
+        restore_chop: Some(crate::ui::minimod_restore_chop),
+        looper_pump: Some(crate::audio::minimod_pump_start),
+        menu_draw: Some(minimod_overlay_menu_draw),
+    };
+    let mut flags = Flags {
+        pending_cc: 0,
+        restore_pending: crate::menu::state().restore_pending,
+    };
+    // SAFETY: the state is the UI module's.
+    let state = unsafe { *crate::ui::minimod_ui_state() };
+    let marks = [state.mark_v0, state.mark_v1];
+    // SAFETY: the screen pointer and the flags are the crate's own.
+    unsafe {
+        minimod_overlay_paint(
+            component,
+            graphics,
+            crate::firmware::base(),
+            core::ptr::from_ref(&hooks),
+            core::ptr::addr_of_mut!(flags),
+            core::ptr::addr_of_mut!(paint::g_screen),
+            crate::ui::shift(),
+            crate::ui::minimod_screen_chop_mode(),
+            crate::looper_ffi::looper_is_open(),
+            crate::menu::state().open,
+            marks.as_ptr(),
+        );
+    }
+    crate::menu::state_mut().restore_pending = flags.restore_pending;
+}
+
+/// Advance the spectral chop from the paint.
+unsafe extern "C" fn minimod_spectral_tick_c() {
+    // SAFETY: the crate's own state and the app's screen.
+    unsafe {
+        crate::spectral::minimod_spectral_frame(crate::firmware::base(), paint::screen());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Flags, Hooks, Outcome};

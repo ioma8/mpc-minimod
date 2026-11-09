@@ -79,6 +79,7 @@
 
 void minimod_overlay_menu_draw(uintptr_t graphics);
 void minimod_overlay_finalize(void);
+void minimod_overlay_paint_self(uintptr_t component, uintptr_t graphics);
 
 struct minimod_ui_hooks minimod_ui_hooks_self(void);
 
@@ -1156,20 +1157,7 @@ static void screen_paint(void *p, void *g)
 {
     g_paint_comp = (uintptr_t)p;
     g_paint_gfx = g;
-    struct minimod_overlay_hooks hooks = {0};
-    hooks.original = (void (*)(void *, void *))orig_screen_paint;
-    hooks.spectral_tick = spectral_tick;
-    hooks.finalize = hpss_finalize;
-    hooks.restore_chop = hpss_restore_chop;
-    hooks.looper_pump = looper_pump;
-    hooks.menu_draw = (void (*)(void *))hpss_draw_menu;
-    struct minimod_overlay_flags flags = {0, g_hpss_restore_pending};
-    float marks[2] = {g_mark_v0, g_mark_v1};
-    minimod_overlay_paint((uintptr_t)p, (uintptr_t)g, base, &hooks, &flags,
-                          (uintptr_t *)&g_screen,
-                          g_shift, in_chop_mode(), looper_is_open(), g_hpss_menu,
-                          marks);
-    g_hpss_restore_pending = flags.restore_pending;
+    minimod_overlay_paint_self((uintptr_t)p, (uintptr_t)g);
 }
 
 int install_screen_paint(void)
