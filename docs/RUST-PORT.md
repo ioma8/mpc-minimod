@@ -373,8 +373,17 @@ cannot run - the prime suspect is doing allocation or `std::env` work inside a
 constructor that runs before the Rust runtime is up, or a site being patched with a
 handler whose C signature does not match the one declared for it.
 
-Next step is a logging build that prints each install as it happens, so the last
-line before the crash names the site.
+The logging build did its job in one run: the install **completes** - steps 1 to 9,
+`install done`, the app gets a pid - once the handlers it names are global.  The
+start-up failure was `undefined symbol: midi_note_event`: six C handlers were still
+`static`, and a `static` is not a symbol the Rust install can name.
+
+With them global the app starts and the install finishes, but the clean build still
+loses the app on first interaction (`NRestarts=1`), so something the diagnostic
+build masked is still wrong - most likely one of the four `safe`/`debug`/`mask`
+statics that the old constructor used to set and nothing sets now.
+
+That is the last known gap before the flip lands.
 
 ## The button entry point
 
