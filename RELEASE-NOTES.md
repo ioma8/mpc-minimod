@@ -19,6 +19,9 @@ only the latest changes.
 
 ## Features
 
+- **Rust implementation:** the preload library is a Rust `cdylib` built on the
+  public memory-safe [`mpc-sample-sdk`](https://github.com/ioma8/mpc-sample-sdk);
+  no C or C++ is compiled, and the feature crate contains no `unsafe`.
 - **16 Levels:** shift the pad row by ±8 semitones with PLUS/MINUS; external
   MIDI plays the selected sample chromatically over the whole keyboard from the
   sample's own root note (C3 when it has none), with exact semitones and no
@@ -34,8 +37,9 @@ only the latest changes.
   - **Add Reverb** creates a reverberated copy with an appended tail.
   - **Vinyl** and **Lo-Fi** apply the firmware's built-in H3 effects to a new
     copy.
-  - **Bass Synth** previews chromatic C2–D#3 from pads 1–16, shapes it with
-    K1/K2/K3, and saves a C2 pluck to a new pad.
+  - **Synth** has eight selectable characters — bass, piano, pads, lead, bells,
+    strings, voice and organ. Turn `DATA` to switch; each character has its own
+    three knobs, and `DATA` saves a C2 note to a new pad.
   - **Live Looper** opens a fullscreen 16-pad looper: each pad records from the
     selected input source, plays, overdubs, clears with `ERASE`, and can be
     synced to a pulse built from the last loop's length.
@@ -51,7 +55,56 @@ The release supports MPC Sample firmware **1.3.0.12** only.
 
 ## Changes in v0.8.0
 
-- Add a fullscreen **Live Looper** with one loop per pad: press to record from
+### Rust port
+
+- Replace the C preload library with a Rust `cdylib` built on the public
+  [`mpc-sample-sdk`](https://github.com/ioma8/mpc-sample-sdk). The workspace
+  keeps feature code in `rust/crates/minimod` and host-testable DSP in
+  `rust/crates/dsp`; the SDK owns firmware discovery, hooks, events, audio,
+  drawing and typed platform objects.
+- No C or C++ is compiled. `minimod` contains no `unsafe` and no C ABI; the SDK
+  isolates the firmware boundary behind its safe API.
+- One SDK build script (`build-mod.sh`) now performs the cross-build, symbol and
+  glibc checks, stripping and the SD `autorun` package. minimod only vendors a
+  thin wrapper.
+- The strict gate covers formatting, clippy (all + pedantic + cargo), rustdoc,
+  the no-`unsafe` guard, host tests and the aarch64 release build.
+
+### Synth characters
+
+- Add eight selectable synth characters on the Synth page: bass, piano, pads,
+  lead, bells, strings, voice and organ.
+- The DATA encoder switches character; the page title shows the selection and
+  the three knob labels/defaults change with it.
+- Give each character its own synthesis path and controls: BASS
+  BRIGHT/DECAY/FILTER, PIANO BRIGHT/DECAY/TONE, PADS ATTACK/BRIGHT/WIDTH, LEAD
+  BRIGHT/BITE/FILTER, BELLS BRIGHT/DECAY/RATIO, STRINGS ATTACK/BRIGHT/WIDTH,
+  VOICE VOWEL/BRIGHT/FILTER, ORGAN DRAWBAR/BRIGHT/FILTER.
+- Shorten the bass from 1.5 s to 0.75 s with a 150 ms body and fast tail, and
+  replace the subtle EXCITE knob with DECAY.
+- Name rendered pads after the selected character (`Piano C2`, `Organ C2`, …).
+
+### Fixes
+
+- Route non-bass preview notes to the selected synth engine; previously every
+  character except the bass was silent when auditioned from the pads.
+- Let 16 Levels reach the stock app again; the mod had consumed the key and the
+  app never toggled its own state.
+- Clear the held PLUS flag on release so MINUS shifts the 16 Levels pitch down
+  instead of being mistaken for a two-key reset.
+- Accept a single spectral boundary, so pad A16's one-change sample chops into
+  two regions instead of failing with “no onsets”.
+- Close the SAMPLE OPTIONS menu when a Spectral run fails, making the status
+  and toast visible.
+- Keep a reverb copy's tail: native Extract starts with the source range, so the
+  new pad's trim end is moved to 99% of the rendered frames (1% end trim).
+- Repaint after a toast expires, so AutoTrim and other messages disappear
+  instead of remaining on screen.
+- Draw the looper grid like the hardware: pad 1 bottom-left, pad 16 top-right.
+
+### Live Looper
+
+- Add a fullscreen 16-pad looper with one loop per pad: press to record from
   the selected input source, press again to play, press a playing loop to stop.
 - `ERASE` + pad clears one loop, `STOP` stops every loop, and the sync click is
   off by default (`SHIFT` + `LOOP` toggles it).
@@ -118,16 +171,19 @@ The release supports MPC Sample firmware **1.3.0.12** only.
 - Replace the competing raw MIDI reader with the native MIDI event hook and
   document the reverse-engineered firmware paths.
 
-## Verification
+## Verification and compatibility
 
-- Live Looper verified in the emulator: the firmware reports 1024 frames per
-  ring, so takes use 2048 frames and clicks recorded through the loop cable land
-  within 69 frames (1.6 ms) of the pulse grid; a 1.17 s loop recorded from the tone input plays
-  at 0.15 rms / 441 Hz after the input is unplugged; stop silences it; overdub
-  keeps the loop length; a short take under a 1.27 s pulse becomes exactly one
-  pulse; `STOP` silences everything, `ERASE`+pad clears one, `SHIFT`+`LOOP`
-  toggles the click; closing keeps the loops and does not restart the app.
-- Built and packaged the release for the MPC Sample's ARM64 firmware.
-- Emulator checks cover the native reverb, Vinyl, Lo-Fi and Bass Synth paths,
-  plus C3/C#3/G3 MIDI transposition, pass-through outside 16 Levels, and no
-  firmware restart.
+- Supported firmware: **MPC Sample 1.3.0.12 only**.
+- Package: `minimod.zip`, built from the Rust tree, with a valid
+  `autorun.check`; the loader checks the 36-word firmware fingerprint.
+- SDK: **59 tests**, clippy and rustdoc clean.
+- minimod: **39 tests**; DSP: **42 tests**, including all eight synth
+  characters, every knob, the golden fixtures and the non-bass preview.
+- `rust/check.sh`: formatting, strict clippy, rustdoc, no-`unsafe` guard, host
+  tests and the aarch64 cross build all pass.
+- Emulator checks cover the menu, AutoTrim, HPSS, Spectral Chop, Reverb, Vinyl,
+  Lo-Fi, the eight-character Synth page and render path, Live Looper and
+  16 Levels.
+- Real-hardware verification remains device-specific; the emulator validates
+  logic, UI, native object access and the rendered audio, not hardware latency
+  or analog audio behaviour.
