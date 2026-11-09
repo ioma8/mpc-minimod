@@ -946,10 +946,6 @@ void minimod_glue_cc_notice(const char *text)
     looper_notice(text);
 }
 
-void minimod_glue_repaint(void)
-{
-    hpss_repaint();
-}
 
 void minimod_glue_save(void)
 {

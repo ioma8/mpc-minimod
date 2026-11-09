@@ -205,7 +205,6 @@ unsafe extern "C" {
     fn minimod_glue_set_trim(frames: i32);
     fn minimod_glue_set_knobs(knobs: *const f32);
     fn minimod_glue_cc_notice(text: *const u8);
-    fn minimod_glue_repaint();
     fn minimod_glue_save();
 }
 
@@ -241,7 +240,7 @@ pub unsafe extern "C" fn minimod_hook_cc(event: usize, raw: u32, low: f32, range
     };
     let hooks = Hooks {
         original: None,
-        repaint: Some(minimod_glue_repaint),
+        repaint: Some(crate::ui::minimod_repaint_screen),
         save: Some(minimod_glue_save),
         notice: Some(minimod_glue_cc_notice),
     };
