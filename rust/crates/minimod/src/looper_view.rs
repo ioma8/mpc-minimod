@@ -177,17 +177,25 @@ fn meter(graphics: usize, view: &View) {
     }
 }
 
+/// The 4x4 pad grid position, with pad 1 at the physical bottom-left.
+fn grid_position(index: usize) -> (i32, i32) {
+    let column = i32::try_from(index % 4).unwrap_or(0);
+    // Pads run left-to-right and bottom-to-top: A1 is the bottom-left cell and
+    // A16 is the top-right one, matching the hardware below the screen.
+    let row = i32::try_from(PADS / 4 - 1 - index / 4).unwrap_or(0);
+    (8 + column * 78, 40 + row * 41)
+}
+
 /// The 4x4 pad grid.
 fn grid(graphics: usize, view: &View) {
     for index in 0..PADS {
-        let column = i32::try_from(index % 4).unwrap_or(0);
-        let row = i32::try_from(index / 4).unwrap_or(0);
+        let (x, y) = grid_position(index);
         let recording = view.recording_pad == i32::try_from(index).unwrap_or(-1);
         cell(
             graphics,
             Cell {
-                x: 8 + column * 78,
-                y: 40 + row * 41,
+                x,
+                y,
                 width: 75,
                 height: 38,
             },
@@ -296,5 +304,18 @@ mod tests {
         view.message[..4].copy_from_slice(b"LOOP");
         assert_eq!(message_of(&view), "LOOP");
         assert_eq!(message_of(&blank()), "");
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::grid_position;
+
+    #[test]
+    fn pad_one_is_bottom_left_and_pad_sixteen_is_top_right() {
+        assert_eq!(grid_position(0), (8, 40 + 3 * 41));
+        assert_eq!(grid_position(15), (8 + 3 * 78, 40));
+        assert_eq!(grid_position(3), (8 + 3 * 78, 40 + 3 * 41));
+        assert_eq!(grid_position(12), (8, 40));
     }
 }

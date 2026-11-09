@@ -33,7 +33,7 @@ port is merged; no C or C++ is compiled for the mod. Nothing at `HEAD` is tagged
 
 - `rust/check.sh` passes: fmt, clippy `all` + `pedantic` + `cargo` with
   `-D warnings`, a rustdoc build with warnings denied, a guard that
-  `crates/minimod/src` contains no `unsafe` token, **37 minimod tests** and
+  `crates/minimod/src` contains no `unsafe` token, **38 minimod tests** and
   **37 dsp tests** in this workspace (including the golden fixtures), and the
   aarch64 release build. The standalone `mpc-sample-sdk` repo has its own
   **59 SDK tests**.
