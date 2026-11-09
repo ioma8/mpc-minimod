@@ -436,7 +436,6 @@ static void (*orig_setctl)(void *, void *, int, int, float);
  * Start/End widgets (pad+0x1588 -> widget value, pad+0x15e0 -> End). */
 
 
-static void (*orig_cc)(void *, unsigned, float, float);
 
 
 /* AC50WaveformLocator::bounds (0x16b6060): x = pos[+0x168] * view->w[+0x28] - 2.
@@ -1532,18 +1531,12 @@ uintptr_t ctl_obj_for(uintptr_t surface)
  * app performs exactly what a knob does. */
 static int g_in_cc_replay;
 
-static void cc_capture(void *ev, unsigned raw, float lo, float range)
+struct minimod_cc_context minimod_glue_cc_context(void)
 {
-    unsigned cc = ev ? ((unsigned char *)ev)[8] : 0xffffu;
-    struct minimod_cc_hooks hooks = {0};
-    hooks.original = (void (*)(void *, uint32_t, float, float))orig_cc;
-    hooks.repaint = hpss_repaint;
-    hooks.save = looper_cfg_save;
-    hooks.notice = (void (*)(const char *))looper_notice;
     struct minimod_cc_context context = {
         .replaying = g_in_cc_replay ? 1 : 0,
-        .value = raw,
-        .range = range,
+        .value = 0,
+        .range = 0.0f,
         .looper_open = looper_is_open() ? 1 : 0,
         .menu_open = g_hpss_menu ? 1 : 0,
         .bass_edit = g_bass_edit ? 1 : 0,
@@ -1552,19 +1545,37 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
         .trim_frames = g_lat_extra,
         .knobs = {g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]},
     };
-    struct minimod_cc_outcome outcome = minimod_cc_handle(&context, cc, &hooks);
-    if (outcome.trim_changed)
-        g_lat_extra = outcome.trim_frames;
-    if (outcome.knobs_changed) {
-        g_bass_knob[0] = outcome.knobs[0];
-        g_bass_knob[1] = outcome.knobs[1];
-        g_bass_knob[2] = outcome.knobs[2];
-    }
-    if (outcome.consumed)
-        return;
-    if (orig_cc)
-        orig_cc(ev, raw, lo, range);
+    return context;
 }
+
+void minimod_glue_set_trim(int32_t frames)
+{
+    g_lat_extra = (int)frames;
+}
+
+void minimod_glue_set_knobs(const float *knobs)
+{
+    g_bass_knob[0] = knobs[0];
+    g_bass_knob[1] = knobs[1];
+    g_bass_knob[2] = knobs[2];
+    bass_preview_set_params(g_bass_knob[0], g_bass_knob[1], g_bass_knob[2]);
+}
+
+void minimod_glue_cc_notice(const char *text)
+{
+    looper_notice(text);
+}
+
+void minimod_glue_repaint(void)
+{
+    hpss_repaint();
+}
+
+void minimod_glue_save(void)
+{
+    looper_cfg_save();
+}
+
 
 
 
@@ -1879,9 +1890,8 @@ __attribute__((constructor)) static void load(void)
     } else {
         mlog("minimod: MIDI dispatcher mismatch; not hooking\n");
     }
-    void *t_cc = install_hook(base + 0x159f230, (void *)cc_capture);
-    if (t_cc)
-        orig_cc = (void (*)(void *, unsigned, float, float))t_cc;
+    void *t_cc = install_hook(base + 0x159f230, (void *)minimod_hook_cc);
+    minimod_hook_cc_original((void (*)(void *, uint32_t, float, float))t_cc);
     void *t_poff = install_hook(base + A_PITCH_OFF, (void *)pitch_off);
     if (t_poff)
         orig_pitch_off = (void (*)(void *, uint64_t, uint64_t, int))t_poff;

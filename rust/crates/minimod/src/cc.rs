@@ -198,6 +198,73 @@ pub unsafe extern "C" fn minimod_cc_handle(
     unsafe { handle(context, control, hooks) }
 }
 
+// The glue owns the screens, the key flags and the trim value; it builds the
+// context and applies what comes back.
+unsafe extern "C" {
+    fn minimod_glue_cc_context() -> Context;
+    fn minimod_glue_set_trim(frames: i32);
+    fn minimod_glue_set_knobs(knobs: *const f32);
+    fn minimod_glue_cc_notice(text: *const u8);
+    fn minimod_glue_repaint();
+    fn minimod_glue_save();
+}
+
+/// The app's own control-change handler, recorded at install time.
+static mut ORIGINAL: Option<unsafe extern "C" fn(usize, u32, f32, f32)> = None;
+
+/// Record the displaced handler, for the glue.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_hook_cc_original(
+    original: Option<unsafe extern "C" fn(usize, u32, f32, f32)>,
+) {
+    // SAFETY: the constructor calls this once, before any event can arrive.
+    unsafe { ORIGINAL = original };
+}
+
+/// A control change, as the app's own hook.
+///
+/// # Safety
+///
+/// The app calls this with its own event pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hook_cc(event: usize, raw: u32, low: f32, range: f32) {
+    // SAFETY: the glue builds the context from state it owns.
+    let mut context = unsafe { minimod_glue_cc_context() };
+    // The value and the range belong to the event, not to the glue.
+    context.value = raw;
+    context.range = range;
+    let control = if event == 0 {
+        0xffff
+    } else {
+        // SAFETY: the app's event is a struct whose control byte is at 8.
+        u32::from(unsafe { *(event as *const u8).add(8) })
+    };
+    let hooks = Hooks {
+        original: None,
+        repaint: Some(minimod_glue_repaint),
+        save: Some(minimod_glue_save),
+        notice: Some(minimod_glue_cc_notice),
+    };
+    // SAFETY: the hooks are the glue's callbacks.
+    let outcome = unsafe { handle(context, control, hooks) };
+    if outcome.trim_changed != 0 {
+        // SAFETY: the glue owns the value.
+        unsafe { minimod_glue_set_trim(outcome.trim_frames) };
+    }
+    if outcome.knobs_changed != 0 {
+        // SAFETY: the glue owns the three values.
+        unsafe { minimod_glue_set_knobs(outcome.knobs.as_ptr()) };
+    }
+    if outcome.consumed != 0 {
+        return;
+    }
+    // SAFETY: the original is the app's own handler.
+    if let Some(original) = unsafe { *core::ptr::addr_of!(ORIGINAL) } {
+        // SAFETY: the caller passed the app's event.
+        unsafe { original(event, raw, low, range) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Context, Hooks, handle};

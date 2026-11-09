@@ -38,4 +38,17 @@ struct minimod_cc_outcome minimod_cc_handle(const struct minimod_cc_context *con
                                             uint32_t control,
                                             const struct minimod_cc_hooks *hooks);
 
+/* The entry point the constructor installs, and the app's own handler. */
+void minimod_hook_cc(void *event, uint32_t raw, float low, float range);
+void minimod_hook_cc_original(void (*original)(void *event, uint32_t raw,
+                                               float low, float range));
+
+/* What the glue supplies. */
+struct minimod_cc_context minimod_glue_cc_context(void);
+void minimod_glue_set_trim(int32_t frames);
+void minimod_glue_set_knobs(const float *knobs);
+void minimod_glue_cc_notice(const char *text);
+void minimod_glue_repaint(void);
+void minimod_glue_save(void);
+
 #endif
