@@ -81,5 +81,9 @@ CC `b0 <id> <state>`.
 - Screen is 320×240 (`out/run/mpc-virt.dtb`, patched at build time).
 - The guest is reachable over `ssh -p 2022 root@127.0.0.1` (lab keys in
   `out/keys/`).
-- This project has no project-file conversion. That is what `mpc2stems` in this
-  repository does; see [FORMAT.md](FORMAT.md) and [FINDINGS.md](FINDINGS.md).
+- Project-file conversion is a separate tool; see
+  [`../converter/docs/FORMAT.md`](../converter/docs/FORMAT.md) and
+  [`../converter/docs/FINDINGS.md`](../converter/docs/FINDINGS.md).
+- Preloading the mod and driving it from tests:
+  [`TOOLING.md`](TOOLING.md#2-the-emulator-lab) and
+  [`FEATURES.md`](FEATURES.md#build-and-verification).

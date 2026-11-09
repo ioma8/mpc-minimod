@@ -242,8 +242,7 @@ in-process tap is.
 
 ## Related
 
-* [`docs/MINIMOD.md`](MINIMOD.md) — current shipped behaviour.
-* [`docs/re/FIRMWARE-MECHANISMS.md`](re/FIRMWARE-MECHANISMS.md) — the audio
-  mechanisms this relies on.
+* [`FEATURES.md`](FEATURES.md) — current shipped behaviour of the other features.
+* [`MECHANISMS.md`](MECHANISMS.md) — the audio mechanisms this relies on.
 * [`mod/tests/emulator_looper.py`](../mod/tests/emulator_looper.py) — the
   acceptance test.

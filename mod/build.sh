@@ -43,4 +43,30 @@ if [ -n "$unresolved" ]; then
     exit 1
 fi
 "$objcopy" --strip-all build/minimod.elf build/minimod.so
+
+# The MPC Sample ships glibc 2.39 (see the az0x open-source dump). Refuse a
+# library that would need a newer symbol version than the device has.
+if [ -n "${LLVM_OBJDUMP:-}" ]; then
+    objdump=$LLVM_OBJDUMP
+elif command -v llvm-objdump >/dev/null 2>&1; then
+    objdump=$(command -v llvm-objdump)
+elif [ -x /opt/homebrew/opt/llvm/bin/llvm-objdump ]; then
+    objdump=/opt/homebrew/opt/llvm/bin/llvm-objdump
+else
+    echo "llvm-objdump is required for the glibc symbol-version check" >&2
+    exit 1
+fi
+version=$("$objdump" -T build/minimod.so 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -u | sort -t. -k2 -n | tail -1)
+if [ -n "$version" ]; then
+    v=${version#GLIBC_}
+    major=${v%%.*}
+    minor=${v#*.}
+    if [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -gt 39 ]; }; then
+        echo "built against $version, newer than the MPC Sample's glibc 2.39" >&2
+        exit 1
+    fi
+    echo "glibc symbol versions: highest $version (device has 2.39)"
+else
+    echo "glibc symbol versions: none (static link?)"
+fi
 echo "built build/minimod.so ($(wc -c < build/minimod.so) bytes), g_screen $(cut -d' ' -f1 build/minimod.map)"

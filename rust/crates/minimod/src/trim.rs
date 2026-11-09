@@ -74,6 +74,11 @@ pub fn edges(path: &Path, layout: Layout, frames: u32, ratio: f64) -> Option<Edg
 
 /// The amplitude a frame must exceed to count as audible.
 fn threshold(file: &File, layout: &Layout, frames: u32, frame_bytes: usize, ratio: f64) -> i32 {
+    threshold_for(peak(file, layout, frames, frame_bytes), ratio)
+}
+
+/// The threshold for a file whose loudest sample is `peak`, in the trim scale.
+fn threshold_for(peak: i32, ratio: f64) -> i32 {
     let ratio = if ratio > 0.0 {
         ratio
     } else {
@@ -84,12 +89,57 @@ fn threshold(file: &File, layout: &Layout, frames: u32, frame_bytes: usize, rati
             .clamp(-90.0, -6.0);
         10.0_f64.powf(db / 20.0)
     };
-    let peak = peak(file, layout, frames, frame_bytes);
     if peak == 0 {
         return 328;
     }
     let scaled = (f64::from(peak) * ratio).clamp(MIN_THRESHOLD, MAX_THRESHOLD);
     scaled as i32
+}
+
+/// A float sample in the trim scale: the 16-bit integer range.
+fn scaled_float(value: f32) -> i32 {
+    if !value.is_finite() {
+        0
+    } else if value >= 1.0 {
+        32_767
+    } else if value <= -1.0 {
+        -32_768
+    } else {
+        (value * 32_768.0) as i32
+    }
+}
+
+/// The audible bounds of audio already in memory, `channels` interleaved.
+///
+/// The same scan as [`edges`] over the app's own float32 buffer; the caller has
+/// already chosen `ratio`.  `None` when the audio is silent.
+#[must_use]
+pub fn memory_edges(samples: &[f32], channels: usize, ratio: f64) -> Option<Edges> {
+    let channels = channels.max(1);
+    let loud_at = |frame: usize, threshold: i32| {
+        samples[frame * channels..][..channels]
+            .iter()
+            .any(|value| scaled_float(*value).abs() > threshold)
+    };
+    let frames = samples.len() / channels;
+    let peak = samples
+        .iter()
+        .map(|value| scaled_float(*value).abs())
+        .max()
+        .unwrap_or(0);
+    if peak == 0 {
+        return None;
+    }
+    let threshold = threshold_for(peak, ratio);
+    let first = (0..frames).find(|frame| loud_at(*frame, threshold))?;
+    let last = (first..frames)
+        .rev()
+        .find(|frame| loud_at(*frame, threshold))
+        .unwrap_or(first);
+    Some(Edges {
+        first: u32::try_from(first).ok()?,
+        last: u32::try_from(last).ok()?,
+    })
 }
 
 /// The loudest sample in the file, in the trim scale.
@@ -211,6 +261,49 @@ fn loud(layout: &Layout, buffer: &[u8], frame: usize, threshold: i32) -> bool {
         .abs()
             > threshold
     })
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::{Edges, memory_edges};
+
+    #[test]
+    fn memory_audio_trims_like_the_file_scan() {
+        // Silence, a burst from 100 to 199, silence.
+        let mut audio = vec![0.0_f32; 400];
+        for value in &mut audio[100..200] {
+            *value = 0.5;
+        }
+        assert_eq!(
+            memory_edges(&audio, 1, 0.03),
+            Some(Edges {
+                first: 100,
+                last: 199
+            })
+        );
+    }
+
+    #[test]
+    fn silent_or_empty_memory_has_no_edges() {
+        assert_eq!(memory_edges(&[0.0; 64], 1, 0.03), None);
+        assert_eq!(memory_edges(&[], 2, 0.03), None);
+    }
+
+    #[test]
+    fn both_channels_count() {
+        // Stereo: only the right channel carries the burst.
+        let mut audio = vec![0.0_f32; 400];
+        for frame in 50..60 {
+            audio[frame * 2 + 1] = 0.8;
+        }
+        assert_eq!(
+            memory_edges(&audio, 2, 0.03),
+            Some(Edges {
+                first: 50,
+                last: 59
+            })
+        );
+    }
 }
 
 #[cfg(test)]

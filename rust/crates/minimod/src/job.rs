@@ -4,8 +4,6 @@
 //! starts the worker and frees it.  The layout is defined here, once, and the
 //! glue uses the same field names through its header.
 
-/// Length of the source-path buffer, including the terminator.
-pub const PATH_BYTES: usize = 512;
 /// The HPSS split action.
 pub const ACTION_SPLIT: i32 = 0;
 /// The bass synth action.
@@ -43,14 +41,6 @@ pub struct Job {
     pub action: i32,
     /// The worker's result: 0 for success, anything else for failure.
     pub rc: i32,
-    /// The source WAV's path.
-    pub source_path: [u8; PATH_BYTES],
-    /// Where its audio data starts.
-    pub source_data_offset: i64,
-    /// The source audio, so a failed extract can put it back.
-    pub source_audio_backup: *mut u8,
-    /// How many bytes that backup holds.
-    pub source_audio_bytes: usize,
 }
 
 /// Run the job's action: render an effect or a synth take, or split the input.
@@ -142,7 +132,6 @@ pub unsafe extern "C" fn minimod_job_free(job: *mut Job) {
         libc::free(fields.harmonic.cast());
         libc::free(fields.percussive.cast());
         libc::free(fields.rendered.cast());
-        libc::free(fields.source_audio_backup.cast());
         libc::free(job.cast());
     }
 }

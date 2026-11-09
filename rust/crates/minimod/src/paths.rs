@@ -17,7 +17,6 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use crate::firmware;
 use crate::wav;
@@ -113,30 +112,6 @@ pub fn unique(root: &Path, frames: u32, channels: u16, rate: u32) -> Option<Path
         }
     }
     if matches == 1 { found } else { None }
-}
-
-/// The newest file under `root` with this frame count.
-///
-/// Used for a recording that is still being written: its own length is a strong
-/// identifier and the newest match is the one the app just produced.
-#[must_use]
-pub fn newest(root: &Path, frames: u32) -> Option<PathBuf> {
-    let mut best: Option<(SystemTime, PathBuf)> = None;
-    for path in wav_files(root) {
-        let Some(info) = wav::Info::read(&path) else {
-            continue;
-        };
-        if info.frames != frames {
-            continue;
-        }
-        let Ok(modified) = std::fs::metadata(&path).and_then(|meta| meta.modified()) else {
-            continue;
-        };
-        if best.as_ref().is_none_or(|(when, _)| modified >= *when) {
-            best = Some((modified, path));
-        }
-    }
-    best.map(|(_, path)| path)
 }
 
 /// The first path in `text` whose WAV has exactly `frames` frames.
@@ -238,7 +213,7 @@ mod tests {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
 
-    use super::{contains_ignore_case, find, in_text_under, newest, unique};
+    use super::{contains_ignore_case, find, in_text_under, unique};
 
     /// Make a project directory holding one WAV with the given geometry.
     fn wav(name: &str, frames: u32, channels: u16) -> PathBuf {
@@ -301,21 +276,9 @@ mod tests {
     }
 
     #[test]
-    fn newest_picks_the_later_file() {
-        let root = wav("newest", 32, 1);
-        let project = root.join("Temp-Project_[ProjectData]");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let later = project.join("later.wav");
-        std::fs::copy(project.join("newest.wav"), &later).expect("copy");
-        assert_eq!(newest(&root, 32), Some(later));
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
     fn a_missing_root_is_not_a_crash() {
         let missing = Path::new("/nonexistent/minimod/paths");
         assert_eq!(unique(missing, 1, 1, 44_100), None);
-        assert_eq!(newest(missing, 1), None);
     }
 
     #[test]

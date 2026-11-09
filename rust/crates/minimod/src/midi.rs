@@ -239,12 +239,14 @@ pub unsafe extern "C" fn minimod_midi_handle(
         && (note.kind == PAD_EVENT || note.note_off)
         && (note.note_on || state.replayed[note_index] != 0)
     {
+        // A chromatic note is measured from the sample's own root note.
+        let row = i32::from(note.note) - crate::autotrim::pad_root(crate::input::last_pad());
         // SAFETY: the caller promises the event is writable.
         let saved = unsafe {
             replay(
                 event,
                 u8::try_from(state.pad_level_byte).unwrap_or(0),
-                note.row,
+                row,
                 pitch_off,
             )
         };
@@ -252,7 +254,7 @@ pub unsafe extern "C" fn minimod_midi_handle(
         if note.note_on {
             state.chromatic_count = state.chromatic_count.wrapping_add(1);
             state.chromatic_note = i32::from(note.note);
-            state.chromatic_delta = note.row;
+            state.chromatic_delta = row;
         }
         forward(note_event, app, state.pad_ctx, event, REPLAY_SOURCE);
         // SAFETY: same event, untouched in between.

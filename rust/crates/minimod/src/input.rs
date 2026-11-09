@@ -107,8 +107,6 @@ pub struct Context {
     pub looper_open: i32,
     /// Whether a spectral chop is running.
     pub spectral_active: i32,
-    /// Whether the bass preview is playing.
-    pub preview_active: i32,
     /// Whether the effects menu is open.
     pub menu_open: i32,
     /// Whether the bass control page is open.
@@ -185,8 +183,10 @@ pub unsafe extern "C" fn minimod_input_note_on(
     if context.spectral_active != 0 {
         return;
     }
-    if context.preview_active != 0 && (0..PREVIEW_PADS).contains(&pad) {
-        crate::bass_ffi::bass_preview_note(u32::try_from(pad).unwrap_or(0), velocity);
+    // While the bass page is open the pads belong to the preview, which the
+    // control-surface hook feeds; anything that still arrives here is swallowed
+    // so the app cannot start the project's sample under it.
+    if context.menu_open != 0 && context.bass_edit != 0 && (0..PREVIEW_PADS).contains(&pad) {
         return;
     }
     state.last_pad = pad;
@@ -345,21 +345,11 @@ static mut STATE: State = State::new();
 /// What the hooks need to know about the mod's screens and keys, right now.
 fn context() -> Context {
     let menu = crate::menu::state();
-    // SAFETY: plain words, written by the UI thread (the preview flag by the
-    // audio thread, which is why it is read atomically).
-    let (spectral, preview) = unsafe {
-        (
-            (*core::ptr::addr_of!(crate::spectral::G_SPECTRAL)).active,
-            core::sync::atomic::AtomicI32::from_ptr(core::ptr::addr_of_mut!(
-                crate::audio::G_BASS_PREVIEW_ACTIVE
-            ))
-            .load(core::sync::atomic::Ordering::Acquire),
-        )
-    };
+    // SAFETY: a plain word, written by the UI thread.
+    let spectral = unsafe { (*core::ptr::addr_of!(crate::spectral::G_SPECTRAL)).active };
     Context {
         looper_open: crate::looper_ffi::looper_is_open(),
         spectral_active: spectral,
-        preview_active: preview,
         menu_open: menu.open,
         bass_edit: menu.bass_edit,
         busy: menu.busy,
@@ -390,6 +380,8 @@ pub unsafe extern "C" fn minimod_hook_note_on(
     props: usize,
     velocity: f32,
 ) {
+    // SAFETY: the callee reads the app's page objects.
+    unsafe { crate::overlay::poll_offpage() };
     let context = context();
     // SAFETY: the state is a static in this module.
     let state = core::ptr::addr_of_mut!(STATE);
@@ -429,6 +421,9 @@ pub unsafe extern "C" fn minimod_hook_note_off(input: usize, src: i32, pad: i32)
 pub unsafe extern "C" fn minimod_hook_surface(self_address: usize, code: i32, payload: usize) {
     // SAFETY: the state is a static in this module.
     let state = core::ptr::addr_of_mut!(STATE);
+    if bass_pad_event(self_address, code, payload) {
+        return;
+    }
     // SAFETY: the original is the app's own hook.
     unsafe { minimod_input_surface(state, self_address, code, payload, ORIGINAL_SURFACE) };
 }
@@ -528,6 +523,38 @@ pub extern "C" fn minimod_read_pointer(event: usize) -> usize {
         return 0;
     }
     usize::from_ne_bytes(raw)
+}
+
+/// Pads reach the control surface as note messages whose event code is the pad
+/// index, ahead of the pad-grid observer.  While the bass page is open they are
+/// consumed here, before the app can select or switch the sample underneath, and
+/// they feed the preview.  Returns whether the event was consumed.
+fn bass_pad_event(self_address: usize, code: i32, payload: usize) -> bool {
+    let menu = crate::menu::state();
+    if menu.open == 0 || menu.bass_edit == 0 || !(0..PREVIEW_PADS).contains(&code) {
+        return false;
+    }
+    let mut raw = [0_u8; 8];
+    if payload == 0 || !crate::firmware::read(payload, &mut raw) {
+        return false;
+    }
+    let kind = raw[0] & 0xf0;
+    if !matches!(kind, 0x80 | 0x90 | 0xa0) {
+        return false;
+    }
+    if self_address != 0 {
+        // SAFETY: only the UI thread writes the input state.
+        unsafe { (*core::ptr::addr_of_mut!(STATE)).cs_self = self_address };
+    }
+    if kind == 0x90 && raw[2] > 0 {
+        // SAFETY: only the UI thread counts notes.
+        unsafe { crate::bass_ffi::G_BASS_PREVIEW_NOTES += 1 };
+        crate::bass_ffi::bass_preview_note(
+            u32::try_from(code).unwrap_or(0),
+            f32::from(raw[2]) / 127.0,
+        );
+    }
+    true
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 # HPSS — the exact algorithm and the constants we settled on
 
-Reference implementation: [`hpss.py`](hpss.py). This file is the specification —
-if the prototype is ever ported to C for the device, these are the numbers that
-have to survive the port.
+Reference implementation: [`hpss.py`](hpss.py). This file is the specification
+for the C port that ships in the mod (`mod/src/hpss.c`); the parity results are
+in [`../../docs/FEATURES.md`](../../docs/FEATURES.md#hpss).
 
 Verdict date: **2026-11-04**, tuned by ear on `Project1`'s mixdown and checked
 against a drum-forward resampled loop and a purely tonal guitar loop.

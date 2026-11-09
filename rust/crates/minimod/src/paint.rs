@@ -198,6 +198,19 @@ unsafe extern "C" fn page_paint(component: usize, graphics: usize) {
         G_PAINT_GFX = graphics;
         crate::overlay::minimod_overlay_paint_self(component, graphics);
     }
+    // The preview follows the bass page: if the page is open without it (a save
+    // render ended, or a stale disable), bring it back.
+    let menu = crate::menu::state();
+    // SAFETY: plain words, written by the UI thread.
+    let (available, active) = unsafe {
+        (
+            crate::bass_ffi::G_BASS_PREVIEW_AVAILABLE,
+            crate::audio::G_BASS_PREVIEW_ACTIVE,
+        )
+    };
+    if menu.open != 0 && menu.bass_edit != 0 && menu.busy == 0 && available != 0 && active == 0 {
+        crate::bass_ffi::minimod_bass_preview_set_active(1);
+    }
 }
 
 /// Install the page's paint over the app's vtable slot.

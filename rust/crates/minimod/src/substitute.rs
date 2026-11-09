@@ -7,7 +7,7 @@
 //! reverb tail), the last block is enlarged so the extra audio is written too.
 
 use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 /// Where the rendered buffer is and how to walk it.
 #[derive(Clone, Copy, Debug)]
@@ -26,6 +26,8 @@ static SOURCE_FRAMES: AtomicUsize = AtomicUsize::new(0);
 static FRAMES: AtomicUsize = AtomicUsize::new(0);
 static CHANNELS: AtomicUsize = AtomicUsize::new(0);
 static POSITION: AtomicUsize = AtomicUsize::new(0);
+/// Writer callbacks currently inside the substitution.
+static BUSY: AtomicU32 = AtomicU32::new(0);
 
 /// Start substituting `buffer` (interleaved, `channels` wide) for the app's
 /// sample of `source_frames`, with `frames` of audio available in total.
@@ -70,6 +72,29 @@ fn plan() -> Option<Plan> {
 /// `block` must be the app's block descriptor (`u32` frames at `+0`, a sample
 /// pointer at `+8`) and `writer` the original writer for the same closure.
 pub unsafe fn write(closure: usize, block: *mut u8, writer: Option<Writer>) {
+    // The executor waits for this counter after `clear`, so the rendered buffer
+    // is never freed under a callback that already entered the substitution.
+    BUSY.fetch_add(1, Ordering::AcqRel);
+    // SAFETY: the caller's contract.
+    unsafe { write_inner(closure, block, writer) };
+    BUSY.fetch_sub(1, Ordering::AcqRel);
+}
+
+/// Wait for the writer callbacks in flight, at most `timeout_ms`.
+pub fn wait_idle(timeout_ms: u32) {
+    let mut waited = 0;
+    while BUSY.load(Ordering::Acquire) != 0 && waited < timeout_ms {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        waited += 1;
+    }
+}
+
+/// The substitution itself.
+///
+/// # Safety
+///
+/// As for [`write`].
+unsafe fn write_inner(closure: usize, block: *mut u8, writer: Option<Writer>) {
     if block.is_null() {
         forward(closure, block, writer);
         return;
@@ -83,13 +108,18 @@ pub unsafe fn write(closure: usize, block: *mut u8, writer: Option<Writer>) {
     let pointer = unsafe { core::ptr::read_unaligned(block.add(8).cast::<usize>()) };
     let position = POSITION.load(Ordering::Acquire);
     let frames = usize::try_from(frames).unwrap_or(0);
-    if position + frames > plan.source_frames || frames == 0 {
+    if frames == 0 || position.saturating_add(frames) > plan.source_frames {
         forward(closure, block, writer);
         return;
     }
     let replacement = plan.buffer + position * plan.channels * size_of::<f32>();
     let tail = position + frames == plan.source_frames && plan.frames > plan.source_frames;
     let write_frames = if tail { plan.frames - position } else { frames };
+    // Never read past the rendered buffer, whatever the app asks for.
+    if position.saturating_add(write_frames) > plan.frames {
+        forward(closure, block, writer);
+        return;
+    }
     if tail {
         let Ok(extended) = u32::try_from(write_frames) else {
             forward(closure, block, writer);

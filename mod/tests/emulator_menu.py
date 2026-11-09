@@ -1,5 +1,8 @@
 """Check every DATA turn through the real panel, including repeated menu opens.
 
+The SAMPLE OPTIONS menu has seven rows; row geometry is measured from the
+rendered screenshot rather than assumed.
+
 Requires a running lab with the release mod and the Sample page visible.
 Uses Pillow to inspect the rendered selection. Does not confirm processing.
 """
@@ -25,11 +28,21 @@ def main():
     def tap(name):
         control(name, 'press', 100)
         control(name, 'release')
+    ROW0 = 55          # centre of the first SAMPLE OPTIONS row
+    ROW_STEP = 24      # rows are 24 px apart (draw code: y + 32 + i * 24)
+    ROWS = 7           # HPSS, Spectral, Reverb, Vinyl, Lo-Fi, Bass, Close
+    HIGHLIGHT = (58, 42, 16)
+
     def selected():
         with urllib.request.urlopen(args.panel + '/screen.png', timeout=5) as response:
             im = Image.open(io.BytesIO(response.read())).convert('RGB')
-        return next((i for i, y in enumerate((60, 108, 156))
-                     if im.getpixel((22, y)) == (58, 42, 16)), None)
+        ys = [y for y in range(im.height) if im.getpixel((22, y)) == HIGHLIGHT]
+        if not ys:
+            return None
+        # One highlighted band; its centre identifies the row.
+        centre = (ys[0] + ys[-1]) / 2
+        index = round((centre - ROW0) / ROW_STEP)
+        return index if 0 <= index < ROWS else None
     def wait_selection(want):
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
@@ -53,16 +66,17 @@ def main():
         expected = 0
         for raw in [1] * 10 + [127] * 10 + [1, 127] * 5:
             control('DATA', 'turn', raw)
-            expected = (expected + (1 if raw == 1 else 2)) % 3
+            # 01 turns down, 7F up; the menu wraps across all seven rows.
+            expected = (expected + (1 if raw == 1 else ROWS - 1)) % ROWS
             wait_selection(expected)
         for knob in ('K1', 'K2', 'K3', 'FADER'):
             control(knob, 'set', 64)
             time.sleep(.1)
             assert selected() == expected, f'{knob} moved the menu'
         # Close through DATA to exercise button ownership as well as rotation.
-        while expected != 2:
+        while expected != ROWS - 1:      # Close is the last row
             control('DATA', 'turn', 1)
-            expected = (expected + 1) % 3
+            expected = (expected + 1) % ROWS
             wait_selection(expected)
         tap('DATA')
         wait_selection(None)

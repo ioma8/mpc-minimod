@@ -2,7 +2,8 @@
 
 Requires the virtual MPC lab, the current mod preloaded, and Sample Mode open
 on a populated pad. Checks the knob page, output WAV/pitch, pad assignment, and
-that the firmware process did not restart.
+that the firmware process did not restart. The source check allows the app's
+own dither of project working copies (±2 LSB) but rejects real corruption.
 """
 import json
 import panel_screen
@@ -146,6 +147,36 @@ def main():
     source_pre_render = ssh('cat ' + shlex.quote(source_path))
     assert same_audio(decode_audio(source_pre_render), source_audio), \
         'Source pad audio changed before rendering'
+
+    # The live preview: pads on the knob page strike the synth, are consumed
+    # before the app can switch the sample underneath, and the mod mixes the
+    # preview into the output the app writes.
+    def counter(fragment):
+        for line in subprocess.check_output(['nm', '-a', str(ROOT / 'build/minimod.elf')],
+                                            text=True).splitlines():
+            fields = line.split()
+            if fields and fragment in fields[-1]:
+                return mod_base + int(fields[0], 16)
+        raise AssertionError(f'Missing {fragment}')
+
+    def word(fragment):
+        return int.from_bytes(read_mem(counter(fragment), 4), 'little')
+
+    notes, blocks = word('G_BASS_PREVIEW_NOTES'), word('G_BASS_PREVIEW_BLOCKS')
+    sample_before = qword(qword(qword(screen + 0x178) + 0x60) + 0x22e8)
+    tap('PAD 5')
+    tap('PAD 9')
+    time.sleep(1)
+    assert word('G_BASS_PREVIEW_NOTES') - notes == 2, 'pads did not reach the preview'
+    assert word('G_BASS_PREVIEW_BLOCKS') > blocks, 'the preview was never mixed into the output'
+    peak = struct.unpack('<f', read_mem(counter('G_BASS_PREVIEW_PEAK_BITS'), 4))[0]
+    assert 0.05 < peak <= 0.9, f'preview peak {peak}'
+    assert qword(qword(qword(screen + 0x178) + 0x60) + 0x22e8) == sample_before, \
+        'a pad press on the Bass page switched the selected sample'
+    time.sleep(1.5)
+    blocks_after = word('G_BASS_PREVIEW_BLOCKS')
+    time.sleep(.5)
+    assert word('G_BASS_PREVIEW_BLOCKS') == blocks_after, 'the preview did not stop after its envelope'
     tap('DATA')
 
     deadline = time.monotonic() + 12

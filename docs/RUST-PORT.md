@@ -17,7 +17,7 @@ time; where it contradicts this section, this section is right.
 |---|---|
 | Source | `rust/crates/dsp` (audio DSP, host-testable) and `rust/crates/minimod` (the preload library) |
 | Build | `mod/build.sh` -> `build/minimod.so` (Rust `cdylib`, linked by `zig cc`, which only drives the cross linker) |
-| Exported symbols | 23: the 4 ALSA taps (`snd_pcm_*`, which the app resolves by name) and 19 `g_*` statics the device tests read by symbol |
+| Exported symbols | 24: the 4 ALSA taps (`snd_pcm_*`, which the app resolves by name) and 20 `g_*` statics the device tests read by symbol |
 | Gate | `rust/check.sh`: fmt, clippy `all`+`pedantic`+`cargo` `-D warnings`, host tests, aarch64 cross build |
 | Device | `mod/tests/emulator_{looper,bass_sample,hpss,midi_chromatic,reverb,spectral}.py` |
 
@@ -49,7 +49,7 @@ Things worth knowing that the journal below does not say plainly:
 * **A hook returns what the original returns.** The app's slice `execute` returns a status
   its caller checks; a hook typed `-> ()` hands back register garbage, the app reports "Extract
   slice failed" after succeeding, and aborts its source re-encode halfway (corrupt WAVs). All 17
-  sites were checked by disassembly; only `execute`, `set_control` (tail call) and the 16 Levels
+  sites (16 now, see below) were checked by disassembly; only `execute`, `set_control` (tail call) and the 16 Levels
   constructor return something, and all three now forward it.
 * **Exports are deliberate.** Only `snd_pcm_*` and the `g_*` statics the tests read are
   `#[no_mangle]`/`export_name`; everything else is an ordinary Rust item.  `mod/build.sh`
@@ -163,6 +163,33 @@ compares:
 That is the strongest check available without hardware: if the engine made a
 different decision, mixed at a different level, captured one frame less of the
 latency tail or quantised a length differently, the trace differs.
+
+## Merging `main` into the port (November 2026)
+
+`main` kept fixing the C while this branch deleted it, so a textual merge was
+impossible: the branch took `main`'s consolidated docs and its tests, and every C
+fix was re-implemented in the crates.  What came across, and where:
+
+| `main` change | in the crates |
+|---|---|
+| Bass preview: envelope (0.5 level, 1.2 s, per-voice decay), `reset`, finite velocity | `dsp/bass.rs` (`PREVIEW_LENGTH`, `Voice::decay`, `preview_reset`, a unit test that the note dies) |
+| Bass preview: real output path | `audio.rs::mix_preview` inside the exported `snd_pcm_writei` tap; the planar writer hook (site `0x3f398f0`) is **gone**, so the site table has 16 sites. The C patched the PLT stub because it concluded an unversioned symbol does not interpose; the emulator reaches the tap, so the stub patch was not needed (see `HISTORY.md` section 10) |
+| Bass preview: pads consumed at the control surface, always swallowed while the page is open, re-enabled by the paint tick, enable+reset before `active` | `input.rs::bass_pad_event`, `input.rs` note-on, `paint.rs::page_paint`, `bass_ffi.rs::minimod_bass_preview_set_active` |
+| No source backup/restore for effects and the bass synth | removed from `jobflow.rs`, `job.rs`, `wav.rs`, `wav_ffi.rs` |
+| In-memory audio for AutoTrim, the transforms and spectral | `sample.rs::memory` (+ `Memory::read`), `trim.rs::memory_edges`, `jobflow.rs` (`Source`), `spectral.rs`, `autotrim.rs::bounds` |
+| Root-aware chromatic MIDI | `sample.rs::root_note`, `autotrim.rs::pad_root`, `midi.rs` |
+| AutoTrim candidate files must match channels and rate | `paths::for_sample` already filtered; AutoTrim now uses it |
+| Hook engine: `B.cond`, read-back | `hooks.rs` |
+| Arm lifetime, writer quiescence, bounded substitution, independent range restore | `hpss_exec.rs`, `substitute.rs` |
+| Spectral deadline, off-page cancel/finalize, CHOP press only from a captured button | `spectral.rs`, `overlay.rs::poll_offpage`, `ui.rs`/`input.rs` hooks |
+| H3 effect object validation | `effect.rs` |
+| Spectral channels 1-2 only | `dsp/spectral.rs` |
+| glibc 2.39 guard in `build.sh` | `mod/build.sh` (merged with the Rust build) |
+| `g_surface` for the root-note test | exported from `autotrim.rs` |
+
+Not ported on purpose: the debug-only probes and `/run` commands, the dead C2
+renderer, `fmbass_sample.c`, the malloc interposer, and `mod/tests/{hook_engine,
+wav_edges,menu_input}.py` (they compiled the C; the equivalents are unit tests).
 
 ## How the glue moved (historical)
 

@@ -12,7 +12,7 @@ original MPC Sample experience, with just small fixes that enhance it for better
 | --- | --- |
 | **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim | `SHIFT` + `B3` |
 | **Octave shift** of pads in 16 Levels mode — by half the grid | `PLUS` / `MINUS` keys (both = reset) |
-| **External MIDI chromatic playback** of the selected sample while in 16 Levels (C3 root) | Enable **Pad MIDI In** in MIDI Config, then play a MIDI keyboard |
+| **External MIDI chromatic playback** of the selected sample while in 16 Levels, in the sample's own key (C3 when it has no root note) | Enable **Pad MIDI In** in MIDI Config, then play a MIDI keyboard |
 | **HPSS** — splits the selected sample into harmonic and percussive copies on two empty pads; the source sample is left untouched | `SHIFT` + `DATA`, choose **HPSS**, `DATA` |
 | **Spectral Chop** — cuts the selected sample into musical regions — a new chord, a new phrase, a different drum — and chops that same pad at those boundaries (Manual slice markers, up to 16) | `SHIFT` + `DATA`, choose **Spectral Chop**, `DATA` |
 | **Add Reverb** — adds the firmware's stereo reverb and a rendered tail to a new pad copy | `SHIFT` + `DATA`, choose **Add Reverb**, `DATA` |
@@ -37,8 +37,8 @@ slices on the same pad. It uses the firmware's own slice API (reset,
 insert-at-frame, reconcile), sets the chop type to Manual through the binding's
 model callback, and verifies every boundary by reading it back before it
 reports. It never creates samples or uses free pads. Details:
-[`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md); the model, the mechanisms and
-the evidence: [`docs/re/SPECTRAL-CHOP-SOLVED.md`](docs/re/SPECTRAL-CHOP-SOLVED.md).
+[`docs/FEATURES.md`](docs/FEATURES.md#spectral-chop); the slice API and chop
+binding: [`docs/MECHANISMS.md`](docs/MECHANISMS.md#5-the-slice-container-and-a-slice).
 
 The **Live Looper** is a separate fullscreen view, not a sample action: every pad
 records a loop from the source the sampler itself hears (the selected input),
@@ -55,9 +55,10 @@ follow `MAIN VOLUME` like the rest of the app. Pads are blocked from the app whi
 `SHIFT`+`DATA` closes it. Details: [`docs/LIVE-LOOPER.md`](docs/LIVE-LOOPER.md).
 
 External MIDI plays the selected sample chromatically over the whole keyboard
-while 16 Levels is active (C3 root, exact semitones, no wrapping). Enable **Pad
-MIDI In** in MIDI Config — it resets to Off on every start. Details:
-[`docs/MIDI-CHROMATIC.md`](docs/MIDI-CHROMATIC.md).
+while 16 Levels is active, measured from the sample's own root note (C3 when it
+has none): exact semitones, no wrapping. Enable **Pad MIDI In** in MIDI Config —
+it resets to Off on every start. Details:
+[`docs/FEATURES.md`](docs/FEATURES.md#external-midi-chromatic-playback).
 
 ## Install
 
@@ -86,14 +87,18 @@ Release description format and the complete feature overview are in
 
 ## Docs
 
-- [`mod/README.md`](mod/README.md) — details, controls, hooks
+- [`docs/README.md`](docs/README.md) — index, reading order and conventions
+- [`docs/FEATURES.md`](docs/FEATURES.md) — what every feature does, how it is wired, what was measured, known limits
+- [`docs/MECHANISMS.md`](docs/MECHANISMS.md) — the firmware internals we mapped: loader, screen/paint, pad state, sample, slices, chop binding, properties, input, MIDI, sample pool/Extract, effects, threading
+- [`docs/RE-METHOD.md`](docs/RE-METHOD.md) — how the reverse engineering is done, what paid off, blind paths, hardening rules
+- [`docs/TOOLING.md`](docs/TOOLING.md) — Ghidra bridge and scripts, kuna/r2, emulator lab, in-process probes, harnesses
+- [`docs/MODDING.md`](docs/MODDING.md) — boot chain, autorun protocol, hooking technique, packaging, ecosystem
+- [`docs/EMULATOR.md`](docs/EMULATOR.md) — the virtual MPC Sample
+- [`docs/DEVICE-NOTES.md`](docs/DEVICE-NOTES.md) — hardware, Bluetooth, WiFi, the hidden touch Preferences UI
+- [`docs/HISTORY.md`](docs/HISTORY.md) — investigations, reversals and open work
+- [`docs/ADDIN-ECOSYSTEM.md`](docs/ADDIN-ECOSYSTEM.md) — the 2026 addin projects, their loading rules and what we can reuse
+- [`docs/LIVE-LOOPER.md`](docs/LIVE-LOOPER.md) — the Live Looper: state machine, latency, sync
 - [`docs/RUST-PORT.md`](docs/RUST-PORT.md) — the Rust rewrite: layout, lint policy, what is ported and how it is proven
-- [`AUTOTRIM-HANDOFF.md`](AUTOTRIM-HANDOFF.md) — how AutoTrim works
-- [`HPSS-HANDOFF.md`](HPSS-HANDOFF.md) — how SAMPLE OPTIONS / HPSS works and what was validated
-- [`docs/SPECTRAL-CHOP.md`](docs/SPECTRAL-CHOP.md) — the region detector and the in-place chop write
-- [`docs/re/SPECTRAL-CHOP-SOLVED.md`](docs/re/SPECTRAL-CHOP-SOLVED.md) — the chop model, the write recipe, the path there and the probe toolkit
-- [`docs/re/FIRMWARE-MECHANISMS.md`](docs/re/FIRMWARE-MECHANISMS.md) — the firmware internals we mapped: loader, screen/paint, layers, properties, commands, input, sample pool, threading
-- [`docs/MIDI-16LEVELS-METHOD.md`](docs/MIDI-16LEVELS-METHOD.md) — what actually solved the chromatic MIDI problem, and the reusable method
-- [`docs/`](docs/) — device notes, emulator, reverse-engineering writeups
-- [`tools/hpss/`](tools/hpss/) — Python reference, algorithm notes and WAV helper scripts
+- [`mod/README.md`](mod/README.md) — controls, anchors, build
+- [`tools/hpss/`](tools/hpss/) — Python reference implementations and WAV helpers
 - [`converter/`](converter/) — separate tool: project → per-pad stems

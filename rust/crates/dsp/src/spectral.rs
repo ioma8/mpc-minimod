@@ -67,6 +67,9 @@ pub fn detect(
     max_positions: usize,
 ) -> Result<Onsets, AnalysisError> {
     validate(input, channels, rate)?;
+    if channels > 2 {
+        return Err(AnalysisError::UnsupportedChannels);
+    }
     let frames = input.len() / channels;
     if max_positions == 0 || frames < FRAME / 2 {
         return Err(AnalysisError::UnsupportedRequest);

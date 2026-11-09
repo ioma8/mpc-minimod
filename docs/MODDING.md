@@ -1,21 +1,19 @@
-# MPC Sample firmware modding: findings
+# Modding the MPC Sample
 
-Everything learned about running custom code on the MPC Sample from its SD card,
-from the community mod **SampQOL-OS v0.1.4.9** and from the stock firmware image
-shipped in the 1.3.0 updater.
+How custom code gets into the stock app: the boot chain, the autorun protocol and
+its digest, the `LD_PRELOAD` + branch-hook technique this mod uses, packaging,
+and what the surrounding mod ecosystem does. Firmware **1.3.0.12** only.
 
-Tags: **[VALIDATED]** read directly from the mod files or the firmware;
-**[INFERRED]** follows from the code but was never executed on hardware.
+The mechanisms this technique exposes are in [`MECHANISMS.md`](MECHANISMS.md);
+the safety rules in [`RE-METHOD.md`](RE-METHOD.md) §5.
 
 ---
 
-## 1. The stock boot chain
-
-**[VALIDATED]** From the rootfs (`ext4` inside the updater's `AZ0x` image):
+## 1. The stock boot chain [VALIDATED, from the rootfs]
 
 ```
 systemd multi-user.target
-  └─ ac50.service                         usr/lib/systemd/system/ac50.service
+  └─ ac50.service                    /usr/lib/systemd/system/ac50.service
        Wants=az01-script-runner.service   (After=)
        After=az0x-usb-gadget@ac50.service
        ExecStart=/usr/bin/launch-ac50
@@ -33,15 +31,14 @@ export MALLOC_ARENA_MAX=1
 exec setarch -R -- "/usr/bin/MPC Sample" "$@"
 ```
 
-Two details make modding practical:
+Three details make modding practical:
 
-* **`setarch -R` disables ASLR**, so the app always maps at the same addresses.
-  Fixed-address patching depends on this, and the stock launcher already does it.
-* the 1 MiB stack and `MALLOC_ARENA_MAX=1` are set here rather than in the app —
-  a mod that spawns threads inherits both.
-
-`az01-script-runner.service` (`/usr/bin/az01-script-runner`) is a separate
-service; it is **not** the autorun handler (its strings never mention autorun).
+* **`setarch -R` disables ASLR** — the app always maps at the same addresses, and
+  the stock launcher already does it. Fixed-address patching depends on this.
+* The **1 MiB stack** and `MALLOC_ARENA_MAX=1` are set here, not in the app; a
+  mod that spawns threads inherits both.
+* `az01-script-runner.service` is a separate service, **not** the autorun
+  handler (its strings never mention autorun).
 
 ---
 
@@ -49,7 +46,7 @@ service; it is **not** the autorun handler (its strings never mention autorun).
 
 Autorun is a feature of the **application**, not a daemon.
 
-**[VALIDATED]** The string table lives in `/usr/bin/MPC Sample` at file offset
+**[VALIDATED]** The string table is in `/usr/bin/MPC Sample` at file offset
 `0x45c43b8`:
 
 ```
@@ -60,15 +57,16 @@ scripts  files  askQuestion  yesButtonText  noButtonText
 sh "%s"
 ```
 
-**[VALIDATED]** The handler code sits around `0x2416cc0`–`0x2417f00`. It builds
-`<folder>.json` and `<folder>.check` (`adrp/add` against `0x45c43f8` and
-`0x45c4400`), reads both, and only then emits `Script detected on …` and runs the
-script via `sh "<script>"`.
+The handler sits around `0x2416cc0`–`0x2417f00`: it builds `<folder>.json` and
+`<folder>.check`, reads both, and only then emits `Script detected on …` and runs
+the script via `sh "<script>"`.
 
 ### 2.1 Placement
 
 * Folder named exactly **`autorun`**, directly in the **root** of the SD card.
 * Card must be **exFAT**.
+* The card is mounted **`noexec`**: payloads are copied to `/run` (tmpfs) and
+  executed there. Everything is RAM-only; a reboot is stock.
 * Renaming or moving the folder disables it; booting without the card is stock.
 
 ### 2.2 `autorun.json`
@@ -82,7 +80,7 @@ script via `sh "<script>"`.
       {
         "path": "autorun.sh",
         "askQuestion": false,
-        "message": "Start SampQOL OS?\nB1 = Start, B3 = Cancel",
+        "message": "Start minimod?",
         "yesButtonText": "Start",
         "noButtonText": "Cancel"
       }
@@ -93,298 +91,249 @@ script via `sh "<script>"`.
 ```
 
 * `scripts[]` — shell scripts to offer or run, with an optional confirmation
-  prompt and button labels. `askQuestion: false` runs without asking, which is
-  how the mod starts silently.
-* `files[]` — extra files the manifest declares (empty in this mod).
+  prompt and button labels. `askQuestion: false` runs silently, which is how the
+  mod starts.
+* `files[]` — extra files the manifest declares (empty here).
 * Paths are relative to the `autorun` folder.
-* Note the `{"value0": ...}` wrapper — the same serialisation convention as the
-  `.xpj` project format (see `../converter/docs/FORMAT.md` §2).
+* The `{"value0": …}` wrapper is the same serialisation convention as the `.xpj`
+  project format (see [`../converter/docs/FORMAT.md`](../converter/docs/FORMAT.md) §2).
 
-### 2.3 `autorun.check`
+### 2.3 `autorun.check` — the gate is solved
 
 **[VALIDATED]** A 64-character lowercase hex digest with no trailing newline:
 
 ```
-304a89b27a79b49f51e006349c21e150267bd7a4304817124ed222233e45c1cd
+sha256( bytes(autorun.json) || bytes(autorun.sh) || "f7bed1c9-7e90-4731-9194-c996666b4331" )
 ```
 
-**[DISPROVED]** It is not a plain hash of the obvious inputs. Fifteen
-constructions were tried and none matched: `sha256` of `autorun.json` (raw,
-stripped, re-serialised compact, sorted keys), of `autorun.sh`, double-hashing
-either, concatenating the folder's file hashes, or `sha256sum`-formatted text.
-The app links no OpenSSL, so it carries its own digest implementation.
+The two files followed by a fixed 36-byte salt. This reproduces the shipped
+SampQOL package exactly and matches `mpc-ui-toolkit/tools/pack-autorun.sh`;
+[`../mod/pack.sh`](../mod/pack.sh) regenerates it. The salt is why the earlier
+"no obvious construction matches" result was a dead end — none of those attempts
+included it. **Changing either file requires recomputing the check; nothing else
+about the folder is covered.** The app builds the digest itself (it links no
+OpenSSL).
 
-**[INFERRED]** The device hashes the manifest (or the whole folder) and compares
-it with `autorun.check`. The manual is explicit: *"the MPC checks them and
-ignores a changed folder."*
-
-### 2.4 What the shipped script does about it
-
-`autorun.sh` is self-verifying — it pins its own payload:
-
-```sh
-PINS="<sha256>  qol-run.sh
-<sha256>  qol-snap.sh
-<sha256>  mpcqol.so
-<sha256>  qol-splash.raw"
-(cd "$DIR" && echo "$PINS" | sha256sum -c -s) || exit 0
-```
-
-So there are **two** integrity layers: the device's `autorun.check`, and the
-script's own `sha256sum -c` on its payload.
-
----
-
-## 3. The gate: can we run our own code?
-
-To run our own script we must either
-
-* **A.** pass the device's check with our own files — needs the `autorun.check`
-  algorithm, or
-* **B.** change only files the check does not cover.
-
-**[INFERRED] B is plausible and costs one experiment.** The manifest names the
-script by path; `.check` sits next to `.json`. If the device only verifies the
-**manifest**, then:
-
-1. keep `autorun.json` **byte-identical** (it already says
-   `"path": "autorun.sh"`, `askQuestion: false`);
-2. keep `autorun.check` untouched;
-3. replace only `autorun.sh`.
-
-The manifest still validates, and our script runs.
-
-**The experiment** (one boot on hardware): replace `autorun.sh` with
+### 2.4 What the shipped minimod script does
 
 ```sh
 #!/bin/sh
 DIR="$(cd "$(dirname "$0")" && pwd)"
-echo "$(date '+%F %T') custom autorun ran" >> "$DIR/custom.log"
+STOCK="/usr/bin/MPC Sample"
+FW=44507c7a7d3029c411b2e3780ea286ca3e08b7e3ffd7b5047d52f73bf5299d1f   # first 4 KiB
+[ "$(dd if="$STOCK" bs=4096 count=1 2>/dev/null | sha256sum | cut -d' ' -f1)" = "$FW" ] || exit 0
+cp "$DIR/minimod.so" /run/minimod.so || exit 0
+chmod 755 /run/minimod.so
+mkdir -p /run/systemd/system/ac50.service.d
+printf '[Service]\nEnvironment=LD_PRELOAD=/run/minimod.so\nEnvironment=MINIMOD_DEBUG=0\n' \
+    > /run/systemd/system/ac50.service.d/minimod.conf
+systemctl daemon-reload
+systemctl restart ac50
 ```
 
-Boot with the card, then look for `custom.log`. If it appears, arbitrary code
-execution is available with no forgery. If not, the check covers the whole
-folder and the next step is decompiling the comparison at `0x2416cc0`.
+Nothing on disk changes; removing the folder and rebooting returns to stock. The
+first-4-KiB check is a cheap version guard, not a security boundary — the
+`lab.py preload` route (`LD_PRELOAD` by hand) has no such guard and would crash
+the app on another build.
 
-**This was never run** — it needs the device.
+**Known interoperability gap.** `Environment=LD_PRELOAD=` *replaces* the
+variable, so this script's fixed list drops any preload the firmware or another
+addin set (the ecosystem's shared drop-in is `90-mpc-addins.conf`, which sorts
+before ours and therefore loses). The community installer composes the effective
+list instead of replacing it; see
+[`ADDIN-ECOSYSTEM.md`](ADDIN-ECOSYSTEM.md#the-shared-installer-contract).
 
 ---
 
-## 4. How the SampQOL mod works
+## 3. The hooking technique
 
-Three layers, none of which touches flash. Remove the card and the device is
-stock.
+An `LD_PRELOAD` aarch64 shared object; the constructor resolves the app base with
+`dl_iterate_phdr` (the PIE base is constant because ASLR is off). Runtime address
+= `base + mod offset`.
 
-### 4.1 Launcher and supervisor
+### 3.1 Relay and trampoline
 
-`qol-run.sh` (started detached from `autorun.sh`, pid in `/run/qol-run.pid`):
+* Two pages are mapped **within ±128 MB of `base`** (`MAP_FIXED_NOREPLACE`,
+  scanned from `base+0x7900000`): one for the branch relay slots, one for
+  trampolines. A `B` has ±128 MB range, and a slot must be reachable from its
+  target.
+* Each slot is 32 bytes: `ldr x16, #8 ; br x16 ; .quad <hook>`. The site's first
+  instruction is replaced with `B <slot>`.
+* The trampoline replays the displaced prologue (up to 4 instructions) and then
+  branches back to `entry + n*4`. The copier **stops before any PC-relative
+  instruction**; if the very first instruction is PC-relative the site is
+  refused rather than guessed.
+* The site's first instruction word and branch range are validated; the patched
+  page is `mprotect`ed `R|X` afterwards and the instruction cache is cleared.
+* `install_hook()` (Rust: `Hooks::install`, which also reads the patched word
+  back) returns 0 on refusal. A refused hook is a missing feature,
+  never a half-patched function.
 
-1. pins the firmware by hashing the **first 4096 bytes** of `/usr/bin/MPC Sample`
-   against
-   `44507c7a7d3029c411b2e3780ea286ca3e08b7e3ffd7b5047d52f73bf5299d1f`;
-2. `systemctl stop ac50.service`, `killall "MPC Sample"`;
-3. paints a splash by writing `qol-splash.raw` straight to `/dev/fb0`;
-4. relaunches the stock app with the mod injected:
+### 3.2 Calling app code
 
-```sh
-( ulimit -S -s 1024
-  export MALLOC_ARENA_MAX=1
-  export LD_PRELOAD="$SO"
-  setarch -R -- "$STOCK" )
-```
+`FN(offset, type)` casts `base + offset` to a function pointer; `rd`/`wr` (Rust:
+`firmware::read`/`write`) read and write target memory through `/proc/self/mem`. Hooks that need the original
+behaviour keep the trampoline (`orig_*`) and call it.
 
-5. supervises it: two exits inside 120 s each → fall back to stock
-   (`systemctl start ac50.service`). Exit codes go to `autorun/logs/events.log`.
+### 3.3 What the hooks must check
 
-### 4.2 The payload
+* the **firmware hash** (autorun script) and the **prologue bytes** at each site;
+* the **screen vtable** before any model access (`base + 0x6e212a0`);
+* the **sample identity** before committing a transform (pointer and frame
+  count), and the **chop type** after setting it;
+* the **first four instructions of the MIDI dispatcher** before installing the permanent hook (the hook itself is never swapped at runtime; it forwards untouched when 16 Levels is off).
 
-`mpcqol.so` — 828 KB, stripped ARM64 shared object, **625 exported functions**
-with descriptive names (`trkname_shift`, `overlay_update`, `newfolder_label`,
-`eq_current_params`, `faderstep_fader_on`, `submix_init`, …). Imports only
-`libc`, `libm`, `libpthread`, `libdl` — no Qt, no app symbols.
+A mismatch must turn into "no mod" or an explicit status, never a wrong write.
 
-### 4.3 The patching technique
+### 3.4 Threads
 
-**[VALIDATED]** from its own log strings, it is an **in-memory inline hook
-installer**:
-
-```
-.text  .got  .got.plt  .rela.plt
-/proc/self/maps  /proc/self/statm  /proc/self/task/%ld/comm
-mprotect
-"%s: 0x%lx is 0x%08x, not 0x%08x -- not patched"
-"%s: 0x%lx not the expected BL (0x%08x) -- hook off"
-"%s: call hook installed site=0x%lx veneer=0x%lx"
-"%s: capture installed target=0x%lx veneer=0x%lx"
-"%s: wrap installed target=0x%lx veneer=0x%lx"
-"%s: veneer out of branch range"
-"%s: 0x%lx already wrapped by this handler -- skip"
-```
-
-The loop:
-
-1. find its own load base via `/proc/self/maps`;
-2. parse the ELF (`.text`, `.got`, `.rela.plt`) to resolve patch sites;
-3. `mprotect` the pages writable;
-4. **verify the expected opcode** before writing anything;
-5. write a `BL` to a **veneer** allocated within ±128 MB of the target
-   (AArch64 `BL` range), and the veneer jumps to the mod;
-6. "wrap" hooks call the original through the veneer, so stock behaviour can be
-   preserved and extended.
-
-This is why the mod is firmware-locked: every site is a fixed offset plus an
-expected opcode, and it refuses to patch anything that does not match.
-
-### 4.4 Resolving app internals
-
-**[VALIDATED]** It calls app functions through a pointer table at
-`0x171d000 + {0x3c0, 0x3c8, 0x3e0, 0x3f8, 0x408, 0x410, 0x418, 0x420}`, filled at
-load. It never reimplements the renderer — it drives the stock one.
-
-### 4.4.1 Reading the app's own DSP out of a stripped binary
-
-**[VALIDATED]** The app is a 119,243,440 B stripped AArch64 PIE (SHA-256
-`b6584cba76e416e432ad202509099d34373dc2c3d6a8fb625f5678bf0193b508`), but it
-keeps **C++ RTTI**, and the class names map the whole signal path: `FilterS8`
-with `enum FILTER_TYPE` and `generateFrequencyResponseCurve(FILTER_TYPE, f, f,
-vector<float>&, …)` (the per-type filter model), `AirCompressor`,
-`FX_Compressor`, `XFX_Compressor`, `Qbq16CompressorEffect`,
-`Qbq25SidechainCompressorEffect`, `AC50CompressorMeterConnector`, and the `H3`
-plugin framework whose presets are literal XML (`<H3Part Type='Dyn3Compressor'
-…>`).
-
-Two small tools in `tools/re/` make this practical, because full auto-analysis of
-a binary this size is too slow to iterate with:
-
-```sh
-# every reference to a rodata string or global, in seconds
-python3 tools/re/fwxref.py "$FW" filterCutoff gainCoefficient
-# RTTI name -> type_info -> vtable of function pointers
-python3 tools/re/rtti.py  "$FW" 9FilterS8
-# every BL call site to an address (e.g. after finding a helper)
-python3 tools/re/calls.py "$FW" 0xb52e18
-```
-
-`fwxref.py` scans for `adrp`/`add`/`ldr` pairs, which is how essentially every
-AArch64 reference to a fixed address is formed. `rtti.py` walks Itanium ABI
-type_info objects, whose `name` pointer points at the mangled name string.
-`calls.py` answers the inverse question — who calls this address — by decoding
-`BL` immediates, which is how the JUCE IIR coefficient builders were found
-(FINDINGS §73).
-
-That route already paid off twice: it resolved the voice filter to
-`juce::dsp::IIR::Coefficients<float>` and showed the device hardcodes Q = 1/√2,
-which replaced an invented resonance→Q curve in the converter.
-
-The extracted binary itself must stay **outside the repository** (it is 114 MiB);
-`analysis/` is git-ignored. Re-extract with:
-
-```sh
-7z x firmware/extracted/part2 "usr/bin/MPC Sample"   # part2 = the ext4 rootfs
-```
-
-The `.xpj` insert blobs (`plugin.state`) are also readable now: plain base64 with
-`/` written as `.`, length-prefixed inside the string. The decoded payload is a
-bit-packed parameter stream (`0xff` = unset) that needs the app's bit widths to
-unpack — see FINDINGS §72 and `../converter/docs/FORMAT.md` §15.
-
-### 4.5 Project safety net
-
-`qol-snap.sh` keeps a shadow copy of the open project under
-`data/qol-snap/live` (hard links, so samples cost no extra space), plus the last
-5 `.xpj` revisions, and re-links them if stock deleted files. This exists because
-stock loading a mod-created project can drop samples that only the mod used.
+Input hooks only publish requests. Model work happens in the paint hook, one
+phase per pass. DSP and file I/O run on a worker. The audio-thread hook copies
+the planar block, mixes into private scratch, and calls the original writer. See
+[`MECHANISMS.md`](MECHANISMS.md#14-threads-and-ownership).
 
 ---
 
-## 5. Toolchain
-
-The mod is an ordinary ARM64 Linux shared object. It can be built from macOS
-with the system clang — no Linux machine needed:
+## 4. Build and package
 
 ```sh
-clang -target aarch64-linux-gnu -shared -fPIC -nostdlib \
-      -Wl,--unresolved-symbols=ignore-all -o ourmod.so ourmod.c
+cd mod
+./build.sh      # build/minimod.so  (the Rust cdylib, cross-linked with zig cc)
+./pack.sh       # build/minimod.zip (autorun package with a valid autorun.check)
 ```
 
-`-nostdlib` avoids needing an aarch64 sysroot; unresolved libc symbols resolve
-from the running process at load. For anything beyond a trivial constructor a
-proper sysroot or a `buildroot`/`crosstool-ng` toolchain is worth the setup.
+`build.sh` builds the `minimod` crate (`rust/crates/minimod`, with the DSP in
+`rust/crates/dsp`) as a `cdylib` for `aarch64-unknown-linux-gnu`, then strips the
+`.so` with `llvm-objcopy --strip-all` **without shifting `g_screen`** (the
+emulator tests read that symbol through `build/minimod.map`). No C or C++ is
+compiled. It fails on an unresolved non-glibc symbol and on a glibc symbol
+version newer than 2.39. The linker driver `zig-cc-aarch64-linux-gnu` (in
+`rust/scripts/`) must be on `PATH`. The library exports only the 4 ALSA taps and
+the `g_*` statics the device tests read.
+
+`pack.sh` stages `autorun/{autorun.json, autorun.sh, minimod.so}`, recomputes
+`autorun.check` with the salt, and zips the folder. That zip is the release
+artifact.
+
+The build is warning-free; `rust/check.sh` is the gate (see
+[`TOOLING.md`](TOOLING.md#7-static-analysis)). The investigation probes of the C
+era are not part of the Rust crate.
+`build.sh` also refuses a library whose highest `GLIBC_*` symbol version is newer
+than the device's 2.39.
 
 ---
 
-## 6. Constraints and risks
+## 5. Constraints and risks
 
 | constraint | detail |
-| --- | --- |
-| Firmware lock | first 4 KB of the app pinned to 1.3.0 (`44507c7a…`); any other firmware needs every patch site re-derived |
-| No flash | the mod exists only in RAM; power off restores stock |
-| Card format | exFAT, folder named exactly `autorun` at the card root |
-| Autorun gate | unproven (§3); everything depends on it |
+|---|---|
+| firmware lock | first 4 KiB of the app pinned to 1.3.0.12 (`44507c7a…`); any other firmware needs every patch site re-derived — the offsets are absolute |
+| no flash | the mod exists only in RAM; power off restores stock |
+| card format | exFAT, folder named exactly `autorun` at the card root |
+| autorun gate | solved: `sha256(json + sh + salt)`; recompute on every change |
+| noexec card | payloads must run from `/run` (tmpfs) |
 | SSH is not a shortcut | `sshd` exists but login goes through `/usr/bin/az01-ssh-login`, a `ForceCommand` wrapper validating a product string from the key certificate; `debug-shell.service` only fires on a failed boot |
 | ASLR | already disabled by the stock launcher, so fixed addresses are stable |
+| hardware validation | emulator-verified is recorded as such; only pitch and external MIDI chromatic are hardware-verified |
 
 ---
 
-## 7. Design study: per-pad stem export (not built)
+## 6. The ecosystem
 
-Recorded because the analysis is reusable if the mod is ever picked up again.
+Studied to decide what a *minimal* mod should do. Sources: `mpc-boot-thingy`,
+`SampQOL-OS` v0.1.5, `am-mod` r26/r27, `mpc-ui-toolkit`, `mpc-furnace`,
+`mpc-cavestory`, `mpc-gen1recomp`, `mpc-tic80`, and the virtual lab. The 2026
+addin wave (draw handler, remote, scale mode, rack) and its shared installer are
+documented separately in [`ADDIN-ECOSYSTEM.md`](ADDIN-ECOSYSTEM.md).
 
-**Why:** the device can export a mixdown but not stems; per-pad audio is exactly
-what `mpc2stems` reconstructs offline.
+### 6.1 mpc-boot-thingy — a multi-app launcher
 
-**How SampQOL does it (per track)** — **[VALIDATED]** from its strings:
+Not a firmware patch: an `autorun` package that **replaces "one mod at a time"
+with a menu**. It takes the panel UART and the screen while it runs and hands
+them to the app it launches.
 
 ```
-export: render %d/%d %s seq %d bars %d..%d tail %d, %d track(s) muted -> %s
-Mix + %d stem%s
-submix: stem writer reached idx=%lu tid=%ld
-Samples/User/Export   /Stems
+/autorun/
+  autorun.json, autorun.sh, autorun.check     <- boot-thingy itself
+  system/mpc-boot-thingy                      <- the menu binary
+  system/boot-default                         <- saved default id
+  system/patches/, patch-catalog/             <- Boot Edit binary patch sets
+  apps/<name>/boot.entry                      <- an app
+  apps/<name>/autorun/…                       <- or a nested autorun package
 ```
 
-It renders the sequence **once per track with the other tracks muted**, plus a
-`Mix` file. Submixes instead **tap the submix bus**. Options exposed:
-`Export Master FX`, `Export Tail`, `Export Stems Same`, `Export BPM in Name`,
-`Export Separator`.
+An app is either an ELF named by `boot.entry` (launcher stops `ac50.service`,
+releases panel/screen, `fork/exec`s it with cwd = its folder, waits, reopens the
+menu), or a nested autorun package run through
+`systemd-run --unit=mpc-boot-autorun`. If any of its `.sh` files mention `ac50`
+or `LD_PRELOAD` in the first 64 KB it is treated as *replacing* the stock app;
+otherwise stock restarts afterwards. `boot.entry` is `title=`, `run=`, `args=`,
+`boot=`; Boot Edit patches a copy of the app in RAM.
 
-**Decisions reached before the study was parked:**
+### 6.2 SampQOL OS — the full-featured reference
 
-| question | decision |
-| --- | --- |
-| trigger | "Export stems" beside "Export mixdown" in song mode, reached by a `SHIFT` + confirm combo |
-| stems | **dry** (no master insert chain) — the Color Compressor is non-linear and would not sum |
-| mixdown file | not written by the stems export |
-| tail | +3 s, always on (matches the stock mixdown window of 29.1818 s) |
-| which pads | only pads that play in the song |
-| output | `Samples/User/Export/<song>-stems/`, names `A01-<sample>.wav` |
-| feedback | stock progress per render + a log file |
+Layers, none of which touches flash:
 
-**Why it was parked:** the mute-and-re-render design needs one render per pad
-(≈6 min for 12 pads). Hitting under 30 s requires a different architecture — a
-**single pass that taps every pad** during one render. That tap was never found:
-it is plausible (the engine sums per-pad voices) but not located, and if voices
-are summed per *track* rather than per *pad* the tap yields tracks, which is
-useless with a single drum track.
+* `qol-run.sh` started detached from `autorun.sh` (pid in `/run/qol-run.pid`),
+  copies the payload to `/run`, stops `ac50.service`, restarts it with
+  `LD_PRELOAD` and keeps a supervisor alive;
+* `mpcqol.so` (880 KB, named `.dynsym` entries) patched in;
+* features: step edit, chords, arp, mute, EQ, compressor, **Export Stems**
+  (one WAV per track, 24-bit/44.1 kHz, submix effects, never master FX) and
+  **Explode** (Step Edit → Track View → `SHIFT`+`B3` moves each pad to its own
+  track, except pads sharing a mute group).
 
----
+It was also the MIDI oracle: its log named the hooks (`keys-evin 0x211b090`,
+`keys-nrsend 0x211a690`, `keys-prognote 0x286fcf0`) and measured chromatic
+playback at correlation 0.997.
 
-## 8. If this is resumed, start here
+### 6.3 am-mod — the overlay technique
 
-1. **Run the bypass experiment** (§3). Everything else is blocked on it.
-2. If it fails, decompile the compare at `0x2416cc0` in the app — the digest
-   input is decided in that function.
-3. Pin the SD mount path from the rootfs rather than guessing it.
-4. Decide the architecture before writing code: `mute+re-render` is days and
-   ~6 min per song; `single-pass tap` is weeks and <30 s.
+The technique that mattered: it **replaces the screen's paint vtable slot** and
+draws over the stock painting with the app's own `juce::Graphics` entry points,
+rather than renaming stock widgets.
 
----
+```c
+uintptr_t *vt = (uintptr_t *)(base + SCREEN_VT);
+vt[27] = (uintptr_t)paint;      /* Component::paint(Graphics&), byte +0xD8 */
+```
 
-## 9. Glossary
+The vtable lives in `.data.rel.ro`, so the page must be `mprotect`ed writable for
+the swap and read-only afterwards; keep the original slot and call it first to
+draw on top of the stock UI. Useful entry points (same offsets in 1.3.0.12):
 
-| term | meaning |
-| --- | --- |
-| **autorun** | stock feature that runs a script from the `autorun` folder at boot |
-| **`autorun.check`** | digest the device compares against to reject a modified folder |
-| **veneer** | trampoline within branch range of a target, so a `BL` can be retargeted |
-| **wrap hook** | hook that calls the original function through the veneer |
-| **bypass** | running our own `autorun.sh` by changing nothing the device checks |
+| offset | call |
+|---|---|
+| `0x102d5e0` | `Graphics::setColour(uint32 argb)` |
+| `0x102e000` | `Graphics::fillRect(int x, int y, int w, int h)` |
+| `0x1082810` | `Font::Font(int typeface, float height)` |
+| `0x102dca0` | `Graphics::setFont(const Font&)` |
+| `0x10817b0` | `Graphics::drawText(String&, x, y, w, h, justification, ellipses, minScale)` |
+| `0xf535c0` | `juce::String::operator=(const char*)` |
+| `0x1070d60` / `0xf0a290` | `Font` / `String` destructors |
+
+am-mod identifies screens by vtable comparison (`*(uintptr_t*)p == base +
+SCREEN_VT`), walks `Component+0x18` (parent) to find the owning screen, and keeps
+a "ticket" (epoch + shift bit) so a queued control movement cannot land after the
+screen changed. minimod uses the same paint-slot swap for the AutoTrim caption
+and the SAMPLE OPTIONS overlay.
+
+### 6.4 The rest
+
+* **mpc-ui-toolkit** — UI components for other mods; its `pack-autorun.sh` is the
+  second implementation that confirms the check formula.
+* **mpc-furnace, mpc-cavestory, mpc-gen1recomp, mpc-tic80** — apps that boot
+  through boot-thingy rather than patching the stock app.
+* **virtual-mpc-sample** — the QEMU lab this project uses; it also documents how
+  a library can be injected without an autorun package (`lab.py preload`).
+
+### 6.5 What that means for a minimal mod
+
+1. Ship one `autorun` package — nothing else.
+2. Pin the firmware, verify it, stop `ac50`, restart it with `LD_PRELOAD`.
+3. Do everything in the preload, with base-relative offsets and verified
+   prologues; keep the stock file and all of `/usr` untouched.
+4. Keep a log under `/run` (debug builds only) and make every hook refuse rather
+   than guess when the bytes do not match.
+5. Prefer the app's own commands and APIs to field writes; the app then keeps
+   ownership of files, history and repaints.

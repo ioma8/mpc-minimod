@@ -6,9 +6,10 @@
 //! page redraws its waveform exactly as if the user had moved the markers.
 
 use crate::paint;
-use crate::paths_ffi;
+use crate::paths;
 use crate::sample;
-use crate::wav_ffi;
+use crate::trim;
+use crate::wav;
 
 /// The control op that sets the trim's start.
 const SET_START: i32 = 0x462;
@@ -25,8 +26,6 @@ const SURFACE_PADS_END: usize = 0x2810;
 const STATE_LAYERS: usize = 0x22e8;
 /// The layer's sample.
 const LAYER_SAMPLE: usize = 0x4a8;
-/// The longest path the app stores.
-const PATH_LEN: usize = 512;
 
 /// What the trim needs from the glue.
 #[repr(C)]
@@ -85,25 +84,16 @@ pub unsafe fn run(context: Context, hooks: Hooks) {
     if frames == 0 {
         return;
     }
-    // SAFETY: the path helpers take a writable buffer of PATH_LEN bytes.
-    let Some(path) = path_of(sample, frames) else {
+    let Some((_, channels, rate)) = sample::geometry(sample) else {
         return;
     };
-    let Some(info) = info_of(&path) else {
-        return;
-    };
-    if info.frames != frames {
-        return;
-    }
+    let ratio = RATIOS[usize::try_from(context.step).unwrap_or(0).min(2)];
     let (first, last) = if context.step >= 3 {
         (0, frames.saturating_sub(1))
+    } else if let Some(found) = bounds(sample, frames, channels, rate, ratio) {
+        found
     } else {
-        let ratio = RATIOS[usize::try_from(context.step).unwrap_or(0).min(2)];
-        // SAFETY: the file is the one the app is showing.
-        let Some((first, last)) = edges_of(&path, &info, ratio) else {
-            return;
-        };
-        (first, last)
+        return;
     };
     // The toast has to be armed first: the trim's own repaint is what paints the
     // page, so a toast set afterwards waits for an unrelated frame.
@@ -134,6 +124,23 @@ pub unsafe fn run(context: Context, hooks: Hooks) {
     }
 }
 
+/// The note the selected pad's sample plays at its original speed, C3 when the
+/// surface has not been seen or the chain is unreadable.
+#[must_use]
+pub fn pad_root(pad: i32) -> i32 {
+    let pad = if (0..128).contains(&pad) {
+        pad
+    } else {
+        FALLBACK_PAD
+    };
+    // SAFETY: only the UI thread writes the surface.
+    let surface = unsafe { *core::ptr::addr_of!(g_surface) };
+    if surface == 0 {
+        return sample::DEFAULT_ROOT;
+    }
+    sample_of(surface, pad).map_or(sample::DEFAULT_ROOT, sample::root_note)
+}
+
 /// The sample a pad holds, read through the surface's own tables.
 fn sample_of(surface: usize, pad: i32) -> Option<usize> {
     let array = crate::firmware::read_pointer(surface + SURFACE_PADS)?;
@@ -157,85 +164,29 @@ fn sample_of(surface: usize, pad: i32) -> Option<usize> {
     (sample != 0).then_some(sample)
 }
 
-/// The path of the sample's WAV, trying the object, then the object graph, then
-/// a scan by frame count.
-fn path_of(sample: usize, frames: u32) -> Option<String> {
-    let mut buffer = vec![0_u8; PATH_LEN];
-    // SAFETY: the buffer is PATH_LEN bytes and the helpers NUL-terminate it.
-    let found = unsafe {
-        paths_ffi::path_from_object(sample, frames, buffer.as_mut_ptr().cast(), PATH_LEN) != 0
-            || paths_ffi::wav_path_of(sample, frames, buffer.as_mut_ptr().cast(), PATH_LEN) != 0
-            || paths_ffi::find_wav_by_frames(frames, buffer.as_mut_ptr().cast(), PATH_LEN) != 0
-    };
-    if !found {
-        return None;
+/// The first and last audible frames at `ratio` of the peak.
+///
+/// The loaded audio comes first, so a recording that was never saved still
+/// trims; a streamed sample falls back to the WAV, which must match the sample's
+/// frames, channels and rate.
+fn bounds(sample: usize, frames: u32, channels: u16, rate: u32, ratio: f64) -> Option<(u32, u32)> {
+    if let Some(memory) = sample::memory(sample)
+        && memory.frames == frames
+        && let Some(samples) = memory.read()
+    {
+        let edges = trim::memory_edges(&samples, usize::from(memory.channels), ratio)?;
+        return Some((edges.first, edges.last));
     }
-    let end = buffer.iter().position(|&byte| byte == 0)?;
-    if end == 0 {
-        return None;
-    }
-    String::from_utf8(buffer[..end].to_vec()).ok()
-}
-
-/// One WAV's header facts.
-struct Info {
-    frames: u32,
-    data_offset: u32,
-    channels: u32,
-    bytes: u32,
-    format: u32,
-}
-
-/// Read a WAV's header.
-fn info_of(path: &str) -> Option<Info> {
-    let mut text = path.as_bytes().to_vec();
-    text.push(0);
-    let (mut frames, mut rate, mut channels) = (0_u32, 0_u32, 0_u32);
-    let (mut offset, mut bytes, mut format) = (0_u32, 0_u32, 0_u32);
-    // SAFETY: the path is NUL-terminated and the out-pointers are ours.
-    let ok = unsafe {
-        wav_ffi::wav_info(
-            text.as_ptr().cast(),
-            core::ptr::from_mut(&mut frames),
-            core::ptr::from_mut(&mut rate),
-            core::ptr::from_mut(&mut channels),
-            core::ptr::from_mut(&mut offset),
-            core::ptr::from_mut(&mut bytes),
-            core::ptr::from_mut(&mut format),
-        )
+    let path = paths::for_sample(sample, frames, channels, rate)?;
+    let info = wav::Info::read(&path).filter(|info| info.matches(frames, channels, rate))?;
+    let layout = trim::Layout {
+        data_offset: info.data_offset,
+        channels: info.channels,
+        width: info.width,
+        encoding: info.encoding,
     };
-    if ok == 0 {
-        return None;
-    }
-    Some(Info {
-        frames,
-        data_offset: offset,
-        channels,
-        bytes,
-        format,
-    })
-}
-
-/// The first and last audible frames at `ratio` of the file's peak.
-fn edges_of(path: &str, info: &Info, ratio: f64) -> Option<(u32, u32)> {
-    let mut text = path.as_bytes().to_vec();
-    text.push(0);
-    let (mut first, mut last) = (0_u32, 0_u32);
-    // SAFETY: the path is NUL-terminated and the out-pointers are ours.
-    let ok = unsafe {
-        wav_ffi::wav_edges(
-            text.as_ptr().cast(),
-            info.frames,
-            info.data_offset,
-            info.channels,
-            info.bytes,
-            info.format,
-            ratio,
-            core::ptr::from_mut(&mut first),
-            core::ptr::from_mut(&mut last),
-        )
-    };
-    (ok != 0).then_some((first, last))
+    let edges = trim::edges(&path, layout, frames, ratio)?;
+    Some((edges.first, edges.last))
 }
 
 /// The app's control setter, as the page's knobs call it.
@@ -244,7 +195,8 @@ type SetControl = unsafe extern "C" fn(usize, usize, i32, i32, f32) -> usize;
 /// The setter the mod displaced.
 static mut ORIGINAL_SET: Option<SetControl> = None;
 /// The control-surface object the app last handed to the setter.
-static mut SURFACE: usize = 0;
+#[unsafe(no_mangle)]
+pub static mut g_surface: usize = 0;
 /// The control context that came with it.
 static mut CONTROL: usize = 0;
 
@@ -285,7 +237,7 @@ pub unsafe extern "C" fn minimod_hook_set_control(
     // SAFETY: only the UI thread calls the setter.
     unsafe {
         if looks_live {
-            SURFACE = surface;
+            g_surface = surface;
             CONTROL = control;
         }
         // The setter tail-calls the app's own, so its result is its caller's.
@@ -305,7 +257,7 @@ pub unsafe extern "C" fn minimod_autotrim_cycle() {
     // SAFETY: only the UI thread writes these.
     let (surface, control, set_control) = unsafe {
         (
-            *core::ptr::addr_of!(SURFACE),
+            *core::ptr::addr_of!(g_surface),
             *core::ptr::addr_of!(CONTROL),
             *core::ptr::addr_of!(ORIGINAL_SET),
         )

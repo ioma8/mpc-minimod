@@ -645,6 +645,8 @@ pub unsafe extern "C" fn minimod_ui_hooks_self() -> Hooks {
 ///
 /// `event` is the page's own event.
 pub unsafe extern "C" fn minimod_ui_buttons(event: usize) {
+    // SAFETY: the callee reads the app's page objects.
+    unsafe { crate::overlay::poll_offpage() };
     // SAFETY: the table is the crate's and the event the app's.
     unsafe {
         let table = minimod_ui_hooks_self();

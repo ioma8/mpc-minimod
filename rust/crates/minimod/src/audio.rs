@@ -1,174 +1,5 @@
-//! Reading the device's stream geometry off the app's audio object.
-//!
-//! The app keeps the channel count of each stream in its own object, sometimes
-//! in a second field when the first is negative.  Getting this wrong would mix
-//! the wrong number of channels, so the fallback to stereo is explicit.
-
-use crate::firmware;
-
-/// `[self + 0xd8]` is the output channel count, `+0xe4` its alternative.
-const OUTPUT_CHANNELS: usize = 0xd8;
-const OUTPUT_ALT: usize = 0xe4;
-/// `[self + 0xd4]` is the input channel count, `+0xe0` its alternative.
-const INPUT_CHANNELS: usize = 0xd4;
-const INPUT_ALT: usize = 0xe0;
-/// The device never has more channels than this.
-const CHANNEL_LIMIT: i32 = 8;
-
-/// The channel count of one side of the app's audio object.
-#[must_use]
-pub fn channels(self_address: usize, input_side: bool) -> usize {
-    let read = |offset: usize| -> i32 {
-        firmware::read_u32(self_address.wrapping_add(offset)).map_or(-1, u32::cast_signed)
-    };
-    let mut count = if input_side {
-        let primary = read(INPUT_CHANNELS);
-        if primary < 0 {
-            read(INPUT_ALT)
-        } else {
-            primary
-        }
-    } else {
-        let primary = read(OUTPUT_CHANNELS);
-        if primary < 0 {
-            read(OUTPUT_ALT)
-        } else {
-            primary
-        }
-    };
-    if !(1..=CHANNEL_LIMIT).contains(&count) {
-        count = 2;
-    }
-    usize::try_from(count).unwrap_or(2)
-}
-
-/// Frames the writer will ever see in one block.
-pub const MAX_FRAMES: usize = 4096;
-/// Channels the writer will ever see.
-pub const MAX_CHANNELS: usize = 8;
-
-/// The app's writer: closure, channel array, frames, offset.
-pub type Writer = unsafe extern "C" fn(usize, usize, usize, i32);
-
-/// The copy the mod hands to the app when it mixed something in.
-///
-/// Flat and heap-allocated on first use rather than a thread-local: a 128 KiB
-/// thread-local lands in `.tbss` and pushed `.bss` outside the loader's last
-/// segment, so the mod's own globals were addressed past the end of its image.
-static SCRATCH: std::sync::Mutex<Option<Box<[f32]>>> = std::sync::Mutex::new(None);
-
-/// Run `body` with the scratch buffer, allocating it on first use.
-fn with_scratch<T>(body: impl FnOnce(&mut [f32]) -> T) -> Option<T> {
-    let mut guard = SCRATCH.lock().ok()?;
-    let buffer = guard.get_or_insert_with(|| vec![0.0_f32; MAX_FRAMES * MAX_CHANNELS].into());
-    Some(body(buffer))
-}
-
-/// Mix the preview into the app's block and forward it.
-///
-/// Returns the preview's peak when it produced audio, so the caller can keep its
-/// statistics without the writer carrying them.
-///
-/// # Safety
-///
-/// `input` must be an array of `channels(self_address, false)` writable channel
-/// pointers, each valid for `frames` samples, and `orig` must be the writer the
-/// hook displaced.
-pub unsafe fn write(
-    self_address: usize,
-    input: *mut *mut f32,
-    frames: usize,
-    offset: i32,
-    orig: Option<Writer>,
-    preview: bool,
-) -> Option<f32> {
-    if !preview {
-        // Clear ringing voices after the menu closes, then pass the block on.
-        // SAFETY: an empty channel list mixes nothing.
-        unsafe { minimod_dsp::bass::preview_mix(&mut [], 0, 44_100) };
-        forward(orig, self_address, input, frames, offset);
-        return None;
-    }
-    let count = channels(self_address, false);
-    if input.is_null() || frames == 0 || frames > MAX_FRAMES || !(1..=MAX_CHANNELS).contains(&count)
-    {
-        forward(orig, self_address, input, frames, offset);
-        return None;
-    }
-    let peak = with_scratch(|scratch| {
-        let mut pointers: [*mut f32; MAX_CHANNELS] = [core::ptr::null_mut(); MAX_CHANNELS];
-        for (index, slot) in pointers.iter_mut().enumerate().take(count) {
-            // SAFETY: the caller promises each channel pointer is readable.
-            let source = unsafe { *input.add(index) };
-            if source.is_null() {
-                return None;
-            }
-            let channel = &mut scratch[index * MAX_FRAMES..][..frames];
-            // SAFETY: the source is readable for `frames` samples and the
-            // destination is a slice of exactly that length.
-            unsafe {
-                core::ptr::copy_nonoverlapping(source, channel.as_mut_ptr(), frames);
-            }
-            *slot = channel.as_mut_ptr();
-        }
-        // SAFETY: every pointer in the array points at `frames` writable samples.
-        let peak =
-            unsafe { minimod_dsp::bass::preview_mix(&mut pointers[..count], frames, 44_100) };
-        Some((pointers, peak))
-    });
-    let Some(Some((mut pointers, peak))) = peak else {
-        forward(orig, self_address, input, frames, offset);
-        return None;
-    };
-    forward(orig, self_address, pointers.as_mut_ptr(), frames, offset);
-    (peak > 0.0).then_some(peak)
-}
-
-/// Forward a block to the app's own writer.
-fn forward(
-    orig: Option<Writer>,
-    self_address: usize,
-    channels: *mut *mut f32,
-    frames: usize,
-    offset: i32,
-) {
-    if let Some(writer) = orig {
-        // SAFETY: the caller guarantees this is the displaced writer and the
-        // block matches what the app gave it.
-        unsafe { writer(self_address, channels as usize, frames, offset) };
-    }
-}
-
-/// The audio writer, for the C glue.
-///
-/// # Safety
-///
-/// See [`write`].
-pub unsafe extern "C" fn minimod_audio_writer(
-    self_address: usize,
-    input: *mut *mut f32,
-    frames: usize,
-    offset: i32,
-    orig: Option<Writer>,
-    preview: i32,
-    peak_out: *mut f32,
-) -> i32 {
-    // SAFETY: see the function contract.
-    let peak = unsafe { write(self_address, input, frames, offset, orig, preview != 0) };
-    match peak {
-        Some(value) => {
-            if !peak_out.is_null() {
-                // SAFETY: the caller promises `peak_out` is writable.
-                unsafe { *peak_out = value };
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-/// How many times the app asked for audio, for the device tests.
-pub static mut G_AUDIO_OUT_CALLS: u32 = 0;
+//! Device audio: the ALSA taps that feed the looper and the bass preview, the
+//! stream geometry they read, and the looper's repaint pump.
 
 /// How many blocks the bass preview produced.
 pub static mut G_BASS_PREVIEW_BLOCKS: u32 = 0;
@@ -181,51 +12,6 @@ pub static mut G_BASS_PREVIEW_ACTIVE: i32 = 0;
 
 /// The component the page last painted.
 pub static mut G_PAINT_COMP: usize = 0;
-
-/// The app's own audio writer.
-static mut ORIGINAL_WRITER: Option<Writer> = None;
-
-/// The audio writer: count the call, and track the preview's peak.
-///
-/// # Safety
-///
-/// The app calls this with its own buffers.
-pub unsafe extern "C" fn minimod_hook_audio_writer(
-    self_address: usize,
-    input: *mut *mut f32,
-    frames: usize,
-    offset: i32,
-) {
-    // SAFETY: the counters are statics in this module.
-    unsafe { core::ptr::addr_of_mut!(G_AUDIO_OUT_CALLS).write_volatile(G_AUDIO_OUT_CALLS + 1) };
-    // SAFETY: see above.
-    let preview = i32::from(unsafe { G_BASS_PREVIEW_ACTIVE } != 0);
-    let mut peak = 0.0_f32;
-    // SAFETY: the original is the app's own writer.
-    let original = unsafe { *core::ptr::addr_of!(ORIGINAL_WRITER) };
-    // SAFETY: the caller passed the app's buffers.
-    let wrote = unsafe {
-        minimod_audio_writer(
-            self_address,
-            input,
-            frames,
-            offset,
-            original,
-            preview,
-            core::ptr::from_mut(&mut peak),
-        )
-    };
-    if wrote == 0 || peak <= 0.0 {
-        return;
-    }
-    // SAFETY: the counters are statics in this module.
-    unsafe {
-        core::ptr::addr_of_mut!(G_BASS_PREVIEW_BLOCKS).write_volatile(G_BASS_PREVIEW_BLOCKS + 1);
-        if peak > f32::from_bits(G_BASS_PREVIEW_PEAK_BITS) {
-            core::ptr::addr_of_mut!(G_BASS_PREVIEW_PEAK_BITS).write_volatile(peak.to_bits());
-        }
-    }
-}
 
 /// The looper's repaint pump: a steady tick while the view is open.
 ///
@@ -365,16 +151,6 @@ pub unsafe extern "C" fn minimod_stream_geometry(
     frames
 }
 
-/// Record the app's audio writer at install time.
-///
-/// # Safety
-///
-/// Called once, before any audio can arrive.
-pub unsafe extern "C" fn minimod_audio_writer_original_now(original: usize) {
-    // SAFETY: the caller's contract.
-    unsafe { ORIGINAL_WRITER = crate::input::from_address(original) };
-}
-
 /// Frames the output tap keeps: two seconds at the device rate.
 pub const OUTTAP_FRAMES: usize = 44100 * 2;
 
@@ -421,6 +197,8 @@ pub unsafe extern "C" fn snd_pcm_writei(pcm: usize, buffer: *const i32, size: u6
     let Some(write) = real else {
         return -1;
     };
+    // SAFETY: the buffer is the device's own output, `size` frames of it.
+    unsafe { mix_preview(pcm, buffer.cast_mut(), size) };
     let looper = crate::looper_ffi::looper_is_open() != 0;
     // The rings are only readable once the stream exists, so this is retried
     // until both directions report one.
@@ -776,23 +554,139 @@ pub extern "C" fn minimod_pump_start() {
         });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{CHANNEL_LIMIT, INPUT_ALT, INPUT_CHANNELS, OUTPUT_ALT, OUTPUT_CHANNELS, channels};
+/// The preview's mix: it adds to interleaved S32 output, so its own scratch
+/// planes are two channels of the largest block the device writes.
+const PREVIEW_BLOCK: usize = 4096;
 
-    #[test]
-    fn the_offsets_are_the_documented_ones() {
-        assert_eq!(OUTPUT_CHANNELS, 0xd8);
-        assert_eq!(OUTPUT_ALT, 0xe4);
-        assert_eq!(INPUT_CHANNELS, 0xd4);
-        assert_eq!(INPUT_ALT, 0xe0);
-        assert_eq!(CHANNEL_LIMIT, 8);
-    }
+/// What the output probe found: format, channels and rate of the app's stream.
+static PROBE: std::sync::OnceLock<(i32, u32, u32)> = std::sync::OnceLock::new();
 
-    #[test]
-    fn an_unreadable_object_falls_back_to_stereo() {
-        // Address zero is never readable in the target process.
-        assert_eq!(channels(0, false), 2);
-        assert_eq!(channels(0, true), 2);
+/// Whether the mixer is inside the preview already (it is not re-entrant).
+static MIXER_BUSY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Whether the previous block carried the preview, so the voices are cleared
+/// once when it stops.
+static WAS_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Read the stream's format, channels and rate once.
+fn probe(pcm: usize) -> (i32, u32, u32) {
+    *PROBE.get_or_init(|| {
+        let mut channels = 0_u32;
+        let mut s32 = 0_i32;
+        // SAFETY: `pcm` is the app's live handle; the out pointers are ours.
+        unsafe {
+            minimod_stream_geometry(
+                pcm,
+                core::ptr::from_mut(&mut channels),
+                core::ptr::from_mut(&mut s32),
+            );
+        }
+        (s32, channels, stream_rate(pcm))
+    })
+}
+
+/// The stream's rate, or the device's nominal 44.1 kHz when it cannot be read.
+fn stream_rate(pcm: usize) -> u32 {
+    type Malloc = unsafe extern "C" fn(*mut *mut libc::c_void) -> i32;
+    type Current = unsafe extern "C" fn(*mut libc::c_void, *mut libc::c_void) -> i32;
+    type Rate = unsafe extern "C" fn(*mut libc::c_void, *mut u32, *mut i32) -> i32;
+    type Free = unsafe extern "C" fn(*mut libc::c_void);
+    let (Some(malloc), Some(current), Some(rate), Some(free)) = (
+        look_up::<Malloc>(c"snd_pcm_hw_params_malloc"),
+        look_up::<Current>(c"snd_pcm_hw_params_current"),
+        look_up::<Rate>(c"snd_pcm_hw_params_get_rate"),
+        look_up::<Free>(c"snd_pcm_hw_params_free"),
+    ) else {
+        return 44_100;
+    };
+    let mut params: *mut libc::c_void = core::ptr::null_mut();
+    // SAFETY: the entry point allocates the parameters.
+    if unsafe { malloc(core::ptr::from_mut(&mut params)) } < 0 || params.is_null() {
+        return 44_100;
     }
+    let mut hertz = 0_u32;
+    let mut direction = 0_i32;
+    // SAFETY: the handle is live and `params` is ours.
+    let known = unsafe {
+        current(pcm as *mut libc::c_void, params) >= 0
+            && rate(
+                params,
+                core::ptr::from_mut(&mut hertz),
+                core::ptr::from_mut(&mut direction),
+            ) >= 0
+    };
+    // SAFETY: the parameters came from the malloc above.
+    unsafe { free(params) };
+    if known && (8_000..=192_000).contains(&hertz) {
+        hertz
+    } else {
+        44_100
+    }
+}
+
+/// Add the bass preview to the block the app is about to write.
+///
+/// The app's real output is `snd_pcm_writei` with interleaved S32; the planar
+/// float writer the mod used to hook is not called during normal playback, so
+/// mixing there was inaudible.  Channels beyond the first two are untouched.
+///
+/// # Safety
+///
+/// `buffer` must hold `frames` interleaved frames of the stream behind `pcm`.
+unsafe fn mix_preview(pcm: usize, buffer: *mut i32, frames: u64) {
+    use core::sync::atomic::Ordering;
+    // SAFETY: a plain word, written by the UI thread.
+    let active = unsafe { G_BASS_PREVIEW_ACTIVE } != 0;
+    let was = WAS_ACTIVE.swap(active, Ordering::AcqRel);
+    let (s32, channels, rate) = probe(pcm);
+    let frames = usize::try_from(frames).unwrap_or(0);
+    if !active {
+        if was {
+            // SAFETY: an empty channel list mixes nothing and clears the voices.
+            unsafe { minimod_dsp::bass::preview_mix(&mut [], 0, rate) };
+        }
+        return;
+    }
+    if buffer.is_null()
+        || frames == 0
+        || frames > PREVIEW_BLOCK
+        || s32 == 0
+        || !(1..=8).contains(&channels)
+        || MIXER_BUSY.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    let count = channels.min(2) as usize;
+    let mut planes = vec![0.0_f32; count * frames];
+    let (left, right) = planes.split_at_mut(frames);
+    let mut pointers: [*mut f32; 2] = [left.as_mut_ptr(), right.as_mut_ptr()];
+    // SAFETY: each pointer addresses `frames` writable samples.
+    let peak = unsafe { minimod_dsp::bass::preview_mix(&mut pointers[..count], frames, rate) };
+    if peak > 0.0 {
+        let stride = channels as usize;
+        for frame in 0..frames {
+            for channel in 0..count {
+                let value = if channel == 0 {
+                    left[frame]
+                } else {
+                    right[frame]
+                };
+                let added = (f64::from(value.clamp(-1.0, 1.0)) * 2_147_483_647.0) as i64;
+                // SAFETY: the block holds `frames * stride` samples.
+                let slot = unsafe { buffer.add(frame * stride + channel) };
+                // SAFETY: see above.
+                let sum = i64::from(unsafe { *slot }) + added;
+                // SAFETY: see above.
+                unsafe { *slot = sum.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32 };
+            }
+        }
+        // SAFETY: counters are this module's statics, written by the audio thread.
+        unsafe {
+            core::ptr::addr_of_mut!(G_BASS_PREVIEW_BLOCKS)
+                .write_volatile(G_BASS_PREVIEW_BLOCKS + 1);
+            if peak > f32::from_bits(G_BASS_PREVIEW_PEAK_BITS) {
+                core::ptr::addr_of_mut!(G_BASS_PREVIEW_PEAK_BITS).write_volatile(peak.to_bits());
+            }
+        }
+    }
+    MIXER_BUSY.store(false, Ordering::Release);
 }

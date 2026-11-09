@@ -45,6 +45,153 @@ pub fn frames(sample: usize) -> u32 {
     frames
 }
 
+/// `[sample + 0x170]` is the object that holds the audio in memory.
+const SAMPLE_HOLDER: usize = 0x170;
+/// `[holder + 0x18]` points back at the sample's metadata block.
+const HOLDER_BACK: usize = 0x18;
+/// `[holder + 0x28]` is the buffer's owner; its first word is the buffer.
+const HOLDER_BUFFER: usize = 0x28;
+/// `[metadata + 0x3e4]` is the note the sample plays at its original speed.
+const METADATA_ROOT: usize = 0x3e4;
+/// The root note when the app's value cannot be read: C3.
+pub const DEFAULT_ROOT: i32 = 60;
+/// 256 MB of float32: larger than any sample the firmware holds in memory.
+const MEMORY_AUDIO_MAX_CELLS: usize = 64 * 1024 * 1024;
+/// Bytes copied from the app per read.
+const READ_CHUNK: usize = 64 * 1024;
+
+/// A sample the app keeps in memory as interleaved float32.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Memory {
+    /// Address of the first sample.
+    pub buffer: usize,
+    /// Length in frames.
+    pub frames: u32,
+    /// Interleaved channels, one or two.
+    pub channels: u16,
+    /// Sample rate.
+    pub rate: u32,
+}
+
+/// Whether the object's class name (without the length prefix) is `want`.
+fn class_is(object: usize, want: &str) -> bool {
+    let Some(vtable) = firmware::read_pointer(object) else {
+        return false;
+    };
+    let Some(info) = vtable.checked_sub(8).and_then(firmware::read_pointer) else {
+        return false;
+    };
+    let Some(name) = info.checked_add(8).and_then(firmware::read_pointer) else {
+        return false;
+    };
+    let mut text = [0_u8; 63];
+    if !firmware::read(name, &mut text) {
+        return false;
+    }
+    let end = text
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(text.len());
+    let name = &text[..end];
+    let digits = name.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    &name[digits..] == want.as_bytes()
+}
+
+/// Where the app keeps the sample's audio, when it holds it in memory.
+///
+/// Layout verified on 1.3.0.12: the sample's holder (RTTI `12MemorySample`) points
+/// back at the metadata block `{u16 channels, u32 frames, u32 rate, u32 bits}`
+/// and owns the interleaved float32 buffer.  A streamed sample has none, and the
+/// caller falls back to the WAV.
+#[must_use]
+pub fn memory(sample: usize) -> Option<Memory> {
+    let metadata = firmware::read_pointer(sample.checked_add(SAMPLE_METADATA)?)?;
+    let holder = firmware::read_pointer(sample.checked_add(SAMPLE_HOLDER)?)?;
+    if !class_is(holder, "MemorySample") {
+        return None;
+    }
+    if firmware::read_pointer(holder.checked_add(HOLDER_BACK)?)? != metadata {
+        return None;
+    }
+    let owner = firmware::read_pointer(holder.checked_add(HOLDER_BUFFER)?)?;
+    let buffer = firmware::read_pointer(owner)?;
+    let mut header = [0_u8; 16];
+    if !firmware::read(metadata, &mut header) {
+        return None;
+    }
+    let word = |at: usize| {
+        i32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+    };
+    let (channels, frames, rate, bits) = (word(0), word(4), word(8), word(12));
+    if !(1..=2).contains(&channels) || frames <= 0 || bits != 32 {
+        return None;
+    }
+    let rate = u32::try_from(rate)
+        .ok()
+        .filter(|rate| RATE_RANGE.contains(rate))?;
+    Some(Memory {
+        buffer,
+        frames: u32::try_from(frames).ok()?,
+        channels: u16::try_from(channels).ok()?,
+        rate,
+    })
+}
+
+impl Memory {
+    /// Copy the audio out of the app.
+    #[must_use]
+    pub fn read(&self) -> Option<Vec<f32>> {
+        let cells = (self.frames as usize).checked_mul(usize::from(self.channels))?;
+        if cells == 0 || cells > MEMORY_AUDIO_MAX_CELLS {
+            return None;
+        }
+        let mut out = vec![0.0_f32; cells];
+        let mut at = 0;
+        let mut bytes = vec![0_u8; READ_CHUNK];
+        while at < cells {
+            let count = (cells - at).min(READ_CHUNK / 4);
+            let chunk = &mut bytes[..count * 4];
+            if !firmware::read(self.buffer.checked_add(at * 4)?, chunk) {
+                return None;
+            }
+            for (slot, raw) in out[at..at + count].iter_mut().zip(chunk.chunks_exact(4)) {
+                *slot = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+            }
+            at += count;
+        }
+        Some(out)
+    }
+}
+
+/// The note the sample plays at its original speed; C3 when it cannot be read.
+///
+/// A chromatic note is measured from this, not from C3: on 1.3.0.12 pad A01's
+/// kick has root 88 and most others 60.
+#[must_use]
+pub fn root_note(sample: usize) -> i32 {
+    sample
+        .checked_add(SAMPLE_METADATA)
+        .and_then(firmware::read_pointer)
+        .and_then(|metadata| metadata.checked_add(METADATA_ROOT))
+        .and_then(firmware::read_u32)
+        .map(u32::cast_signed)
+        .filter(|root| (0..=127).contains(root))
+        .unwrap_or(DEFAULT_ROOT)
+}
+
+/// A sample's frames, channels and rate, when its metadata is usable.
+#[must_use]
+pub fn geometry(sample: usize) -> Option<(u32, u16, u32)> {
+    let frames = frames(sample);
+    if frames == 0 {
+        return None;
+    }
+    let metadata = firmware::read_pointer(sample.checked_add(SAMPLE_METADATA)?)?;
+    let channels = u16::try_from(firmware::read_u32(metadata)? & 0xffff).ok()?;
+    let rate = firmware::read_u32(metadata.checked_add(8)?)?;
+    Some((frames, channels, rate))
+}
+
 /// The frame count of a sample object, for the C glue.
 ///
 /// # Safety

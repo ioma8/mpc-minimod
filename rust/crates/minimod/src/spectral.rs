@@ -9,6 +9,8 @@ use crate::paint;
 
 /// How long a run may take before it gives up.
 const DEADLINE_MS: i64 = 3_000;
+/// How long a claim may wait for the page to start it.
+const CLAIM_MS: i64 = 5_000;
 
 /// What the chop is doing.
 #[repr(C)]
@@ -56,7 +58,11 @@ pub fn start(state: &mut State, event: &[u8], busy: bool) -> bool {
         return false;
     }
     state.active = 1;
+    state.phase = 0;
+    state.screen = 0;
     state.slices = 0;
+    // The claim expires if the page never paints to start the run.
+    state.deadline = crate::clock::now_ms() + CLAIM_MS;
     state.event = [0; 16];
     let length = event.len().min(state.event.len());
     state.event[..length].copy_from_slice(&event[..length]);
@@ -112,6 +118,11 @@ pub unsafe fn tick(
     let now = crate::clock::now_ms();
     if state.phase == 0 {
         start_run(state, menu_state, base, screen, hooks, now);
+        return;
+    }
+    // A claim that never reached the machine must not mute every pad for good.
+    if state.phase == 0 && now > state.deadline {
+        finish(state, menu_state, hooks, Some("timed out"));
         return;
     }
     let mut slices = 0_u32;
@@ -171,16 +182,20 @@ fn start_run(
         finish(state, menu_state, hooks, Some("no sample on this pad"));
         return;
     }
-    let Some(path) =
-        crate::paths::for_sample(sample, frames, u16::try_from(channels).unwrap_or(0), rate)
-    else {
-        finish(state, menu_state, hooks, Some("cannot read sample WAV"));
-        return;
-    };
-    let Some(samples) =
-        crate::wav::read_f32(&path, frames, u16::try_from(channels).unwrap_or(0), rate)
-    else {
-        finish(state, menu_state, hooks, Some("cannot read sample WAV"));
+    // The loaded audio first, so a recording that was never saved still works;
+    // a streamed sample falls back to its WAV.
+    let channels16 = u16::try_from(channels).unwrap_or(0);
+    let samples = crate::sample::memory(sample)
+        .filter(|memory| {
+            memory.frames == frames && u32::from(memory.channels) == channels && memory.rate == rate
+        })
+        .and_then(|memory| memory.read())
+        .or_else(|| {
+            let path = crate::paths::for_sample(sample, frames, channels16, rate)?;
+            crate::wav::read_f32(&path, frames, channels16, rate)
+        });
+    let Some(samples) = samples else {
+        finish(state, menu_state, hooks, Some("cannot read sample audio"));
         return;
     };
     let mut error: *const u8 = core::ptr::null();
@@ -278,6 +293,31 @@ pub unsafe extern "C" fn minimod_spectral_tick(
     unsafe { tick(state, menu_state, base, screen, hooks) };
 }
 
+/// End a run whose page went away.  It is called from the input hooks, which
+/// run whether or not the Sample page paints.
+///
+/// # Safety
+///
+/// Reads the app's page objects; the state is the crate's own.
+pub unsafe fn cancel_if_page_gone() {
+    // SAFETY: the statics are the crate's own, written by the UI thread.
+    let state = unsafe { &mut *core::ptr::addr_of_mut!(G_SPECTRAL) };
+    if state.active != 1 {
+        return;
+    }
+    let screen = paint::screen();
+    let visible = crate::page::minimod_page_visible(crate::firmware::base(), screen) != 0;
+    if visible && (state.screen == 0 || screen == state.screen) {
+        return;
+    }
+    let hooks = Hooks {
+        press_chop: None,
+        set_status: Some(minimod_status_c),
+        repaint: Some(crate::ui::minimod_repaint_screen),
+    };
+    finish(state, menu::state_mut(), hooks, Some("page changed"));
+}
+
 /// The run in flight.  It keeps its name because the glue reads it.
 pub static mut G_SPECTRAL: State = State {
     active: 0,
@@ -305,6 +345,11 @@ pub unsafe extern "C" fn minimod_spectral_key_press() {
             return;
         };
         let mut event = (*core::ptr::addr_of!(G_SPECTRAL)).event;
+        // Only replay a button that was really captured; its context is the
+        // app's own and a blank one would be dereferenced.
+        if event[..8] == [0; 8] {
+            return;
+        }
         event[8] = 0x4b;
         event[9] = 0x7f;
         original(event.as_ptr() as usize);

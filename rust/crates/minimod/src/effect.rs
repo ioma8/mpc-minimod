@@ -13,7 +13,7 @@
 use std::ffi::c_void;
 use std::ptr;
 
-use crate::firmware::Firmware;
+use crate::firmware::{self, Firmware};
 
 /// Frames per processing block: the firmware's own audio block size.
 const BLOCK: usize = 512;
@@ -27,6 +27,9 @@ const VINYL_FACTORY: usize = 0x03c4_3cf0;
 const DECIMATOR_FACTORY: usize = 0x03c4_57a0;
 /// Offset of the parameter array inside an effect object.
 const PARAMETERS_OFFSET: usize = 0x18;
+/// How far past the load address a vtable or method can lie and still be the
+/// app's own.
+const IMAGE_SPAN: usize = 0x1200_0000;
 /// Peak the rendered audio is normalised to.
 const PEAK: f32 = 0.98;
 
@@ -117,20 +120,40 @@ impl Instance {
         if object.is_null() {
             return Err(EffectError::FirmwareRefused);
         }
-        // SAFETY: an effect object starts with a vtable pointer; slots 1, 9 and
-        // 11 are the destroy, setup and process entries of the effect base.
-        let vtable = unsafe { object.cast::<*const usize>().read() };
-        if vtable.is_null() {
+        // The factory returned an object: check its class data and slots before
+        // calling through them.  A failed check leaks the object but cannot
+        // corrupt the host.
+        let image = firmware.base()..firmware.base().saturating_add(IMAGE_SPAN);
+        let in_image = |address: usize| image.contains(&address);
+        let object_address = object as usize;
+        let slots = firmware::read_pointer(object_address)
+            .filter(|vtable| in_image(*vtable))
+            .and_then(|vtable| {
+                Some((
+                    firmware::read_pointer(vtable + 9 * 8)?,
+                    firmware::read_pointer(vtable + 11 * 8)?,
+                    firmware::read_pointer(vtable + 8)?,
+                ))
+            })
+            .filter(|(setup, process, destroy)| {
+                in_image(*setup) && in_image(*process) && in_image(*destroy)
+            });
+        let parameters = firmware::read_pointer(object_address + PARAMETERS_OFFSET)
+            .filter(|parameters| parameters % 4 == 0);
+        let readable = parameters.is_some_and(|parameters| {
+            let mut probe = [0_u8; 24];
+            firmware::read(parameters, &mut probe)
+        });
+        let (Some((setup, process, destroy)), true) = (slots, readable) else {
             return Err(EffectError::FirmwareRefused);
-        }
-        // SAFETY: the vtable belongs to the object the factory returned.
-        let slot = |index: usize| unsafe { vtable.add(index).read() };
-        // SAFETY: the three slots are the documented methods of that base class.
+        };
+        // SAFETY: the three slots are the documented methods of that base class,
+        // and each lies inside the app's image.
         let methods = unsafe {
             Methods {
-                setup: core::mem::transmute::<usize, Setup>(slot(9)),
-                process: core::mem::transmute::<usize, Process>(slot(11)),
-                destroy: core::mem::transmute::<usize, Destroy>(slot(1)),
+                setup: core::mem::transmute::<usize, Setup>(setup),
+                process: core::mem::transmute::<usize, Process>(process),
+                destroy: core::mem::transmute::<usize, Destroy>(destroy),
             }
         };
         let instance = Self { object, methods };

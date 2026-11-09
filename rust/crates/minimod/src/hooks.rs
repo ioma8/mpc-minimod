@@ -101,6 +101,7 @@ pub fn encode_branch(from: usize, to: usize) -> Option<u32> {
 #[must_use]
 pub fn is_pc_relative(instruction: u32) -> bool {
     instruction & 0x7c00_0000 == 0x1400_0000       // B / BL
+        || instruction & 0xff00_0010 == 0x5400_0000 // B.cond
         || instruction & 0x9f00_0000 == 0x9000_0000 // ADRP
         || instruction & 0x9f00_0000 == 0x1000_0000 // ADR
         || instruction & 0x3b00_0000 == 0x1800_0000 // LDR literal
@@ -258,8 +259,10 @@ impl HookEngine {
         let span = (last - page) + PAGE_SIZE;
         // SAFETY: only the pages the four-byte patch touches are remapped, and
         // the original protection is restored right after.
-        let patched =
-            unsafe { make_writable(page, span) } && firmware::write(site, &branch.to_le_bytes());
+        let patched = unsafe { make_writable(page, span) }
+            && firmware::write(site, &branch.to_le_bytes())
+            // Read the word back: a write that did not land must not count.
+            && firmware::read_u32(site) == Some(branch);
         // SAFETY: same range as above, restoring the executable mapping.
         unsafe {
             libc::mprotect(
@@ -478,6 +481,9 @@ mod tests {
         assert!(is_pc_relative(0x1000_0000), "adr");
         assert!(is_pc_relative(0x1800_0010), "ldr literal");
         assert!(is_pc_relative(0xb400_0000), "cbz");
+        assert!(is_pc_relative(0x5400_0040), "b.eq");
+        assert!(is_pc_relative(0x54ff_ffe0), "b.cond, negative offset");
+        assert!(!is_pc_relative(0x5400_0010), "bit 4 set is not a B.cond");
         assert!(is_pc_relative(0x3600_0000), "tbz");
         assert!(is_pc_relative(0xd65f_03c0), "ret (Rn = 30)");
         assert!(is_pc_relative(0xd65f_0000), "ret x0");

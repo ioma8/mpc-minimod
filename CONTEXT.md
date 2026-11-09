@@ -2,6 +2,12 @@
 
 Glossary for the MPC Sample domain. Terms only — no implementation, no plans.
 
+> **Scope:** this glossary belongs to the **converter** (`converter/`, mpc2stems:
+> song → per-pad stems). It is not the mod's vocabulary; for `minimod`
+> (the `LD_PRELOAD` firmware mod) start at [`README.md`](README.md),
+> [`mod/README.md`](mod/README.md) and
+> [`docs/MECHANISMS.md`](docs/MECHANISMS.md).
+
 ## Source material
 
 **Song** — the arrangement in Song mode: an ordered list of sequences with repeat

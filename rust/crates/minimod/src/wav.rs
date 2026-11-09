@@ -6,7 +6,7 @@
 //! over a file handle: no firmware addresses, so it is host-testable with
 //! synthetic files.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
@@ -131,29 +131,6 @@ pub fn read_f32(path: &Path, frames: u32, channels: u16, rate: u32) -> Option<Ve
         }
     }
     if at == cells { Some(samples) } else { None }
-}
-
-/// The bytes of the `data` chunk, for a caller that wants to put the source
-/// back byte for byte after the firmware rewrote it.
-#[must_use]
-pub fn data_chunk(path: &Path) -> Option<(u64, Vec<u8>)> {
-    let file = File::open(path).ok()?;
-    let (_, data_offset, data_bytes) = scan(&file)?;
-    let size = usize::try_from(data_bytes).ok()?;
-    let mut data = vec![0_u8; size];
-    file.read_exact_at(&mut data, data_offset).ok()?;
-    Some((data_offset, data))
-}
-
-/// Write `data` back at `offset` of `path` and flush it to disk.
-///
-/// # Errors
-///
-/// Returns the standard I/O error of the open, write or flush.
-pub fn restore_data(path: &Path, offset: u64, data: &[u8]) -> std::io::Result<()> {
-    let file = OpenOptions::new().write(true).open(path)?;
-    file.write_all_at(data, offset)?;
-    file.sync_data()
 }
 
 /// Walk the RIFF chunks and return the format description and the data chunk.
@@ -294,7 +271,7 @@ fn decode(bytes: &[u8], info: &Info) -> f32 {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Encoding, Info, data_chunk, read_f32, restore_data};
+    use super::{Encoding, Info, read_f32};
 
     /// Write a WAV with the given chunks; `junk` puts a `JUNK` chunk in front of
     /// `fmt `, the way the sampler's own recordings do.
@@ -446,29 +423,9 @@ mod tests {
     }
 
     #[test]
-    fn the_data_chunk_round_trips() {
-        let payload = pcm16(&[1, -2, 3, -4]);
-        let path = write_wav("restore", true, 1, 1, 44_100, 16, &payload);
-        let (offset, data) = data_chunk(&path).expect("data chunk");
-        assert_eq!(data, payload);
-        // Overwrite it the way the firmware does, then put it back.
-        let mut modified = data.clone();
-        modified[0] ^= 0xFF;
-        restore_data(&path, offset, &modified).expect("write");
-        let (_, now) = data_chunk(&path).expect("data chunk");
-        assert_eq!(now, modified);
-        restore_data(&path, offset, &data).expect("restore");
-        let (_, restored) = data_chunk(&path).expect("data chunk");
-        assert_eq!(restored, payload);
-        std::fs::remove_dir_all(path.parent().unwrap()).ok();
-    }
-
-    #[test]
     fn a_missing_file_is_not_an_error_to_panic_on() {
         let missing = Path::new("/nonexistent/minimod/none.wav");
         assert!(Info::read(missing).is_none());
         assert!(read_f32(missing, 1, 1, 44_100).is_none());
-        assert!(data_chunk(missing).is_none());
-        assert!(restore_data(missing, 0, &[0]).is_err());
     }
 }

@@ -11,8 +11,8 @@ use crate::paint::{self, Repaint, minimod_toast};
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
-use crate::job::{ACTION_BASS, ACTION_SPLIT, Job, PATH_BYTES};
-use crate::{firmware, pads, page, paths, selection, status, wav, wav_ffi};
+use crate::job::{ACTION_BASS, ACTION_SPLIT, Job};
+use crate::{firmware, pads, page, paths, sample, selection, status, wav};
 
 /// The job the worker is running, if any.
 static JOB: AtomicPtr<Job> = AtomicPtr::new(core::ptr::null_mut());
@@ -150,29 +150,9 @@ fn room_for_pads(base: usize, job: &Job, effect: bool) -> Result<(), Report> {
     })
 }
 
-/// Put the source audio back when the action took a backup of it.
-///
-/// Every exit path needs this: the bass synth overwrites the pad's file while it
-/// renders, so a cancelled or failed job would otherwise leave the user's sample
-/// modified.
-fn restore_source(job: &Job) -> bool {
-    if job.source_audio_backup.is_null() {
-        return true;
-    }
-    // SAFETY: the path is NUL-terminated by the glue and the backup is the
-    // job's own buffer.
-    let restored = unsafe {
-        wav_ffi::bass_source_restore(
-            job.source_path.as_ptr().cast(),
-            job.source_data_offset,
-            job.source_audio_backup,
-            job.source_audio_bytes,
-        )
-    };
-    restored != 0
-}
-
-/// Write an effect or synth take to a pad, restoring the source if it moved.
+/// Write an effect or synth take to a pad.  The mod never writes a sample file:
+/// the app re-serialises its working copy on Extract, so the source is not
+/// ours to restore.
 ///
 /// # Safety
 ///
@@ -211,15 +191,7 @@ unsafe fn extract_take(base: usize, job: &Job, hooks: &Hooks) -> Result<(), Repo
         // SAFETY: the caller guarantees this is the app's restore.
         unsafe { restore() };
     }
-    let source_ok = restore_source(job);
     let _ = base;
-    if !source_ok {
-        return Err(Report {
-            raw: false,
-            status: "source restore failed",
-            toast: "Bass: source restore failed",
-        });
-    }
     if extracted == 0 {
         return Err(Report {
             raw: false,
@@ -366,13 +338,7 @@ pub unsafe extern "C" fn minimod_job_finalize(
 }
 
 /// Fill a fresh job from the selection.
-fn fill(
-    job: &mut Job,
-    selected: &selection::Selection,
-    path: &std::path::Path,
-    input: *mut f32,
-    action: i32,
-) {
+fn fill(job: &mut Job, selected: &selection::Selection, input: *mut f32, action: i32) {
     job.screen = selected.screen;
     job.state = selected.state;
     job.sample = selected.sample;
@@ -382,9 +348,6 @@ fn fill(
     job.input = input;
     job.action = action;
     job.rc = -1;
-    let bytes = path.to_string_lossy();
-    let take = bytes.len().min(PATH_BYTES - 1);
-    job.source_path[..take].copy_from_slice(&bytes.as_bytes()[..take]);
 }
 
 /// Copy a slice into a `malloc` block, which the job frees with libc `free`.
@@ -439,27 +402,44 @@ pub unsafe extern "C" fn minimod_job_start(
         }
         return core::ptr::null_mut();
     };
-    let Some(path) = paths::for_sample(
-        selected.sample,
-        selected.frames,
-        selected.channels,
-        selected.rate,
-    ) else {
-        status::set_action_status(action, "no exact WAV file");
-        // SAFETY: see the function contract.
-        unsafe {
-            say(
-                hooks.toast,
-                if action == 0 {
-                    "HPSS: no WAV"
-                } else {
-                    "Effect: no WAV"
-                },
-            );
-        }
-        return core::ptr::null_mut();
+    // The loaded audio first: it exists before a sample is saved and needs no
+    // file.  A streamed sample falls back to the WAV the app points at.  The
+    // bass synth needs no source audio at all.
+    let source = if action == ACTION_BASS {
+        Source::Synth
+    } else if let Some(samples) = sample::memory(selected.sample)
+        .filter(|memory| {
+            memory.frames == selected.frames
+                && memory.channels == selected.channels
+                && memory.rate == selected.rate
+        })
+        .and_then(|memory| memory.read())
+    {
+        Source::Memory(samples)
+    } else {
+        let Some(path) = paths::for_sample(
+            selected.sample,
+            selected.frames,
+            selected.channels,
+            selected.rate,
+        ) else {
+            status::set_action_status(action, "no exact WAV file");
+            // SAFETY: see the function contract.
+            unsafe {
+                say(
+                    hooks.toast,
+                    if action == 0 {
+                        "HPSS: no WAV"
+                    } else {
+                        "Effect: no WAV"
+                    },
+                );
+            }
+            return core::ptr::null_mut();
+        };
+        Source::File(path)
     };
-    let Some(job) = (unsafe { prepare(action, &selected, &path, hooks) }) else {
+    let Some(job) = (unsafe { prepare(action, &selected, source, hooks) }) else {
         return core::ptr::null_mut();
     };
     status::set_status(&format!("Processing {}...", status::action_name(action)));
@@ -488,6 +468,19 @@ pub unsafe extern "C" fn minimod_job_start(
         }
     });
     job
+}
+
+/// The page the running job started from, or zero when none runs.
+#[must_use]
+pub fn job_screen() -> usize {
+    let job = JOB.load(Ordering::Acquire);
+    if job.is_null() {
+        0
+    } else {
+        // SAFETY: the job stays allocated until the UI thread finishes it, and
+        // `screen` is written once before it is published.
+        unsafe { (*job).screen }
+    }
 }
 
 /// Whether a job is running or waiting to be finished.
@@ -526,8 +519,17 @@ pub unsafe extern "C" fn minimod_job_finish(
     1
 }
 
-/// Allocate the job and give it its input (or, for the bass synth, a backup of
-/// the source it will overwrite).
+/// Where a job's input audio comes from.
+enum Source {
+    /// The bass synth renders its own audio.
+    Synth,
+    /// The app's in-memory float32 buffer.
+    Memory(Vec<f32>),
+    /// The sample's WAV file.
+    File(std::path::PathBuf),
+}
+
+/// Allocate the job and give it its input.
 ///
 /// # Safety
 ///
@@ -535,22 +537,28 @@ pub unsafe extern "C" fn minimod_job_finish(
 unsafe fn prepare(
     action: i32,
     selected: &selection::Selection,
-    path: &std::path::Path,
+    source: Source,
     hooks: StartHooks,
 ) -> Option<*mut Job> {
-    let synth = action == ACTION_BASS;
-    let input = if synth {
-        core::ptr::null_mut()
-    } else {
-        let Some(samples) = wav::read_f32(path, selected.frames, selected.channels, selected.rate)
-        else {
-            status::set_action_status(action, "cannot decode WAV");
-            // SAFETY: see the caller's contract.
-            unsafe { say_failure(hooks.toast, action, "bad WAV") };
-            return None;
-        };
-        into_malloc(&samples)
+    let synth = matches!(source, Source::Synth);
+    let samples = match source {
+        Source::Synth => None,
+        Source::Memory(samples) => Some(samples),
+        Source::File(path) => {
+            let Some(samples) =
+                wav::read_f32(&path, selected.frames, selected.channels, selected.rate)
+            else {
+                status::set_action_status(action, "cannot decode WAV");
+                // SAFETY: see the caller's contract.
+                unsafe { say_failure(hooks.toast, action, "bad WAV") };
+                return None;
+            };
+            Some(samples)
+        }
     };
+    let input = samples
+        .as_deref()
+        .map_or(core::ptr::null_mut(), into_malloc);
     // SAFETY: a plain allocation, checked for null.
     let job = unsafe { libc::calloc(1, size_of::<Job>()) }.cast::<Job>();
     if (input.is_null() && !synth) || job.is_null() {
@@ -564,26 +572,8 @@ unsafe fn prepare(
     }
     // SAFETY: `job` is a fresh zeroed allocation we own.
     let fields = unsafe { &mut *job };
-    fill(fields, selected, path, input, action);
+    fill(fields, selected, input, action);
     if synth {
-        // SAFETY: the path is NUL-terminated and the outputs are the job's own
-        // fields, which it frees later.
-        let backed_up = unsafe {
-            wav_ffi::bass_source_backup(
-                fields.source_path.as_ptr().cast(),
-                core::ptr::addr_of_mut!(fields.source_data_offset),
-                core::ptr::addr_of_mut!(fields.source_audio_backup),
-                core::ptr::addr_of_mut!(fields.source_audio_bytes),
-            )
-        };
-        if backed_up == 0 {
-            // SAFETY: the job owns its buffers.
-            unsafe { crate::job::minimod_job_free(job) };
-            status::set_action_status(action, "cannot preserve source sample");
-            // SAFETY: see the caller's contract.
-            unsafe { say(hooks.toast, "Bass: source read failed") };
-            return None;
-        }
         fields.rendered_channels = 2;
     }
     Some(job)

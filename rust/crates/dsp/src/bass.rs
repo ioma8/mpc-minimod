@@ -28,6 +28,11 @@ const DURATION: f32 = 1.5;
 const GATE: f32 = 0.4;
 /// Peak the rendered pluck is normalised to.
 const OUTPUT_PEAK: f32 = 0.86;
+/// How long a preview voice may sound, in seconds. The preview is an audition,
+/// not the saved sample: it decays from the first sample so a stack of pads can
+/// never turn into a sustained drone.
+const PREVIEW_LENGTH: f32 = 1.2;
+
 /// Peak the preview mix is allowed to reach before it is clamped.
 const PREVIEW_PEAK: f32 = 0.85;
 /// Nominal rate the engine is built at before the device reports its own.
@@ -146,6 +151,8 @@ struct Voice {
     age: u32,
     quiet: u32,
     level: f32,
+    /// Time constant of the preview's exponential tail, in seconds.
+    decay: f32,
     active: bool,
 }
 
@@ -157,6 +164,7 @@ impl Voice {
             age: 0,
             quiet: 0,
             level: 0.0,
+            decay: 0.6,
             active: false,
         }
     }
@@ -228,7 +236,8 @@ impl Preview {
         });
         voice.filter.set_resonance(0.05);
         voice.filter.set_drive(excite * 0.35);
-        voice.level = 0.75 * clamp01(velocity);
+        voice.level = 0.5 * clamp01(velocity);
+        voice.decay = 0.35 + excite * 0.15;
         voice.age = 0;
         voice.quiet = 0;
         voice.active = true;
@@ -244,6 +253,8 @@ struct PreviewCell(core::cell::UnsafeCell<Option<Preview>>);
 unsafe impl Sync for PreviewCell {}
 
 static PREVIEW: PreviewCell = PreviewCell(core::cell::UnsafeCell::new(None));
+/// A reset the audio thread has not run yet.
+static RESET: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(false);
 /// Brightness, as f32 bits.
 static BRIGHTNESS: AtomicU32 = AtomicU32::new(0.52_f32.to_bits());
@@ -280,12 +291,18 @@ pub fn preview_set_params(brightness: f32, excite: f32, cutoff: f32) {
 
 /// Strike one pad; the audio thread picks the velocity up.
 pub fn preview_note(pad: usize, velocity: f32) {
-    if velocity <= 0.0 {
+    if velocity <= 0.0 || !velocity.is_finite() {
         return;
     }
     if let Some(slot) = PENDING.get(pad) {
         slot.store(clamp01(velocity).to_bits(), Ordering::Release);
     }
+}
+
+/// Ask the audio thread to silence every voice and drop pending strikes before
+/// its next block, so a page that just opened never plays a stale note.
+pub fn preview_reset() {
+    RESET.store(true, Ordering::Release);
 }
 
 /// Mix the preview into the device's output channels and report its peak.
@@ -296,6 +313,9 @@ pub fn preview_note(pad: usize, velocity: f32) {
 /// `channels` itself may be empty (which mixes nothing).
 pub unsafe fn preview_mix(channels: &mut [*mut f32], frames: usize, rate: u32) -> f32 {
     let channel_count = channels.len();
+    if RESET.swap(false, Ordering::AcqRel) {
+        with_preview(Preview::stop);
+    }
     if !ENABLED.load(Ordering::Acquire)
         || channel_count == 0
         || frames == 0
@@ -346,7 +366,7 @@ pub unsafe fn preview_mix(channels: &mut [*mut f32], frames: usize, rate: u32) -
         }
 
         let mut noise = preview.noise;
-        let max_age = rate * 4;
+        let max_age = rate_f * PREVIEW_LENGTH;
         let max_quiet = rate / 3;
         let mut peak = 0.0_f32;
         for frame in 0..frames {
@@ -358,7 +378,8 @@ pub unsafe fn preview_mix(channels: &mut [*mut f32], frames: usize, rate: u32) -
                 voice
                     .filter
                     .process(voice.string.process(false, &mut noise));
-                let value = voice.filter.low_pass() * voice.level;
+                let t = voice.age as f32 / rate_f;
+                let value = voice.filter.low_pass() * voice.level * (-t / voice.decay).exp();
                 sample += value;
                 if value.abs() < 1e-5 {
                     voice.quiet += 1;
@@ -366,7 +387,7 @@ pub unsafe fn preview_mix(channels: &mut [*mut f32], frames: usize, rate: u32) -
                     voice.quiet = 0;
                 }
                 voice.age += 1;
-                if voice.age > max_age || voice.quiet > max_quiet {
+                if voice.age as f32 > max_age || voice.quiet > max_quiet {
                     voice.active = false;
                 }
             }
@@ -455,8 +476,43 @@ mod tests {
         );
     }
 
+    /// The preview is a process singleton, so its tests take turns.
+    static PREVIEW_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn a_preview_note_dies_within_its_envelope() {
+        use super::preview_reset;
+        let _serial = PREVIEW_TEST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        preview_enable(true);
+        preview_reset();
+        preview_note(3, 1.0);
+        let rate = 44_100;
+        let mut peak_late = 0.0_f32;
+        // Two seconds of 128-frame blocks; the voice is capped at 1.2 s.
+        for block in 0..(2 * rate / 128) {
+            let mut left = vec![0.0_f32; 128];
+            let mut right = vec![0.0_f32; 128];
+            let mut channels = [left.as_mut_ptr(), right.as_mut_ptr()];
+            // SAFETY: both channels hold 128 samples.
+            let peak = unsafe { preview_mix(&mut channels, 128, rate) };
+            if block * 128 > rate * 3 / 2 {
+                peak_late = peak_late.max(peak);
+            }
+        }
+        preview_enable(false);
+        assert!(
+            peak_late < 1e-3,
+            "still ringing after the envelope: {peak_late}"
+        );
+    }
+
     #[test]
     fn the_preview_strikes_a_pad_and_reports_a_peak() {
+        let _serial = PREVIEW_TEST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _: Pluck = render(44_100, 0.5, 0.3, 0.6).expect("renders");
         assert_eq!(PADS, 16);
         preview_enable(true);

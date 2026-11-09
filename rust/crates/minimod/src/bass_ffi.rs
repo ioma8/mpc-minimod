@@ -88,7 +88,16 @@ pub extern "C" fn minimod_bass_preview_set_active(active: i32) {
             crate::audio::G_BASS_PREVIEW_PEAK_BITS = 0;
         }
     }
-    // SAFETY: the flag is this module's.
-    unsafe { crate::audio::G_BASS_PREVIEW_ACTIVE = active };
-    bass_preview_enable(active);
+    if active != 0 {
+        // Enable and clear before the audio thread can see `active`, so the
+        // first pad is neither dropped nor mixed into a stale voice.
+        bass_preview_enable(1);
+        bass::preview_reset();
+        // SAFETY: the flag is this module's.
+        unsafe { crate::audio::G_BASS_PREVIEW_ACTIVE = 1 };
+    } else {
+        // SAFETY: the flag is this module's.
+        unsafe { crate::audio::G_BASS_PREVIEW_ACTIVE = 0 };
+        bass_preview_enable(0);
+    }
 }

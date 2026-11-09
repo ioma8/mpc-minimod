@@ -11,7 +11,7 @@ const PT_LOAD: u32 = 1;
 
 /// Two words of every site the mod patches, so a different firmware is refused
 /// instead of hooked at the wrong offsets.
-const FIRMWARE_SITES: [(usize, u32); 37] = [
+const FIRMWARE_SITES: [(usize, u32); 36] = [
     (0x00f5_35c0, 0xd503_233f),
     (0x0114_9880, 0xd503_233f),
     (0x013b_b930, 0xd503_233f),
@@ -48,7 +48,6 @@ const FIRMWARE_SITES: [(usize, u32); 37] = [
     (0x0281_4ec0, 0xd503_233f),
     (0x0282_2260, 0xd503_233f),
     (0x0294_1ff0, 0xd503_245f),
-    (0x03f3_98f0, 0xd503_233f),
 ];
 
 /// One program header, as aarch64 lays it out.
@@ -141,20 +140,6 @@ unsafe extern "C" fn find_main(info: *mut ModuleInfo, _size: usize, out: *mut us
         }
     }
     0
-}
-
-/// Read process memory, as the glue's own reader does.
-///
-/// # Safety
-///
-/// `dst` must be writable for `length` bytes.
-pub unsafe extern "C" fn rd(address: usize, dst: *mut u8, length: usize) -> i32 {
-    if dst.is_null() || length == 0 {
-        return 0;
-    }
-    // SAFETY: the caller promises the buffer.
-    let buffer = unsafe { core::slice::from_raw_parts_mut(dst, length) };
-    i32::from(firmware::read(address, buffer))
 }
 
 /// Whether an address lies inside any mapping.
@@ -332,7 +317,7 @@ unsafe impl Send for Site {}
 
 /// Everything the constructor patches, in the glue's order, with the offsets read
 /// from the glue's own defines.
-static SITES: [Site; 17] = [
+static SITES: [Site; 16] = [
     Site {
         offset: 0x0154_5a50,
         handler: crate::entries::minimod_hook_sixteen_ctor as *const (),
@@ -370,10 +355,6 @@ static SITES: [Site; 17] = [
         handler: crate::ui::minimod_ui_buttons as *const (),
     },
     Site {
-        offset: 0x03f3_98f0,
-        handler: crate::audio::minimod_hook_audio_writer as *const (),
-    },
-    Site {
         offset: 0x0114_9880,
         handler: crate::entries::minimod_hook_repaint as *const (),
     },
@@ -405,8 +386,8 @@ static SITES: [Site; 17] = [
 
 /// Whether the note-on hook was installed, which the preview needs.
 static mut NOTE_ON_OK: bool = false;
-/// Whether the audio writer hook was installed.
-static mut WRITER_OK: bool = false;
+/// Whether the note-off hook was installed.
+static mut NOTE_OFF_OK: bool = false;
 
 /// Keep the displaced function for one site and hand it to whoever needs it.
 ///
@@ -425,21 +406,20 @@ unsafe fn record_site(index: usize, original: usize) -> bool {
                 crate::input::minimod_note_on_original(original);
             }
             4 => crate::input::minimod_surface_original(original),
-            5 => crate::input::minimod_note_off_original(original),
+            5 => {
+                NOTE_OFF_OK = original != 0;
+                crate::input::minimod_note_off_original(original);
+            }
             6 => crate::cc::minimod_hook_cc_original(crate::input::from_address(original)),
             7 => crate::entries::minimod_pitch_original(original),
             8 => crate::ui::minimod_buttons_original(original),
-            9 => {
-                WRITER_OK = original != 0;
-                crate::audio::minimod_audio_writer_original_now(original);
-            }
-            10 => crate::entries::minimod_repaint_original(original),
-            11 => crate::entries::minimod_assign_original(original),
-            12 => crate::hpss_exec::minimod_hpss_ctor_original(original),
-            13 => crate::hpss_exec::minimod_hpss_exec_original(original),
-            14 => crate::entries::minimod_writer_original(original),
-            15 => crate::midi::minimod_midi_note_original(original),
-            16 => crate::autotrim::record_set_control(original),
+            9 => crate::entries::minimod_repaint_original(original),
+            10 => crate::entries::minimod_assign_original(original),
+            11 => crate::hpss_exec::minimod_hpss_ctor_original(original),
+            12 => crate::hpss_exec::minimod_hpss_exec_original(original),
+            13 => crate::entries::minimod_writer_original(original),
+            14 => crate::midi::minimod_midi_note_original(original),
+            15 => crate::autotrim::record_set_control(original),
             _ => return false,
         }
     }
@@ -459,11 +439,10 @@ unsafe fn after_sites() -> bool {
         // SAFETY: sealing is the engine's own call.
         hooks::minimod_seal_hooks();
     }
-    // The bass preview needs the note hooks and the writer, exactly as the C
-    // constructor required.
+    // The bass preview needs the note hooks; it mixes into the output tap.
     // SAFETY: the flags are this module's.
     unsafe {
-        crate::bass_ffi::G_BASS_PREVIEW_AVAILABLE = i32::from(NOTE_ON_OK && WRITER_OK);
+        crate::bass_ffi::G_BASS_PREVIEW_AVAILABLE = i32::from(NOTE_ON_OK && NOTE_OFF_OK);
     }
     touched
 }
@@ -543,7 +522,7 @@ mod tests {
 
     #[test]
     fn every_site_is_word_aligned_and_inside_the_image() {
-        assert_eq!(FIRMWARE_SITES.len(), 37);
+        assert_eq!(FIRMWARE_SITES.len(), 36);
         for (offset, _) in FIRMWARE_SITES {
             assert_eq!(offset % 4, 0, "site {offset:#x} is not aligned");
             assert!(

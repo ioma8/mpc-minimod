@@ -230,6 +230,29 @@ pub unsafe extern "C" fn minimod_overlay_finalize() {
     }
 }
 
+/// A completed job or a running spectral chop used to need a paint of the Sample
+/// page to finish.  Both are polled from the always-running input hooks, so
+/// leaving the page cannot wedge them: finalize cancels before any model call
+/// when the page is gone.
+///
+/// # Safety
+///
+/// The crate's own state and the app's objects.
+pub unsafe fn poll_offpage() {
+    // SAFETY: the callee reads the app's page objects.
+    unsafe { crate::spectral::cancel_if_page_gone() };
+    let screen = crate::jobflow::job_screen();
+    if screen == 0 {
+        return;
+    }
+    let current = paint::screen();
+    let visible = crate::page::minimod_page_visible(crate::firmware::base(), current) != 0;
+    if !visible || current != screen {
+        // SAFETY: finalize guards itself and returns when nothing is done.
+        unsafe { minimod_overlay_finalize() };
+    }
+}
+
 /// The page's paint, with the mod's overlay on top.
 ///
 /// # Safety

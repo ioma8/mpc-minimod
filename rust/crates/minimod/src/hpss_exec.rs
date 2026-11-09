@@ -86,13 +86,15 @@ pub unsafe fn run(
             let old_end = read_u64(settings + RANGE_END);
             match (old_start, old_end) {
                 (Some(old_start), Some(old_end)) => {
-                    let wrote = write_u64(settings + RANGE_START, u64::from(arm.start))
-                        && write_u64(settings + RANGE_END, u64::from(arm.end));
-                    if wrote {
-                        Some((settings, old_start, old_end))
-                    } else {
-                        None
-                    }
+                    // Each field is restored if it was written, even when the
+                    // other write failed.
+                    let start_written = write_u64(settings + RANGE_START, u64::from(arm.start));
+                    let end_written = write_u64(settings + RANGE_END, u64::from(arm.end));
+                    Some((
+                        settings,
+                        start_written.then_some(old_start),
+                        end_written.then_some(old_end),
+                    ))
                 }
                 _ => None,
             }
@@ -104,8 +106,12 @@ pub unsafe fn run(
         outcome.status = unsafe { execute(command) };
     }
     if let Some((settings, old_start, old_end)) = patched {
-        let _ = write_u64(settings + RANGE_START, old_start);
-        let _ = write_u64(settings + RANGE_END, old_end);
+        if let Some(old) = old_start {
+            let _ = write_u64(settings + RANGE_START, old);
+        }
+        if let Some(old) = old_end {
+            let _ = write_u64(settings + RANGE_END, old);
+        }
     }
     if !substitute::active() {
         // Nothing was substituted: the app copied its own range.
@@ -123,6 +129,9 @@ pub unsafe fn run(
         consumed = substitute::position();
     }
     substitute::clear();
+    // A writer callback that already entered the substitution still holds the
+    // buffer: wait for it before the caller frees the rendered audio.
+    substitute::wait_idle(WRITER_TIMEOUT_MS);
     outcome.write_ok = i32::from(consumed == total);
     outcome
 }
@@ -360,10 +369,13 @@ pub unsafe extern "C" fn minimod_hpss_arm(
     end: u32,
     rename: i32,
 ) {
-    // SAFETY: the statics are this module's.
+    // SAFETY: the statics are this module's.  The fields are written first and
+    // `armed` last, with a release store, so a hook that sees the arm sees all
+    // of it.
     unsafe {
-        ARM = Arm {
-            armed: 1,
+        let slot = core::ptr::addr_of_mut!(ARM);
+        slot.write(Arm {
+            armed: 0,
             buffer,
             frames,
             source_frames,
@@ -371,15 +383,40 @@ pub unsafe extern "C" fn minimod_hpss_arm(
             start,
             end,
             rename,
-        };
+        });
         ARM_SOURCE = source;
+        armed_flag(slot).store(1, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// The arm's `armed` field as an atomic.
+///
+/// # Safety
+///
+/// `arm` must point at the static.
+unsafe fn armed_flag<'a>(arm: *mut Arm) -> &'a core::sync::atomic::AtomicI32 {
+    // SAFETY: `armed` is a naturally aligned `i32` inside the static.
+    unsafe { core::sync::atomic::AtomicI32::from_ptr(core::ptr::addr_of_mut!((*arm).armed)) }
+}
+
+/// A snapshot of the arm, taken after an acquire load of its flag.
+fn snapshot() -> (Arm, usize) {
+    // SAFETY: the statics are this module's; the acquire load pairs with the
+    // release store in `minimod_hpss_arm`.
+    unsafe {
+        let slot = core::ptr::addr_of_mut!(ARM);
+        let armed = armed_flag(slot).load(core::sync::atomic::Ordering::Acquire);
+        let mut arm = slot.read();
+        arm.armed = armed;
+        (arm, ARM_SOURCE)
     }
 }
 
 /// Disarm after the app has run the command.
 pub extern "C" fn minimod_hpss_disarm() {
     // SAFETY: the static is this module's.
-    unsafe { ARM.armed = 0 };
+    let flag = unsafe { armed_flag(core::ptr::addr_of_mut!(ARM)) };
+    flag.store(0, core::sync::atomic::Ordering::Release);
 }
 
 /// Whether the writer consumed the whole buffer, for the caller.
@@ -406,8 +443,7 @@ pub unsafe extern "C" fn minimod_hpss_ctor_entry(
     nine: usize,
 ) {
     let destination = i32::try_from(three).unwrap_or(0);
-    // SAFETY: the statics are this module's.
-    let (arm, source) = unsafe { (ARM, ARM_SOURCE) };
+    let (arm, source) = snapshot();
     // SAFETY: the static is this module's.
     let forward = unsafe { *core::ptr::addr_of!(ORIGINAL_CTOR) };
     // SAFETY: the caller's contract.
@@ -435,8 +471,7 @@ pub unsafe extern "C" fn minimod_hpss_ctor_entry(
 ///
 /// The app calls this with its own command.
 pub unsafe extern "C" fn minimod_hpss_exec_entry(command: usize) -> i32 {
-    // SAFETY: the statics are this module's.
-    let mut arm = unsafe { ARM };
+    let (mut arm, _) = snapshot();
     arm.armed = i32::from(arm.armed != 0 && unsafe { minimod_hpss_is_armed(command) } != 0);
     // SAFETY: the static is this module's.
     let execute = unsafe { *core::ptr::addr_of!(ORIGINAL_EXEC) };
@@ -552,10 +587,11 @@ pub unsafe extern "C" fn minimod_extract_run(
             unsafe extern "C" fn(usize),
         >(firmware::base() + 0x0165_80d0);
         handler(screen);
-        minimod_hpss_disarm();
     }
     // The command may run on an executor thread after the handler returns, so
-    // wait for the pad to change before starting the next one.
+    // the arm stays published until the pad changes (the command ran) or the
+    // wait gives up: clearing it earlier made a late command miss its
+    // substitution while still consuming a pad.
     let mut after = before;
     for _ in 0..3000 {
         if after != before {
@@ -564,6 +600,7 @@ pub unsafe extern "C" fn minimod_extract_run(
         std::thread::sleep(core::time::Duration::from_millis(1));
         after = crate::pads::minimod_pads_free_pad(firmware::base(), program);
     }
+    minimod_hpss_disarm();
     let write_ok = if buffer.is_null() {
         1
     } else {
