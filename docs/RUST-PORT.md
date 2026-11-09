@@ -746,3 +746,20 @@ problem; this one measured it in nine restarts.
 
 Next: reproduce with the mask on `40000` alone and a log, and compare
 `minimod_assign_original` against the C constructor's `orig_str_assign = t_sa`.
+
+## The bisect was measured on a sick lab
+
+The mask sweep in the previous entry is **not trustworthy**.  Halfway through it the
+emulator's MIDI port wedged (`Device not found on port 'Control Surface...'`), and the
+app exits on that - so every later "NORUN" was the lab, not the mod.  The `40000`
+result, and the "the label site is the culprit" conclusion drawn from it, have to be
+re-measured.
+
+The reboot that followed exposed two things the lab keeps in `/run` and therefore
+loses: the preload drop-in (`/run/systemd/system/ac50.service.d/mpclab-preload.conf`)
+and the preload directory itself.  Both are restored; the certified build is deployed
+and the Live Looper suite passes again.
+
+Lesson for the next sweep: check `pidof` *and* `/proc/<pid>/maps` for `minimod.so`
+before believing a negative result, and restart the lab if the MIDI port message
+appears.
