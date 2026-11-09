@@ -401,7 +401,7 @@ static SITES: [Site; 16] = [
     },
     Site {
         offset: 0x0159_f2f0,
-        handler: glue_buttons as *const (),
+        handler: crate::ui::minimod_ui_buttons as *const (),
     },
     Site {
         offset: 0x03f3_98f0,
@@ -435,7 +435,6 @@ static SITES: [Site; 16] = [
 
 // The handlers that are still C.
 unsafe extern "C" {
-    fn ui_buttons(event: usize);
     fn minimod_glue_set_originals(originals: *const Originals);
     fn minimod_glue_finished(touched: i32);
 }
@@ -458,12 +457,6 @@ pub struct Originals {
     pub hpss_ctor: usize,
     /// The slice command's execute method.
     pub hpss_exec: usize,
-}
-
-/// The button entry, as the glue installs it.
-unsafe extern "C" fn glue_buttons(event: usize) {
-    // SAFETY: the app calls this with its own event.
-    unsafe { ui_buttons(event) };
 }
 
 /// How many sites the glue has to patch.
@@ -540,7 +533,7 @@ pub unsafe extern "C" fn minimod_after_sites(originals: *const Originals) -> i32
     // SAFETY: the caller's contract.
     unsafe {
         minimod_glue_set_originals(originals);
-        drop(crate::paint::minimod_paint_install_self());
+        let _ = crate::paint::minimod_paint_install_self();
     }
     // SAFETY: the engine's own queries.
     let touched = unsafe { minimod_hooks_touched() != 0 };

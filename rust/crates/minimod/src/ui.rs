@@ -659,6 +659,20 @@ pub unsafe extern "C" fn minimod_ui_hooks_self() -> Hooks {
     }
 }
 
+/// The button entry the app calls: build the table and run the ladder.
+///
+/// # Safety
+///
+/// `event` is the page's own event.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_ui_buttons(event: usize) {
+    // SAFETY: the table is the crate's and the event the app's.
+    unsafe {
+        let table = minimod_ui_hooks_self();
+        minimod_hook_buttons(event, core::ptr::from_ref(&table));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::State;

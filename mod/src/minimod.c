@@ -388,10 +388,6 @@ struct rng {
 
 /* The engine that maps the pages, displaces the prologue and patches the site
  * lives in Rust; this is only the C name the constructor calls. */
-static void *install_hook(uintptr_t site, void *hook)
-{
-    return minimod_install_hook(base, site, (uintptr_t)hook);
-}
 
 /* ---------------------------------------------------------- MIDI hook (lazy)
  * Outside 16 Levels the stock app must see its own dispatcher code, not a
@@ -400,10 +396,6 @@ static void *install_hook(uintptr_t site, void *hook)
  * it turns off or the Sample page goes away. */
 static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
 
-static void midi_hook_set(int on)
-{
-    minimod_midi_set(on);
-}
 
 /* -------------------------------------------------------- 16 Levels state */
 /* 16 LEVELS mode lives in `g_midi.levels`, tracked from button 0x28. */
@@ -418,16 +410,8 @@ static void *g_sixteen; /* the live 16 Levels screen, if seen             */
  * on the Sample page is the 16 LEVELS button (code 0x28), which is a toggle.
  * The mode also ends when the Sample page stops being shown, so the tracked
  * flag is dropped whenever the screen is not visible. */
-static int levels_active(void)
-{
-    return minimod_levels_active();
-}
 
 
-static int bump_octave(int d)
-{
-    return minimod_levels_bump(d);
-}
 
 
 
@@ -670,10 +654,6 @@ extern struct minimod_spectral_state g_spectral;
 /* The machine presses CHOP through the app's own button handler; the event it
  * replays is the one that started the run, which lives in the Rust state. */
 
-static void spectral_tick(void)
-{
-    minimod_spectral_frame(base, (uintptr_t)g_screen);
-}
 
 
 static int hpss_extract_hook(uintptr_t screen, uintptr_t state, const float *buf,
@@ -705,18 +685,6 @@ static const struct minimod_glue_hooks g_job_hooks = {
 };
 
 
-static void hpss_open(void)
-{
-    if (!sample_page_visible() || g_hpss_busy)
-        return;
-    g_hpss_menu = 1;
-    g_menu.selection = 0;
-    g_bass_edit = 0;
-    bass_preview_set_active(0);
-    g_hpss_data_down = 0;
-    hpss_set_status("");
-    hpss_repaint();
-}
 
 static void hpss_close(void)
 {
@@ -779,16 +747,7 @@ static int32_t ui_busy(void) { return g_hpss_busy ? 1 : 0; }
 static int32_t ui_spectral(void) { return g_spectral.active == 1 ? 1 : 0; }
 
 
-static struct minimod_ui_hooks hooks(void)
-{
-    return minimod_ui_hooks_self();
-}
 
-void ui_buttons(void *event)
-{
-    struct minimod_ui_hooks table = hooks();
-    minimod_hook_buttons(event, &table);
-}
 
 /* The Rust entry points ask for this once per event. */
 struct minimod_input_context minimod_glue_context(void);
@@ -862,15 +821,6 @@ static int g_lat_extra;      /* MINIMOD_LOOP_LAT_EXTRA: calibration trim */
 
 /* Hand-edited latency trim survives a restart. */
 
-static void looper_cfg_load(void)
-{
-    int trim = 0, master = -1;
-    if (!minimod_cfg_load(&trim, &master))
-        return;
-    g_lat_extra = trim;
-    if (master >= 0)
-        looper_set_master((unsigned)master);
-}
 
 static void looper_cfg_save(void)
 {
