@@ -543,6 +543,32 @@ pub fn from_address<T: Copy>(address: usize) -> Option<T> {
     Some(unsafe { core::mem::transmute_copy::<usize, T>(&address) })
 }
 
+/// Release the pads the mod is still holding down.
+///
+/// # Safety
+///
+/// The crate's own state and the app's own note-off.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_ui_release_held() {
+    // SAFETY: the state is this module's and the hook is the crate's.
+    unsafe {
+        minimod_input_release_held(core::ptr::addr_of_mut!(STATE), Some(minimod_hook_note_off));
+    }
+}
+
+/// The first word of the event the page sent, which is the pointer to its button.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_read_pointer(event: usize) -> usize {
+    if event == 0 {
+        return 0;
+    }
+    let mut raw = [0_u8; size_of::<usize>()];
+    if !crate::firmware::read(event, &mut raw) {
+        return 0;
+    }
+    usize::from_ne_bytes(raw)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{MENU_ITEMS, State};

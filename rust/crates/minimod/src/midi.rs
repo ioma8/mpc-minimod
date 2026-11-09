@@ -413,6 +413,25 @@ pub extern "C" fn minimod_midi_set(on: i32) {
     unsafe { g_midi.on = i32::from(on != 0) };
 }
 
+/// Toggle 16 Levels and keep the dispatcher in step.
+///
+/// # Safety
+///
+/// Reads the crate's own state.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_toggle_levels() {
+    // SAFETY: the record is this module's.
+    unsafe {
+        g_midi.levels = i32::from(g_midi.levels == 0);
+        let pad = crate::input::last_pad();
+        if g_midi.levels != 0 && (0..16).contains(&pad) {
+            g_midi.pad_level_byte = u32::try_from(pad).unwrap_or(0);
+        }
+        let active = minimod_levels_active();
+        minimod_midi_set(active);
+    }
+}
+
 /// Whether 16 Levels is showing and its page predicate agrees.
 ///
 /// # Safety

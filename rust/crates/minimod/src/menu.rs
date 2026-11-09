@@ -482,6 +482,77 @@ pub unsafe extern "C" fn minimod_menu_bass_page() {
     });
 }
 
+/// Open the effects menu, if the page is showing and nothing is running.
+///
+/// # Safety
+///
+/// The crate's own state and the app's repaint.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_menu_open_self() {
+    if crate::ui::minimod_screen_visible() == 0 || state().busy != 0 {
+        return;
+    }
+    let menu = state_mut();
+    menu.open = 1;
+    menu.selection = 0;
+    menu.bass_edit = 0;
+    menu.data_down = 0;
+    crate::bass_ffi::minimod_bass_preview_set_active(0);
+    crate::status::set_status("");
+    // SAFETY: the app's own repaint.
+    unsafe { crate::ui::minimod_repaint_screen() };
+}
+
+/// Close the menu, unless a job is running.
+///
+/// # Safety
+///
+/// The crate's own state and the app's repaint.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_menu_close_self() {
+    if state().busy != 0 {
+        return;
+    }
+    let menu = state_mut();
+    menu.open = 0;
+    menu.bass_edit = 0;
+    menu.data_down = 0;
+    crate::bass_ffi::minimod_bass_preview_set_active(0);
+    // SAFETY: the app's own repaint.
+    unsafe { crate::ui::minimod_repaint_screen() };
+}
+
+/// Rename the soft key, which the app draws itself.
+///
+/// # Safety
+///
+/// The text is ignored; the rename happens on the paint.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_filter_text(_text: *const u8) {
+    if paint::screen() != 0 {
+        // SAFETY: the app's own repaint.
+        unsafe { crate::ui::minimod_repaint_screen() };
+    }
+}
+
+/// Whether the menu is open.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_menu_is_open() -> i32 {
+    i32::from(state().open != 0)
+}
+
+/// Whether the bass control page is showing.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_menu_is_bass_edit() -> i32 {
+    i32::from(state().bass_edit != 0)
+}
+
+/// Whether a job is running.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_menu_is_busy() -> i32 {
+    i32::from(state().busy != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Hooks, ROW_HPSS, State, close, open};

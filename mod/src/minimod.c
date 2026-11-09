@@ -77,6 +77,8 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+struct minimod_ui_hooks minimod_ui_hooks_self(void);
+
 void minimod_menu_activate_self(void);
 
 int32_t minimod_job_start_self(int32_t action, uintptr_t base, uintptr_t screen);
@@ -855,32 +857,15 @@ static void ui_menu_open_hook(void)
     hpss_open();
 }
 
-static const struct minimod_ui_hooks g_ui_hooks = {
-    .forward = ui_forward,
-    .toggle_levels = ui_toggle_levels,
-    .menu_open = ui_menu_open_hook,
-    .menu_close = hpss_close,
-    .menu_activate = hpss_activate,
-    .filter_text = set_filter_text,
-    .midi_sync = midi_hook_set,
-    .levels_active = levels_active,
-    .page_visible = ui_page_visible,
-    .restore_chop = hpss_restore_chop,
-    .repaint = hpss_repaint,
-    .clear_marks = ui_clear_marks,
-    .bump_octave = ui_bump_octave,
-    .run_autotrim = do_autotrim,
-    .release_held = ui_release_held,
-    .read_pointer = ui_read_pointer,
-    .menu_open_state = ui_menu_open,
-    .bass_edit_state = ui_bass_edit,
-    .busy_state = ui_busy,
-    .spectral_state = ui_spectral,
-};
+static struct minimod_ui_hooks hooks(void)
+{
+    return minimod_ui_hooks_self();
+}
 
 void ui_buttons(void *event)
 {
-    minimod_hook_buttons(event, &g_ui_hooks);
+    struct minimod_ui_hooks table = hooks();
+    minimod_hook_buttons(event, &table);
 }
 
 /* The Rust entry points ask for this once per event. */

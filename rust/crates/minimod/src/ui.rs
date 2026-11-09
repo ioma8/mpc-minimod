@@ -597,6 +597,68 @@ pub extern "C" fn minimod_screen_chop_mode() -> i32 {
     page::minimod_page_chop_mode(firmware::base(), paint::screen())
 }
 
+/// Forward the event to the app's own handler.
+///
+/// # Safety
+///
+/// `event` is the page's own event.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_ui_forward(event: usize) {
+    // SAFETY: the pointer is the app's.
+    if let Some(original) = original_buttons() {
+        unsafe { original(event) };
+    }
+}
+
+/// Drop the trim edges the mod drew.
+///
+/// # Safety
+///
+/// The app's own repaint is used.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_ui_clear_marks() {
+    // SAFETY: the app's own repaint.
+    unsafe { minimod_repaint_screen() };
+}
+
+/// Whether a spectral chop is running.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_ui_spectral_state() -> i32 {
+    // SAFETY: the record is the spectral module's.
+    i32::from(unsafe { crate::spectral::g_spectral.active } == 1)
+}
+
+/// The button hooks, all in Rust.
+///
+/// # Safety
+///
+/// Every entry is a crate function of the right shape.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_ui_hooks_self() -> Hooks {
+    Hooks {
+        forward: Some(minimod_ui_forward),
+        toggle_levels: Some(crate::midi::minimod_toggle_levels),
+        menu_open: Some(crate::menu::minimod_menu_open_self),
+        menu_close: Some(crate::menu::minimod_menu_close_self),
+        menu_activate: Some(crate::jobflow::minimod_menu_activate_self),
+        filter_text: Some(crate::menu::minimod_filter_text),
+        midi_sync: Some(crate::midi::minimod_midi_set),
+        levels_active: Some(crate::midi::minimod_levels_active),
+        page_visible: Some(minimod_screen_visible),
+        menu_open_state: Some(crate::menu::minimod_menu_is_open),
+        bass_edit_state: Some(crate::menu::minimod_menu_is_bass_edit),
+        busy_state: Some(crate::menu::minimod_menu_is_busy),
+        spectral_state: Some(minimod_ui_spectral_state),
+        restore_chop: Some(minimod_restore_chop),
+        repaint: Some(minimod_repaint_screen),
+        clear_marks: Some(minimod_ui_clear_marks),
+        bump_octave: Some(crate::levels::minimod_levels_bump),
+        run_autotrim: Some(crate::autotrim::minimod_autotrim_cycle),
+        release_held: Some(crate::input::minimod_ui_release_held),
+        read_pointer: Some(crate::input::minimod_read_pointer),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::State;
