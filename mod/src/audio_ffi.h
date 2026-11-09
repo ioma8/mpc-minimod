@@ -1,16 +1,20 @@
 #ifndef MINIMOD_AUDIO_FFI_H
 #define MINIMOD_AUDIO_FFI_H
 
+#include <stddef.h>
 #include <stdint.h>
 
-/* Stream geometry, implemented in Rust (rust/crates/minimod/src/audio.rs). */
+/* The audio hooks and their counters, implemented in Rust
+ * (rust/crates/minimod/src/audio.rs). */
 
-int minimod_audio_channels(uintptr_t self, int input_side);
+void minimod_hook_audio_writer(void *self, void *input, size_t frames, int32_t offset);
+void *minimod_pump_thread(void *arg);
+void minimod_audio_writer_original(void *original);
 
-typedef void (*minimod_audio_writer_fn)(void *self, void *channels, size_t frames,
-                                        int offset);
-int minimod_audio_writer(uintptr_t self, float **input, size_t frames, int offset,
-                         minimod_audio_writer_fn orig, int preview,
-                         float *peak_out);
+extern uint32_t g_audio_out_calls;
+extern uint32_t g_bass_preview_blocks;
+extern uint32_t g_bass_preview_peak_bits;
+extern int32_t g_bass_preview_active;
+extern uintptr_t g_paint_comp;
 
 #endif

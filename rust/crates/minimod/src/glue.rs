@@ -257,6 +257,13 @@ pub extern "C" fn minimod_paint_original() -> Option<unsafe extern "C" fn(usize,
     unsafe { *core::ptr::addr_of!(ORIGINAL_PAINT) }
 }
 
+/// The repaint the mod displaced, for the pump.
+#[must_use]
+pub fn original_repaint() -> Option<unsafe extern "C" fn(usize, u64, u64)> {
+    // SAFETY: written once at install.
+    unsafe { *core::ptr::addr_of!(crate::entries::ORIGINAL_REPAINT) }
+}
+
 /// The glue's mapping test, from the crate's side.
 ///
 /// # Safety

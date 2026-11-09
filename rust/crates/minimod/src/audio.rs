@@ -174,6 +174,112 @@ pub unsafe extern "C" fn minimod_audio_writer(
     }
 }
 
+/// How many times the app asked for audio, for the device tests.
+#[unsafe(no_mangle)]
+pub static mut g_audio_out_calls: u32 = 0;
+
+/// How many blocks the bass preview produced.
+#[unsafe(no_mangle)]
+pub static mut g_bass_preview_blocks: u32 = 0;
+
+/// The loudest block the preview produced, as bits.
+#[unsafe(no_mangle)]
+pub static mut g_bass_preview_peak_bits: u32 = 0;
+
+/// Whether the bass preview is audible.
+#[unsafe(no_mangle)]
+pub static mut g_bass_preview_active: i32 = 0;
+
+/// The component the page last painted.
+#[unsafe(no_mangle)]
+pub static mut g_paint_comp: usize = 0;
+
+/// The app's own audio writer.
+static mut ORIGINAL_WRITER: Option<Writer> = None;
+
+/// Record the displaced writer, for the glue.
+///
+/// # Safety
+///
+/// The constructor calls this once, before any audio can arrive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_audio_writer_original(original: Option<Writer>) {
+    // SAFETY: the caller's contract.
+    unsafe { ORIGINAL_WRITER = original };
+}
+
+/// The audio writer: count the call, and track the preview's peak.
+///
+/// # Safety
+///
+/// The app calls this with its own buffers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hook_audio_writer(
+    self_address: usize,
+    input: *mut *mut f32,
+    frames: usize,
+    offset: i32,
+) {
+    // SAFETY: the counters are statics in this module.
+    unsafe { core::ptr::addr_of_mut!(g_audio_out_calls).write_volatile(g_audio_out_calls + 1) };
+    // SAFETY: see above.
+    let preview = i32::from(unsafe { g_bass_preview_active } != 0);
+    let mut peak = 0.0_f32;
+    // SAFETY: the original is the app's own writer.
+    let original = unsafe { *core::ptr::addr_of!(ORIGINAL_WRITER) };
+    // SAFETY: the caller passed the app's buffers.
+    let wrote = unsafe {
+        minimod_audio_writer(
+            self_address,
+            input,
+            frames,
+            offset,
+            original,
+            preview,
+            core::ptr::from_mut(&mut peak),
+        )
+    };
+    if wrote == 0 || peak <= 0.0 {
+        return;
+    }
+    // SAFETY: the counters are statics in this module.
+    unsafe {
+        core::ptr::addr_of_mut!(g_bass_preview_blocks).write_volatile(g_bass_preview_blocks + 1);
+        if peak > f32::from_bits(g_bass_preview_peak_bits) {
+            core::ptr::addr_of_mut!(g_bass_preview_peak_bits).write_volatile(peak.to_bits());
+        }
+    }
+}
+
+/// The looper's repaint pump: a steady tick while the view is open.
+///
+/// # Safety
+///
+/// Called as a thread entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_pump_thread(_arg: usize) -> usize {
+    loop {
+        std::thread::sleep(core::time::Duration::from_millis(60));
+        if crate::looper_ffi::looper_is_open() == 0 {
+            continue;
+        }
+        // SAFETY: the paint statics are the glue's.
+        let painted = unsafe { g_paint_comp };
+        let component = if painted != 0 {
+            painted
+        } else {
+            crate::paint::screen()
+        };
+        if component != 0 {
+            // SAFETY: the original is the app's own repaint.
+            if let Some(original) = crate::glue::original_repaint() {
+                // SAFETY: the app's own call.
+                unsafe { original(component, 0, (2000_u64 << 32) | 0x7d0) };
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CHANNEL_LIMIT, INPUT_ALT, INPUT_CHANNELS, OUTPUT_ALT, OUTPUT_CHANNELS, channels};

@@ -20,7 +20,8 @@ static mut ORIGINAL_WRITER: Option<crate::substitute::Writer> = None;
 static mut ORIGINAL_CTOR: SixteenCtor = None;
 static mut ORIGINAL_PROC: SixteenProc = None;
 static mut ORIGINAL_PITCH: PitchOff = None;
-static mut ORIGINAL_REPAINT: Repaint = None;
+/// The repaint the mod displaced.
+pub static mut ORIGINAL_REPAINT: Repaint = None;
 static mut ORIGINAL_STR_ASSIGN: StrAssign = None;
 
 /// Where the page stores the soft key's label.

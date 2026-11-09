@@ -92,6 +92,14 @@
 #include "props_ffi.h"
 
 #include "ui_ffi.h"
+#include "audio_ffi.h"
+
+/* The audio counters and the painted component live in Rust. */
+extern uint32_t g_audio_out_calls;
+extern uint32_t g_bass_preview_blocks;
+extern uint32_t g_bass_preview_peak_bits;
+extern int32_t g_bass_preview_active;
+extern uintptr_t g_paint_comp;
 
 /* The memory window is Rust now; the call sites did not change. */
 int rd(uintptr_t address, void *dst, size_t length);
@@ -372,7 +380,6 @@ static void (*orig_buttons)(void *);
 static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
 static void (*orig_bass_audio_writer)(void *, void *, size_t, int);
 static volatile unsigned g_audio_in_calls;
-static volatile unsigned g_audio_out_calls;
 /* The Sample page (0x2468 bytes) captured from SamplePage_Ctor; it owns the
  * Start/End widgets and is what must be repainted after a property change. */
 typedef void (*pagector_fn)(void *, void *, void *, void *, void *, void *,
@@ -430,7 +437,6 @@ static void (*orig_screen_paint)(void *, void *);
 /* Write the property values immediately before the app paints, so the paint
  * reads the trim we computed. */
 
-static void *g_paint_comp;
 static void *g_paint_gfx;
 
 /* ---------------------------------------------------------- HPSS bridge */
@@ -471,9 +477,6 @@ static uint64_t g_hpss_name[6];
 static int g_hpss_names_ready;
 static float g_bass_knob[3] = {0.52f, 0.18f, 0.56f};
 static volatile unsigned g_bass_preview_notes;
-static volatile unsigned g_bass_preview_blocks;
-static volatile uint32_t g_bass_preview_peak_bits;
-static volatile int g_bass_preview_active;
 static volatile int g_bass_preview_available;
 static uint32_t bass_float_bits(float value)
 {
@@ -856,23 +859,6 @@ static volatile int g_out_s32;      /* output stream is S32_LE */
 static volatile int g_in_s32;       /* input stream is S32_LE */
 static unsigned stream_geometry(void *pcm, unsigned *channels, int *s32);
 
-static void *looper_pump_thread(void *arg)
-{
-    (void)arg;
-    for (;;) {
-        struct timespec ts = {0, 60 * 1000 * 1000};
-        nanosleep(&ts, 0);
-        if (!looper_is_open())
-            continue;
-        /* The counters move in bursts inside each audio callback, so a single
-         * sample depends on the phase. Average a short burst of samples that
-         * spans several callbacks to get the level itself. */
-        void *comp = g_paint_comp ? g_paint_comp : g_screen;
-        if (orig_repaint && comp && looper_is_open()) /* do not paint into a view being closed */
-            orig_repaint(comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
-    }
-    return 0;
-}
 
 static void looper_pump(void)
 {
@@ -880,7 +866,7 @@ static void looper_pump(void)
         return;
     __atomic_store_n(&g_looper_pump_started, 1, __ATOMIC_RELEASE);
     pthread_t th;
-    if (pthread_create(&th, 0, looper_pump_thread, 0) == 0)
+    if (pthread_create(&th, 0, (void *(*)(void *))minimod_pump_thread, 0) == 0)
         pthread_detach(th);
 }
 
@@ -1276,23 +1262,7 @@ static void looper_cfg_save(void)
     minimod_cfg_save(g_lat_extra, looper_master());
 }
 
-static void audio_writer(void *self, void *input, size_t frames, int offset)
-{
-    __atomic_add_fetch(&g_audio_out_calls, 1, __ATOMIC_RELAXED);
-    int preview = __atomic_load_n(&g_bass_preview_active, __ATOMIC_ACQUIRE) ? 1 : 0;
-    float peak = 0.f;
-    if (minimod_audio_writer((uintptr_t)self, (float **)input, frames, offset,
-                             (minimod_audio_writer_fn)orig_bass_audio_writer,
-                             preview, &peak) &&
-        peak > 0.f) {
-        __atomic_add_fetch(&g_bass_preview_blocks, 1, __ATOMIC_RELAXED);
-        uint32_t previous_bits = __atomic_load_n(&g_bass_preview_peak_bits, __ATOMIC_RELAXED);
-        float previous;
-        memcpy(&previous, &previous_bits, sizeof previous);
-        if (peak > previous)
-            __atomic_store_n(&g_bass_preview_peak_bits, bass_float_bits(peak), __ATOMIC_RELAXED);
-    }
-}
+void audio_writer(void *self, void *input, size_t frames, int offset);
 
 
 
@@ -1505,7 +1475,7 @@ __attribute__((unused)) static void draw_text(void *g, const char *s, int x, int
 
 static void screen_paint(void *p, void *g)
 {
-    g_paint_comp = p;
+    g_paint_comp = (uintptr_t)p;
     g_paint_gfx = g;
     struct minimod_overlay_hooks hooks = {0};
     hooks.original = (void (*)(void *, void *))orig_screen_paint;
@@ -1698,7 +1668,7 @@ __attribute__((constructor)) static void load(void)
      * 16 Levels the stock code must stay untouched. */
     mlog("minimod: MIDI hook deferred until 16 LEVELS\n");
     void *t_btn = (hook_mask & 16) ? install_hook(base + A_BUTTONS, (void *)ui_buttons) : 0;
-    void *t_bass_audio = install_hook(base + A_BASS_AUDIO_WRITER, (void *)audio_writer);
+    void *t_bass_audio = install_hook(base + A_BASS_AUDIO_WRITER, (void *)minimod_hook_audio_writer);
     void *t_rp = install_hook(base + A_REPAINT, (void *)minimod_hook_repaint);
     if (t_rp)
         orig_repaint = (void (*)(void *, uint64_t, uint64_t))t_rp;
@@ -1715,6 +1685,7 @@ __attribute__((constructor)) static void load(void)
     if (t_bass_audio) {
         orig_bass_audio_writer = (void (*)(void *, void *, size_t, int))t_bass_audio;
     }
+    minimod_audio_writer_original((void *)t_bass_audio);
     g_bass_preview_available = t_note && t_off && t_bass_audio;
     if (t_sa)
         orig_str_assign = (void (*)(void *, const char *))t_sa;
