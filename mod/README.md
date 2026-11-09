@@ -137,21 +137,19 @@ MPCLAB_PORT_OFFSET=100 python3 lab.py preload /path/to/mod/build/minimod.so
 MPCLAB_PORT_OFFSET=100 python3 lab.py ssh 'tail -f /run/minimod.log'
 ```
 
-Release builds run the fixed hook set and honour **no** environment switches
-except `MINIMOD_TRIM_DB` (the AutoTrim threshold, described under Controls). A
-`-DMINIMOD_DEBUG=1` build additionally reads `MINIMOD_HOOKS` (bitmask: 2 proc,
-16 buttons, 32 note_on, 64 cs, 128 note_off), `MINIMOD_PROBE=1`, and the
-investigation switches `MINIMOD_VIS`, `MINIMOD_BTNLOG`,
-`MINIMOD_DUMP`, `MINIMOD_SNAPDIFF`, `MINIMOD_ENV` and `MINIMOD_SAFE`. The
-release build ignores all of those.
-Chromatic MIDI is handled by the native hook in the default release build; it
-has no separate thread or environment switch.
+Release builds run the fixed hook set and honour **no** environment switch except
+`MINIMOD_TRIM_DB` (the AutoTrim threshold, described under Controls). The C-era
+`MINIMOD_HOOKS` bitmask and the investigation switches (`MINIMOD_PROBE`,
+`MINIMOD_VIS`, `MINIMOD_BTNLOG`, `MINIMOD_DUMP`, `MINIMOD_SNAPDIFF`,
+`MINIMOD_ENV`, `MINIMOD_SAFE`) went with the C. Chromatic MIDI is handled by the
+native hook in the default release build; it has no separate thread or
+environment switch.
 
 ## How it hooks
 
 The library finds the app base with `dl_iterate_phdr`, maps a relay page and a
 trampoline page within ±128 MB, and overwrites the first instruction of each
-target with `B slot`. The slot jumps to the C hook; the hook calls a trampoline
+target with `B slot`. The slot jumps to the Rust hook; the hook calls a trampoline
 that replays the function's prologue (copied only up to the first pc-relative
 instruction) and branches into the body, so the original runs on its own frame
 and returns to the hook. Both pages are `mprotect`ed executable — a missing

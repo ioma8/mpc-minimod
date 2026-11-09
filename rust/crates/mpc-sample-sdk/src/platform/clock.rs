@@ -1,6 +1,6 @@
 //! The monotonic clock the glue schedules on.
 //!
-//! Every deadline in the mod (toast expiry, spectral marker timeouts, settings
+//! Every deadline in the mod (toast expiry, marker timeouts, settings
 //! throttling) is a `CLOCK_MONOTONIC` millisecond count, so it never jumps when
 //! the wall clock is adjusted.
 

@@ -12,12 +12,19 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 name = "minimod"
 version = "0.1.0"
 dependencies = [
- "libc",
  "minimod-dsp",
+ "mpc-sample-sdk",
 ]
 
 [[package]]
 name = "minimod-dsp"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "mpc-sample-sdk"
 version = "0.1.0"
 dependencies = [
  "libc",

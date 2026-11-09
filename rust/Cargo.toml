@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/dsp", "crates/minimod"]
+members = ["crates/dsp", "crates/mpc-sample-sdk", "crates/minimod"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ repository = "https://github.com/jakubkolcar/sample-converter"
 
 [workspace.dependencies]
 minimod-dsp = { path = "crates/dsp" }
+mpc-sample-sdk = { path = "crates/mpc-sample-sdk" }
 libc = "0.2"
 
 [workspace.lints.rust]
@@ -23,6 +24,9 @@ unreachable_pub = "deny"
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
+# Every unsafe block and impl states its contract; the firmware boundary is the
+# only place unsafe is allowed at all, so the comments are part of the review.
+undocumented_unsafe_blocks = "deny"
 # PCM conversion between the device's S32 frames and the f32 DSP samples is
 # inherently lossy: the firmware hands us 32-bit integers and every buffer
 # inside is f32.  Those conversions are confined to `dsp::sample`, whose

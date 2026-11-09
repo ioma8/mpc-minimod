@@ -1,23 +1,23 @@
 //! The keys the user is holding and what the page shows because of it.
 //!
-//! The button entry point keeps this state; the glue reads the same fields
-//! through the module's accessor, so its own readers did not have to change.
+//! The button entry point keeps this state; the feature reads it through the
+//! module's accessors.
 
+use crate::backend::looper;
 use crate::buttons::{self, Action, Context, Held, Modals, OctaveKeys, Screens};
-use crate::firmware;
-use crate::looper_ffi;
 use crate::page;
 use crate::paint;
+use crate::paint::show_toast;
+use mpc_sample_sdk::state::Global;
+use mpc_sample_sdk::{ButtonEvent, ButtonFlow};
 
+/// The app's CHOP key.
+pub const CHOP_KEY: u8 = 0x4b;
 /// A full press, as the app reports it.
 const PRESSED: u32 = 0x7f;
 /// PLUS.
 const KEY_PLUS: u32 = 0x36;
-/// A pad press.
-const KEY_PAD: u32 = 0x06;
-
 /// The state the button entry point keeps.
-#[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct State {
     /// SHIFT, tracked while the looper owns the pads.
@@ -73,65 +73,53 @@ impl Default for State {
     }
 }
 
-/// What the glue has to supply.
-#[repr(C)]
+/// The feature callbacks the button ladder uses.
 #[derive(Clone, Copy)]
 pub struct Hooks {
-    /// The app's own button handler.
-    pub forward: Option<unsafe extern "C" fn(usize)>,
     /// Toggle 16 Levels and keep the MIDI dispatcher in step.
-    pub toggle_levels: Option<unsafe extern "C" fn()>,
+    pub toggle_levels: Option<fn()>,
     /// Open the effects menu.
-    pub menu_open: Option<unsafe extern "C" fn()>,
+    pub menu_open: Option<fn()>,
     /// Close it.
-    pub menu_close: Option<unsafe extern "C" fn()>,
+    pub menu_close: Option<fn()>,
     /// Run the selected row.
-    pub menu_activate: Option<unsafe extern "C" fn()>,
+    pub menu_activate: Option<fn()>,
     /// Rename the soft key.
-    pub filter_text: Option<unsafe extern "C" fn(*const u8)>,
+    pub filter_text: Option<fn()>,
     /// Keep the MIDI dispatcher in step with the visible mode.
-    pub midi_sync: Option<unsafe extern "C" fn(i32)>,
+    pub midi_sync: Option<fn(i32)>,
     /// Whether the 16 Levels screen is up.
-    pub levels_active: Option<unsafe extern "C" fn() -> i32>,
+    pub levels_active: Option<fn() -> i32>,
     /// Whether the Sample page is visible.
-    pub page_visible: Option<unsafe extern "C" fn() -> i32>,
+    pub page_visible: Option<fn() -> bool>,
     /// Whether the effects menu is open.
-    pub menu_open_state: Option<unsafe extern "C" fn() -> i32>,
+    pub menu_open_state: Option<fn() -> bool>,
     /// Whether the bass control page is open.
-    pub bass_edit_state: Option<unsafe extern "C" fn() -> i32>,
+    pub bass_edit_state: Option<fn() -> bool>,
     /// Whether a job is running.
-    pub busy_state: Option<unsafe extern "C" fn() -> i32>,
+    pub busy_state: Option<fn() -> bool>,
     /// Whether a spectral chop is running.
-    pub spectral_state: Option<unsafe extern "C" fn() -> i32>,
+    pub spectral_state: Option<fn() -> bool>,
     /// Put the chop mode back.
-    pub restore_chop: Option<unsafe extern "C" fn()>,
+    pub restore_chop: Option<fn(&State)>,
     /// Redraw the menu.
-    pub repaint: Option<unsafe extern "C" fn()>,
+    pub repaint: Option<fn()>,
     /// Drop the trim edges the mod drew.
-    pub clear_marks: Option<unsafe extern "C" fn()>,
-    /// Move the 16 Levels row.
-    pub bump_octave: Option<unsafe extern "C" fn(i32) -> i32>,
-    /// Run one press of the trim cycle.
-    pub run_autotrim: Option<unsafe extern "C" fn()>,
+    pub clear_marks: Option<fn()>,
     /// Release every pad the app may think is held.
-    pub release_held: Option<unsafe extern "C" fn()>,
-    /// Read a pointer from the app's event.
-    pub read_pointer: Option<unsafe extern "C" fn(usize) -> usize>,
+    pub release_held: Option<fn()>,
 }
 
 /// One button event, handled.
-///
-/// # Safety
-///
-/// `event` must be the app's event object and `hooks` its own functions.
-pub unsafe fn press(state: &mut State, event: usize, hooks: Hooks, data_down: &mut i32) -> i32 {
-    let code = read_byte(event, 8);
-    let down = read_byte(event, 9);
+pub fn press(state: &mut State, event: &ButtonEvent, hooks: Hooks, data_down: &mut i32) -> i32 {
+    state.shift = i32::from(event.shift);
+    state.erase = i32::from(event.erase);
+    let code = event.code;
+    let down = event.value;
     let pressed = down == PRESSED;
-    let levels = ask(hooks.levels_active);
+    let levels = hooks.levels_active.map_or(0, |callback| callback());
     if let Some(sync) = hooks.midi_sync {
-        // SAFETY: the glue's own callback.
-        unsafe { sync(levels) };
+        sync(levels);
     }
     let context = Context {
         code,
@@ -145,13 +133,13 @@ pub unsafe fn press(state: &mut State, event: usize, hooks: Hooks, data_down: &m
         },
         screens: Screens {
             modals: Modals {
-                menu: ask(hooks.menu_open_state) != 0,
-                spectral: ask(hooks.spectral_state) != 0,
+                menu: hooks.menu_open_state.is_some_and(|callback| callback()),
+                spectral: hooks.spectral_state.is_some_and(|callback| callback()),
             },
-            looper: looper_ffi::looper_is_open() != 0,
+            looper: looper::looper_is_open() != 0,
             levels: levels != 0,
         },
-        page_visible: ask(hooks.page_visible) != 0,
+        page_visible: hooks.page_visible.is_some_and(|callback| callback()),
     };
     let action = buttons::dispatch(context);
     if context.screens.looper {
@@ -159,23 +147,21 @@ pub unsafe fn press(state: &mut State, event: usize, hooks: Hooks, data_down: &m
             Action::Shift(on) => state.shift = i32::from(on),
             Action::Erase(on) => state.erase = i32::from(on),
             Action::Looper => {
-                let was = looper_ffi::looper_is_open() != 0;
-                let _ = looper_ffi::looper_button(
+                let was = looper::looper_is_open() != 0;
+                let _ = looper::looper_button(
                     code,
                     i32::try_from(down).unwrap_or(0),
                     state.shift,
                     state.erase,
                 );
-                if was && looper_ffi::looper_is_open() == 0 {
+                if was && looper::looper_is_open() == 0 {
                     state.shift = 0;
                     state.erase = 0;
                     if let Some(release) = hooks.release_held {
-                        // SAFETY: the glue's own callback.
-                        unsafe { release() };
+                        release();
                     }
                     if let Some(repaint) = hooks.repaint {
-                        // SAFETY: the glue's own callback.
-                        unsafe { repaint() };
+                        repaint();
                     }
                 }
             }
@@ -185,27 +171,22 @@ pub unsafe fn press(state: &mut State, event: usize, hooks: Hooks, data_down: &m
     }
     // Remember the event: the chop mode is put back by replaying it, and the
     // encoder's surface is reachable through the context it points at.
-    // SAFETY: the app's event is a struct with the context pointer first.
-    unsafe { remember(state, event, hooks) };
-    // SAFETY: the hooks are the glue's callbacks.
-    unsafe {
-        apply(
-            state,
-            Event {
-                address: event,
-                code,
-                pressed,
-                action,
-                context: &context,
-                hooks,
-                data_down,
-            },
-        );
-    }
+    remember(state, event.bytes);
+    apply(
+        state,
+        Event {
+            code,
+            pressed,
+            action,
+            context: &context,
+            hooks,
+            data_down,
+        },
+    );
     kind(action)
 }
 
-/// The action as a number, for the glue's log.
+/// The action as a number, for the caller's log.
 const fn kind(action: Action) -> i32 {
     match action {
         Action::Forward => 0,
@@ -226,7 +207,6 @@ const fn kind(action: Action) -> i32 {
 
 /// One event, as the decision saw it.
 struct Event<'a> {
-    address: usize,
     code: u32,
     pressed: bool,
     action: Action,
@@ -236,9 +216,8 @@ struct Event<'a> {
 }
 
 /// Apply one decided action.
-unsafe fn apply(state: &mut State, event: Event<'_>) {
+fn apply(state: &mut State, event: Event<'_>) {
     let Event {
-        address,
         code,
         pressed,
         action,
@@ -263,24 +242,21 @@ unsafe fn apply(state: &mut State, event: Event<'_>) {
                 state.trim_step = 0;
                 state.b3_down = 0;
                 if let Some(restore) = hooks.restore_chop {
-                    // SAFETY: the glue's own callback, which decides for itself
-                    // whether a restore is due.
-                    unsafe { restore() };
+                    restore(state);
                 }
             }
             if let Some(text) = hooks.filter_text {
-                let label = if pressed { c"AutoTrim" } else { c"Filter" };
-                // SAFETY: the string is static.
-                unsafe { text(label.as_ptr().cast()) };
+                text();
             }
-            forward(address, hooks);
         }
         Action::Autotrim => {
             if pressed && state.b3_down == 0 {
-                if let Some(run) = hooks.run_autotrim {
-                    // SAFETY: the glue's own callback.
-                    unsafe { run() };
-                }
+                crate::autotrim::run(crate::autotrim::Context {
+                    surface: crate::control::surface(),
+                    control: crate::control::control(),
+                    step: state.trim_step,
+                    last_pad: crate::input::last_pad(),
+                });
                 state.trim_step = (state.trim_step + 1) % 4;
             }
             state.b3_down = i32::from(pressed);
@@ -291,19 +267,18 @@ unsafe fn apply(state: &mut State, event: Event<'_>) {
             } else {
                 state.minus_held = i32::from(pressed);
             }
-            if let Some(bump) = hooks.bump_octave {
-                // SAFETY: the glue's own callback.
-                unsafe { bump(steps) };
+            if let Some((next, text)) = crate::levels::bump(state.octave, steps) {
+                state.octave = next;
+                show_toast(&text);
             }
         }
         Action::ResetPitch => {
             state.octave = 0;
-            paint::show_toast("Pitch reset");
+            show_toast("Pitch reset");
         }
         Action::ToggleLevels => {
             if let Some(toggle) = hooks.toggle_levels {
-                // SAFETY: the glue's own callback owns the mode and the hook.
-                unsafe { toggle() };
+                toggle();
             }
         }
         Action::Forward => {
@@ -311,18 +286,9 @@ unsafe fn apply(state: &mut State, event: Event<'_>) {
                 state.mark_v0 = -1.0;
                 state.mark_v1 = -1.0;
                 if let Some(clear) = hooks.clear_marks {
-                    // SAFETY: the glue's own callback.
-                    unsafe { clear() };
+                    clear();
                 }
             }
-            // SAFETY: the app's event holds a pointer first.
-            if code == KEY_PAD
-                && pressed
-                && let Some(object) = unsafe { read_object(address, hooks) }
-            {
-                state.last_press_obj = object;
-            }
-            forward(address, hooks);
         }
         Action::Erase(_) | Action::Looper => {}
     }
@@ -336,321 +302,176 @@ fn menu(action: Action, hooks: Hooks) {
         _ => hooks.menu_activate,
     };
     if let Some(callback) = callback {
-        // SAFETY: the glue's own callback.
-        unsafe { callback() };
+        callback();
     }
 }
 
 /// Store the event and derive what the encoder hook needs from it.
-unsafe fn remember(state: &mut State, event: usize, hooks: Hooks) {
-    if event == 0 {
-        return;
-    }
-    let mut buffer = [0_u8; 16];
-    // SAFETY: the app's event is at least this long.
-    unsafe { read_replay(&mut buffer, event) };
-    state.event = buffer;
+fn remember(state: &mut State, bytes: [u8; 16]) {
+    state.event = bytes;
     state.event_valid = 1;
-    if let Some(read) = hooks.read_pointer {
-        // SAFETY: the glue's own reader.
-        let context = unsafe { read(event) };
-        if context != 0 {
-            // SAFETY: see above.
-            let surface = unsafe { read(context + 0x10) };
-            if surface != 0 {
-                crate::input::set_data_target(surface + 0x2da8);
-            }
-        }
-    }
-}
-
-/// The object the app's event points at, when it has one.
-unsafe fn read_object(address: usize, hooks: Hooks) -> Option<usize> {
-    let read = hooks.read_pointer?;
-    // SAFETY: the app's event holds a pointer first.
-    let object = unsafe { read(address) };
-    (object != 0).then_some(object)
-}
-
-/// Forward the event to the app.
-fn forward(event: usize, hooks: Hooks) {
-    if let Some(forward) = hooks.forward {
-        // SAFETY: the glue's own callback takes the app's own event.
-        unsafe { forward(event) };
-    }
-}
-
-/// Ask the glue a yes-or-no question.
-fn ask(callback: Option<unsafe extern "C" fn() -> i32>) -> i32 {
-    match callback {
-        // SAFETY: the glue's own callback.
-        Some(callback) => unsafe { callback() },
-        None => 0,
-    }
-}
-
-/// Read one byte of the event.
-fn read_byte(event: usize, offset: usize) -> u32 {
-    if event == 0 {
-        return 0;
-    }
-    // SAFETY: the app's event is a struct with the key at these offsets.
-    u32::from(unsafe { *(event as *const u8).add(offset) })
-}
-
-/// Copy the event's first sixteen bytes, for the chop restore.
-unsafe fn read_replay(buffer: &mut [u8; 16], event: usize) {
-    // SAFETY: the app's event is at least sixteen bytes.
-    unsafe { core::ptr::copy_nonoverlapping(event as *const u8, buffer.as_mut_ptr(), 16) };
 }
 
 /// The 16 Levels octave shift.
 #[must_use]
 pub fn octave() -> i32 {
-    // SAFETY: only the UI thread writes it.
-    unsafe { (*core::ptr::addr_of!(STATE)).octave }
+    state().octave
 }
 
 /// Move the 16 Levels octave shift.
 pub fn set_octave(value: i32) {
-    // SAFETY: only the UI thread writes it.
-    unsafe { (*core::ptr::addr_of_mut!(STATE)).octave = value };
+    state_mut().octave = value;
 }
 
 /// Which press of the trim cycle this is.
 #[must_use]
 pub fn trim_step() -> i32 {
-    // SAFETY: only the UI thread writes it.
-    unsafe { (*core::ptr::addr_of!(STATE)).trim_step }
+    state().trim_step
 }
 
 /// Whether SHIFT is held.
 #[must_use]
 pub fn shift() -> i32 {
-    // SAFETY: only the UI thread writes it.
-    unsafe { (*core::ptr::addr_of!(STATE)).shift }
+    state().shift
 }
 
 /// Whether ERASE is held.
 #[must_use]
 pub fn erase() -> i32 {
-    // SAFETY: only the UI thread writes it.
-    unsafe { (*core::ptr::addr_of!(STATE)).erase }
+    state().erase
 }
 
 /// The state itself.
-static mut STATE: State = State::new();
+static STATE: Global<State> = Global::new(State::new());
+
+/// The state, for the feature code.
+#[must_use]
+pub fn state() -> &'static State {
+    STATE.get()
+}
+
+/// The state, to change.
+pub fn state_mut() -> &'static mut State {
+    STATE.get_mut()
+}
+
+/// The trim marks the page draws.
+#[must_use]
+pub fn marks() -> [f32; 2] {
+    let state = state();
+    [state.mark_v0, state.mark_v1]
+}
 
 /// The menu's encoder-down flag, which the button hook tracks.
-static mut DATA_DOWN: i32 = 0;
-
-/// The UI state, for the glue.
-pub extern "C" fn minimod_ui_state() -> *mut State {
-    core::ptr::addr_of_mut!(STATE)
-}
-
-/// One button event, as the app's own hook.
-///
-/// # Safety
-///
-/// The app calls this with its own event object, and `hooks` must be the glue's
-/// callbacks.
-pub unsafe extern "C" fn minimod_hook_buttons(event: usize, hooks: *const Hooks) -> i32 {
-    if hooks.is_null() {
-        return -1;
-    }
-    // SAFETY: the caller's contract.
-    let hooks = unsafe { *hooks };
-    // SAFETY: the state is a static in this module.
-    let state = unsafe { &mut *core::ptr::addr_of_mut!(STATE) };
-    // SAFETY: the flag is a static in this module.
-    let data_down = unsafe { &mut *core::ptr::addr_of_mut!(DATA_DOWN) };
-    // SAFETY: the hooks are the glue's callbacks.
-    unsafe { press(state, event, hooks, data_down) }
-}
-
-/// The app's own button dispatch, recorded at install.
-static mut ORIGINAL_BUTTONS: Option<unsafe extern "C" fn(usize)> = None;
+static DATA_DOWN: Global<i32> = Global::new(0);
 
 /// The event the page last sent, copied.
 #[must_use]
 pub fn event_copy() -> [u8; 16] {
-    // SAFETY: only the UI thread writes it.
-    unsafe { (*core::ptr::addr_of!(STATE)).event }
-}
-
-/// The app's own button dispatch.
-#[must_use]
-pub fn original_buttons() -> Option<unsafe extern "C" fn(usize)> {
-    // SAFETY: written once at install.
-    unsafe { *core::ptr::addr_of!(ORIGINAL_BUTTONS) }
+    state().event
 }
 
 /// The chop mode the page was in before the mod armed an extraction.
-static mut CHOP_BEFORE: i32 = 0;
-
-/// Record the app's button dispatch.
-///
-/// # Safety
-///
-/// Called once at install, before any button arrives.
-pub unsafe extern "C" fn minimod_buttons_original(original: usize) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        ORIGINAL_BUTTONS = crate::input::from_address(original);
-    }
-}
+static CHOP_BEFORE: Global<i32> = Global::new(0);
 
 /// The chop mode before the last extraction.
 #[must_use]
 pub fn chop_before() -> i32 {
-    // SAFETY: only the UI thread reads it.
-    unsafe { CHOP_BEFORE }
+    *CHOP_BEFORE.get()
 }
 
 /// Put the chop mode back by replaying a CHOP press, when that is safe.
-///
-/// # Safety
-///
-/// Reads the app's page objects.
-pub unsafe extern "C" fn minimod_restore_chop() {
-    let visible = page::minimod_page_visible(firmware::base(), paint::screen());
-    // SAFETY: the state is this module's.
-    let (valid, original, shifted) = unsafe {
-        (
-            (*core::ptr::addr_of!(STATE)).event_valid,
-            *core::ptr::addr_of!(ORIGINAL_BUTTONS),
-            (*core::ptr::addr_of!(STATE)).shift,
-        )
-    };
-    let Some(original) = original else {
-        crate::menu::state_mut().restore_pending = 1;
-        return;
-    };
-    if valid == 0 || shifted != 0 || visible == 0 {
+pub fn minimod_restore_chop(state: &State) {
+    let visible = page::visible(paint::screen());
+    let (valid, shifted) = (state.event_valid, state.shift);
+    if valid == 0 || shifted != 0 || !visible {
         crate::menu::state_mut().restore_pending = 1;
         return;
     }
-    let mode = page::minimod_page_chop_mode(firmware::base(), paint::screen());
-    if mode == chop_before() {
+    let mode = page::chop_mode(paint::screen());
+    if i32::from(mode) == chop_before() {
         return;
     }
-    // Replay the CHOP key on the event the page last sent.
-    // SAFETY: the buffer is this module's and belongs to the page.
-    let mut event = unsafe { (*core::ptr::addr_of!(STATE)).event };
-    event[8] = 0x4b;
-    event[9] = 0x7f;
-    // SAFETY: the app's own dispatch takes this event.
-    unsafe { original(event.as_ptr() as usize) };
-    event[9] = 0x00;
-    // SAFETY: see above.
-    unsafe { original(event.as_ptr() as usize) };
+    if !mpc_sample_sdk::sites::replay_button(&state.event, CHOP_KEY) {
+        crate::menu::state_mut().restore_pending = 1;
+    }
 }
 
 /// Repaint the component the page last painted.
-///
-/// # Safety
-///
-/// The app's own repaint is used.
-pub unsafe extern "C" fn minimod_repaint_screen() {
-    let painted = crate::audio::painted();
-    let component = if painted != 0 {
-        painted
-    } else {
-        paint::screen()
-    };
-    // SAFETY: the original is the app's own repaint.
-    if let Some(original) = crate::glue::original_repaint()
-        && component != 0
-    {
-        // SAFETY: the app's own call.
-        unsafe { original(component, 0, (2000_u64 << 32) | 0x7d0) };
-    }
+pub fn minimod_repaint_screen() {
+    mpc_sample_sdk::draw::repaint_painted();
 }
 
 /// Whether the Sample page is showing.
 #[must_use]
-pub extern "C" fn minimod_screen_visible() -> i32 {
-    page::minimod_page_visible(firmware::base(), paint::screen())
+pub fn screen_visible() -> bool {
+    page::visible(paint::screen())
 }
 
 /// Whether the page is in chop mode.
 #[must_use]
-pub extern "C" fn minimod_screen_chop_mode() -> i32 {
-    page::minimod_page_chop_mode(firmware::base(), paint::screen())
-}
-
-/// Forward the event to the app's own handler.
-///
-/// # Safety
-///
-/// `event` is the page's own event.
-pub unsafe extern "C" fn minimod_ui_forward(event: usize) {
-    // SAFETY: the pointer is the app's.
-    if let Some(original) = original_buttons() {
-        unsafe { original(event) };
-    }
+pub fn screen_chop_mode() -> bool {
+    page::chop_mode(paint::screen())
 }
 
 /// Drop the trim edges the mod drew.
-///
-/// # Safety
-///
-/// The app's own repaint is used.
-pub unsafe extern "C" fn minimod_ui_clear_marks() {
-    // SAFETY: the app's own repaint.
-    unsafe { minimod_repaint_screen() };
+pub fn clear_marks() {
+    minimod_repaint_screen();
 }
 
 /// Whether a spectral chop is running.
 #[must_use]
-pub extern "C" fn minimod_ui_spectral_state() -> i32 {
-    // SAFETY: the record is the spectral module's.
-    i32::from(unsafe { crate::spectral::G_SPECTRAL.active } == 1)
+pub fn spectral_state() -> bool {
+    crate::spectral::G_SPECTRAL.get().active == 1
 }
 
-/// The button hooks, all in Rust.
-///
-/// # Safety
-///
-/// Every entry is a crate function of the right shape.
-pub unsafe extern "C" fn minimod_ui_hooks_self() -> Hooks {
+/// The feature callbacks the button ladder uses.
+pub fn hooks() -> Hooks {
     Hooks {
-        forward: Some(minimod_ui_forward),
-        toggle_levels: Some(crate::midi::minimod_toggle_levels),
-        menu_open: Some(crate::menu::minimod_menu_open_self),
-        menu_close: Some(crate::menu::minimod_menu_close_self),
-        menu_activate: Some(crate::jobflow::minimod_menu_activate_self),
-        filter_text: Some(crate::menu::minimod_filter_text),
-        midi_sync: Some(crate::midi::minimod_midi_set),
-        levels_active: Some(crate::midi::minimod_levels_active),
-        page_visible: Some(minimod_screen_visible),
-        menu_open_state: Some(crate::menu::minimod_menu_is_open),
-        bass_edit_state: Some(crate::menu::minimod_menu_is_bass_edit),
-        busy_state: Some(crate::menu::minimod_menu_is_busy),
-        spectral_state: Some(minimod_ui_spectral_state),
+        toggle_levels: Some(crate::midi::toggle_levels),
+        menu_open: Some(crate::menu::open_menu),
+        menu_close: Some(crate::menu::close_menu),
+        menu_activate: Some(crate::jobflow::menu_activate),
+        filter_text: Some(crate::menu::filter_text),
+        midi_sync: Some(crate::midi::set_on),
+        levels_active: Some(crate::midi::levels_active),
+        page_visible: Some(screen_visible),
+        menu_open_state: Some(crate::menu::is_open),
+        bass_edit_state: Some(crate::menu::is_bass_edit),
+        busy_state: Some(crate::menu::is_busy),
+        spectral_state: Some(spectral_state),
         restore_chop: Some(minimod_restore_chop),
         repaint: Some(minimod_repaint_screen),
-        clear_marks: Some(minimod_ui_clear_marks),
-        bump_octave: Some(crate::levels::minimod_levels_bump),
-        run_autotrim: Some(crate::autotrim::minimod_autotrim_cycle),
-        release_held: Some(crate::input::minimod_ui_release_held),
-        read_pointer: Some(crate::input::minimod_read_pointer),
+        clear_marks: Some(clear_marks),
+        release_held: Some(crate::input::release_held),
     }
 }
 
-/// The button entry the app calls: build the table and run the ladder.
-///
-/// # Safety
-///
-/// `event` is the page's own event.
-pub unsafe extern "C" fn minimod_ui_buttons(event: usize) {
-    // SAFETY: the callee reads the app's page objects.
-    unsafe { crate::overlay::poll_offpage() };
-    // SAFETY: the table is the crate's and the event the app's.
-    unsafe {
-        let table = minimod_ui_hooks_self();
-        minimod_hook_buttons(event, core::ptr::from_ref(&table));
+/// The button entry: run the ladder and tell the SDK whether to forward.
+pub fn button(event: ButtonEvent) -> ButtonFlow {
+    let hooks = hooks();
+    let state = state_mut();
+    let data_down = DATA_DOWN.get_mut();
+    if event.surface != 0 {
+        crate::input::set_data_target(mpc_sample_sdk::event::data_target(event.surface));
+    }
+    let kind = press(state, &event, hooks, data_down);
+    // SHIFT is the app's own key: the mod tracks it, but the app must still see
+    // the press and release.
+    if kind == 0 || kind == 2 {
+        ButtonFlow::Forward
+    } else {
+        ButtonFlow::Consume
+    }
+}
+
+/// The soft key's label: rename `Filter` to `AutoTrim` while SHIFT is held.
+#[must_use]
+pub fn label(label: &core::ffi::CStr) -> Option<&'static core::ffi::CStr> {
+    if label.to_bytes() == b"Filter" && shift() != 0 {
+        Some(c"AutoTrim")
+    } else {
+        None
     }
 }
 

@@ -5,33 +5,28 @@
 //! the bass page, and everything else is either swallowed (a modal screen owns
 //! the controls) or handed to the app.
 
-use crate::bass_ffi::bass_preview_set_params;
+use crate::backend::bass::preview_set_params;
+use crate::backend::looper::{self, looper_notice};
 use crate::clock;
-use crate::looper_ffi::{self, looper_notice};
 use crate::routing;
+use mpc_sample_sdk::state::Global;
+use mpc_sample_sdk::{CcEvent, CcFlow};
 
 /// How often the settings file may be written, in milliseconds.
 const SAVE_EVERY_MS: i64 = 5_000;
 
-/// The encoder's control number; only it reaches the app past a modal screen.
-const DATA: u32 = 0x64;
-
-/// What the glue has to supply.
-#[repr(C)]
+/// The feature callbacks the routing uses.
 #[derive(Clone, Copy)]
 pub struct Hooks {
-    /// The app's own control-change handler.
-    pub original: Option<unsafe extern "C" fn(usize, u32, f32, f32)>,
     /// Redraw the menu.
-    pub repaint: Option<unsafe extern "C" fn()>,
+    pub repaint: Option<fn()>,
     /// Write the settings file.
-    pub save: Option<unsafe extern "C" fn()>,
+    pub save: Option<fn()>,
     /// Show a one-line notice.
-    pub notice: Option<unsafe extern "C" fn(*const u8)>,
+    pub notice: Option<fn(&str)>,
 }
 
 /// The state the routing reads.
-#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Context {
     /// Whether the mod is replaying its own command.
@@ -56,8 +51,7 @@ pub struct Context {
     pub knobs: [f32; 3],
 }
 
-/// What happened, for the glue to apply.
-#[repr(C)]
+/// What the controller should apply.
 #[derive(Clone, Copy, Default)]
 pub struct Outcome {
     /// 1 when the event must not reach the app.
@@ -73,15 +67,11 @@ pub struct Outcome {
 }
 
 /// When the settings were last written.
-static mut SAVED_AT: i64 = 0;
+static SAVED_AT: Global<i64> = Global::new(0);
 
 /// Handle one control-change event.
-///
-/// # Safety
-///
-/// `hooks` must be the glue's callbacks.
 #[must_use]
-pub unsafe fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
+pub fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
     let mut outcome = Outcome {
         consumed: 0,
         trim_frames: context.trim_frames,
@@ -89,75 +79,72 @@ pub unsafe fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
         knobs: context.knobs,
         knobs_changed: 0,
     };
-    let route = routing::minimod_cc_route(
-        context.replaying,
-        control,
-        context.value,
-        context.range,
-        context.looper_open,
-        context.menu_open,
-        context.bass_edit,
-        context.busy,
-        context.spectral_active,
-        context.trim_frames,
-    );
-    match route.kind {
+    let ladder = routing::Context {
+        replaying: context.replaying != 0,
+        control: u16::try_from(control).unwrap_or(0xffff),
+        value: context.value,
+        range: context.range,
+        screens: routing::Screens {
+            looper: context.looper_open != 0,
+            menu: context.menu_open != 0,
+            bass_edit: context.bass_edit != 0,
+        },
+        jobs: routing::Jobs {
+            busy: context.busy != 0,
+            spectral: context.spectral_active != 0,
+        },
+        trim_frames: context.trim_frames,
+    };
+    routing::set_trim(context.trim_frames);
+    match routing::route(ladder) {
         // The master volume drives the loops, then the app's own mix.
-        1 => {
-            looper_ffi::looper_set_master(context.value);
+        routing::Route::Master => {
+            looper::looper_set_master(context.value);
             save_throttled(hooks);
+            // A modal screen still swallows the event after the master update;
+            // the old fallback did this for every non-DATA control.
+            if context.menu_open != 0 || context.spectral_active != 0 {
+                outcome.consumed = 1;
+            }
         }
         // The latency trim moves one millisecond per step.
-        2 => {
-            outcome.trim_frames = route.value;
-            outcome.trim_changed = i32::from(route.value != context.trim_frames);
+        routing::Route::Trim(frames) => {
+            outcome.trim_frames = frames;
+            outcome.trim_changed = i32::from(frames != context.trim_frames);
             save_throttled(hooks);
-            // SAFETY: the glue's own callback.
             if let Some(notice) = hooks.notice {
-                let millis = route.value / 44;
+                let millis = frames / 44;
                 let line = if millis >= 0 {
                     format!("TRIM +{millis} ms")
                 } else {
                     format!("TRIM {millis} ms")
                 };
-                let mut text = line.into_bytes();
-                text.push(0);
-                // SAFETY: the text lives for the call and is NUL-terminated.
-                unsafe { notice(text.as_ptr()) };
+                notice(&line);
             }
             outcome.consumed = 1;
             return outcome;
         }
         // The bass control page owns the three knobs.
-        3 => {
-            let index = usize::try_from(route.value).unwrap_or(0).min(2);
+        routing::Route::Bass(index, amount) => {
+            let index = index.min(2);
             let mut knobs = context.knobs;
-            knobs[index] = route.amount;
+            knobs[index] = amount;
             outcome.knobs = knobs;
             outcome.knobs_changed = 1;
-            bass_preview_set_params(knobs[0], knobs[1], knobs[2]);
+            preview_set_params(knobs[0], knobs[1], knobs[2]);
             if let Some(repaint) = hooks.repaint {
-                // SAFETY: the glue's own callback.
-                unsafe { repaint() };
+                repaint();
             }
             outcome.consumed = 1;
             return outcome;
         }
         // A modal screen keeps the app away from the sample.
-        4 => {
+        routing::Route::Consume => {
             outcome.consumed = 1;
             return outcome;
         }
-        _ => {}
-    }
-    // Only DATA reaches the app while a modal screen owns the controls; the knobs
-    // must not edit the sample behind it.
-    if context.replaying == 0
-        && (context.menu_open != 0 || context.spectral_active != 0)
-        && control != DATA
-    {
-        outcome.consumed = 1;
-        return outcome;
+        // Nothing for the mod.
+        routing::Route::Pass => {}
     }
     outcome
 }
@@ -165,37 +152,31 @@ pub unsafe fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
 /// Write the settings, at most once every few seconds.
 fn save_throttled(hooks: Hooks) {
     let now = clock::now_ms();
-    // SAFETY: only the UI thread calls this.
-    let saved = unsafe { *core::ptr::addr_of!(SAVED_AT) };
+    let saved = *SAVED_AT.get();
     if now <= saved + SAVE_EVERY_MS {
         return;
     }
-    // SAFETY: see above.
-    unsafe { *core::ptr::addr_of_mut!(SAVED_AT) = now };
+    *SAVED_AT.get_mut() = now;
     if let Some(save) = hooks.save {
-        // SAFETY: the glue's own callback.
-        unsafe { save() };
+        save();
     }
 }
 
-// The glue owns the screens, the key flags and the trim value; it builds the
+// The feature owns the screens, the key flags and the trim value; it builds the
 // context and applies what comes back.
 /// What the routing needs to know about the mod's screens and trim, right now.
 fn context() -> Context {
     let menu = crate::menu::state();
-    // SAFETY: plain words, written by the UI thread.
-    let (spectral, trim, knobs) = unsafe {
-        (
-            (*core::ptr::addr_of!(crate::spectral::G_SPECTRAL)).active,
-            crate::glue::g_lat_extra,
-            *core::ptr::addr_of!(crate::menu::g_bass_knob),
-        )
-    };
+    let (spectral, trim, knobs) = (
+        crate::spectral::G_SPECTRAL.get().active,
+        i32::try_from(mpc_sample_sdk::audio::extra_latency()).unwrap_or(0),
+        crate::menu::bass_knobs(),
+    );
     Context {
         replaying: 0,
         value: 0,
         range: 0.0,
-        looper_open: looper_ffi::looper_is_open(),
+        looper_open: looper::looper_is_open(),
         menu_open: menu.open,
         bass_edit: menu.bass_edit,
         busy: menu.busy,
@@ -206,72 +187,35 @@ fn context() -> Context {
 }
 
 /// Write the latency trim and the master level to the settings file.
-unsafe extern "C" fn save() {
-    // SAFETY: plain word, written by the UI thread.
-    let trim = unsafe { crate::glue::g_lat_extra };
-    crate::cfg_ffi::minimod_cfg_save(trim, looper_ffi::looper_master());
+fn save() {
+    // plain word, written by the UI thread.
+    let trim = i32::try_from(mpc_sample_sdk::audio::extra_latency()).unwrap_or(0);
+    crate::settings::save(trim, looper::looper_master());
 }
 
-/// The app's own control-change handler, recorded at install time.
-static mut ORIGINAL: Option<unsafe extern "C" fn(usize, u32, f32, f32)> = None;
-
-/// Record the displaced handler, for the glue.
-pub extern "C" fn minimod_hook_cc_original(
-    original: Option<unsafe extern "C" fn(usize, u32, f32, f32)>,
-) {
-    // SAFETY: the constructor calls this once, before any event can arrive.
-    unsafe { ORIGINAL = original };
-}
-
-/// A control change, as the app's own hook.
-///
-/// # Safety
-///
-/// The app calls this with its own event pointer.
-pub unsafe extern "C" fn minimod_hook_cc(event: usize, raw: u32, low: f32, range: f32) {
+/// A control change: run the routing ladder and tell the SDK whether to forward.
+pub fn control(event: CcEvent) -> CcFlow {
     let mut context = context();
-    // The value and the range belong to the event, not to the glue.
-    context.value = raw;
-    context.range = range;
-    let control = if event == 0 {
-        0xffff
-    } else {
-        // SAFETY: the app's event is a struct whose control byte is at 8.
-        u32::from(unsafe { *(event as *const u8).add(8) })
-    };
+    context.value = event.value;
+    context.range = event.range;
     let hooks = Hooks {
-        original: None,
         repaint: Some(crate::ui::minimod_repaint_screen),
         save: Some(save),
-        notice: Some(notice_c),
+        notice: Some(looper_notice),
     };
-    // SAFETY: the hooks are the glue's callbacks.
-    let outcome = unsafe { handle(context, control, hooks) };
+    let outcome = handle(context, event.control, hooks);
     if outcome.trim_changed != 0 {
-        // SAFETY: the glue owns the value.
-        unsafe { crate::glue::g_lat_extra = outcome.trim_frames };
+        mpc_sample_sdk::audio::set_extra_latency(outcome.trim_frames);
     }
     if outcome.knobs_changed != 0 {
-        // SAFETY: the knobs are the crate's own.
-        unsafe {
-            crate::menu::g_bass_knob = outcome.knobs;
-            bass_preview_set_params(outcome.knobs[0], outcome.knobs[1], outcome.knobs[2]);
-        }
+        crate::menu::set_bass_knobs(outcome.knobs);
+        preview_set_params(outcome.knobs[0], outcome.knobs[1], outcome.knobs[2]);
     }
     if outcome.consumed != 0 {
-        return;
+        CcFlow::Consume
+    } else {
+        CcFlow::Forward
     }
-    // SAFETY: the original is the app's own handler.
-    if let Some(original) = unsafe { *core::ptr::addr_of!(ORIGINAL) } {
-        // SAFETY: the caller passed the app's event.
-        unsafe { original(event, raw, low, range) };
-    }
-}
-
-/// Say something about the looper, in the shape the hooks want.
-unsafe extern "C" fn notice_c(text: *const u8) {
-    // SAFETY: the caller promises a NUL-terminated string or null.
-    unsafe { looper_notice(text.cast()) };
 }
 
 #[cfg(test)]
@@ -295,7 +239,6 @@ mod tests {
 
     fn hooks() -> Hooks {
         Hooks {
-            original: None,
             repaint: None,
             save: None,
             notice: None,
@@ -304,8 +247,8 @@ mod tests {
 
     #[test]
     fn an_ordinary_knob_reaches_the_app() {
-        // SAFETY: no callbacks are set, so nothing is invoked.
-        let outcome = unsafe { handle(context(), 0x20, hooks()) };
+        // no callbacks are set, so nothing is invoked.
+        let outcome = handle(context(), 0x20, hooks());
         assert_eq!(outcome.consumed, 0);
     }
 
@@ -315,11 +258,11 @@ mod tests {
             menu_open: 1,
             ..context()
         };
-        // SAFETY: no callbacks are set.
-        let outcome = unsafe { handle(modal, 0x20, hooks()) };
+        // no callbacks are set.
+        let outcome = handle(modal, 0x20, hooks());
         assert_eq!(outcome.consumed, 1);
-        // SAFETY: no callbacks are set.
-        let data = unsafe { handle(modal, 0x64, hooks()) };
+        // no callbacks are set.
+        let data = handle(modal, 0x64, hooks());
         assert_eq!(data.consumed, 0);
     }
 }

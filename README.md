@@ -78,10 +78,14 @@ cd mod && ./build.sh && ./pack.sh
 
 That writes `mod/build/minimod.zip` — the same package as the release.
 
-The mod is being rewritten in Rust, one validated module at a time; the live
-looper already runs the Rust engine. `rust/check.sh` runs formatting, clippy
-(warnings denied), the host tests and the aarch64 build. Status, the proof
-method and the findings: [`docs/RUST-PORT.md`](docs/RUST-PORT.md).
+The mod is Rust throughout: `rust/crates/mpc-sample-sdk` is the universal SDK
+(firmware image, hooks, input/audio/MIDI, drawing, typed platform objects),
+`rust/crates/minimod` is the feature code built only on that SDK, and
+`rust/crates/dsp` is the host-testable audio DSP.  The preload library is a
+`cdylib` — no C or C++ is compiled. `rust/check.sh` runs formatting, strict clippy (all +
+pedantic + cargo, warnings denied), a rustdoc build with warnings denied, the
+host tests including the golden DSP fixtures, and the aarch64 cross build. Layout, lint policy and the proof method:
+[`docs/RUST-PORT.md`](docs/RUST-PORT.md).
 Release description format and the complete feature overview are in
 [`RELEASE-NOTES.md`](RELEASE-NOTES.md).
 

@@ -3,7 +3,7 @@
 //! The app sends one event per press and release.  The mod either swallows the
 //! event, changes its own state, or hands it back to the app.  The decision is a
 //! pure function of the event and the current state; the caller applies the
-//! result, because the state itself belongs to the glue.
+//! result, because the state itself belongs to the caller.
 
 /// Key codes the mod cares about.
 pub const KEY_SHIFT: u32 = 0x31;
@@ -165,15 +165,15 @@ const fn encoder(context: Context, press: bool) -> Action {
     if context.screens.modals.spectral {
         return Action::Consume;
     }
-    if press && context.screens.modals.menu {
-        return Action::MenuActivate;
-    }
     if press && context.held.shift && context.page_visible {
         return if context.screens.modals.menu {
             Action::MenuClose
         } else {
             Action::MenuOpen
         };
+    }
+    if press && context.screens.modals.menu {
+        return Action::MenuActivate;
     }
     if context.screens.modals.menu {
         return Action::MenuEncoder;
@@ -235,6 +235,24 @@ mod tests {
             ..base()
         };
         assert_eq!(dispatch(context), Action::MenuOpen);
+    }
+
+    #[test]
+    fn shift_and_the_encoder_close_an_open_menu_without_activating_a_row() {
+        let context = Context {
+            code: KEY_DATA,
+            down: PRESSED,
+            held: Held { shift: true },
+            screens: Screens {
+                modals: Modals {
+                    menu: true,
+                    ..Modals::default()
+                },
+                ..Screens::default()
+            },
+            ..base()
+        };
+        assert_eq!(dispatch(context), Action::MenuClose);
     }
 
     #[test]

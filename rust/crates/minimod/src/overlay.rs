@@ -1,158 +1,12 @@
 //! What the mod paints on top of the Sample page.
 //!
-//! The page owns the screen: the mod hooks its paint, lets it draw, and then
-//! adds its own overlays - the toast, the trim marks, the looper view, the
-//! effects menu and the `AutoTrim` soft key.  It also uses this safe point on the
-//! UI thread to run the work that must not run inside a button dispatch.
+//! The SDK lets the app draw first and then calls this; the overlay adds the
+//! toast, the trim marks, the looper view, the effects menu and the `AutoTrim`
+//! soft key.  The paint is also the safe point on the UI thread where a
+//! finished job and the spectral chop advance.
 
 use crate::paint;
-
-/// The Sample page's vtable, as an offset from the image base.
-const SCREEN_VTABLE: usize = 0x6e2_12a0;
-
-/// What the glue has to supply.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Hooks {
-    /// The app's own paint.
-    pub original: Option<unsafe extern "C" fn(usize, usize)>,
-    /// Replay the queued knob command.
-    pub commit_trim: Option<unsafe extern "C" fn()>,
-    /// Advance the spectral chop.
-    pub spectral_tick: Option<unsafe extern "C" fn()>,
-    /// Finish a render that the worker completed; it guards itself.
-    pub finalize: Option<unsafe extern "C" fn()>,
-    /// Put the chop mode back.
-    pub restore_chop: Option<unsafe extern "C" fn()>,
-    /// Re-read the device rings.
-    pub looper_pump: Option<unsafe extern "C" fn()>,
-    /// Draw the effects menu.
-    pub menu_draw: Option<unsafe extern "C" fn(usize)>,
-}
-
-/// The glue's flags this hook may clear.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct Flags {
-    /// A knob command is queued.
-    pub pending_cc: i32,
-    /// A chop restore is waiting.
-    pub restore_pending: i32,
-}
-
-/// What one paint decided.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct Outcome {
-    /// The component was the Sample page.
-    pub sample_page: i32,
-    /// The screen pointer changed.
-    pub screen_changed: i32,
-}
-
-/// Draw one frame.
-///
-/// # Safety
-///
-/// `component` and `graphics` must be the app's objects for this paint, `hooks`
-/// must be the glue's callbacks, and `flags` must point at the glue's flags.
-pub unsafe extern "C" fn minimod_overlay_paint(
-    component: usize,
-    graphics: usize,
-    base: usize,
-    hooks: *const Hooks,
-    flags: *mut Flags,
-    screen_pointer: *mut usize,
-    shift: i32,
-    chop_mode: i32,
-    looper_open: i32,
-    menu_open: i32,
-    marks: *const f32,
-) -> Outcome {
-    let mut outcome = Outcome::default();
-    if hooks.is_null() || flags.is_null() || screen_pointer.is_null() {
-        return outcome;
-    }
-    // SAFETY: the caller promises both pointers are live for this call.
-    let (hooks, flags) = unsafe { (*hooks, &mut *flags) };
-    if let Some(original) = hooks.original {
-        // SAFETY: the glue's own callback.
-        unsafe { original(component, graphics) };
-    }
-    // A queued knob command is replayed here, at a safe point on the UI thread.
-    if flags.pending_cc != 0 {
-        flags.pending_cc = 0;
-        if let Some(commit) = hooks.commit_trim {
-            // SAFETY: the glue's own callback; it sets and clears its own
-            // injection flag around the replay.
-            unsafe { commit() };
-        }
-    }
-    if !is_sample_page(base, component) {
-        return outcome;
-    }
-    outcome.sample_page = 1;
-    // SAFETY: the caller promises the pointer is live.
-    let previous = unsafe { *screen_pointer };
-    if previous != component {
-        // SAFETY: see above.
-        unsafe { *screen_pointer = component };
-        outcome.screen_changed = 1;
-    }
-    if let Some(tick) = hooks.spectral_tick {
-        // SAFETY: the glue's own callback.
-        unsafe { tick() };
-    }
-    if let Some(finalize) = hooks.finalize {
-        // SAFETY: the glue's own callback; it returns at once when nothing is
-        // waiting to be finished.
-        unsafe { finalize() };
-    }
-    if flags.restore_pending != 0 && shift == 0 {
-        flags.restore_pending = 0;
-        if let Some(restore) = hooks.restore_chop {
-            // SAFETY: the glue's own callback.
-            unsafe { restore() };
-        }
-    }
-    toast(graphics);
-    if !marks.is_null() {
-        // SAFETY: the caller promises two readable values.
-        let values = unsafe { core::slice::from_raw_parts(marks, 2) };
-        trim_marks(graphics, values[0], values[1]);
-    }
-    if looper_open != 0 {
-        if let Some(pump) = hooks.looper_pump {
-            // SAFETY: the glue's own callback.
-            unsafe { pump() };
-        }
-        // SAFETY: the graphics object is the app's.
-        unsafe { crate::looper_view::minimod_looper_draw(graphics) };
-        return outcome;
-    }
-    if menu_open != 0 {
-        if let Some(menu) = hooks.menu_draw {
-            // SAFETY: the glue's own callback.
-            unsafe { menu(graphics) };
-        }
-        return outcome;
-    }
-    if shift == 0 || chop_mode != 0 {
-        return outcome;
-    }
-    paint::colour(graphics, 0xff00_0000);
-    paint::rect(graphics, 213, 0, 107, 38);
-    paint::colour(graphics, 0xffff_ffff);
-    paint::text(graphics, "AutoTrim", 215, 5, 103, 28, 18.0);
-    outcome
-}
-
-/// Whether `component` is the Sample page.
-fn is_sample_page(base: usize, component: usize) -> bool {
-    component != 0
-        && crate::firmware::read_pointer(component)
-            .is_some_and(|vtable| vtable == base + SCREEN_VTABLE)
-}
+use mpc_sample_sdk::draw::Graphics;
 
 /// The toast box over the trim bar.
 fn toast(graphics: usize) {
@@ -193,124 +47,70 @@ fn trim_marks(graphics: usize, first: f32, second: f32) {
 }
 
 /// Draw the effects menu over the page.
-///
-/// # Safety
-///
-/// `graphics` is the app's own.
-pub unsafe extern "C" fn minimod_overlay_menu_draw(graphics: usize) {
-    let menu = crate::menu::state();
-    // SAFETY: the status line and the knobs are the crate's own.
-    unsafe {
-        crate::menu::minimod_menu_draw(
-            graphics,
-            menu.selection,
-            menu.bass_edit,
-            menu.busy,
-            core::ptr::addr_of!(crate::status::STATUS).cast::<u8>(),
-            core::ptr::addr_of!(crate::menu::g_bass_knob).cast::<f32>(),
-        );
+fn menu(graphics: usize) {
+    let state = crate::menu::state();
+    crate::menu::draw_menu(
+        graphics,
+        state.selection,
+        state.bass_edit,
+        state.busy,
+        &crate::status::text(),
+        crate::menu::bass_knobs(),
+    );
+}
+
+/// Finish a render the worker completed.
+pub fn finalize() {
+    if crate::jobflow::finish(paint::screen()) {
+        crate::backend::bass::preview_set_active(false);
     }
 }
 
-/// Finish a render the worker completed, with the crate's own hooks.
-///
-/// # Safety
-///
-/// The crate's own state and the app's objects.
-pub unsafe extern "C" fn minimod_overlay_finalize() {
-    let hooks = crate::jobflow::glue_hooks();
-    // SAFETY: the menu and the hooks are the crate's own.
-    unsafe {
-        crate::jobflow::minimod_glue_finish(
-            crate::firmware::base(),
-            paint::screen(),
-            core::ptr::addr_of_mut!(crate::menu::g_menu),
-            core::ptr::from_ref(&hooks),
-        );
-    }
-}
-
-/// A completed job or a running spectral chop used to need a paint of the Sample
-/// page to finish.  Both are polled from the always-running input hooks, so
-/// leaving the page cannot wedge them: finalize cancels before any model call
-/// when the page is gone.
-///
-/// # Safety
-///
-/// The crate's own state and the app's objects.
-pub unsafe fn poll_offpage() {
-    // SAFETY: the callee reads the app's page objects.
-    unsafe { crate::spectral::cancel_if_page_gone() };
+/// Finish a completed job or a running spectral chop without waiting for the
+/// Sample page to paint.
+pub fn poll_offpage() {
+    crate::spectral::cancel_if_page_gone();
     let screen = crate::jobflow::job_screen();
     if screen == 0 {
         return;
     }
     let current = paint::screen();
-    let visible = crate::page::minimod_page_visible(crate::firmware::base(), current) != 0;
-    if !visible || current != screen {
-        // SAFETY: finalize guards itself and returns when nothing is done.
-        unsafe { minimod_overlay_finalize() };
+    if !crate::page::visible(current) || current != screen {
+        finalize();
     }
 }
 
-/// The page's paint, with the mod's overlay on top.
-///
-/// # Safety
-///
-/// The app calls this with its own component and graphics.
-pub unsafe extern "C" fn minimod_overlay_paint_self(component: usize, graphics: usize) {
-    let hooks = Hooks {
-        original: crate::glue::minimod_paint_original(),
-        commit_trim: None,
-        spectral_tick: Some(minimod_spectral_tick_c),
-        finalize: Some(minimod_overlay_finalize),
-        restore_chop: Some(crate::ui::minimod_restore_chop),
-        looper_pump: Some(crate::audio::minimod_pump_start),
-        menu_draw: Some(minimod_overlay_menu_draw),
-    };
-    let mut flags = Flags {
-        pending_cc: 0,
-        restore_pending: crate::menu::state().restore_pending,
-    };
-    // SAFETY: the state is the UI module's.
-    let state = unsafe { *crate::ui::minimod_ui_state() };
-    let marks = [state.mark_v0, state.mark_v1];
-    // SAFETY: the screen pointer and the flags are the crate's own.
-    unsafe {
-        minimod_overlay_paint(
-            component,
-            graphics,
-            crate::firmware::base(),
-            core::ptr::from_ref(&hooks),
-            core::ptr::addr_of_mut!(flags),
-            core::ptr::addr_of_mut!(paint::g_screen),
-            crate::ui::shift(),
-            crate::ui::minimod_screen_chop_mode(),
-            crate::looper_ffi::looper_is_open(),
-            crate::menu::state().open,
-            marks.as_ptr(),
-        );
+/// The page's paint: draw the mod's overlay on top of the app's.
+pub fn paint(graphics: Graphics, event: mpc_sample_sdk::PaintEvent) {
+    if !event.sample_page {
+        return;
     }
-    crate::menu::state_mut().restore_pending = flags.restore_pending;
-}
-
-/// Advance the spectral chop from the paint.
-unsafe extern "C" fn minimod_spectral_tick_c() {
-    // SAFETY: the crate's own state and the app's screen.
-    unsafe {
-        crate::spectral::minimod_spectral_frame(crate::firmware::base(), paint::screen());
+    let component = event.component;
+    let handle = graphics.handle();
+    crate::spectral::frame(component);
+    let _ = crate::jobflow::finish(component);
+    let restore_pending = crate::menu::state().restore_pending;
+    if restore_pending != 0 && crate::ui::shift() == 0 {
+        crate::menu::state_mut().restore_pending = 0;
+        crate::ui::minimod_restore_chop(crate::ui::state());
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Flags, Hooks, Outcome};
-    use core::mem::size_of;
-
-    #[test]
-    fn the_hooks_and_flags_have_stable_layouts() {
-        assert_eq!(size_of::<Flags>(), 8);
-        assert!(size_of::<Hooks>() >= 7 * size_of::<usize>());
-        assert_eq!(size_of::<Outcome>(), 8);
+    toast(handle);
+    let marks = crate::ui::marks();
+    trim_marks(handle, marks[0], marks[1]);
+    if crate::backend::looper::looper_is_open() != 0 {
+        mpc_sample_sdk::draw::start_repaint_pump(crate::backend::audio::pump_component);
+        crate::looper_view::draw(handle);
+        return;
     }
+    if crate::menu::state().open != 0 {
+        menu(handle);
+        return;
+    }
+    if crate::ui::shift() == 0 || event.chop_mode {
+        return;
+    }
+    paint::colour(handle, 0xff00_0000);
+    paint::rect(handle, 213, 0, 107, 38);
+    paint::colour(handle, 0xffff_ffff);
+    paint::text(handle, "AutoTrim", 215, 5, 103, 28, 18.0);
 }

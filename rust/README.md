@@ -2,10 +2,19 @@
 
 The firmware mod, rewritten in Rust:
 
+* `crates/mpc-sample-sdk` — the universal mod SDK: firmware image and verification,
+  the hook engine and all 16 sites, the `Mod` trait and event decoding, the ALSA
+  taps, drawing, the generic `Task<T>` worker and `RenderJob`, and typed access
+  to the app's page, sample, pad, slice, WAV, control-surface, effect and
+  Extract objects.
+* `crates/minimod` — the features built only on the SDK, in safe Rust (the gate
+  rejects any `unsafe` token here): the SAMPLE OPTIONS menu,
+  AutoTrim, HPSS, Spectral Chop, the effects and bass synth, 16 Levels, MIDI
+  chromatic playback and the Live Looper, with the DSP adapters grouped under
+  `backend/`.  It implements `Mod` and emits `export_mod!(Minimod)`;
+  `mod/build.sh` builds it as a `cdylib`.
 * `crates/dsp` — audio DSP (looper, HPSS, onset detection, filters, synths). Pure
   computation over slices, no firmware addresses, host-testable.
-* `crates/minimod` — the `LD_PRELOAD` library itself: hook engine, entry points the app
-  calls, feature glue. `mod/build.sh` builds it as a `cdylib`; no C is involved.
 
 ```sh
 ./check.sh                                  # fmt, clippy, tests, cross build

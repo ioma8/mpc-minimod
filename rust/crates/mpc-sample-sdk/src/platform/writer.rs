@@ -1,7 +1,7 @@
 //! Feeding the app a rendered buffer instead of its own sample.
 //!
-//! The effects and the bass synth do not hand the app a file: they render into
-//! memory and intercept the writer the app calls while saving, replacing each
+//! A renderer does not hand the app a file: it renders into
+//! memory and intercepts the writer the app calls while saving, replacing each
 //! block's pointer with a window into the rendered buffer.  The tail block is
 //! the interesting one - when the rendered audio is longer than the source (a
 //! reverb tail), the last block is enlarged so the extra audio is written too.
@@ -105,6 +105,7 @@ unsafe fn write_inner(closure: usize, block: *mut u8, writer: Option<Writer>) {
     };
     // SAFETY: the app's block descriptor is a frame count followed by a pointer.
     let frames = unsafe { core::ptr::read_unaligned(block.cast::<u32>()) };
+    // SAFETY: as above; the pointer slot is the next field.
     let pointer = unsafe { core::ptr::read_unaligned(block.add(8).cast::<usize>()) };
     let position = POSITION.load(Ordering::Acquire);
     let frames = usize::try_from(frames).unwrap_or(0);
@@ -131,7 +132,7 @@ unsafe fn write_inner(closure: usize, block: *mut u8, writer: Option<Writer>) {
     // SAFETY: see above; the pointer slot is writable.
     unsafe { core::ptr::write_unaligned(block.add(8).cast::<usize>(), replacement) };
     forward(closure, block, writer);
-    // Put the app's own descriptor back: it owns both fields.
+    // SAFETY: the descriptor's two fields are writable and were read above.
     unsafe {
         if tail {
             core::ptr::write_unaligned(block.cast::<u32>(), u32::try_from(frames).unwrap_or(0));
@@ -155,16 +156,12 @@ fn forward(closure: usize, block: *mut u8, writer: Option<Writer>) {
 /// The app's writer signature: closure plus the block descriptor.
 pub type Writer = unsafe extern "C" fn(usize, usize);
 
-/// The app's writer entry, for the C glue.
+/// The app's writer entry, as the C ABI entry point.
 ///
 /// # Safety
 ///
 /// `block` must be the app's block descriptor and `writer` its original writer.
-pub unsafe extern "C" fn minimod_substitute(
-    closure: usize,
-    block: *mut u8,
-    writer: Option<Writer>,
-) {
+pub unsafe fn substitute(closure: usize, block: *mut u8, writer: Option<Writer>) {
     // SAFETY: see the function contract.
     unsafe { write(closure, block, writer) };
 }

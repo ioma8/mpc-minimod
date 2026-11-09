@@ -1,7 +1,7 @@
 //! The stock app as a loaded image: where it is mapped, how to reach into it,
 //! and how to read and write its memory.
 //!
-//! Everything the mod does to the firmware goes through this module: the
+//! Everything the SDK does to the firmware goes through this module: the
 //! address of a hooked site, the bytes of a function prologue, the fields of an
 //! object the app owns.  Memory access deliberately goes through
 //! `/proc/self/mem` instead of a raw pointer: it cannot fault when the app
@@ -22,8 +22,8 @@ pub struct Firmware {
 /// without being handed it at every entry point.
 static BASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// Record the image base; the constructor calls this once.
-pub extern "C" fn minimod_set_base(base: usize) {
+/// Record the image base; the loader calls this once.
+pub fn set_base(base: usize) {
     BASE.store(base, core::sync::atomic::Ordering::Release);
 }
 
@@ -74,7 +74,6 @@ pub fn write(address: usize, bytes: &[u8]) -> bool {
     platform::write(address, bytes)
 }
 
-/// Read one 32-bit word of process memory.
 /// A firmware function taking one pointer and returning nothing.
 pub type VoidOfPointer = unsafe extern "C" fn(usize);
 /// A firmware function taking a pointer and a value.
@@ -405,6 +404,42 @@ pub unsafe fn string_from_c(address: usize, out: usize, text: usize) {
     let function: unsafe extern "C" fn(usize, usize) = unsafe { core::mem::transmute(address) };
     // SAFETY: see above.
     unsafe { function(out, text) };
+}
+
+/// Whether an address lies inside any mapping.
+///
+/// The loader asks this about the app's read-only pages too - the screen's
+/// vtable among them - so every range is kept, not only the writable ones.
+/// Unknown stays permissive: the reads and writes fail safely on their own.
+///
+/// # Safety
+///
+/// The pointer is only compared, never dereferenced.
+pub unsafe fn mapped(address: *const u8) -> bool {
+    use std::sync::OnceLock;
+    static RANGES: OnceLock<Vec<(usize, usize)>> = OnceLock::new();
+    let ranges = RANGES.get_or_init(|| {
+        let Ok(text) = std::fs::read_to_string("/proc/self/maps") else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter_map(|line| {
+                let span = line.split_whitespace().next()?;
+                let (low, high) = span.split_once('-')?;
+                Some((
+                    usize::from_str_radix(low, 16).ok()?,
+                    usize::from_str_radix(high, 16).ok()?,
+                ))
+            })
+            .collect()
+    });
+    if ranges.is_empty() {
+        return true;
+    }
+    let address = address as usize;
+    ranges
+        .iter()
+        .any(|&(low, high)| address >= low && address < high)
 }
 
 #[cfg(test)]

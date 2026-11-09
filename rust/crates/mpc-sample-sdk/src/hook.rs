@@ -1,22 +1,22 @@
 //! In-memory branch hooks.
 //!
-//! The mod never touches the firmware on disk: it patches one instruction in
+//! The SDK never touches the firmware on disk: it patches one instruction in
 //! the loaded image and keeps everything else in pages it maps next to the app.
 //!
-//! A site is patched at `entry + 4` (after `paciasp`/`bti c`):
+//! A site's first instruction is replaced; the trampoline carries the displaced
+//! prologue so the original still runs on its own frame:
 //!
 //! ```text
-//!   entry+4 : b slot            (slot lives in a page mapped near the app)
-//!   slot    : ldr x16, #8 ; br x16 ; .quad hook
-//!   tramp   : <displaced insn> ; b entry+n*4
+//!   entry : b slot            (slot lives in a page mapped near the app)
+//!   slot  : ldr x16, #8 ; br x16 ; .quad hook
+//!   tramp : <n displaced words> ; b entry+n*4
 //! ```
 //!
-//! A `b` reaches +-128 MiB, so both pages are mapped just above the app's image;
-//! the trampoline is what the hook calls to run the original code, and it
-//! carries a copy of the prologue so the original body still runs on its own
-//! frame.
+//! `n` is everything up to the first PC-relative instruction, so a prologue that
+//! computes an address from its own location is refused instead of moved.  A `b`
+//! reaches +-128 MiB, so both pages are mapped just above the app's image.
 
-use crate::firmware::{self, Firmware};
+use crate::image::{self, Firmware};
 
 /// Largest number of hooks this build installs.
 pub const MAX_HOOKS: usize = 60;
@@ -214,7 +214,7 @@ impl HookEngine {
         let site = self.firmware.addr(offset);
         let mut prologue = [0_u32; PROLOGUE_WORDS];
         let mut buffer = [0_u8; PROLOGUE_WORDS * 4];
-        if !firmware::read(site, &mut buffer) {
+        if !image::read(site, &mut buffer) {
             return Err(HookError::Unreadable);
         }
         for (word, chunk) in prologue.iter_mut().zip(buffer.chunks_exact(4)) {
@@ -230,6 +230,7 @@ impl HookEngine {
         // SAFETY: the offsets stay inside the mapped pages, which hold
         // `MAX_HOOKS` slots of `SLOT_STRIDE` bytes each.
         let slot = unsafe { self.relay.add(self.slots * SLOT_STRIDE) };
+        // SAFETY: same mapping, one trampoline per slot.
         let trampoline = unsafe { self.trampoline.add(self.trampolines * SLOT_STRIDE) };
 
         let back = encode_branch(trampoline as usize + count * 4, site + count * 4)
@@ -260,9 +261,9 @@ impl HookEngine {
         // SAFETY: only the pages the four-byte patch touches are remapped, and
         // the original protection is restored right after.
         let patched = unsafe { make_writable(page, span) }
-            && firmware::write(site, &branch.to_le_bytes())
+            && image::write(site, &branch.to_le_bytes())
             // Read the word back: a write that did not land must not count.
-            && firmware::read_u32(site) == Some(branch);
+            && image::read_u32(site) == Some(branch);
         // SAFETY: same range as above, restoring the executable mapping.
         unsafe {
             libc::mprotect(
@@ -395,16 +396,16 @@ fn flush_icache(_start: usize, _end: usize) {}
 /// The hook engine for the loaded app, created on first use.
 static ENGINE: std::sync::OnceLock<std::sync::Mutex<HookEngine>> = std::sync::OnceLock::new();
 
-/// Install a hook at the absolute address `site`, returning the trampoline the
-/// caller must call to run the displaced prologue.
+/// Install a hook at `base + offset`, returning the trampoline that runs the
+/// displaced prologue.
 ///
 /// # Safety
 ///
-/// `site` must be an executable address inside the image at `base` and `hook`
-/// must be a function with the same ABI as the hooked one.
-pub unsafe extern "C" fn minimod_install_hook(base: usize, site: usize, hook: usize) -> *mut u8 {
-    if base == 0 || site <= base {
-        return core::ptr::null_mut();
+/// `base` must be the app's load address, `offset` a site inside the image and
+/// `handler` a function with the same ABI as the hooked one.
+pub unsafe fn install(base: usize, offset: usize, handler: usize) -> Option<usize> {
+    if base == 0 || offset == 0 {
+        return None;
     }
     let engine = ENGINE.get_or_init(|| {
         let firmware = Firmware::from_base(base);
@@ -412,28 +413,21 @@ pub unsafe extern "C" fn minimod_install_hook(base: usize, site: usize, hook: us
             HookEngine::new(firmware).unwrap_or_else(|_| HookEngine::disabled(firmware)),
         )
     });
-    let Ok(mut engine) = engine.lock() else {
-        return core::ptr::null_mut();
-    };
-    match engine.install(site - base, hook) {
-        Ok(trampoline) => trampoline as *mut u8,
-        Err(_) => core::ptr::null_mut(),
-    }
+    let mut engine = engine.lock().ok()?;
+    engine.install(offset, handler).ok()
 }
 
 /// Whether at least one hook was installed.
-pub extern "C" fn minimod_hooks_touched() -> i32 {
-    match ENGINE.get() {
-        Some(engine) => match engine.lock() {
-            Ok(engine) => i32::from(engine.touched()),
-            Err(_) => 0,
-        },
-        None => 0,
-    }
+#[must_use]
+pub fn touched() -> bool {
+    ENGINE
+        .get()
+        .and_then(|engine| engine.lock().ok())
+        .is_some_and(|engine| engine.touched())
 }
 
 /// Mark the hook pages executable once every hook is in place.
-pub extern "C" fn minimod_seal_hooks() {
+pub fn seal() {
     if let Some(engine) = ENGINE.get()
         && let Ok(engine) = engine.lock()
     {

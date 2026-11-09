@@ -5,6 +5,8 @@
 //! open flag, the selected row and whether the bass control page is showing.
 
 use crate::paint;
+use mpc_sample_sdk::export_static;
+use mpc_sample_sdk::state::Global;
 
 /// The rows of the effects menu.
 /// The split.
@@ -40,28 +42,25 @@ pub struct State {
     pub restore_pending: i32,
 }
 
-/// What the glue has to supply.
-#[repr(C)]
+/// The feature callbacks the menu uses.
 #[derive(Clone, Copy)]
 pub struct Hooks {
     /// Redraw the screen.
-    pub repaint: Option<unsafe extern "C" fn()>,
+    pub repaint: Option<fn()>,
     /// Render the split.
-    pub start_split: Option<unsafe extern "C" fn()>,
+    pub start_split: Option<fn(&mut State)>,
     /// Render one effect, by its row.
-    pub start_effect: Option<unsafe extern "C" fn(i32)>,
+    pub start_effect: Option<fn(i32, &mut State)>,
     /// Start the spectral chop.
-    pub start_spectral: Option<unsafe extern "C" fn()>,
+    pub start_spectral: Option<fn(&mut State)>,
     /// Start the bass synth with its source backup.
-    pub start_bass: Option<unsafe extern "C" fn()>,
-    /// Put the chop mode back.
-    pub restore_chop: Option<unsafe extern "C" fn()>,
+    pub start_bass: Option<fn(&mut State)>,
     /// Show the bass control page.
-    pub start_bass_page: Option<unsafe extern "C" fn()>,
+    pub start_bass_page: Option<fn(&mut State)>,
     /// Open the live looper.
-    pub start_looper: Option<unsafe extern "C" fn() -> i32>,
+    pub start_looper: Option<fn() -> i32>,
     /// Replace the status line.
-    pub set_status: Option<unsafe extern "C" fn(*const u8)>,
+    pub set_status: Option<fn(&str)>,
 }
 
 /// Close the menu unless a job is running.
@@ -77,55 +76,44 @@ pub fn close(state: &mut State, hooks: Hooks) -> bool {
 }
 
 /// Run the selected row.
-///
-/// # Safety
-///
-/// The hooks must be the glue's own callbacks.
-pub unsafe fn activate(state: &mut State, hooks: Hooks) {
+pub fn activate(state: &mut State, hooks: Hooks) {
     if state.busy != 0 {
         return;
     }
     if state.bass_edit != 0 {
         if let Some(start) = hooks.start_bass {
-            // SAFETY: the caller's callback.
-            unsafe { start() };
+            start(state);
         }
         return;
     }
     match state.selection {
         ROW_HPSS => {
             if let Some(start) = hooks.start_split {
-                // SAFETY: the caller's callback.
-                unsafe { start() };
+                start(state);
             }
         }
         ROW_SPECTRAL => {
             if let Some(start) = hooks.start_spectral {
-                // SAFETY: the caller's callback.
-                unsafe { start() };
+                start(state);
             }
         }
         ROW_REVERB | ROW_VINYL | ROW_LOFI => {
             if let Some(start) = hooks.start_effect {
-                // SAFETY: the caller's callback.
-                unsafe { start(state.selection - 1) };
+                start(state.selection - 1, state);
             }
         }
         ROW_BASS => {
             if let Some(status) = hooks.set_status {
-                // SAFETY: the message is a static, NUL-terminated string.
-                unsafe { status(c"Live preview unavailable".as_ptr().cast()) };
+                status("Live preview unavailable");
             }
             if let Some(page) = hooks.start_bass_page {
-                // SAFETY: the caller's callback.
-                unsafe { page() };
+                page(state);
             }
             repaint(hooks);
         }
         ROW_LOOPER => {
             if let Some(activate) = hooks.start_looper {
-                // SAFETY: the caller's callback.
-                let opened = unsafe { activate() };
+                let opened = activate();
                 if opened != 0 {
                     state.open = 0;
                     state.bass_edit = 0;
@@ -142,24 +130,8 @@ pub unsafe fn activate(state: &mut State, hooks: Hooks) {
 /// Redraw.
 fn repaint(hooks: Hooks) {
     if let Some(repaint) = hooks.repaint {
-        // SAFETY: the caller's callback.
-        unsafe { repaint() };
+        repaint();
     }
-}
-
-/// Run the selected row, for the C glue.
-///
-/// # Safety
-///
-/// `state` and `hooks` must be live for this call.
-pub unsafe extern "C" fn minimod_menu_activate(state: *mut State, hooks: *const Hooks) {
-    if state.is_null() || hooks.is_null() {
-        return;
-    }
-    // SAFETY: the caller promises both pointers are live.
-    let (state, hooks) = unsafe { (&mut *state, *hooks) };
-    // SAFETY: the hooks are the caller's callbacks.
-    unsafe { activate(state, hooks) };
 }
 
 /// The menu's colours.
@@ -188,7 +160,7 @@ const KNOBS: [&str; 3] = ["BRIGHT", "EXCITE", "FILTER"];
 
 /// Draw the menu.
 ///
-/// `status` is the glue's status line (empty when there is nothing to say) and
+/// `status` is the caller's status line (empty when there is nothing to say) and
 /// `knobs` are the bass synth's three values.
 #[must_use]
 pub fn draw(graphics: usize, state: &State, busy: bool, status: &str, knobs: [f32; 3]) -> bool {
@@ -304,27 +276,15 @@ fn draw_knobs(graphics: usize, area: (i32, i32, i32), status: &str, knobs: [f32;
 /// The number of rows.
 pub const MENU_ROWS: usize = 8;
 
-/// Draw the menu, for the C glue.
-///
-/// # Safety
-///
-/// `status` must be a NUL-terminated string and `graphics` the app's object.
-pub unsafe extern "C" fn minimod_menu_draw(
+/// Draw the menu.
+pub fn draw_menu(
     graphics: usize,
     selection: i32,
     bass_edit: i32,
     busy: i32,
-    status: *const u8,
-    knobs: *const f32,
+    status: &str,
+    knobs: [f32; 3],
 ) {
-    if status.is_null() || knobs.is_null() {
-        return;
-    }
-    // SAFETY: the caller promises a NUL-terminated string.
-    let text = unsafe { core::ffi::CStr::from_ptr(status.cast()) };
-    let status = text.to_str().unwrap_or("");
-    // SAFETY: the caller promises three readable knob values.
-    let values = unsafe { core::slice::from_raw_parts(knobs, 3) };
     let state = State {
         open: 1,
         busy,
@@ -333,57 +293,68 @@ pub unsafe extern "C" fn minimod_menu_draw(
         selection,
         restore_pending: 0,
     };
-    let _ = draw(
-        graphics,
-        &state,
-        busy != 0,
-        status,
-        [values[0], values[1], values[2]],
-    );
+    let _ = draw(graphics, &state, busy != 0, status, knobs);
 }
 
-/// The menu's state.  It keeps its name because the glue reads its fields.
-#[unsafe(no_mangle)]
-pub static mut g_menu: State = State {
+export_static!(#[doc = "The menu's state, read by the device tests."]
+g_menu: Global<State> = Global::new(State {
     open: 0,
     busy: 0,
     bass_edit: 0,
     data_down: 0,
     selection: 0,
     restore_pending: 0,
-};
+}));
 
 /// The menu's state, for the crate.
 #[must_use]
 pub fn state() -> &'static State {
-    // SAFETY: only the UI thread writes it.
-    unsafe { &*core::ptr::addr_of!(g_menu) }
+    g_menu.get()
 }
 
 /// The menu's state, to change.
 pub fn state_mut() -> &'static mut State {
-    // SAFETY: only the UI thread writes it.
-    unsafe { &mut *core::ptr::addr_of_mut!(g_menu) }
+    g_menu.get_mut()
+}
+
+export_static!(#[doc = "The bass page's three knobs, read by the device tests."]
+g_bass_knob: Global<[f32; 3]> = Global::new([0.52, 0.18, 0.56]));
+
+/// Keep the bass preview on while its page is open.
+pub fn follow_preview() {
+    let menu = state();
+    if menu.open != 0
+        && menu.bass_edit != 0
+        && menu.busy == 0
+        && crate::backend::bass::available()
+        && !crate::backend::bass::preview_active()
+    {
+        crate::backend::bass::preview_set_active(true);
+    }
 }
 
 /// The bass control page's three knobs.
-#[unsafe(no_mangle)]
-pub static mut g_bass_knob: [f32; 3] = [0.52, 0.18, 0.56];
+#[must_use]
+pub fn bass_knobs() -> [f32; 3] {
+    *g_bass_knob.get()
+}
+
+/// Store the bass control page's three knobs.
+pub fn set_bass_knobs(knobs: [f32; 3]) {
+    *g_bass_knob.get_mut() = knobs;
+}
 
 /// Show the bass control page and start its preview.
 ///
 /// # Safety
 ///
 /// The app's own calls are used.
-pub unsafe extern "C" fn minimod_menu_bass_page() {
-    // SAFETY: the array is this module's.
-    let knobs = unsafe { *core::ptr::addr_of!(g_bass_knob) };
-    let menu = state_mut();
-    menu.bass_edit = 1;
-    crate::bass_ffi::bass_preview_set_params(knobs[0], knobs[1], knobs[2]);
-    crate::bass_ffi::minimod_bass_preview_set_active(1);
-    // SAFETY: the flag is the bass module's.
-    let available = unsafe { crate::bass_ffi::G_BASS_PREVIEW_AVAILABLE } != 0;
+pub fn bass_page(state: &mut State) {
+    let knobs = bass_knobs();
+    state.bass_edit = 1;
+    crate::backend::bass::preview_set_params(knobs[0], knobs[1], knobs[2]);
+    crate::backend::bass::preview_set_active(true);
+    let available = crate::backend::bass::available();
     crate::status::set_status(if available {
         ""
     } else {
@@ -396,8 +367,8 @@ pub unsafe extern "C" fn minimod_menu_bass_page() {
 /// # Safety
 ///
 /// The crate's own state and the app's repaint.
-pub unsafe extern "C" fn minimod_menu_open_self() {
-    if crate::ui::minimod_screen_visible() == 0 || state().busy != 0 {
+pub fn open_menu() {
+    if !crate::ui::screen_visible() || state().busy != 0 {
         return;
     }
     let menu = state_mut();
@@ -405,10 +376,9 @@ pub unsafe extern "C" fn minimod_menu_open_self() {
     menu.selection = 0;
     menu.bass_edit = 0;
     menu.data_down = 0;
-    crate::bass_ffi::minimod_bass_preview_set_active(0);
+    crate::backend::bass::preview_set_active(false);
     crate::status::set_status("");
-    // SAFETY: the app's own repaint.
-    unsafe { crate::ui::minimod_repaint_screen() };
+    crate::ui::minimod_repaint_screen();
 }
 
 /// Close the menu, unless a job is running.
@@ -416,7 +386,7 @@ pub unsafe extern "C" fn minimod_menu_open_self() {
 /// # Safety
 ///
 /// The crate's own state and the app's repaint.
-pub unsafe extern "C" fn minimod_menu_close_self() {
+pub fn close_menu() {
     if state().busy != 0 {
         return;
     }
@@ -424,9 +394,8 @@ pub unsafe extern "C" fn minimod_menu_close_self() {
     menu.open = 0;
     menu.bass_edit = 0;
     menu.data_down = 0;
-    crate::bass_ffi::minimod_bass_preview_set_active(0);
-    // SAFETY: the app's own repaint.
-    unsafe { crate::ui::minimod_repaint_screen() };
+    crate::backend::bass::preview_set_active(false);
+    crate::ui::minimod_repaint_screen();
 }
 
 /// Rename the soft key, which the app draws itself.
@@ -434,29 +403,28 @@ pub unsafe extern "C" fn minimod_menu_close_self() {
 /// # Safety
 ///
 /// The text is ignored; the rename happens on the paint.
-pub unsafe extern "C" fn minimod_filter_text(_text: *const u8) {
+pub fn filter_text() {
     if paint::screen() != 0 {
-        // SAFETY: the app's own repaint.
-        unsafe { crate::ui::minimod_repaint_screen() };
+        crate::ui::minimod_repaint_screen();
     }
 }
 
 /// Whether the menu is open.
 #[must_use]
-pub extern "C" fn minimod_menu_is_open() -> i32 {
-    i32::from(state().open != 0)
+pub fn is_open() -> bool {
+    state().open != 0
 }
 
 /// Whether the bass control page is showing.
 #[must_use]
-pub extern "C" fn minimod_menu_is_bass_edit() -> i32 {
-    i32::from(state().bass_edit != 0)
+pub fn is_bass_edit() -> bool {
+    state().bass_edit != 0
 }
 
 /// Whether a job is running.
 #[must_use]
-pub extern "C" fn minimod_menu_is_busy() -> i32 {
-    i32::from(state().busy != 0)
+pub fn is_busy() -> bool {
+    state().busy != 0
 }
 
 #[cfg(test)]
@@ -470,7 +438,6 @@ mod tests {
             start_effect: None,
             start_spectral: None,
             start_bass: None,
-            restore_chop: None,
             start_bass_page: None,
             start_looper: None,
             set_status: None,

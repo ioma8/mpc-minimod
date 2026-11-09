@@ -1,60 +1,21 @@
-//! Finishing a job: the checks, the extracts and the words the user sees.
+//! Render jobs: start one, wait for the worker, then check and write the result.
 //!
-//! The worker has already produced its buffers; this decides whether the result
-//! can still be used, writes it to pads through the app's own extract, and
-//! reports.  The extract itself stays a callback because it drives a firmware
-//! handler and waits on the app's writer - the one part that is still glue.
+//! The SDK owns the worker, its completion state and the rendered buffers; the
+//! feature owns what to read, what each output means and what to tell the user.
+//! `TASK` is the feature's only handle — it is not a result slot or a flag.
 
-use crate::firmware::base;
-use crate::glue::minimod_paint_original;
-use crate::paint::{self, Repaint, minimod_toast};
-use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use crate::job::{ACTION_BASS, ACTION_SPLIT, Job};
-use crate::{firmware, pads, page, paths, sample, selection, status, wav};
+use crate::actions::{ACTION_BASS, ACTION_LOFI, ACTION_REVERB, ACTION_SPLIT, ACTION_VINYL};
+use crate::paint::{self, show_toast};
+use crate::{pads, selection, status};
+use mpc_sample_sdk::platform::extract;
+use mpc_sample_sdk::platform::selection::AudioReadError;
+use mpc_sample_sdk::render::RenderJob;
+use mpc_sample_sdk::task::{Task, TaskError};
 
-/// The job the worker is running, if any.
-static JOB: AtomicPtr<Job> = AtomicPtr::new(core::ptr::null_mut());
-/// Whether the worker has finished.
-static DONE: AtomicBool = AtomicBool::new(false);
-/// Whether the UI thread is finishing the job.
-static FINALIZING: AtomicBool = AtomicBool::new(false);
-/// The screen the page is on.
-static SCREEN: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-
-/// What the glue has to supply when a job starts.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct StartHooks {
-    /// The worker finished; the UI thread will pick it up.
-    pub finished: Option<unsafe extern "C" fn()>,
-    /// Redraw.
-    pub repaint: Option<unsafe extern "C" fn()>,
-    /// Show a toast.
-    pub toast: Option<unsafe extern "C" fn(*const u8)>,
-}
-
-/// The app's extract: screen, state, buffer, start, end, source frames, buffer
-/// frames, channels, name index, and where the assigned pad lands.
-pub type Extract =
-    unsafe extern "C" fn(usize, usize, *const f32, u32, u32, u32, u32, u32, i32, *mut i32) -> i32;
-
-/// What the glue has to supply.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Hooks {
-    /// Write one buffer through the app's extract.
-    pub extract: Option<Extract>,
-    /// Put the chop mode back after extracting.
-    pub restore_chop: Option<unsafe extern "C" fn()>,
-    /// Show a toast.
-    pub toast: Option<unsafe extern "C" fn(*const u8)>,
-}
-
-/// `[state + 0x2310]` is the app's program object.
-const STATE_PROGRAM: usize = 0x2310;
-
+/// The one render the UI has started and not finished.
+static TASK: Mutex<Option<Task<RenderJob>>> = Mutex::new(None);
 /// One failure: what to put in the status line and what to toast.
 #[derive(Clone, Copy)]
 struct Report {
@@ -63,6 +24,11 @@ struct Report {
     /// Whether `status` is the whole line, rather than `"<action>: <status>"`.
     raw: bool,
     toast: &'static str,
+}
+
+/// Lock the feature's task slot, recovering from a poisoned mutex.
+fn task_slot() -> MutexGuard<'static, Option<Task<RenderJob>>> {
+    TASK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Cancel text for an action.
@@ -82,57 +48,21 @@ const fn cancelled(effect: bool) -> Report {
     }
 }
 
-/// Report the outcome through the toast hook.
-///
-/// # Safety
-///
-/// `toast` must accept a NUL-terminated string.
-unsafe fn say(toast: Option<unsafe extern "C" fn(*const u8)>, text: &str) {
-    if let Some(toast) = toast {
-        let mut buffer = [0_u8; 64];
-        let take = text.len().min(buffer.len() - 1);
-        buffer[..take].copy_from_slice(&text.as_bytes()[..take]);
-        // SAFETY: the buffer is NUL-terminated above and outlives the call.
-        unsafe { toast(buffer.as_ptr()) };
-    }
-}
-
 /// Whether the job produced usable buffers.
-fn broken(job: &Job, effect: bool) -> bool {
+fn broken(job: &RenderJob, effect: bool) -> bool {
     if effect {
-        job.rc != 0 || job.rendered.is_null() || u32::try_from(job.rendered_frames).is_err()
+        job.outputs
+            .first()
+            .is_none_or(|output| output.audio.is_empty())
     } else {
-        job.rc != 0 || job.harmonic.is_null() || job.percussive.is_null()
-    }
-}
-
-/// Whether the page and the sample the job rendered are still the ones selected.
-fn still_selected(base: usize, job: &Job, screen: usize) -> Result<(), Report> {
-    if screen != job.screen {
-        return Err(cancelled(job.action != ACTION_SPLIT));
-    }
-    if !page::visible(base, screen) {
-        return Err(cancelled(job.action != ACTION_SPLIT));
-    }
-    let same = selection::current(base, job.screen).is_some_and(|selected| {
-        selected.state == job.state
-            && selected.sample == job.sample
-            && selected.frames == job.frames
-            && u32::from(selected.channels) == job.channels
-            && selected.rate == job.rate
-    });
-    if same {
-        Ok(())
-    } else {
-        Err(cancelled(job.action != ACTION_SPLIT))
+        job.outputs.len() < 2 || job.outputs[0].audio.is_empty() || job.outputs[1].audio.is_empty()
     }
 }
 
 /// Whether the program still has room for the pads the action needs.
-fn room_for_pads(base: usize, job: &Job, effect: bool) -> Result<(), Report> {
-    let program = firmware::read_pointer(job.state.wrapping_add(STATE_PROGRAM)).unwrap_or(0);
+fn room_for_pads(job: &RenderJob, effect: bool) -> Result<(), Report> {
     let required = if effect { 1 } else { 2 };
-    if program != 0 && pads::free_estimate(base, program) >= required {
+    if pads::has_room(selection::program(job.source.state), required) {
         return Ok(());
     }
     Err(if effect {
@@ -150,103 +80,99 @@ fn room_for_pads(base: usize, job: &Job, effect: bool) -> Result<(), Report> {
     })
 }
 
-/// Write an effect or synth take to a pad.  The mod never writes a sample file:
-/// the app re-serialises its working copy on Extract, so the source is not
-/// ours to restore.
-///
-/// # Safety
-///
-/// `hooks` must hold the app's extract and restore.
-unsafe fn extract_take(base: usize, job: &Job, hooks: &Hooks) -> Result<(), Report> {
-    let read_frames = if job.action == ACTION_BASS && job.rendered_frames < job.frames as usize {
-        u32::try_from(job.rendered_frames).unwrap_or(job.frames)
-    } else {
-        job.frames
-    };
-    let channels = if job.rendered_channels == 0 {
-        job.channels
-    } else {
-        job.rendered_channels
-    };
-    let mut pad = -1;
-    let extracted = match hooks.extract {
-        // SAFETY: the caller guarantees this is the app's extract.
-        Some(extract) => unsafe {
-            extract(
-                job.screen,
-                job.state,
-                job.rendered,
-                0,
-                read_frames,
-                read_frames,
-                u32::try_from(job.rendered_frames).unwrap_or(0),
-                channels,
-                job.action + 1,
-                core::ptr::addr_of_mut!(pad),
-            )
-        },
-        None => 0,
-    };
-    if let Some(restore) = hooks.restore_chop {
-        // SAFETY: the caller guarantees this is the app's restore.
-        unsafe { restore() };
+/// The name an action shows in the status line.
+#[must_use]
+pub fn action_name(action: i32) -> &'static str {
+    match action {
+        ACTION_REVERB => "Reverb",
+        ACTION_VINYL => "Vinyl",
+        ACTION_LOFI => "Lo-Fi",
+        ACTION_BASS => "Bass Synth",
+        _ => "HPSS",
     }
-    let _ = base;
-    if extracted == 0 {
+}
+
+/// The name the Extract command gives each action's new pad.
+fn names() -> [&'static core::ffi::CStr; 6] {
+    [
+        c"HPSS Harmonic",
+        c"HPSS Percussive",
+        c"Reverb",
+        c"Vinyl",
+        c"Lo-Fi",
+        c"Bass C2",
+    ]
+}
+
+/// Write one rendered buffer through the app's Extract command.
+fn extract_one(
+    job: &RenderJob,
+    output: &mpc_sample_sdk::render::RenderOutput,
+    name: &'static core::ffi::CStr,
+    end: u32,
+    source_frames: u32,
+) -> bool {
+    extract::run(&extract::Request {
+        screen: job.source.screen,
+        state: job.source.state,
+        name,
+        buffer: output.audio.get(..),
+        source_frames,
+        channels: output.channels,
+        start: 0,
+        end,
+    })
+    .is_ok()
+}
+
+/// Write an effect or synth take to a pad.
+fn extract_take(job: &RenderJob) -> Result<(), Report> {
+    let Some(output) = job.outputs.first() else {
         return Err(Report {
             raw: false,
             status: "output failed",
             toast: "Effect: write failed",
         });
+    };
+    let name = names()[usize::try_from(job.kind + 1).unwrap_or(5).min(5)];
+    // The app's Extract takes the source length for an effect; a synth take may
+    // be shorter than its source and then uses its own frame count.
+    let rendered = u32::try_from(output.frames).unwrap_or(job.source.frames);
+    let end = if job.kind == ACTION_BASS {
+        rendered.min(job.source.frames)
+    } else {
+        job.source.frames
+    };
+    let source_frames = end;
+    if extract_one(job, output, name, end, source_frames) {
+        Ok(())
+    } else {
+        Err(Report {
+            raw: false,
+            status: "output failed",
+            toast: "Effect: write failed",
+        })
     }
-    Ok(())
 }
 
 /// Write the harmonic and percussive parts to two pads.
-///
-/// # Safety
-///
-/// `hooks` must hold the app's extract and restore.
-unsafe fn extract_split(job: &Job, hooks: &Hooks) -> Result<(), Report> {
-    let part = |buffer: *const f32, name: i32| -> bool {
-        match hooks.extract {
-            // SAFETY: the caller guarantees this is the app's extract.
-            Some(extract) => unsafe {
-                let mut pad = -1;
-                extract(
-                    job.screen,
-                    job.state,
-                    buffer,
-                    0,
-                    job.frames,
-                    job.frames,
-                    job.frames,
-                    job.channels,
-                    name,
-                    core::ptr::addr_of_mut!(pad),
-                ) != 0
-            },
-            None => false,
-        }
+fn extract_split(job: &RenderJob) -> Result<(), Report> {
+    let (Some(harmonic), Some(percussive)) = (job.outputs.first(), job.outputs.get(1)) else {
+        return Err(Report {
+            raw: true,
+            status: "HPSS: first output failed",
+            toast: "HPSS: write failed",
+        });
     };
-    let first = part(job.harmonic, 0);
-    if !first {
-        if let Some(restore) = hooks.restore_chop {
-            // SAFETY: the caller guarantees this is the app's restore.
-            unsafe { restore() };
-        }
+    let frames = u32::try_from(harmonic.frames).unwrap_or(job.source.frames);
+    if !extract_one(job, harmonic, names()[0], frames, frames) {
         return Err(Report {
             raw: true,
             status: "HPSS: first output failed",
             toast: "HPSS: write failed",
         });
     }
-    let second = part(job.percussive, 1);
-    if let Some(restore) = hooks.restore_chop {
-        // SAFETY: the caller guarantees this is the app's restore.
-        unsafe { restore() };
-    }
-    if !second {
+    if !extract_one(job, percussive, names()[1], frames, frames) {
         return Err(Report {
             raw: true,
             status: "HPSS: harmonic only (second failed)",
@@ -257,8 +183,8 @@ unsafe fn extract_split(job: &Job, hooks: &Hooks) -> Result<(), Report> {
 }
 
 /// The success line for an action.
-const fn success(job: &Job) -> Report {
-    if job.action == ACTION_SPLIT {
+const fn success(job: &RenderJob) -> Report {
+    if job.kind == ACTION_SPLIT {
         Report {
             raw: true,
             status: "HPSS: harmonic + percussive created",
@@ -268,35 +194,19 @@ const fn success(job: &Job) -> Report {
         Report {
             raw: false,
             status: "copy created",
-            toast: match job.action {
-                1 => "Reverb done",
-                2 => "Vinyl done",
-                3 => "Lo-Fi done",
+            toast: match job.kind {
+                ACTION_REVERB => "Reverb done",
+                ACTION_VINYL => "Vinyl done",
+                ACTION_LOFI => "Lo-Fi done",
                 _ => "Bass C2 done",
             },
         }
     }
 }
 
-/// Finish a job: check it, extract it, report it, and free it.
-///
-/// # Safety
-///
-/// `job` must be the live job the worker finished, `hooks` must hold the app's
-/// extract and restore, and `screen` must be the page the job started from.
-pub unsafe extern "C" fn minimod_job_finalize(
-    job: *mut Job,
-    hooks: *const Hooks,
-    screen: usize,
-    base: usize,
-) -> i32 {
-    if job.is_null() || hooks.is_null() {
-        return 1;
-    }
-    // SAFETY: the caller promises both pointers are live for this call.
-    let job = unsafe { &mut *job };
-    let hooks = unsafe { *hooks };
-    let effect = job.action != ACTION_SPLIT;
+/// Check, extract and report one finished job.
+fn finalize(job: &RenderJob, screen: usize) -> Report {
+    let effect = job.kind != ACTION_SPLIT;
     let outcome = if broken(job, effect) {
         Err(Report {
             raw: false,
@@ -307,539 +217,254 @@ pub unsafe extern "C" fn minimod_job_finalize(
                 "HPSS: processing failed"
             },
         })
+    } else if screen != job.source.screen || !job.source.is_current() {
+        Err(cancelled(effect))
     } else {
-        still_selected(base, job, screen)
-            .and_then(|()| room_for_pads(base, job, effect))
+        room_for_pads(job, effect)
             .and_then(|()| {
-                // SAFETY: see the function contract.
-                unsafe {
-                    if effect {
-                        extract_take(base, job, &hooks)
-                    } else {
-                        extract_split(job, &hooks)
-                    }
-                }
+                let wrote = if effect {
+                    extract_take(job)
+                } else {
+                    extract_split(job)
+                };
+                crate::ui::minimod_restore_chop(crate::ui::state());
+                wrote
             })
             .map(|()| success(job))
     };
-    let report = match outcome {
+    match outcome {
         Ok(report) | Err(report) => report,
-    };
+    }
+}
+
+/// The text for an unavailable input.
+fn read_error(action: i32, error: AudioReadError) -> Report {
+    let effect = action != ACTION_SPLIT;
+    match error {
+        AudioReadError::NoPath => Report {
+            raw: false,
+            status: "no exact WAV file",
+            toast: if effect {
+                "Effect: no WAV"
+            } else {
+                "HPSS: no WAV"
+            },
+        },
+        AudioReadError::DecodeFailed => Report {
+            raw: false,
+            status: "cannot decode WAV",
+            toast: if effect {
+                "Effect: bad WAV"
+            } else {
+                "HPSS: bad WAV"
+            },
+        },
+        AudioReadError::LengthMismatch => Report {
+            raw: false,
+            status: "sample length changed",
+            toast: if effect {
+                "Effect: bad sample"
+            } else {
+                "HPSS: bad sample"
+            },
+        },
+    }
+}
+
+/// Tell the user why a start failed.
+fn fail(action: i32, report: Report) {
     if report.raw {
         status::set_status(report.status);
     } else {
-        status::set_action_status(job.action, report.status);
+        status::set_prefixed(action_name(action), report.status);
     }
-    // SAFETY: see the function contract.
-    unsafe { say(hooks.toast, report.toast) };
-    // SAFETY: the job is live and about to be abandoned.
-    unsafe { crate::job::minimod_job_free(core::ptr::from_mut(job)) };
-    0
-}
-
-/// Fill a fresh job from the selection.
-fn fill(job: &mut Job, selected: &selection::Selection, input: *mut f32, action: i32) {
-    job.screen = selected.screen;
-    job.state = selected.state;
-    job.sample = selected.sample;
-    job.frames = selected.frames;
-    job.channels = u32::from(selected.channels);
-    job.rate = selected.rate;
-    job.input = input;
-    job.action = action;
-    job.rc = -1;
-}
-
-/// Copy a slice into a `malloc` block, which the job frees with libc `free`.
-fn into_malloc(values: &[f32]) -> *mut f32 {
-    let bytes = values.len().saturating_mul(size_of::<f32>()).max(1);
-    // SAFETY: a plain allocation, checked for null.
-    let buffer = unsafe { libc::malloc(bytes) }.cast::<f32>();
-    if buffer.is_null() {
-        return core::ptr::null_mut();
-    }
-    // SAFETY: `buffer` holds `bytes` and the source is a live slice.
-    unsafe { core::ptr::copy_nonoverlapping(values.as_ptr(), buffer, values.len()) };
-    buffer
+    show_toast(report.toast);
 }
 
 /// Start `action` on the selected sample.
-///
-/// Returns the job when it started, so the glue can keep its busy flag; on
-/// failure the status line and the toast are already set and null comes back.
-///
-/// # Safety
-///
-/// `knobs` must be readable for three values and `hooks` must be live.
-pub unsafe extern "C" fn minimod_job_start(
-    action: i32,
-    base: usize,
-    knobs: *const f32,
-    hooks: *const StartHooks,
-) -> *mut Job {
-    if hooks.is_null() {
-        return core::ptr::null_mut();
+pub fn start(action: i32, screen: usize, menu: &mut crate::menu::State) -> bool {
+    if task_slot().is_some() {
+        return false;
     }
-    // SAFETY: the caller promises the hooks are live for this call.
-    let hooks = unsafe { *hooks };
-    if JOB.load(Ordering::Acquire).is_null() {
-        // Nothing is running: try to start.
-    } else {
-        return core::ptr::null_mut();
-    }
-    let Some(selected) = selection::current(base, current_screen()) else {
-        status::set_action_status(action, "no sample on this pad");
-        // SAFETY: see the function contract.
-        unsafe {
-            say(
-                hooks.toast,
-                if action == 0 {
+    let Some(source) = selection::current(screen) else {
+        fail(
+            action,
+            Report {
+                raw: false,
+                status: "no sample on this pad",
+                toast: if action == ACTION_SPLIT {
                     "HPSS: no sample"
                 } else {
                     "Effect: no sample"
                 },
-            );
-        }
-        return core::ptr::null_mut();
+            },
+        );
+        return false;
     };
-    // The loaded audio first: it exists before a sample is saved and needs no
-    // file.  A streamed sample falls back to the WAV the app points at.  The
-    // bass synth needs no source audio at all.
-    let source = if action == ACTION_BASS {
-        Source::Synth
-    } else if let Some(samples) = sample::memory(selected.sample)
-        .filter(|memory| {
-            memory.frames == selected.frames
-                && memory.channels == selected.channels
-                && memory.rate == selected.rate
-        })
-        .and_then(|memory| memory.read())
-    {
-        Source::Memory(samples)
+    let input = if action == ACTION_BASS {
+        Vec::new()
     } else {
-        let Some(path) = paths::for_sample(
-            selected.sample,
-            selected.frames,
-            selected.channels,
-            selected.rate,
-        ) else {
-            status::set_action_status(action, "no exact WAV file");
-            // SAFETY: see the function contract.
-            unsafe {
-                say(
-                    hooks.toast,
-                    if action == 0 {
-                        "HPSS: no WAV"
-                    } else {
-                        "Effect: no WAV"
-                    },
-                );
+        match source.read_audio() {
+            Ok(audio) => audio,
+            Err(error) => {
+                fail(action, read_error(action, error));
+                return false;
             }
-            return core::ptr::null_mut();
-        };
-        Source::File(path)
-    };
-    let Some(job) = (unsafe { prepare(action, &selected, source, hooks) }) else {
-        return core::ptr::null_mut();
-    };
-    status::set_status(&format!("Processing {}...", status::action_name(action)));
-    JOB.store(job, Ordering::Release);
-    DONE.store(false, Ordering::Release);
-    let knobs = if knobs.is_null() {
-        [0.5_f32, 0.5, 0.5]
-    } else {
-        // SAFETY: the caller promises three readable values.
-        let values = unsafe { core::slice::from_raw_parts(knobs, 3) };
-        [values[0], values[1], values[2]]
-    };
-    let job_address = job as usize;
-    std::thread::spawn(move || {
-        // SAFETY: the job is owned by the flow until the UI thread frees it, and
-        // the address is stable for its whole life.
-        unsafe { crate::job::minimod_job_run(job_address as *mut Job, knobs.as_ptr(), base) };
-        DONE.store(true, Ordering::Release);
-        if let Some(finished) = hooks.finished {
-            // SAFETY: the caller's callback.
-            unsafe { finished() };
         }
-        if let Some(repaint) = hooks.repaint {
-            // SAFETY: the caller's callback.
-            unsafe { repaint() };
-        }
+    };
+    let job = RenderJob::new(source, action, input);
+    let knobs = crate::menu::bass_knobs();
+    let task = Task::spawn(screen, job, move |job| {
+        let outcome = crate::actions::render(job, &knobs);
+        // The worker's completion is the only event that will reach the UI when
+        // the user is idle; ask for the frame that takes the result.
+        crate::ui::minimod_repaint_screen();
+        outcome
     });
-    job
+    *task_slot() = Some(task);
+    menu.restore_pending = i32::from(crate::ui::screen_chop_mode());
+    menu.busy = 1;
+    crate::ui::minimod_repaint_screen();
+    status::set_status(&format!("Processing {}...", action_name(action)));
+    true
 }
 
 /// The page the running job started from, or zero when none runs.
 #[must_use]
 pub fn job_screen() -> usize {
-    let job = JOB.load(Ordering::Acquire);
-    if job.is_null() {
-        0
-    } else {
-        // SAFETY: the job stays allocated until the UI thread finishes it, and
-        // `screen` is written once before it is published.
-        unsafe { (*job).screen }
-    }
+    task_slot().as_ref().map_or(0, Task::key)
 }
 
 /// Whether a job is running or waiting to be finished.
 #[must_use]
 pub fn busy() -> bool {
-    !JOB.load(Ordering::Acquire).is_null()
+    task_slot().is_some()
 }
 
-/// Finish the job if the worker is done.
-///
-/// Returns 1 when a job was consumed, 0 when there was nothing to do.
-///
-/// # Safety
-///
-/// `hooks` must be live for this call.
-pub unsafe extern "C" fn minimod_job_finish(
-    hooks: *const Hooks,
-    screen: usize,
-    base: usize,
-) -> i32 {
-    if hooks.is_null() || FINALIZING.swap(true, Ordering::AcqRel) {
-        return 0;
-    }
-    if !DONE.swap(false, Ordering::AcqRel) {
-        FINALIZING.store(false, Ordering::Release);
-        return 0;
-    }
-    let job = JOB.swap(core::ptr::null_mut(), Ordering::AcqRel);
-    if job.is_null() {
-        FINALIZING.store(false, Ordering::Release);
-        return 0;
-    }
-    // SAFETY: the pointer came from `minimod_job_start` and is ours now.
-    unsafe { minimod_job_finalize(job, hooks, screen, base) };
-    FINALIZING.store(false, Ordering::Release);
-    1
-}
-
-/// Where a job's input audio comes from.
-enum Source {
-    /// The bass synth renders its own audio.
-    Synth,
-    /// The app's in-memory float32 buffer.
-    Memory(Vec<f32>),
-    /// The sample's WAV file.
-    File(std::path::PathBuf),
-}
-
-/// Allocate the job and give it its input.
-///
-/// # Safety
-///
-/// `hooks` must be live for this call.
-unsafe fn prepare(
-    action: i32,
-    selected: &selection::Selection,
-    source: Source,
-    hooks: StartHooks,
-) -> Option<*mut Job> {
-    let synth = matches!(source, Source::Synth);
-    let samples = match source {
-        Source::Synth => None,
-        Source::Memory(samples) => Some(samples),
-        Source::File(path) => {
-            let Some(samples) =
-                wav::read_f32(&path, selected.frames, selected.channels, selected.rate)
-            else {
-                status::set_action_status(action, "cannot decode WAV");
-                // SAFETY: see the caller's contract.
-                unsafe { say_failure(hooks.toast, action, "bad WAV") };
-                return None;
-            };
-            Some(samples)
-        }
-    };
-    let input = samples
-        .as_deref()
-        .map_or(core::ptr::null_mut(), into_malloc);
-    // SAFETY: a plain allocation, checked for null.
-    let job = unsafe { libc::calloc(1, size_of::<Job>()) }.cast::<Job>();
-    if (input.is_null() && !synth) || job.is_null() {
-        // SAFETY: both came from `malloc`; nothing else owns them.
-        unsafe {
-            libc::free(input.cast());
-            libc::free(job.cast());
-        }
-        status::set_action_status(action, "out of memory");
-        return None;
-    }
-    // SAFETY: `job` is a fresh zeroed allocation we own.
-    let fields = unsafe { &mut *job };
-    fill(fields, selected, input, action);
-    if synth {
-        fields.rendered_channels = 2;
-    }
-    Some(job)
-}
-
-/// The "bad WAV" toast for an action.
-///
-/// # Safety
-///
-/// `toast` must accept a NUL-terminated string.
-unsafe fn say_failure(toast: Option<unsafe extern "C" fn(*const u8)>, action: i32, what: &str) {
-    let text = if action == 0 { "HPSS: " } else { "Effect: " };
-    let mut joined = [0_u8; 48];
-    let head = text.len();
-    joined[..head].copy_from_slice(text.as_bytes());
-    let tail = what.len().min(joined.len() - head - 1);
-    joined[head..head + tail].copy_from_slice(&what.as_bytes()[..tail]);
-    // SAFETY: the buffer is NUL-terminated above and outlives the call.
-    unsafe {
-        say(
-            toast,
-            core::str::from_utf8(&joined[..head + tail]).unwrap_or(""),
-        );
-    }
-}
-
-/// Record the current screen; the glue calls this when it changes.
-pub extern "C" fn minimod_job_set_screen(screen: usize) {
-    SCREEN.store(screen as *mut (), Ordering::Release);
-}
-
-/// The screen the page is on.
-fn current_screen() -> usize {
-    SCREEN.load(Ordering::Acquire) as usize
-}
-
-/// What the glue supplies for a start or a finish.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct GlueHooks {
-    /// Mark the job finished.
-    pub finished: Option<unsafe extern "C" fn()>,
-    /// Redraw the screen.
-    pub repaint: Option<unsafe extern "C" fn()>,
-    /// Show a toast.
-    pub toast: Option<unsafe extern "C" fn(*const u8)>,
-    /// Read the chop mode.
-    pub chop_mode: Option<unsafe extern "C" fn() -> i32>,
-    /// Put the chop mode back.
-    pub restore_chop: Option<unsafe extern "C" fn()>,
-    /// Stop the bass preview.
-    pub preview_off: Option<unsafe extern "C" fn()>,
-    /// Extract the result.
-    pub extract: Option<Extract>,
-}
-
-/// Start a job, if nothing is running and the pad has a sample.
-///
-/// # Safety
-///
-/// `menu` and `knobs` must be live and `hooks` readable.
-pub unsafe extern "C" fn minimod_glue_start(
-    action: i32,
-    base: usize,
-    screen: usize,
-    knobs: *const f32,
-    menu: *mut crate::menu::State,
-    hooks: *const GlueHooks,
-) -> i32 {
-    if menu.is_null() || knobs.is_null() || hooks.is_null() {
-        return 0;
-    }
-    // SAFETY: the caller's contract.
-    let (menu, hooks) = unsafe { (&mut *menu, *hooks) };
-    if menu.busy != 0 || busy() {
-        return 0;
-    }
-    let start = StartHooks {
-        finished: hooks.finished,
-        repaint: hooks.repaint,
-        toast: hooks.toast,
-    };
-    minimod_job_set_screen(screen);
-    // SAFETY: the knobs and hooks are the caller's.
-    if unsafe { minimod_job_start(action, base, knobs, core::ptr::from_ref(&start)) }.is_null() {
-        return 0;
-    }
-    if let Some(mode) = hooks.chop_mode {
-        // SAFETY: the glue's own callback.
-        unsafe { menu.restore_pending = mode() };
-    }
-    menu.busy = 1;
-    if let Some(repaint) = hooks.repaint {
-        // SAFETY: the glue's own callback.
-        unsafe { repaint() };
-    }
-    1
-}
-
-/// Finish a job that the worker completed.
-///
-/// # Safety
-///
-/// `menu` must be live and `hooks` readable.
-pub unsafe extern "C" fn minimod_glue_finish(
-    base: usize,
-    screen: usize,
-    menu: *mut crate::menu::State,
-    hooks: *const GlueHooks,
-) -> i32 {
-    if menu.is_null() || hooks.is_null() {
-        return 0;
-    }
-    // SAFETY: the caller's contract.
-    let (menu, hooks) = unsafe { (&mut *menu, *hooks) };
-    let finish = Hooks {
-        extract: hooks.extract,
-        restore_chop: hooks.restore_chop,
-        toast: hooks.toast,
-    };
-    minimod_job_set_screen(screen);
-    // SAFETY: the hooks are the caller's.
-    if unsafe { minimod_job_finish(core::ptr::from_ref(&finish), screen, base) } == 0 {
-        return 0;
-    }
+/// Clear the menu and preview state after a terminal job.
+fn finish_state() {
+    let menu = crate::menu::state_mut();
     menu.busy = 0;
     menu.open = 0;
-    if let Some(off) = hooks.preview_off {
-        // SAFETY: the glue's own callback.
-        unsafe { off() };
-    }
     menu.data_down = 0;
-    if let Some(repaint) = hooks.repaint {
-        // SAFETY: the glue's own callback.
-        unsafe { repaint() };
-    }
-    1
+    crate::backend::bass::preview_set_active(false);
+    crate::ui::minimod_repaint_screen();
 }
 
-/// Mark the job finished.
-extern "C" fn finished_noop() {}
-
-/// Show a toast, in the shape the hooks want: draw it and say it.
-unsafe extern "C" fn toast_c(text: *const u8) {
-    let painted = crate::audio::painted();
-    let component = if painted != 0 {
-        painted
-    } else {
-        paint::screen()
+/// Finish the job if the worker is done.  Returns whether a job was consumed.
+#[must_use]
+pub fn finish(screen: usize) -> bool {
+    let Some(mut task) = task_slot().take() else {
+        return false;
     };
-    // SAFETY: the text is the caller's and the repaint the app's.
-    unsafe {
-        let repaint: Option<Repaint> = minimod_paint_original().map(|original| {
-            // SAFETY: the app's paint takes the component and two coordinates.
-            core::mem::transmute::<unsafe extern "C" fn(usize, usize), Repaint>(original)
-        });
-        minimod_toast(text, repaint, component);
+    match task.take() {
+        Err(TaskError::Running) => {
+            *task_slot() = Some(task);
+            false
+        }
+        Err(TaskError::AlreadyTaken) => {
+            finish_state();
+            true
+        }
+        Err(TaskError::Panicked) => {
+            status::set_status("processing failed");
+            show_toast("processing failed");
+            finish_state();
+            true
+        }
+        Err(TaskError::Render(code)) => {
+            status::set_prefixed(action_name(code), "processing failed");
+            show_toast(if code == ACTION_SPLIT {
+                "HPSS: processing failed"
+            } else {
+                "Effect: processing failed"
+            });
+            finish_state();
+            true
+        }
+        Ok(job) => {
+            let report = finalize(&job, screen);
+            if report.raw {
+                status::set_status(report.status);
+            } else {
+                status::set_prefixed(action_name(job.kind), report.status);
+            }
+            show_toast(report.toast);
+            finish_state();
+            true
+        }
     }
 }
 
-/// Stop the bass preview.
-extern "C" fn preview_off() {
-    crate::bass_ffi::minimod_bass_preview_set_active(0);
+/// The status setter in the shape the menu wants.
+fn set_status(text: &str) {
+    status::set_status(text);
 }
 
-/// The hooks the crate uses for every job it starts.
-pub fn glue_hooks() -> GlueHooks {
-    GlueHooks {
-        finished: Some(finished_noop),
-        repaint: Some(crate::ui::minimod_repaint_screen),
-        toast: Some(toast_c),
-        chop_mode: Some(crate::ui::minimod_screen_chop_mode),
-        restore_chop: Some(crate::ui::minimod_restore_chop),
-        preview_off: Some(preview_off),
-        extract: Some(crate::hpss_exec::minimod_extract_cb),
+/// Start a transform job bound to no effect.
+fn start_split(menu: &mut crate::menu::State) {
+    start(ACTION_SPLIT, paint::screen(), menu);
+}
+
+/// Start a transform job for one effect.
+fn start_effect(action: i32, menu: &mut crate::menu::State) {
+    start(action, paint::screen(), menu);
+}
+
+/// Start a spectral chop.
+fn start_spectral(menu: &mut crate::menu::State) {
+    let busy = menu.busy != 0 || busy();
+    if crate::spectral::run_start(busy) {
+        crate::ui::minimod_repaint_screen();
     }
 }
 
-/// Start a job from the crate.
-///
-/// # Safety
-///
-/// The app's objects are the caller's.
-pub unsafe extern "C" fn minimod_job_start_self(action: i32, base: usize, screen: usize) -> i32 {
-    let hooks = glue_hooks();
-    // SAFETY: the knobs, menu and hooks are the crate's own.
-    unsafe {
-        minimod_glue_start(
-            action,
-            base,
-            screen,
-            core::ptr::addr_of!(crate::menu::g_bass_knob).cast::<f32>(),
-            core::ptr::addr_of_mut!(crate::menu::g_menu),
-            core::ptr::from_ref(&hooks),
-        )
-    }
+/// Open the bass control page.
+fn start_bass_page(menu: &mut crate::menu::State) {
+    crate::menu::bass_page(menu);
 }
 
-/// Open the effects menu with the crate's own hooks.
-///
-/// # Safety
-///
-/// The app's objects are live while the page is showing.
-pub unsafe extern "C" fn minimod_menu_activate_self() {
+/// Start the bass synth.
+fn start_bass(menu: &mut crate::menu::State) {
+    start(ACTION_BASS, paint::screen(), menu);
+}
+
+/// Open the looper, re-reading the device's rings if it opened.
+fn start_looper() -> i32 {
+    let opened = crate::backend::looper::looper_activate();
+    if opened != 0 {
+        mpc_sample_sdk::audio::mark_buffers_stale();
+        crate::backend::bass::preview_set_active(false);
+        mpc_sample_sdk::draw::start_repaint_pump(crate::backend::audio::pump_component);
+    }
+    opened
+}
+
+/// Run the selected menu row.
+pub fn menu_activate() {
     let hooks = crate::menu::Hooks {
         repaint: Some(crate::ui::minimod_repaint_screen),
         start_split: Some(start_split),
         start_effect: Some(start_effect),
         start_spectral: Some(start_spectral),
         start_bass: Some(start_bass),
-        restore_chop: Some(crate::ui::minimod_restore_chop),
         start_bass_page: Some(start_bass_page),
         start_looper: Some(start_looper),
-        set_status: Some(toast_c),
+        set_status: Some(set_status),
     };
-    // SAFETY: the menu and the hooks are the crate's own.
-    unsafe {
-        crate::menu::minimod_menu_activate(
-            core::ptr::addr_of_mut!(crate::menu::g_menu),
-            core::ptr::from_ref(&hooks),
-        );
+    crate::menu::activate(crate::menu::state_mut(), hooks);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::action_name;
+
+    #[test]
+    fn action_names_match_the_menu() {
+        assert_eq!(action_name(0), "HPSS");
+        assert_eq!(action_name(1), "Reverb");
+        assert_eq!(action_name(2), "Vinyl");
+        assert_eq!(action_name(3), "Lo-Fi");
+        assert_eq!(action_name(4), "Bass Synth");
     }
-}
-
-/// Start a transform job bound to no effect.
-extern "C" fn start_split() {
-    // SAFETY: the app's objects are live.
-    unsafe { minimod_job_start_self(0, base(), paint::screen()) };
-}
-
-/// Start a transform job for one effect.
-extern "C" fn start_effect(action: i32) {
-    // SAFETY: the app's objects are live.
-    unsafe { minimod_job_start_self(action, base(), paint::screen()) };
-}
-
-/// Start a spectral chop.
-unsafe extern "C" fn start_spectral() {
-    let busy = i32::from(crate::menu::state().busy != 0 || busy());
-    // SAFETY: the crate's own state.
-    if unsafe { crate::spectral::minimod_spectral_run_start(busy) } != 0 {
-        // SAFETY: the app's own repaint.
-        unsafe { crate::ui::minimod_repaint_screen() };
-    }
-}
-
-/// Open the bass control page.
-unsafe extern "C" fn start_bass_page() {
-    // SAFETY: the crate's own state.
-    unsafe { crate::menu::minimod_menu_bass_page() };
-}
-
-/// Start the bass synth.
-extern "C" fn start_bass() {
-    // SAFETY: the app's objects are live.
-    unsafe { minimod_job_start_self(4, base(), paint::screen()) };
-}
-
-/// Open the looper, re-reading the device's rings if it opened.
-extern "C" fn start_looper() -> i32 {
-    let opened = crate::looper_ffi::looper_activate();
-    if opened != 0 {
-        // SAFETY: the flag is the audio module's.
-        unsafe { crate::audio::G_BUF_DIRTY = 1 };
-        crate::bass_ffi::minimod_bass_preview_set_active(0);
-        crate::audio::minimod_pump_start();
-    }
-    opened
 }

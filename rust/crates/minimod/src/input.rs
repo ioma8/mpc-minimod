@@ -1,36 +1,21 @@
-//! The app's input hooks: pad presses, their releases, control-surface events
-//! and the encoder.
+//! The input policy: which screen owns a pad, a surface event or an encoder turn.
 //!
-//! These run on the app's own threads, so the state they keep is behind one
-//! struct the glue owns.  Each hook decides whether the mod consumes the event
-//! and otherwise forwards it to the displaced function.
+//! The SDK decodes the app's events and forwards whatever this module does not
+//! consume; nothing here touches a displaced function.
+
+use mpc_sample_sdk::state::Global;
+use mpc_sample_sdk::{
+    EncoderEvent, EncoderFlow, PadAction, PadEvent, PadFlow, SurfaceEvent, SurfaceFlow,
+};
 
 /// Pads the app can address.
 pub const PADS: usize = 128;
-/// Pads the looper owns.
+/// Pads the looper owns; a test keeps it equal to the engine's table.
 pub const LOOPER_PADS: i32 = 16;
-/// Pads the bass preview listens to.
+/// Pads the bass preview listens to; a test keeps it equal to the synth's.
 pub const PREVIEW_PADS: i32 = 16;
-/// Entries on the effects menu.
+/// Entries on the effects menu; a test keeps it equal to the menu's rows.
 pub const MENU_ITEMS: i32 = 8;
-
-/// One remembered pad press, so the page can be re-selected later.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct PadRecord {
-    /// The input object the event came from.
-    pub input: usize,
-    /// The source id.
-    pub src: i32,
-    /// The pad index.
-    pub pad: i32,
-    /// The event's property block.
-    pub props: usize,
-    /// The velocity.
-    pub velocity: f32,
-    /// Whether this record holds a real press.
-    pub valid: i32,
-}
 
 /// The state the input hooks keep.
 #[repr(C)]
@@ -42,20 +27,10 @@ pub struct State {
     pub held_input: [usize; PADS],
     /// The source each held pad came from.
     pub held_src: [i32; PADS],
-    /// The last real press per pad.
-    pub pad_rec: [PadRecord; PADS],
     /// The pad pressed last.
     pub last_pad: i32,
-    /// Its property block.
-    pub props: usize,
-    /// Whether the mod is replaying a pad itself.
-    pub replaying: i32,
-    /// The control-surface object last seen.
-    pub cs_self: usize,
     /// The encoder's surface, as the button handler recorded it.
     pub data_target: usize,
-    /// The pad note base the app reports for the bank.
-    pub pad_prop_base: i32,
 }
 
 impl State {
@@ -66,20 +41,8 @@ impl State {
             held_on: [0; PADS],
             held_input: [0; PADS],
             held_src: [0; PADS],
-            pad_rec: [PadRecord {
-                input: 0,
-                src: 0,
-                pad: 0,
-                props: 0,
-                velocity: 0.0,
-                valid: 0,
-            }; PADS],
             last_pad: -1,
-            props: 0,
-            replaying: 0,
-            cs_self: 0,
             data_target: 0,
-            pad_prop_base: 0x75,
         }
     }
 }
@@ -90,16 +53,7 @@ impl Default for State {
     }
 }
 
-/// The app's note-on.
-pub type NoteOn = unsafe extern "C" fn(usize, i32, i32, usize, f32);
-/// The app's note-off.
-pub type NoteOff = unsafe extern "C" fn(usize, i32, i32);
-/// The app's control-surface event.
-pub type ControlSurface = unsafe extern "C" fn(usize, i32, usize);
-/// The app's encoder.
-pub type DataSignal = unsafe extern "C" fn(usize, i32);
-
-/// What the hooks need from the glue for one event.
+/// The screens and keys the policy reads.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Context {
@@ -117,31 +71,6 @@ pub struct Context {
     pub shift: i32,
     /// Whether ERASE is held.
     pub erase: i32,
-    /// Redraw the screen.
-    pub repaint: Option<unsafe extern "C" fn()>,
-}
-
-/// Forward a note-on to the app.
-fn forward_on(
-    callback: Option<NoteOn>,
-    input: usize,
-    src: i32,
-    pad: i32,
-    props: usize,
-    velocity: f32,
-) {
-    if let Some(callback) = callback {
-        // SAFETY: the caller guarantees this is the displaced hook.
-        unsafe { callback(input, src, pad, props, velocity) };
-    }
-}
-
-/// Forward a note-off to the app.
-fn forward_off(callback: Option<NoteOff>, input: usize, src: i32, pad: i32) {
-    if let Some(callback) = callback {
-        // SAFETY: the caller guarantees this is the displaced hook.
-        unsafe { callback(input, src, pad) };
-    }
 }
 
 /// The pad index, when it is one the app can address.
@@ -149,109 +78,132 @@ fn pad_index(pad: i32) -> Option<usize> {
     usize::try_from(pad).ok().filter(|index| *index < PADS)
 }
 
-/// A pad press.
-///
-/// # Safety
-///
-/// `state` must point at the glue's state and `callback` at the app's own hook.
-pub unsafe extern "C" fn minimod_input_note_on(
-    state: *mut State,
-    input: usize,
-    src: i32,
-    pad: i32,
-    props: usize,
-    velocity: f32,
-    context: Context,
-    callback: Option<NoteOn>,
-) {
-    if state.is_null() {
-        return;
-    }
-    // SAFETY: the caller promises the state is live.
-    let state = unsafe { &mut *state };
-    if let Some(index) = pad_index(pad) {
-        state.held_on[index] = 1;
-        state.held_input[index] = input;
-        state.held_src[index] = src;
-    }
-    if context.looper_open != 0 && pad >= 0 {
-        if pad < LOOPER_PADS {
-            let _ = crate::looper_ffi::looper_pad(pad, context.shift, context.erase);
+/// A pad press or release.
+pub fn pad(event: PadEvent) -> PadFlow {
+    // only the app's input thread touches this state.
+    let state = STATE.get_mut();
+    if let Some(index) = pad_index(event.pad) {
+        match event.action {
+            PadAction::Press => {
+                state.held_on[index] = 1;
+                state.held_input[index] = event.input;
+                state.held_src[index] = event.source;
+            }
+            PadAction::Release => state.held_on[index] = 0,
         }
-        return;
+    }
+    let context = context();
+    if context.looper_open != 0 && event.pad >= 0 {
+        if context.looper_open != 0 && event.action == PadAction::Press && event.pad < LOOPER_PADS {
+            let _ = crate::backend::looper::looper_pad(event.pad, context.shift, context.erase);
+        }
+        return PadFlow::Consume;
     }
     if context.spectral_active != 0 {
-        return;
+        return PadFlow::Consume;
     }
     // While the bass page is open the pads belong to the preview, which the
     // control-surface hook feeds; anything that still arrives here is swallowed
     // so the app cannot start the project's sample under it.
-    if context.menu_open != 0 && context.bass_edit != 0 && (0..PREVIEW_PADS).contains(&pad) {
-        return;
+    if context.menu_open != 0 && context.bass_edit != 0 && (0..PREVIEW_PADS).contains(&event.pad) {
+        return PadFlow::Consume;
     }
-    state.last_pad = pad;
-    state.props = props;
-    if state.replaying == 0
-        && let Some(index) = pad_index(pad)
-    {
-        state.pad_rec[index] = PadRecord {
-            input,
-            src,
-            pad,
-            props,
-            velocity,
-            valid: 1,
-        };
+    if event.action == PadAction::Press {
+        state.last_pad = event.pad;
     }
-    forward_on(callback, input, src, pad, props, velocity);
+    PadFlow::Forward
 }
 
-/// A pad release.
-///
-/// # Safety
-///
-/// `state` must point at the glue's state and `callback` at the app's own hook.
-pub unsafe extern "C" fn minimod_input_note_off(
-    state: *mut State,
-    input: usize,
-    src: i32,
-    pad: i32,
-    context: Context,
-    callback: Option<NoteOff>,
-) {
-    if !state.is_null()
-        && let Some(index) = pad_index(pad)
-    {
-        // SAFETY: the caller promises the state is live.
-        unsafe { (*state).held_on[index] = 0 };
+/// A control-surface event: the bass page consumes the pad notes it sees.
+#[must_use]
+pub fn surface(event: SurfaceEvent) -> SurfaceFlow {
+    if bass_pad_event(event) {
+        SurfaceFlow::Consume
+    } else {
+        SurfaceFlow::Forward
     }
-    if context.looper_open != 0 && pad >= 0 {
-        return;
-    }
-    if context.menu_open != 0 && context.bass_edit != 0 && (0..PREVIEW_PADS).contains(&pad) {
-        return;
-    }
-    forward_off(callback, input, src, pad);
 }
 
-/// Release every pad the app may think is held.
-///
-/// # Safety
-///
-/// `state` must point at the glue's state and `callback` at the app's own hook.
-pub unsafe extern "C" fn minimod_input_release_held(state: *mut State, callback: Option<NoteOff>) {
-    if state.is_null() {
-        return;
+/// The encoder: drive the open menu, or forward the turn.
+#[must_use]
+pub fn encoder(event: EncoderEvent) -> EncoderFlow {
+    // only the app's input thread touches this state.
+    let state = STATE.get();
+    let context = context();
+    if event.surface != state.data_target
+        || (context.menu_open == 0 && context.spectral_active == 0)
+    {
+        return EncoderFlow::Forward;
     }
-    // SAFETY: the caller promises the state is live.
-    let state = unsafe { &mut *state };
+    if context.menu_open != 0 && context.busy == 0 && event.delta != 0 && context.bass_edit == 0 {
+        let step = if event.delta > 0 { 1 } else { 7 };
+        let selection = &mut crate::menu::state_mut().selection;
+        *selection = (*selection + step) % MENU_ITEMS;
+        // the app's own repaint; the UI thread is here.
+        crate::ui::minimod_repaint_screen();
+    }
+    EncoderFlow::Consume
+}
+
+/// The pad the user pressed last, or -1.
+#[must_use]
+pub fn last_pad() -> i32 {
+    // only the UI thread writes it.
+    STATE.get().last_pad
+}
+
+/// Record the encoder's surface.
+pub fn set_data_target(target: usize) {
+    // only the UI thread writes the input state.
+    STATE.get_mut().data_target = target;
+}
+
+/// The state itself.
+static STATE: Global<State> = Global::new(State::new());
+
+/// What the policy needs to know about the mod's screens and keys, right now.
+fn context() -> Context {
+    let menu = crate::menu::state();
+    // a plain word, written by the UI thread.
+    let spectral = crate::spectral::G_SPECTRAL.get().active;
+    Context {
+        looper_open: crate::backend::looper::looper_is_open(),
+        spectral_active: spectral,
+        menu_open: menu.open,
+        bass_edit: menu.bass_edit,
+        busy: menu.busy,
+        shift: i32::from(mpc_sample_sdk::shift()),
+        erase: i32::from(mpc_sample_sdk::erase()),
+    }
+}
+
+/// Feed the bass preview a pad note while its page is open.
+fn bass_pad_event(event: SurfaceEvent) -> bool {
+    let menu = crate::menu::state();
+    if menu.open == 0 || menu.bass_edit == 0 || !(0..PREVIEW_PADS).contains(&event.code) {
+        return false;
+    }
+    if !matches!(event.kind, 0x80 | 0x90 | 0xa0) {
+        return false;
+    }
+    if event.kind == 0x90 && event.velocity > 0 {
+        crate::backend::bass::preview_note(
+            u32::try_from(event.code).unwrap_or(0),
+            f32::from(event.velocity) / 127.0,
+        );
+    }
+    true
+}
+
+/// Release every pad the app may think is held, through the app's own path.
+pub fn release_held() {
+    let state = STATE.get_mut();
     for pad in 0..PADS {
         if state.held_on[pad] == 0 {
             continue;
         }
         state.held_on[pad] = 0;
-        forward_off(
-            callback,
+        mpc_sample_sdk::sites::send_note_off(
             state.held_input[pad],
             state.held_src[pad],
             i32::try_from(pad).unwrap_or(0),
@@ -259,315 +211,31 @@ pub unsafe extern "C" fn minimod_input_release_held(state: *mut State, callback:
     }
 }
 
-/// A control-surface event: remember the object and pass it on.
-///
-/// # Safety
-///
-/// `state` must point at the glue's state and `callback` at the app's own hook.
-pub unsafe extern "C" fn minimod_input_surface(
-    state: *mut State,
-    self_address: usize,
-    code: i32,
-    payload: usize,
-    callback: Option<ControlSurface>,
-) {
-    if state.is_null() {
-        return;
-    }
-    // SAFETY: the caller promises the state is live.
-    let state = unsafe { &mut *state };
-    if self_address != 0 {
-        state.cs_self = self_address;
-    }
-    if let Some(callback) = callback {
-        // SAFETY: the caller guarantees this is the displaced hook.
-        unsafe { callback(self_address, code, payload) };
-    }
-}
-
-/// The encoder: drive the menu, or pass the event on.
-///
-/// # Safety
-///
-/// `state` must point at the glue's state and `callback` at the app's own hook.
-pub unsafe extern "C" fn minimod_input_data(
-    state: *mut State,
-    selection: *mut i32,
-    self_address: usize,
-    delta: i32,
-    context: Context,
-    callback: Option<DataSignal>,
-) {
-    if state.is_null() || selection.is_null() {
-        return;
-    }
-    // SAFETY: the caller promises the state is live.
-    let data_target = unsafe { (*state).data_target };
-    if self_address == data_target && (context.menu_open != 0 || context.spectral_active != 0) {
-        if context.menu_open != 0 && context.busy == 0 && delta != 0 && context.bass_edit == 0 {
-            let step = if delta > 0 { 1 } else { 7 };
-            // The row belongs to the menu, which owns it; this hook only moves it.
-            // SAFETY: the caller promises the pointer is writable.
-            let current = unsafe { *selection };
-            // SAFETY: see above.
-            unsafe { *selection = (current + step) % MENU_ITEMS };
-            if let Some(repaint) = context.repaint {
-                // SAFETY: the caller's callback.
-                unsafe { repaint() };
-            }
-        }
-        return;
-    }
-    if let Some(callback) = callback {
-        // SAFETY: the caller guarantees this is the displaced hook.
-        unsafe { callback(self_address, delta) };
-    }
-}
-
-/// The pad the user pressed last, or -1.
-#[must_use]
-pub fn last_pad() -> i32 {
-    // SAFETY: only the UI thread writes it.
-    unsafe { (*core::ptr::addr_of!(STATE)).last_pad }
-}
-
-/// Record the encoder's surface.
-pub fn set_data_target(target: usize) {
-    // SAFETY: only the UI thread writes the input state.
-    unsafe { (*core::ptr::addr_of_mut!(STATE)).data_target = target };
-}
-
-/// The state itself.
-static mut STATE: State = State::new();
-
-// The glue owns the screens and the keys; it builds the context for us and
-// hands us its menu's selection slot.
-/// What the hooks need to know about the mod's screens and keys, right now.
-fn context() -> Context {
-    let menu = crate::menu::state();
-    // SAFETY: a plain word, written by the UI thread.
-    let spectral = unsafe { (*core::ptr::addr_of!(crate::spectral::G_SPECTRAL)).active };
-    Context {
-        looper_open: crate::looper_ffi::looper_is_open(),
-        spectral_active: spectral,
-        menu_open: menu.open,
-        bass_edit: menu.bass_edit,
-        busy: menu.busy,
-        shift: crate::ui::shift(),
-        erase: crate::ui::erase(),
-        repaint: Some(crate::ui::minimod_repaint_screen),
-    }
-}
-
-/// The app's own note-on, recorded at install time.
-static mut ORIGINAL_ON: Option<NoteOn> = None;
-/// The app's own note-off.
-static mut ORIGINAL_OFF: Option<NoteOff> = None;
-/// The app's own control-surface handler.
-static mut ORIGINAL_SURFACE: Option<ControlSurface> = None;
-/// The app's own encoder handler.
-static mut ORIGINAL_DATA: Option<DataSignal> = None;
-
-/// A pad press, as the app's own hook.
-///
-/// # Safety
-///
-/// The app calls this with its own event pointers.
-pub unsafe extern "C" fn minimod_hook_note_on(
-    input: usize,
-    src: i32,
-    pad: i32,
-    props: usize,
-    velocity: f32,
-) {
-    // SAFETY: the callee reads the app's page objects.
-    unsafe { crate::overlay::poll_offpage() };
-    let context = context();
-    // SAFETY: the state is a static in this module.
-    let state = core::ptr::addr_of_mut!(STATE);
-    // SAFETY: the original is the app's own hook.
-    unsafe {
-        minimod_input_note_on(
-            state,
-            input,
-            src,
-            pad,
-            props,
-            velocity,
-            context,
-            ORIGINAL_ON,
-        );
-    }
-}
-
-/// A pad release, as the app's own hook.
-///
-/// # Safety
-///
-/// The app calls this with its own event pointers.
-pub unsafe extern "C" fn minimod_hook_note_off(input: usize, src: i32, pad: i32) {
-    let context = context();
-    // SAFETY: the state is a static in this module.
-    let state = core::ptr::addr_of_mut!(STATE);
-    // SAFETY: the original is the app's own hook.
-    unsafe { minimod_input_note_off(state, input, src, pad, context, ORIGINAL_OFF) };
-}
-
-/// A control-surface event, as the app's own hook.
-///
-/// # Safety
-///
-/// The app calls this with its own event pointers.
-pub unsafe extern "C" fn minimod_hook_surface(self_address: usize, code: i32, payload: usize) {
-    // SAFETY: the state is a static in this module.
-    let state = core::ptr::addr_of_mut!(STATE);
-    if bass_pad_event(self_address, code, payload) {
-        return;
-    }
-    // SAFETY: the original is the app's own hook.
-    unsafe { minimod_input_surface(state, self_address, code, payload, ORIGINAL_SURFACE) };
-}
-
-/// The encoder, as the app's own hook.
-///
-/// # Safety
-///
-/// The app calls this with its own event pointers.
-pub unsafe extern "C" fn minimod_hook_data(self_address: usize, delta: i32) {
-    let context = context();
-    let state = core::ptr::addr_of_mut!(STATE);
-    let selection = core::ptr::addr_of_mut!(crate::menu::state_mut().selection);
-    // SAFETY: the state, the slot and the original are the caller's.
-    unsafe {
-        minimod_input_data(
-            state,
-            selection,
-            self_address,
-            delta,
-            context,
-            ORIGINAL_DATA,
-        );
-    }
-}
-
-/// Record the app's note-on handler.
-///
-/// # Safety
-///
-/// Called once at install, before any note can arrive.
-pub unsafe extern "C" fn minimod_note_on_original(original: usize) {
-    // SAFETY: the caller's contract.
-    unsafe { ORIGINAL_ON = from_address(original) };
-}
-
-/// Record the app's note-off handler.
-///
-/// # Safety
-///
-/// Called once at install, before any note can arrive.
-pub unsafe extern "C" fn minimod_note_off_original(original: usize) {
-    // SAFETY: the caller's contract.
-    unsafe { ORIGINAL_OFF = from_address(original) };
-}
-
-/// Record the app's control-surface handler.
-///
-/// # Safety
-///
-/// Called once at install, before any event can arrive.
-pub unsafe extern "C" fn minimod_surface_original(original: usize) {
-    // SAFETY: the caller's contract.
-    unsafe { ORIGINAL_SURFACE = from_address(original) };
-}
-
-/// Record the app's data-signal handler.
-///
-/// # Safety
-///
-/// Called once at install, before any event can arrive.
-pub unsafe extern "C" fn minimod_data_original(original: usize) {
-    // SAFETY: the caller's contract.
-    unsafe { ORIGINAL_DATA = from_address(original) };
-}
-
-/// One displaced function, from its address.
-#[must_use]
-pub fn from_address<T: Copy>(address: usize) -> Option<T> {
-    if address == 0 {
-        return None;
-    }
-    // SAFETY: the caller names the shape the site has.
-    Some(unsafe { core::mem::transmute_copy::<usize, T>(&address) })
-}
-
-/// Release the pads the mod is still holding down.
-///
-/// # Safety
-///
-/// The crate's own state and the app's own note-off.
-pub unsafe extern "C" fn minimod_ui_release_held() {
-    // SAFETY: the state is this module's and the hook is the crate's.
-    unsafe {
-        minimod_input_release_held(core::ptr::addr_of_mut!(STATE), Some(minimod_hook_note_off));
-    }
-}
-
-/// The first word of the event the page sent, which is the pointer to its button.
-#[must_use]
-pub extern "C" fn minimod_read_pointer(event: usize) -> usize {
-    if event == 0 {
-        return 0;
-    }
-    let mut raw = [0_u8; size_of::<usize>()];
-    if !crate::firmware::read(event, &mut raw) {
-        return 0;
-    }
-    usize::from_ne_bytes(raw)
-}
-
-/// Pads reach the control surface as note messages whose event code is the pad
-/// index, ahead of the pad-grid observer.  While the bass page is open they are
-/// consumed here, before the app can select or switch the sample underneath, and
-/// they feed the preview.  Returns whether the event was consumed.
-fn bass_pad_event(self_address: usize, code: i32, payload: usize) -> bool {
-    let menu = crate::menu::state();
-    if menu.open == 0 || menu.bass_edit == 0 || !(0..PREVIEW_PADS).contains(&code) {
-        return false;
-    }
-    let mut raw = [0_u8; 8];
-    if payload == 0 || !crate::firmware::read(payload, &mut raw) {
-        return false;
-    }
-    let kind = raw[0] & 0xf0;
-    if !matches!(kind, 0x80 | 0x90 | 0xa0) {
-        return false;
-    }
-    if self_address != 0 {
-        // SAFETY: only the UI thread writes the input state.
-        unsafe { (*core::ptr::addr_of_mut!(STATE)).cs_self = self_address };
-    }
-    if kind == 0x90 && raw[2] > 0 {
-        // SAFETY: only the UI thread counts notes.
-        unsafe { crate::bass_ffi::G_BASS_PREVIEW_NOTES += 1 };
-        crate::bass_ffi::bass_preview_note(
-            u32::try_from(code).unwrap_or(0),
-            f32::from(raw[2]) / 127.0,
-        );
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{MENU_ITEMS, State};
+    use super::{LOOPER_PADS, MENU_ITEMS, PREVIEW_PADS, State};
 
     #[test]
     fn a_fresh_state_remembers_nothing() {
         let state = State::new();
         assert_eq!(state.last_pad, -1);
         assert!(state.held_on.iter().all(|&held| held == 0));
-        assert!(state.pad_rec.iter().all(|record| record.valid == 0));
-        assert_eq!(state.pad_prop_base, 0x75);
         assert_eq!(MENU_ITEMS, 8);
+    }
+
+    #[test]
+    fn the_shared_counts_match_their_owners() {
+        assert_eq!(
+            usize::try_from(LOOPER_PADS).unwrap_or(0),
+            crate::backend::looper::PADS
+        );
+        assert_eq!(
+            usize::try_from(PREVIEW_PADS).unwrap_or(0),
+            crate::backend::bass::PADS
+        );
+        assert_eq!(
+            usize::try_from(MENU_ITEMS).unwrap_or(0),
+            crate::menu::MENU_ROWS
+        );
     }
 }

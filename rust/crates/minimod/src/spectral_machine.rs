@@ -6,18 +6,14 @@
 //! between frames, so every phase re-reads the selection and gives up if it
 //! moved.
 
+use crate::backend::spectral;
 use crate::chop;
-use crate::firmware;
 use crate::page;
 use crate::selection;
-use minimod_dsp::spectral;
+use mpc_sample_sdk::state::Global;
 
 /// How many boundaries the app can take.
 pub const MAX_SLICES: usize = 16;
-/// `[screen + 0x168]` is the chop binding.
-const SCREEN_BINDING: usize = 0x168;
-/// `[binding + 0x9c]` is the chop type (0 is Manual).
-const BINDING_TYPE: usize = 0x9c;
 
 /// What the caller should do after a step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +24,7 @@ pub enum Step {
     Started,
     /// Keep going next frame.
     Continue,
-    /// Finished; `slices` is what the pad now holds.
+    /// Finished; the pad holds this many slices.
     Done(u32),
     /// Finished with an error to show in the status line.
     Failed(&'static str),
@@ -49,40 +45,32 @@ struct Machine {
     deadline: i64,
 }
 
-static mut MACHINE: Option<Machine> = None;
+/// The run in flight.
+static MACHINE: Global<Option<Machine>> = Global::new(None);
 
 /// Run one frame of the state machine.
-///
-/// `active` is the caller's flag: 1 means a run was requested.
 #[must_use]
-pub fn step(base: usize, now: i64, active: i32) -> Step {
-    if active != 1 {
-        return Step::Idle;
-    }
-    // SAFETY: only the UI thread touches the machine.
-    let slot = unsafe { &mut *core::ptr::addr_of_mut!(MACHINE) };
-    match slot.as_mut() {
+pub fn step(now: i64) -> Step {
+    match MACHINE.get_mut().as_mut() {
         None => Step::Idle,
-        Some(running) => advance(base, now, running),
+        Some(running) => advance(now, running),
     }
 }
 
 /// Begin a run: detect the boundaries in the samples the caller read, open
 /// Manual chop and store the machine.
-fn start(
-    base: usize,
+pub fn begin(
     now: i64,
     selected: &selection::Selection,
     samples: &[f32],
-    press_chop: Option<unsafe extern "C" fn()>,
-    slot: &mut Option<Machine>,
+    press_chop: Option<&[u8; 16]>,
 ) -> Step {
     if samples.len()
         != usize::try_from(selected.frames).unwrap_or(0) * usize::from(selected.channels)
     {
         return Step::Failed("cannot read sample WAV");
     }
-    let Ok(onsets) = spectral::detect(
+    let Some(detected) = spectral::detect(
         samples,
         usize::from(selected.channels),
         selected.rate,
@@ -90,27 +78,26 @@ fn start(
     ) else {
         return Step::Failed("no onsets");
     };
-    let count = onsets.positions.len().min(MAX_SLICES);
+    let count = detected.len().min(MAX_SLICES);
     if count < 2 {
         return Step::Failed("no onsets");
     }
     let mut positions = [0_u32; MAX_SLICES];
-    for (index, position) in onsets.positions.iter().take(count).enumerate() {
+    for (index, position) in detected.iter().take(count).enumerate() {
         if *position >= selected.frames || (index > 0 && *position <= positions[index - 1]) {
             return Step::Failed("invalid onsets");
         }
         positions[index] = *position;
     }
-    if !page::chop_mode(base, selected.screen)
-        && let Some(press) = press_chop
+    if !page::chop_mode(selected.screen)
+        && let Some(event) = press_chop
     {
-        // SAFETY: the caller's callback replays the CHOP button.
-        unsafe { press() };
+        let _ = mpc_sample_sdk::sites::replay_button(event, crate::ui::CHOP_KEY);
     }
-    if !chop::set_manual(base, selected.screen) {
+    if !chop::set_manual(selected.screen) {
         return Step::Failed("cannot select Manual chop");
     }
-    *slot = Some(Machine {
+    *MACHINE.get_mut() = Some(Machine {
         screen: selected.screen,
         state: selected.state,
         sample: selected.sample,
@@ -126,8 +113,8 @@ fn start(
 }
 
 /// Phases 1 and 2: wait for Manual chop, write the boundaries, verify them.
-fn advance(base: usize, now: i64, running: &mut Machine) -> Step {
-    let Some(selected) = selection::current(base, running.screen) else {
+fn advance(now: i64, running: &mut Machine) -> Step {
+    let Some(selected) = selection::current(running.screen) else {
         return Step::Failed("sample changed; cancelled");
     };
     if selected.screen != running.screen
@@ -139,10 +126,8 @@ fn advance(base: usize, now: i64, running: &mut Machine) -> Step {
     {
         return Step::Failed("sample changed; cancelled");
     }
-    let kind = firmware::read_pointer(running.screen.wrapping_add(SCREEN_BINDING))
-        .and_then(|binding| firmware::read_u32(binding.wrapping_add(BINDING_TYPE)))
-        .map_or(-1, u32::cast_signed);
-    if !page::chop_mode(base, running.screen) || kind != 0 {
+    let kind = chop::chop_kind(running.screen);
+    if !page::chop_mode(running.screen) || kind != 0 {
         return if now >= running.deadline {
             Step::Failed("Manual chop did not open")
         } else {
@@ -151,7 +136,6 @@ fn advance(base: usize, now: i64, running: &mut Machine) -> Step {
     }
     if running.phase == 1 {
         if !chop::write_markers(
-            base,
             running.sample,
             &running.positions[..usize::try_from(running.count).unwrap_or(0)],
             running.frames,
@@ -172,97 +156,4 @@ fn advance(base: usize, now: i64, running: &mut Machine) -> Step {
         };
     }
     Step::Continue
-}
-
-/// Begin a run, for the C glue.
-///
-/// The caller has already read the sample's audio (with the same path it uses
-/// for the other actions), so the machine only detects, opens Manual chop and
-/// keeps the state.
-///
-/// Returns 0 started, 1 failed (with `error` set).
-///
-/// # Safety
-///
-/// `samples` must be readable for `frames * channels` values and `error` must be
-/// writable when non-null.
-pub unsafe extern "C" fn minimod_spectral_begin(
-    base: usize,
-    now: i64,
-    screen: usize,
-    state: usize,
-    sample: usize,
-    frames: u32,
-    channels: u32,
-    rate: u32,
-    samples: *const f32,
-    press_chop: Option<unsafe extern "C" fn()>,
-    error: *mut *const u8,
-) -> i32 {
-    let Ok(channels16) = u16::try_from(channels) else {
-        return 1;
-    };
-    let Some(count) = usize::try_from(frames)
-        .ok()
-        .and_then(|frames| frames.checked_mul(usize::from(channels16)))
-    else {
-        return 1;
-    };
-    if samples.is_null() {
-        return 1;
-    }
-    let selected = selection::Selection {
-        screen,
-        state,
-        sample,
-        frames,
-        channels: channels16,
-        rate,
-    };
-    // SAFETY: the caller promises the samples are readable for that many values.
-    let buffer = unsafe { core::slice::from_raw_parts(samples, count) };
-    // SAFETY: only the UI thread touches the machine.
-    let slot = unsafe { &mut *core::ptr::addr_of_mut!(MACHINE) };
-    match start(base, now, &selected, buffer, press_chop, slot) {
-        Step::Failed(message) => {
-            if !error.is_null() {
-                // SAFETY: the caller promises this is writable.
-                unsafe { *error = message.as_ptr() };
-            }
-            1
-        }
-        Step::Idle | Step::Started | Step::Continue | Step::Done(_) => 0,
-    }
-}
-
-/// One frame of a run already begun, for the C glue.
-///
-/// Returns 2 continue, 3 done (with `slices`), 4 failed (with `error`).
-///
-/// # Safety
-///
-/// `slices` and `error` must be writable when non-null.
-pub unsafe extern "C" fn minimod_spectral_step(
-    base: usize,
-    now: i64,
-    slices: *mut u32,
-    error: *mut *const u8,
-) -> i32 {
-    match step(base, now, 1) {
-        Step::Idle | Step::Started | Step::Continue => 2,
-        Step::Done(count) => {
-            if !slices.is_null() {
-                // SAFETY: the caller promises this is writable.
-                unsafe { *slices = count };
-            }
-            3
-        }
-        Step::Failed(message) => {
-            if !error.is_null() {
-                // SAFETY: the caller promises this is writable.
-                unsafe { *error = message.as_ptr() };
-            }
-            4
-        }
-    }
 }

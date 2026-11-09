@@ -18,8 +18,8 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::firmware;
-use crate::wav;
+use crate::image;
+use crate::platform::wav;
 
 /// Where the app keeps its loaded copies and recordings.
 pub const TEMP_PROJECTS: &str = "/data/TempProjects";
@@ -48,8 +48,8 @@ pub fn for_sample(sample: usize, frames: u32, channels: u16, rate: u32) -> Optio
 /// The path the sample object points at directly.
 #[must_use]
 pub fn from_object(sample: usize, frames: u32) -> Option<PathBuf> {
-    let holder = firmware::read_pointer(sample.checked_add(0x30)?)?;
-    let text = firmware::read_pointer(holder.checked_add(0x120)?)?;
+    let holder = image::read_pointer(sample.checked_add(0x30)?)?;
+    let text = image::read_pointer(holder.checked_add(0x120)?)?;
     read_text(text, frames)
 }
 
@@ -58,14 +58,14 @@ pub fn from_object(sample: usize, frames: u32) -> Option<PathBuf> {
 #[must_use]
 pub fn from_object_graph(object: usize, frames: u32) -> Option<PathBuf> {
     for offset in (0..0x2000_usize).step_by(8) {
-        let Some(pointer) = firmware::read_pointer(object.wrapping_add(offset)) else {
+        let Some(pointer) = image::read_pointer(object.wrapping_add(offset)) else {
             continue;
         };
         if let Some(path) = read_text(pointer, frames) {
             return Some(path);
         }
         for inner in (0..0x400_usize).step_by(8) {
-            let Some(deeper) = firmware::read_pointer(pointer.wrapping_add(inner)) else {
+            let Some(deeper) = image::read_pointer(pointer.wrapping_add(inner)) else {
                 continue;
             };
             if let Some(path) = read_text(deeper, frames) {
@@ -78,7 +78,7 @@ pub fn from_object_graph(object: usize, frames: u32) -> Option<PathBuf> {
     for delta in (-0x2000_isize..=0x2000).step_by(8) {
         let address = object.wrapping_add_signed(delta);
         let mut buffer = [0_u8; 512];
-        if !firmware::read(address, &mut buffer[..511]) {
+        if !image::read(address, &mut buffer[..511]) {
             continue;
         }
         let printable = buffer[..511]
@@ -157,7 +157,7 @@ fn matches(path: &Path, frames: u32, channels: u16, rate: u32) -> bool {
 /// Read up to 511 bytes at `address` and look for a path in them.
 fn read_text(address: usize, frames: u32) -> Option<PathBuf> {
     let mut buffer = [0_u8; 512];
-    if !firmware::read(address, &mut buffer[..511]) {
+    if !image::read(address, &mut buffer[..511]) {
         return None;
     }
     in_text(&buffer, frames)

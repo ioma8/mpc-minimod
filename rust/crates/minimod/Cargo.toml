@@ -15,7 +15,7 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 minimod-dsp.workspace = true
-libc.workspace = true
+mpc-sample-sdk.workspace = true
 
 [lints]
 workspace = true

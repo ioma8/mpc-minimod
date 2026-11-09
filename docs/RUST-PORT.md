@@ -3,7 +3,7 @@
 **The port is complete.** The mod is Rust: `mod/build.sh` builds the `minimod` crate as
 a `cdylib` and cross-links it; no C or C++ is compiled and none is left in the tree (the
 C sources are in git history, before the commit that removed them).  The crate is
-clippy-clean with no inline lint annotations, the DSP is host-tested against fixtures
+clippy-clean, the DSP is host-tested against fixtures
 recorded from the original C, and all six emulator suites (`mod/tests/emulator_*.py`)
 pass on the shipped `.so`.
 
@@ -15,87 +15,152 @@ time; where it contradicts this section, this section is right.
 
 | | |
 |---|---|
-| Source | `rust/crates/dsp` (audio DSP, host-testable) and `rust/crates/minimod` (the preload library) |
+| Crates | `mpc-sample-sdk` (the universal SDK), `minimod` (the features, built only on the SDK), `dsp` (pure audio DSP) |
 | Build | `mod/build.sh` -> `build/minimod.so` (Rust `cdylib`, linked by `zig cc`, which only drives the cross linker) |
 | Exported symbols | 24: the 4 ALSA taps (`snd_pcm_*`, which the app resolves by name) and 20 `g_*` statics the device tests read by symbol |
-| Gate | `rust/check.sh`: fmt, clippy `all`+`pedantic`+`cargo` `-D warnings`, host tests, aarch64 cross build |
+| Gate | `rust/check.sh`: fmt, clippy `all`+`pedantic`+`cargo` `-D warnings`, rustdoc `-D warnings`, host tests, aarch64 cross build |
 | Device | `mod/tests/emulator_{looper,bass_sample,hpss,midi_chromatic,reverb,spectral}.py` |
+
+### The SDK split
+
+`mpc-sample-sdk` is the part another mod would reuse unchanged.  It owns the
+`unsafe` and the process-wide state (`state::Global`, `export_static!`), so a mod
+writes safe feature code only. It owns:
+
+* finding the app with `dl_iterate_phdr`, verifying the 36 firmware words, and
+  refusing a different image;
+* the in-memory hook engine, all 16 sites, and the displaced originals (a mod
+  never stores or types one);
+* the event decoding for pads, the surface, the encoder, buttons, control
+  changes and MIDI, and the `Mod` trait the feature code implements;
+* the ALSA taps, the `OutputInfo` a mod mixes against, and the latency it
+  implies;
+* drawing on the app's `Graphics` object, the toast, the page's screen, the
+  screen vtable's paint slot and the repaint pump;
+* the generic `task::Task<T>` worker and the `render::RenderJob`/`RenderOutput`
+  audio job, including source identity and pad-room checks;
+* typed access to the app's objects: `image`, `page`, `selection`, `sample`,
+  `pads`, `slice`, `trim`, `wav`, `paths`, `status`, `clock`, the writer, the
+  control surface, the effect renderer and the Extract command.
+
+`minimod` implements `Mod` (`src/module.rs`), installs itself with
+`mpc_sample_sdk::export_mod!(Minimod)`, and contains only the features: the
+SAMPLE OPTIONS menu, AutoTrim, HPSS, Spectral Chop, the effects and bass synth,
+16 Levels, external MIDI chromatic playback and the Live Looper.  Its
+`src/lib.rs` aliases the SDK modules under the names the feature code already
+used, so the feature modules stayed diff-small while every platform call moved
+behind the SDK.
 
 Where the C went (most of it was `mod/src/minimod.c`, one translation unit):
 
 | the C area | now |
 |---|---|
-| hook engine, trampolines | `hooks.rs` (engine), `glue.rs` (site table, install, the `.init_array` constructor) |
-| button dispatcher, SHIFT/ERASE/B3 | `buttons.rs` (decision ladder), `ui.rs` (state and effects) |
-| control changes, master/trim/knobs | `routing.rs` (decision), `cc.rs` (effects) |
-| note, pad and encoder hooks | `input.rs`, `midi.rs`, `levels.rs` |
-| effects menu, bass page, status line | `menu.rs`, `status.rs`, `overlay.rs`, `paint.rs` |
-| render jobs (HPSS, effects, bass) | `job.rs`, `jobflow.rs`, `hpss_exec.rs`, `substitute.rs`, `effect.rs` |
-| Spectral Chop | `spectral.rs`, `spectral_machine.rs`, `chop.rs`, `dsp/spectral.rs` |
-| AutoTrim | `autotrim.rs`, `trim.rs`, `wav.rs` |
-| audio taps, ring geometry, preview mix | `audio.rs`, `dsp/bass.rs` |
-| live looper | `dsp/looper.rs`, `looper_ffi.rs`, `looper_view.rs`, `cfg.rs` |
-| memory window, page and sample accessors | `firmware.rs`, `page.rs`, `selection.rs`, `sample.rs`, `pads.rs`, `paths.rs` |
+| hook engine, trampolines | SDK `hook.rs`, `sites.rs`, `loader.rs` |
+| firmware image, memory window | SDK `image.rs` |
+| site table, install, the `.init_array` constructor | SDK `sites.rs`, `loader.rs`; the mod emits one `export_mod!` |
+| button dispatcher, SHIFT/ERASE/B3 | `buttons.rs` (decision ladder), `ui.rs` (state and effects), SDK `event.rs` (hold state) |
+| control changes, master/trim/knobs | `routing.rs` (decision), `cc.rs` (effects), SDK `control.rs` (the setter) |
+| note, pad and encoder hooks | `input.rs`, `midi.rs`, `levels.rs`, SDK `event.rs`/`sites.rs` |
+| effects menu, bass page, status line | `menu.rs`, `overlay.rs`, SDK `platform/status.rs`, `draw.rs` |
+| render jobs (HPSS, effects, bass) | `actions.rs`, `jobflow.rs`, SDK `task.rs` + `render.rs`, `platform/{effect,extract,writer}.rs` |
+| Spectral Chop | `spectral.rs`, `spectral_machine.rs`, SDK `platform/slice.rs`, `dsp/spectral.rs` |
+| AutoTrim | `autotrim.rs`, SDK `platform/{trim,wav,control}.rs` |
+| audio taps, ring geometry, latency, preview mix | SDK `audio.rs` (`OutputInfo::latency`, `add_planes_i32`), `dsp/bass.rs`, mod `backend/audio.rs` |
+| live looper | `dsp/looper.rs`, `backend/looper.rs`, `looper_view.rs`, `settings.rs` |
+| page and sample accessors | SDK `platform/{page,selection,sample,pads,paths}.rs` |
+| repaint pump, screen and toast | SDK `draw.rs` (`start_repaint_pump`) |
 | HPSS, FFT, DSP primitives | `dsp/hpss.rs`, `dsp/fft.rs`, `dsp/sample.rs` |
 
-The `*_ffi.rs` modules are now thin wrappers over those, kept as separate files for
-their `extern "C"` hook-table shapes; they no longer cross any language boundary.
+The old `*_ffi.rs` names are gone.  The DSP adapters are grouped under
+`minimod/src/backend/` (`hpss`, `bass`, `looper`, `audio`); `actions.rs` maps an
+action code to those backends and `jobflow.rs` keeps only the feature workflow.
+They are ordinary safe Rust modules over the SDK and the DSP crate, with no
+`extern "C"` hook tables and no language boundary to cross.
 
 Things worth knowing that the journal below does not say plainly:
 
-* **Every hook site needs a recorder.** `glue::record_site` stores each displaced
-  function; a site without one silently swallows its event (the button dispatcher lost
-  its recorder once and CHOP died).  A unit test fails if a site has none.
-* **A hook returns what the original returns.** The app's slice `execute` returns a status
-  its caller checks; a hook typed `-> ()` hands back register garbage, the app reports "Extract
-  slice failed" after succeeding, and aborts its source re-encode halfway (corrupt WAVs). All 17
-  sites (16 now, see below) were checked by disassembly; only `execute`, `set_control` (tail call) and the 16 Levels
-  constructor return something, and all three now forward it.
-* **Exports are deliberate.** Only `snd_pcm_*` and the `g_*` statics the tests read are
-  `#[no_mangle]`/`export_name`; everything else is an ordinary Rust item.  `mod/build.sh`
-  refuses a build that leaves any unresolved symbol of its own.
-* **The golden fixtures are the reference now.** `rust/tests/golden/*.bin` were recorded
-  from the original C; the generators went with the C.  Change a fixture only on purpose.
-* **AutoTrim** was a silent no-op after commit `317a9bd` (its control-surface capture was
-  deleted as a "probe"); it is fixed and its cycle verified on the device, but no
-  automated test asserts the trim itself.
+* **The SDK records every original.** `sites::install` patches the 16 sites and
+  stores each trampoline in one table; the site adapter decodes the event, calls
+  the mod, and forwards through that table when the mod returns `Forward`.  A mod
+  cannot call a displaced function by accident because none is exposed.
+* **A hook returns what the original returns.** The app's slice `execute` returns
+  a status its caller checks; a hook typed `-> ()` hands back register garbage,
+  the app reports "Extract slice failed" after succeeding, and aborts its source
+  re-encode halfway (corrupt WAVs).  The SDK's sites preserve the return values
+  of the command constructor and the control setter.
+* **The feature crate is safe Rust.** `crates/minimod/src` contains no `unsafe`
+  token at all; `rust/check.sh` fails if one appears.  Every firmware access, hook,
+  displaced function and exported static is behind an SDK item: the SDK owns the
+  `unsafe`, the feature code calls safe functions and the `Mod` trait.
+* **Exports are deliberate.** Only `snd_pcm_*` and the `g_*` statics the tests
+  read are exported; the feature crate declares them through
+  `mpc_sample_sdk::export_static!`, so its source has no `#[unsafe(no_mangle)]`.
+  `mod/build.sh` refuses a build that leaves any unresolved symbol of its own.
+* **The golden fixtures are the reference now.** `rust/tests/golden/*.bin` were
+  recorded from the original C; the generators went with the C.  Change a
+  fixture only on purpose.
+* **AutoTrim** is a silent no-op no more: the SDK's control site records the
+  surface, the mod's cycle drives the same setter, and
+  `mod/tests/emulator_autotrim.py` reads the trim bounds from the live model and
+  asserts all four presses.
 
 ## Layout
 
 ```
 rust/
-  crates/dsp       audio DSP.  Pure computation over slices: no firmware
-                   addresses, no globals, no FFI, host-testable.
-  crates/minimod   the LD_PRELOAD library: C ABI, hook engine, feature glue.
-  tests/golden     fixtures recorded from the original C implementation (the
-                   generators went with the C; they are in git history).
-  scripts          the aarch64 cross linker driver (zig).
-  check.sh         fmt + clippy + tests + cross build, one command.
+  crates/mpc-sample-sdk  universal SDK: image, hooks, sites, input/audio/MIDI,
+                         drawing, and typed platform objects.
+  crates/minimod         the LD_PRELOAD library: the `Mod` impl and the features.
+  crates/dsp             audio DSP.  Pure computation over slices: no firmware
+                         addresses, no globals, no FFI, host-testable.
+  tests/golden           fixtures recorded from the original C implementation (the
+                         generators went with the C; they are in git history).
+  scripts                the aarch64 cross linker driver (zig).
+  check.sh               fmt + clippy + docs + tests + cross build, one command.
 ```
 
-The DSP crate is where the risk lives (sample-exact behaviour on a real device),
-so it is validated first and independently of the firmware glue.
+The SDK is validated on the host where it can be (decoders, trim, WAV, status,
+the materialised plan), and on the device through the mod.  The DSP crate is
+where the arithmetic risk lives (sample-exact behaviour), so it is validated
+first and independently of the firmware glue.
 
 ## Lint policy
 
 `check.sh` runs `cargo clippy --all-targets --workspace -- -D warnings` with
 `clippy::all`, `clippy::pedantic`, `clippy::cargo` and a few extra `rustc` lints
 (`missing_docs`, `unsafe_op_in_unsafe_fn`, `unreachable_pub`,
-`unused_qualifications`) denied.
+`unused_qualifications`) denied, then `cargo doc --no-deps --workspace` with
+`RUSTDOCFLAGS=-D warnings`, so a private or broken doc link fails the gate.
 
-There is **no `#[allow(clippy::…)]` or `#[expect(clippy::…)]` anywhere** in the
-crates. Two lints are turned off once, in the workspace lint table, because they
-describe the audio boundary rather than a style choice:
+There are two documented call-site exceptions, both required by the exported
+static layout: `Global::get_mut` suppresses `mut_from_ref` (the cell is
+single-threaded and its access is documented) and `export_static!` suppresses
+`non_upper_case_globals` for the exported names (`g_menu`, `g_midi`, …). No other
+`#[allow(clippy::…)]` or `#[expect(clippy::…)]` exists. Two lints are turned off
+once, in the workspace lint table, because they describe the audio boundary
+rather than a style choice:
 
 * `cast_possible_truncation` — the device hands over signed 32-bit PCM frames
   and every buffer inside is `f32`; narrowing is required;
 * `cast_precision_loss` — buffer lengths and frame indices become `f32` for the
   analysis windows.
 
-Both are funnelled through `crates/dsp/src/sample.rs` and `num.rs`, which document the exact
-rounding. Every other cast is exact, and `cast_sign_loss` and
-`cast_possible_wrap` stay denied, which is why conversions from `i64`/`f32` to
-unsigned sizes go through explicit `try_from(...).unwrap_or(...)`.
+They are allowed for the workspace rather than at each call site, so those two
+conversions are audited by reading them, not enforced by the compiler: the audio
+conversions with documented rounding live in `crates/dsp/src/sample.rs` and
+`num.rs`, and the remaining `as` casts are exact by construction (an index into a
+buffer sized from the same value) or bounded by a clamp before the cast.
+`cast_sign_loss` and `cast_possible_wrap` stay denied, which is why conversions
+from `i64`/`f32` to unsigned sizes go through explicit `try_from(...).unwrap_or(...)`.
+
+`clippy::nursery` is deliberately **not** enabled. Its `suboptimal_flops` lint
+rewrites `a + b * c` as `mul_add`, which changes the rounding of the DSP; the
+golden fixtures require the reference's exact arithmetic, and the looper selects
+`mul_add` only where the reference contracts. `clippy::undocumented_unsafe_blocks`
+is denied in the workspace table, so every unsafe block and `unsafe impl` states
+its contract in a `SAFETY` comment. A lib-only
+`unwrap_used`/`expect_used`/`panic` pass is clean as well; that one is not in the
+table because the tests use all three freely.
 
 Panics are not allowed to reach the firmware: `panic = "abort"` in the release
 profile, and the FFI layer validates every pointer and length before it forms a
@@ -173,19 +238,19 @@ fix was re-implemented in the crates.  What came across, and where:
 | `main` change | in the crates |
 |---|---|
 | Bass preview: envelope (0.5 level, 1.2 s, per-voice decay), `reset`, finite velocity | `dsp/bass.rs` (`PREVIEW_LENGTH`, `Voice::decay`, `preview_reset`, a unit test that the note dies) |
-| Bass preview: real output path | `audio.rs::mix_preview` inside the exported `snd_pcm_writei` tap; the planar writer hook (site `0x3f398f0`) is **gone**, so the site table has 16 sites. The C patched the PLT stub because it concluded an unversioned symbol does not interpose; the emulator reaches the tap, so the stub patch was not needed (see `HISTORY.md` section 10) |
-| Bass preview: pads consumed at the control surface, always swallowed while the page is open, re-enabled by the paint tick, enable+reset before `active` | `input.rs::bass_pad_event`, `input.rs` note-on, `paint.rs::page_paint`, `bass_ffi.rs::minimod_bass_preview_set_active` |
+| Bass preview: real output path | `backend/audio.rs::mix_preview` inside the exported `snd_pcm_writei` tap; the planar writer hook (site `0x3f398f0`) is **gone**, so the site table has 16 sites. The C patched the PLT stub because it concluded an unversioned symbol does not interpose; the emulator reaches the tap, so the stub patch was not needed (see `HISTORY.md` section 10) |
+| Bass preview: pads consumed at the control surface, always swallowed while the page is open, re-enabled by the paint tick, enable+reset before `active` | `input.rs::bass_pad_event`, `input.rs` note-on, SDK `sites.rs::page_paint`, `backend/bass.rs::preview_set_active` |
 | No source backup/restore for effects and the bass synth | removed from `jobflow.rs`, `job.rs`, `wav.rs`, `wav_ffi.rs` |
-| In-memory audio for AutoTrim, the transforms and spectral | `sample.rs::memory` (+ `Memory::read`), `trim.rs::memory_edges`, `jobflow.rs` (`Source`), `spectral.rs`, `autotrim.rs::bounds` |
-| Root-aware chromatic MIDI | `sample.rs::root_note`, `autotrim.rs::pad_root`, `midi.rs` |
+| In-memory audio for AutoTrim, the transforms and spectral | SDK `platform/sample.rs::memory` (+ `Memory::read`), `platform/trim.rs::memory_edges`, `platform/selection.rs` (`Selection::read_audio`), `spectral.rs`, `autotrim.rs::bounds` |
+| Root-aware chromatic MIDI | SDK `platform/sample.rs::root_note`, `autotrim.rs::pad_root`, `midi.rs` |
 | AutoTrim candidate files must match channels and rate | `paths::for_sample` already filtered; AutoTrim now uses it |
-| Hook engine: `B.cond`, read-back | `hooks.rs` |
-| Arm lifetime, writer quiescence, bounded substitution, independent range restore | `hpss_exec.rs`, `substitute.rs` |
+| Hook engine: `B.cond`, read-back | SDK `hook.rs` |
+| Arm lifetime, writer quiescence, bounded substitution, independent range restore | SDK `platform/extract.rs`, `platform/writer.rs` |
 | Spectral deadline, off-page cancel/finalize, CHOP press only from a captured button | `spectral.rs`, `overlay.rs::poll_offpage`, `ui.rs`/`input.rs` hooks |
-| H3 effect object validation | `effect.rs` |
+| H3 effect object validation | SDK `platform/effect.rs` |
 | Spectral channels 1-2 only | `dsp/spectral.rs` |
 | glibc 2.39 guard in `build.sh` | `mod/build.sh` (merged with the Rust build) |
-| `g_surface` for the root-note test | exported from `autotrim.rs` |
+| `g_surface` for the root-note test | exported from SDK `platform/control.rs` |
 
 Not ported on purpose: the debug-only probes and `/run` commands, the dead C2
 renderer, `fmbass_sample.c`, the malloc interposer, and `mod/tests/{hook_engine,
@@ -370,17 +435,15 @@ General lesson, from two reverts now: **a port inherits its dependencies'
 behaviour, so diff the helpers it calls, not only its own body** - or, better,
 pass the data in so the port cannot resolve it differently.
 
-## The menu state, ported but not wired
+## The menu state
 
 `menu` holds the effects menu's state machine (open, close, activate a row,
-restore the chop) as functions over a `State` struct with its own tests.  Moving
-the glue's five menu flags into that struct and pointing the old names at it with
-macros compiled and the app started, but the bass control page stopped taking the
-knobs: the menu's row selection only moves through the encoder hook, and the
-re-wired dispatcher consumed the turn before it reached it.
-
-Reverted to the flags in the glue.  Wiring this needs the encoder path and the
-flag struct moved **together**, not the flags first.
+restore the chop) as functions over a `State` struct with its own tests.  An
+earlier attempt moved the glue's five menu flags into it while the encoder path
+still consumed the turn first, and the bass control page stopped taking the
+knobs; it was reverted because the flags and the encoder path had to move
+**together**.  The final wiring does that: `g_menu` is the one state, the encoder
+hook moves its `selection`, and the button entry, paint and job flow all read it.
 
 ## The paint hook
 
@@ -389,16 +452,6 @@ was not the drawing at all: `minimod_set_base` was declared and implemented but
 **never called**, so `firmware::base()` returned 0 and every Rust draw jumped to
 `0 + offset`.  One line in the constructor fixed it (`base = found;
 minimod_set_base(base);`) and all six device tests pass with the Rust draws.
-
-Drawing and the toast are ported (`paint`) but **cannot be wired yet**: every
-attempt makes the app crash-loop at startup (`NRestarts=5` within seconds, before
-any interaction), so the fault is in the first paint, not in a toast.  The Rust
-side mirrors the C calls one for one - setColour, fillRect, and the String + Font
-+ drawText sequence with the same offsets - so the likely difference is in how the
-temporary String/Font objects are laid out or destroyed.
-
-It stays unwired until that is understood; the C draws with its own calls, which
-is verified by every device run.
 
 ## The spectral tick
 
@@ -535,11 +588,12 @@ sample, resolves the WAV, asks `trim` for the audible bounds and applies them
 through the app's own control surface, so the page redraws exactly as if the
 markers had been moved.  The fourth press clears the trim.
 
-It is wired and the cycle runs four times with the app stable, but **the trim's
-effect is not asserted by any test in this lab**: the older `emulator_autotrim.py`
-compares screenshots, and its QMP screendump targets the other lab's setup.  What
-is proven here is that the press is handled, the app survives it and every other
-feature still passes.
+It is wired and the cycle runs four times with the app stable.  An earlier
+version of `emulator_autotrim.py` compared screenshots through a QMP screendump
+aimed at a different lab, so it proved nothing here; the current test reads the
+trim start, end and start mirror out of the live model and asserts the whole
+cycle (clear, 3/6/9 %, monotone tightening, clear again).  The `trim` unit tests
+cover the scan itself.
 
 ## What the last 3 287 lines are
 

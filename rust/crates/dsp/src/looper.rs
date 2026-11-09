@@ -298,7 +298,6 @@ pub static mut LOOPTAP: [f32; LOOPTAP_FRAMES] = [0.0; LOOPTAP_FRAMES];
 #[unsafe(export_name = "g_looptap_w")]
 pub static mut LOOPTAP_W: u32 = 0;
 
-/// MAIN VOLUME, 0..127.
 /// MAIN VOLUME, 0..127.  Exported so the acceptance harness can read the value
 /// the mixer is actually using instead of inferring it from the audio.
 #[unsafe(export_name = "g_looper_master")]
@@ -867,7 +866,7 @@ impl core::fmt::Write for TextLine {
     }
 }
 
-/// `index % length` without a division for the common power-of-two cases.
+/// `index % length` without dividing by zero.
 fn wrap_index(index: u64, length: u32) -> usize {
     let length = u64::from(length.max(1));
     usize::try_from(index % length).unwrap_or(0)
@@ -905,31 +904,51 @@ fn close_length(pad: &Pad) {
         .store(if len != 0 { len } else { recorded }, Ordering::Release);
 }
 
-/// The nearest sync multiple.
-///
-/// Rounded up when snapping would drop more than an eighth of a pulse, so
-/// recorded material is never silently truncated.
+/// The loop pool's capacity in frames.
+fn pool_limit() -> u32 {
+    u32::try_from(MAX_FRAMES).unwrap_or(u32::MAX)
+}
+
+/// The length a closed take gets: the nearest sync multiple, and never longer
+/// than the pool that holds the take.
 fn quantize(frames: u32) -> u32 {
     let pulse = SYNC_FRAMES.load(Ordering::Acquire);
     if SYNC.load(Ordering::Acquire) == 0 || pulse == 0 || frames == 0 {
-        return frames;
+        // Without a pulse there is nothing to snap to, but the pool bound still
+        // applies: a take may outlast the eight seconds it can hold.
+        return frames.min(pool_limit());
     }
+    snap(frames, pulse, pool_limit())
+}
+
+/// The snapping rule without the globals: round `frames` up to a whole `pulse`
+/// when that drops at most an eighth of one, then reduce it to a length that
+/// fits `max`.
+///
+/// The reduction steps down from the unrounded multiple, exactly like the
+/// reference: a take that was rounded *up* over the pool loses that extra pulse
+/// before it loses a whole one.
+fn snap(frames: u32, pulse: u32, max: u32) -> u32 {
+    let pulse = pulse.max(1);
     let mut multiple = frames.saturating_add(pulse / 2) / pulse;
     if multiple < 1 {
         multiple = 1;
     }
-    let max = u64::from(u32::try_from(MAX_FRAMES).unwrap_or(u32::MAX));
-    let mut target = u64::from(multiple) * u64::from(pulse);
-    let frames_u = u64::from(frames);
-    if target < frames_u && frames_u - target > u64::from(pulse / QUANTIZE_SLACK) {
-        target += u64::from(pulse);
+    let pulse64 = u64::from(pulse);
+    let max64 = u64::from(max);
+    let base = u64::from(multiple) * pulse64;
+    let mut target = base;
+    let frames64 = u64::from(frames);
+    if target < frames64 && frames64 - target > pulse64 / u64::from(QUANTIZE_SLACK) {
+        target += pulse64;
     }
-    while target > max && multiple > 1 {
-        multiple -= 1;
-        target = u64::from(multiple) * u64::from(pulse);
-    }
-    if target > max {
-        target = (max / u64::from(pulse)) * u64::from(pulse);
+    if target > max64 {
+        let floor = (max64 / pulse64) * pulse64;
+        target = if multiple > 1 && target > base && base <= max64 {
+            base - pulse64
+        } else {
+            floor
+        };
     }
     u32::try_from(target).unwrap_or(0)
 }
@@ -1068,12 +1087,18 @@ fn record(pad: &Pad, samples: &mut [f32], input: &[f32]) {
 }
 
 /// Add one sample to a loop at the overdub position, latency shifted, wrapped.
+///
+/// A position that lands before the loop start (the first `latency` frames of a
+/// take) is dropped: it belongs before the recording, not at its end.
 fn dub_add(samples: &mut [f32], len: u32, latency: u32, pos: u64, value: f32) {
     if len == 0 {
         return;
     }
     let target = wrap_index(pos, len);
-    let Some(slot) = samples.get_mut(target.wrapping_sub(latency as usize)) else {
+    let Some(shifted) = target.checked_sub(latency as usize) else {
+        return;
+    };
+    let Some(slot) = samples.get_mut(shifted) else {
         return;
     };
     *slot = (*slot + value).clamp(-1.0, 1.0);
@@ -1148,4 +1173,61 @@ pub fn reset_for_tests() {
     TAKE_COUNT.store(0, Ordering::Release);
     INPUT_LEVEL.store(0, Ordering::Release);
     Engine::clear_message();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_FRAMES, QUANTIZE_SLACK, pool_limit, quantize, snap};
+
+    /// The original step-by-step rule, kept as the oracle for [`snap`].
+    fn reference(frames: u32, pulse: u32, max: u32) -> u32 {
+        let max = u64::from(max);
+        let mut multiple = frames.saturating_add(pulse / 2) / pulse;
+        if multiple < 1 {
+            multiple = 1;
+        }
+        let mut target = u64::from(multiple) * u64::from(pulse);
+        let frames = u64::from(frames);
+        if target < frames && frames - target > u64::from(pulse / QUANTIZE_SLACK) {
+            target += u64::from(pulse);
+        }
+        while target > max && multiple > 1 {
+            multiple -= 1;
+            target = u64::from(multiple) * u64::from(pulse);
+        }
+        if target > max {
+            target = (max / u64::from(pulse)) * u64::from(pulse);
+        }
+        u32::try_from(target).unwrap_or(0)
+    }
+
+    #[test]
+    fn snapping_matches_the_reference_rule() {
+        for pulse in [1_u32, 7, 100, 1_000, 44_100] {
+            for frames in [
+                0_u32, 1, 3, 50, 99, 100, 101, 999, 1_000, 1_001, 2_500, 44_100, 352_800, 352_801,
+                500_000,
+            ] {
+                for max in [0_u32, 1, 999, 1_000, 2_500, 352_800] {
+                    assert_eq!(
+                        snap(frames, pulse, max),
+                        reference(frames, pulse, max),
+                        "frames {frames} pulse {pulse} max {max}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_loop_is_never_longer_than_the_pool() {
+        let limit = pool_limit();
+        assert_eq!(limit, u32::try_from(MAX_FRAMES).unwrap_or(u32::MAX));
+        assert_eq!(quantize(0), 0);
+        assert!(quantize(limit) <= limit);
+        assert!(
+            quantize(limit.saturating_add(1)) <= limit,
+            "cut to the pool"
+        );
+    }
 }

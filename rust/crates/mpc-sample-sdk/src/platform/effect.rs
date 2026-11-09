@@ -7,13 +7,13 @@
 //! the firmware's own sound.
 //!
 //! Everything here is a call into the loaded image, so the module is only ever
-//! used after [`Firmware::find`] has succeeded and the build has been checked
-//! against [`crate::firmware::KNOWN_BUILD_SITES`].
+//! used after the image has been recognised and checked against the firmware
+//! site table in `glue`.
 
 use std::ffi::c_void;
 use std::ptr;
 
-use crate::firmware::{self, Firmware};
+use crate::image::{self, Firmware};
 
 /// Frames per processing block: the firmware's own audio block size.
 const BLOCK: usize = 512;
@@ -104,7 +104,12 @@ struct Instance {
 
 impl Instance {
     /// Create and set up one effect.
-    fn create(firmware: Firmware, effect: Effect, rate: u32) -> Result<Self, EffectError> {
+    fn create(
+        firmware: Firmware,
+        effect: Effect,
+        rate: u32,
+        values: &[(usize, f32)],
+    ) -> Result<Self, EffectError> {
         let context = AudioContext {
             sample_rate: rate as f32,
             reserved: 0,
@@ -126,23 +131,23 @@ impl Instance {
         let image = firmware.base()..firmware.base().saturating_add(IMAGE_SPAN);
         let in_image = |address: usize| image.contains(&address);
         let object_address = object as usize;
-        let slots = firmware::read_pointer(object_address)
+        let slots = image::read_pointer(object_address)
             .filter(|vtable| in_image(*vtable))
             .and_then(|vtable| {
                 Some((
-                    firmware::read_pointer(vtable + 9 * 8)?,
-                    firmware::read_pointer(vtable + 11 * 8)?,
-                    firmware::read_pointer(vtable + 8)?,
+                    image::read_pointer(vtable + 9 * 8)?,
+                    image::read_pointer(vtable + 11 * 8)?,
+                    image::read_pointer(vtable + 8)?,
                 ))
             })
             .filter(|(setup, process, destroy)| {
                 in_image(*setup) && in_image(*process) && in_image(*destroy)
             });
-        let parameters = firmware::read_pointer(object_address + PARAMETERS_OFFSET)
+        let parameters = image::read_pointer(object_address + PARAMETERS_OFFSET)
             .filter(|parameters| parameters % 4 == 0);
         let readable = parameters.is_some_and(|parameters| {
             let mut probe = [0_u8; 24];
-            firmware::read(parameters, &mut probe)
+            image::read(parameters, &mut probe)
         });
         let (Some((setup, process, destroy)), true) = (slots, readable) else {
             return Err(EffectError::FirmwareRefused);
@@ -157,7 +162,7 @@ impl Instance {
             }
         };
         let instance = Self { object, methods };
-        instance.apply_parameters(effect);
+        instance.apply_parameters(values);
         // SAFETY: this slot takes the audio context, not a boolean; the base
         // setup forwards it to the sample-rate/block-size initialiser.
         unsafe { (methods.setup)(object, ptr::from_ref(&context) as i64) };
@@ -165,7 +170,7 @@ impl Instance {
     }
 
     /// Set the effect's own knobs to the values the mod wants.
-    fn apply_parameters(&self, effect: Effect) {
+    fn apply_parameters(&self, values: &[(usize, f32)]) {
         // SAFETY: `object + 0x18` holds the effect's parameter array pointer.
         // SAFETY: the field is pointer-aligned in the object; the read is done
         // unaligned so the address arithmetic needs no alignment claim.
@@ -180,20 +185,12 @@ impl Instance {
         if parameters.is_null() {
             return;
         }
-        // Mild drive and a restrained noise level for the vinyl, about 8 bits
-        // and a reduced sample rate for the decimator.
         // SAFETY: the parameter array has at least six entries.
         unsafe {
-            match effect {
-                Effect::Vinyl => {
-                    *parameters.add(0) = 0.18;
-                    *parameters.add(5) = 0.12;
+            for &(index, value) in values {
+                if index < 6 {
+                    *parameters.add(index) = value;
                 }
-                Effect::Decimator => {
-                    *parameters.add(0) = 0.58;
-                    *parameters.add(4) = 0.70;
-                }
-                Effect::Reverb => {}
             }
         }
     }
@@ -322,18 +319,54 @@ impl std::error::Error for EffectError {}
 /// Run one firmware effect over an interleaved f32 buffer.
 ///
 /// The output carries the effect's own tail (four seconds for the reverb),
-/// normalised to [`PEAK`] and trimmed to where it went quiet.
+/// normalised to a peak of 0.98 and trimmed to where it went quiet.
 ///
 /// # Errors
 ///
 /// Returns [`EffectError`] when the buffer or rate is unsupported, or when the
 /// firmware refuses to create or process the effect.
 pub fn render(
+    effect: Effect,
+    input: &[f32],
+    channels: usize,
+    rate: u32,
+) -> Result<Rendered, EffectError> {
+    let firmware = Firmware::find().ok_or(EffectError::FirmwareRefused)?;
+    render_at(firmware, effect, input, channels, rate, &[])
+}
+
+/// Render one effect selected by the app's effect code.
+///
+/// Returns `None` for an unknown code, a bad buffer, or an image that cannot host
+/// the effect.
+#[must_use]
+pub fn render_code(
+    code: i32,
+    input: &[f32],
+    channels: u32,
+    rate: u32,
+    parameters: &[(usize, f32)],
+) -> Option<Vec<f32>> {
+    let effect = Effect::from_code(code)?;
+    let firmware = Firmware::find()?;
+    let channels = usize::try_from(channels).ok()?;
+    render_at(firmware, effect, input, channels, rate, parameters)
+        .ok()
+        .map(|rendered| rendered.audio)
+}
+
+/// Render through a specific image, for tests and advanced callers.
+///
+/// # Errors
+///
+/// Returns [`EffectError`] for the same reasons as [`render`].
+pub fn render_at(
     firmware: Firmware,
     effect: Effect,
     input: &[f32],
     channels: usize,
     rate: u32,
+    parameters: &[(usize, f32)],
 ) -> Result<Rendered, EffectError> {
     if input.is_empty() {
         return Err(EffectError::Empty);
@@ -353,7 +386,7 @@ pub fn render(
 
     let frames = input.len() / channels;
     let total = frames + rate as usize * effect.tail_seconds();
-    let instance = Instance::create(firmware, effect, rate)?;
+    let instance = Instance::create(firmware, effect, rate, parameters)?;
     let mut rendered = instance.process(input, channels, frames, total);
     drop(instance);
 
@@ -411,8 +444,8 @@ fn trim_tail(
 
 #[cfg(test)]
 mod tests {
-    use super::{Effect, EffectError, render};
-    use crate::firmware::Firmware;
+    use super::{Effect, EffectError, render_at};
+    use crate::image::Firmware;
 
     #[test]
     fn effect_codes_map_to_the_menu_entries() {
@@ -434,26 +467,26 @@ mod tests {
     fn invalid_buffers_are_refused_before_any_firmware_call() {
         let firmware = Firmware::from_base(0);
         assert_eq!(
-            render(firmware, Effect::Reverb, &[], 2, 44_100).unwrap_err(),
+            render_at(firmware, Effect::Reverb, &[], 2, 44_100, &[]).unwrap_err(),
             EffectError::Empty
         );
         assert_eq!(
-            render(firmware, Effect::Reverb, &[0.0; 8], 3, 44_100).unwrap_err(),
+            render_at(firmware, Effect::Reverb, &[0.0; 8], 3, 44_100, &[]).unwrap_err(),
             EffectError::UnsupportedChannels
         );
         assert_eq!(
-            render(firmware, Effect::Reverb, &[0.0; 8], 2, 100).unwrap_err(),
+            render_at(firmware, Effect::Reverb, &[0.0; 8], 2, 100, &[]).unwrap_err(),
             EffectError::UnsupportedRate
         );
         // Ragged: three samples do not divide into two channels.
         assert_eq!(
-            render(firmware, Effect::Reverb, &[0.0; 3], 2, 44_100).unwrap_err(),
+            render_at(firmware, Effect::Reverb, &[0.0; 3], 2, 44_100, &[]).unwrap_err(),
             EffectError::RaggedBuffer
         );
         // A zero base is not a firmware image, so the call is refused instead of
         // jumping into unmapped memory.
         assert_eq!(
-            render(firmware, Effect::Reverb, &[0.0; 8], 2, 44_100).unwrap_err(),
+            render_at(firmware, Effect::Reverb, &[0.0; 8], 2, 44_100, &[]).unwrap_err(),
             EffectError::FirmwareRefused
         );
     }

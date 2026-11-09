@@ -1,0 +1,85 @@
+//! What the Sample page is currently showing.
+//!
+//! Two questions decide most of a mod's behaviour: is the Sample page the visible
+//! screen, and is it in chop mode?  Both are answered by the page's own
+//! predicate, not by guessing from state the mod tracks itself.
+
+use crate::image;
+
+/// The Sample page's vtable, as an offset from the image base.
+pub const SAMPLE_PAGE_VTABLE: usize = 0x6e2_12a0;
+/// `[screen + 0x1ee0]` is the chop-mode view the predicate takes.
+const CHOP_VIEW: usize = 0x1ee0;
+/// The app's predicate for "this view is in chop mode".
+const CHOP_PREDICATE: usize = 0x112_fd50;
+
+/// The Sample page the mod last painted.  It keeps its exported name because the
+/// device tests find the page through it.
+#[unsafe(no_mangle)]
+pub static mut g_screen: usize = 0;
+
+/// The sample page the mod last painted, or zero.
+#[must_use]
+pub fn screen() -> usize {
+    // SAFETY: only the UI thread writes it.
+    unsafe { core::ptr::addr_of!(g_screen).read() }
+}
+
+/// Record the sample page the paint hook just saw.
+pub fn set_screen(screen: usize) {
+    // SAFETY: only the UI thread writes it.
+    unsafe { core::ptr::addr_of_mut!(g_screen).write(screen) };
+}
+
+/// Whether `screen` is a Sample page.
+#[must_use]
+pub fn is_sample_page(screen: usize) -> bool {
+    screen != 0
+        && image::read_pointer(screen)
+            .is_some_and(|vtable| vtable == image::base() + SAMPLE_PAGE_VTABLE)
+}
+
+/// Whether the Sample page is visible and showing a sample.
+#[must_use]
+pub fn visible(screen: usize) -> bool {
+    if !is_sample_page(screen) {
+        return false;
+    }
+    // SAFETY: `base + CHOP_PREDICATE` is the page's own predicate.
+    unsafe { image::int_of_pointer(image::base() + CHOP_PREDICATE, screen) != 0 }
+}
+
+/// Whether the Sample page is in chop mode.
+#[must_use]
+pub fn chop_mode(screen: usize) -> bool {
+    if !is_sample_page(screen) {
+        return false;
+    }
+    // SAFETY: same predicate, applied to the page's chop view.
+    unsafe {
+        image::int_of_pointer(
+            image::base() + CHOP_PREDICATE,
+            screen.wrapping_add(CHOP_VIEW),
+        ) != 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CHOP_VIEW, SAMPLE_PAGE_VTABLE, chop_mode, screen, set_screen, visible};
+
+    #[test]
+    fn a_null_screen_is_never_a_sample_page() {
+        assert!(!visible(0));
+        assert!(!chop_mode(0));
+        assert_eq!(SAMPLE_PAGE_VTABLE, 0x6e2_12a0);
+        assert_eq!(CHOP_VIEW, 0x1ee0);
+    }
+
+    #[test]
+    fn the_last_painted_screen_is_read_back() {
+        set_screen(0x1234);
+        assert_eq!(screen(), 0x1234);
+        set_screen(0);
+    }
+}

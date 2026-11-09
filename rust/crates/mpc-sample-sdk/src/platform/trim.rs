@@ -9,7 +9,7 @@ use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
-use crate::wav::{self, Encoding};
+use crate::platform::wav::{self, Encoding};
 
 /// Bytes read per block; one read per frame froze the UI thread on long samples.
 const BLOCK_BYTES: usize = 16_384;
@@ -311,7 +311,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{Edges, Layout, edges};
-    use crate::wav::Info;
+    use crate::platform::wav::Info;
 
     /// Write a 16-bit mono WAV whose `frames` are `loud` inside `first..last`.
     fn padded(name: &str, frames: u32, first: u32, last: u32) -> (PathBuf, Layout) {

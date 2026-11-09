@@ -22,65 +22,22 @@ pub fn pitch_offset(applied: i32, shift: i32) -> i32 {
     applied + SEMITONES_PER_STEP * shift
 }
 
-/// The next shift, for the C glue: writes `out` and returns 1 when it changed.
-///
-/// # Safety
-///
-/// `out` must be writable.
-pub unsafe extern "C" fn minimod_levels_shift(current: i32, delta: i32, out: *mut i32) -> i32 {
-    if out.is_null() {
-        return 0;
-    }
-    let Some(next) = shift(current, delta) else {
-        return 0;
-    };
-    // SAFETY: the caller promises `out` is writable.
-    unsafe { *out = next };
-    1
-}
-
-/// The pitch-offset setter: `void (*)(void *, u64, u64, int)`.
-pub type PitchOffset = unsafe extern "C" fn(usize, u64, u64, i32);
-
-/// Call the app's pitch-offset setter with our octave shift applied.
-///
-/// # Safety
-///
-/// `original` must be the setter this hook displaced.
-pub unsafe extern "C" fn minimod_pitch_off(
-    original: Option<PitchOffset>,
-    first: usize,
-    second: u64,
-    third: u64,
-    applied: i32,
-    shift: i32,
-) {
-    if let Some(setter) = original {
-        // SAFETY: the caller guarantees this is the displaced setter.
-        unsafe { setter(first, second, third, pitch_offset(applied, shift)) };
-    }
-}
-
-/// Move the 16 Levels row by `steps` and say so.
-///
-/// Returns 1 when the shift was applied.
+/// The next 16 Levels row and the toast it should show.
 #[must_use]
-pub extern "C" fn minimod_levels_bump(steps: i32) -> i32 {
-    let mut next = 0;
-    // SAFETY: the out pointer is this frame's.
-    if unsafe { minimod_levels_shift(crate::ui::octave(), steps, core::ptr::from_mut(&mut next)) }
-        == 0
-    {
-        return 0;
-    }
-    crate::ui::set_octave(next);
+pub fn bump(current: i32, steps: i32) -> Option<(i32, String)> {
+    let next = shift(current, steps)?;
     let text = if next == 0 {
         "Pitch reset".to_string()
     } else {
         format!("Pitch {:+} semitones", next * 8)
     };
-    crate::paint::show_toast(&text);
-    1
+    Some((next, text))
+}
+
+/// Apply the 16 Levels octave shift to an offset the app computed.
+#[must_use]
+pub fn apply(applied: i32) -> i32 {
+    pitch_offset(applied, crate::ui::octave())
 }
 
 #[cfg(test)]

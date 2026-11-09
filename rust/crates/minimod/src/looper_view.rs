@@ -3,7 +3,7 @@
 //! Everything is read from one snapshot of the engine, so the paint never races
 //! the audio thread: if the snapshot fails there is nothing to draw.
 
-use minimod_dsp::looper::{PADS, PadView, State, View};
+use crate::backend::looper::{MAX_FRAMES, PADS, PadView, RATE, State, View};
 
 use crate::paint;
 
@@ -11,8 +11,6 @@ use crate::paint;
 const WIDTH: i32 = 320;
 /// Its height.
 const HEIGHT: i32 = 240;
-/// The longest loop the engine allows, in frames.
-const LONGEST_LOOP: u32 = 44_100 * 8;
 
 const BACKDROP: u32 = 0xff0c_0c10;
 const BAR: u32 = 0xff15_151a;
@@ -79,7 +77,7 @@ fn cell(graphics: usize, area: Cell, pad: &PadView, index: usize, recording: boo
     // A take still capturing its tail is a recording as far as the user sees.
     let recording_state = matches!(state, State::Rec | State::Drain);
     let total = if recording_state {
-        LONGEST_LOOP
+        u32::try_from(MAX_FRAMES).unwrap_or(u32::MAX)
     } else {
         pad.len_frames
     };
@@ -105,7 +103,7 @@ fn cell(graphics: usize, area: Cell, pad: &PadView, index: usize, recording: boo
         paint::rect(graphics, x + 4, y + height - 9, filled, 4);
     }
     if !recording_state && pad.len_frames > 0 {
-        let seconds = f64::from(pad.len_frames) / f64::from(minimod_dsp::looper::RATE);
+        let seconds = f64::from(pad.len_frames) / f64::from(RATE);
         paint::colour(graphics, 0xffb8_b8be);
         paint::text(
             graphics,
@@ -138,7 +136,7 @@ fn pulse(graphics: usize, view: &View) {
         paint::text(graphics, "FREE", 248, 4, 60, 16, 10.0);
         return;
     }
-    let seconds = f64::from(view.sync_frames) / f64::from(minimod_dsp::looper::RATE);
+    let seconds = f64::from(view.sync_frames) / f64::from(RATE);
     let line = if view.click != 0 {
         format!("SYNC {seconds:.2}s +CLK")
     } else {
@@ -172,7 +170,7 @@ fn meter(graphics: usize, view: &View) {
             METER_OK
         },
     );
-    let level = minimod_dsp::num::f32_to_u32(view.input.clamp(0.0, 1.0) * 290.0).min(290);
+    let level = crate::backend::looper::level(view.input);
     let level = i32::try_from(level).unwrap_or(0);
     if level > 0 {
         paint::rect(graphics, 22, 30, level, 4);
@@ -214,7 +212,7 @@ fn footer(graphics: usize, view: &View) {
             b'F' => "FIX",
             _ => "EST",
         };
-        let millis = u64::from(view.lat_frames) * 1000 / u64::from(minimod_dsp::looper::RATE);
+        let millis = u64::from(view.lat_frames) * 1000 / u64::from(RATE);
         paint::colour(graphics, 0xff5a_5a64);
         paint::rect(graphics, 8, 202, 304, 12);
         paint::colour(graphics, 0xffb8_b8be);
@@ -250,11 +248,7 @@ fn footer(graphics: usize, view: &View) {
 }
 
 /// Draw the whole view.
-///
-/// # Safety
-///
-/// `graphics` must be the app's Graphics object.
-pub unsafe extern "C" fn minimod_looper_draw(graphics: usize) {
+pub fn draw(graphics: usize) {
     let Some(view) = snapshot() else {
         return;
     };
@@ -268,8 +262,8 @@ pub unsafe extern "C" fn minimod_looper_draw(graphics: usize) {
 /// Take a snapshot of the engine, or nothing when it is not running.
 fn snapshot() -> Option<View> {
     let mut view = View::default();
-    // SAFETY: the view is ours and only this thread reads it.
-    let ok = unsafe { crate::looper_ffi::looper_snapshot(core::ptr::from_mut(&mut view)) };
+    // the view is ours and only this thread reads it.
+    let ok = crate::backend::looper::looper_snapshot(&mut view);
     (ok != 0).then_some(view)
 }
 
@@ -286,7 +280,7 @@ fn message_of(view: &View) -> String {
 #[cfg(test)]
 mod tests {
     use super::message_of;
-    use minimod_dsp::looper::{MESSAGE_LEN, PadView, View};
+    use crate::backend::looper::{MESSAGE_LEN, PadView, View};
 
     fn blank() -> View {
         View {

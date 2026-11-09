@@ -4,7 +4,7 @@
 //! helpers instead of raw pointer arithmetic in the glue.  The offsets are the
 //! reverse-engineered ones and change with the firmware.
 
-use crate::firmware;
+use crate::image;
 
 /// `[sample + 0x130]` is the sample's metadata block.
 const SAMPLE_METADATA: usize = 0x130;
@@ -20,11 +20,11 @@ pub fn frames(sample: usize) -> u32 {
     }
     let Some(metadata) = sample
         .checked_add(SAMPLE_METADATA)
-        .and_then(firmware::read_pointer)
+        .and_then(image::read_pointer)
     else {
         return 0;
     };
-    let Some(channels) = firmware::read_u32(metadata) else {
+    let Some(channels) = image::read_u32(metadata) else {
         return 0;
     };
     let Ok(channels) = u16::try_from(channels & 0xffff) else {
@@ -33,10 +33,8 @@ pub fn frames(sample: usize) -> u32 {
     if channels != 1 && channels != 2 {
         return 0;
     }
-    let (Some(frames), Some(rate)) = (
-        firmware::read_u32(metadata + 4),
-        firmware::read_u32(metadata + 8),
-    ) else {
+    let (Some(frames), Some(rate)) = (image::read_u32(metadata + 4), image::read_u32(metadata + 8))
+    else {
         return 0;
     };
     if !RATE_RANGE.contains(&rate) {
@@ -75,17 +73,17 @@ pub struct Memory {
 
 /// Whether the object's class name (without the length prefix) is `want`.
 fn class_is(object: usize, want: &str) -> bool {
-    let Some(vtable) = firmware::read_pointer(object) else {
+    let Some(vtable) = image::read_pointer(object) else {
         return false;
     };
-    let Some(info) = vtable.checked_sub(8).and_then(firmware::read_pointer) else {
+    let Some(info) = vtable.checked_sub(8).and_then(image::read_pointer) else {
         return false;
     };
-    let Some(name) = info.checked_add(8).and_then(firmware::read_pointer) else {
+    let Some(name) = info.checked_add(8).and_then(image::read_pointer) else {
         return false;
     };
     let mut text = [0_u8; 63];
-    if !firmware::read(name, &mut text) {
+    if !image::read(name, &mut text) {
         return false;
     }
     let end = text
@@ -105,18 +103,18 @@ fn class_is(object: usize, want: &str) -> bool {
 /// caller falls back to the WAV.
 #[must_use]
 pub fn memory(sample: usize) -> Option<Memory> {
-    let metadata = firmware::read_pointer(sample.checked_add(SAMPLE_METADATA)?)?;
-    let holder = firmware::read_pointer(sample.checked_add(SAMPLE_HOLDER)?)?;
+    let metadata = image::read_pointer(sample.checked_add(SAMPLE_METADATA)?)?;
+    let holder = image::read_pointer(sample.checked_add(SAMPLE_HOLDER)?)?;
     if !class_is(holder, "MemorySample") {
         return None;
     }
-    if firmware::read_pointer(holder.checked_add(HOLDER_BACK)?)? != metadata {
+    if image::read_pointer(holder.checked_add(HOLDER_BACK)?)? != metadata {
         return None;
     }
-    let owner = firmware::read_pointer(holder.checked_add(HOLDER_BUFFER)?)?;
-    let buffer = firmware::read_pointer(owner)?;
+    let owner = image::read_pointer(holder.checked_add(HOLDER_BUFFER)?)?;
+    let buffer = image::read_pointer(owner)?;
     let mut header = [0_u8; 16];
-    if !firmware::read(metadata, &mut header) {
+    if !image::read(metadata, &mut header) {
         return None;
     }
     let word = |at: usize| {
@@ -151,7 +149,7 @@ impl Memory {
         while at < cells {
             let count = (cells - at).min(READ_CHUNK / 4);
             let chunk = &mut bytes[..count * 4];
-            if !firmware::read(self.buffer.checked_add(at * 4)?, chunk) {
+            if !image::read(self.buffer.checked_add(at * 4)?, chunk) {
                 return None;
             }
             for (slot, raw) in out[at..at + count].iter_mut().zip(chunk.chunks_exact(4)) {
@@ -171,9 +169,9 @@ impl Memory {
 pub fn root_note(sample: usize) -> i32 {
     sample
         .checked_add(SAMPLE_METADATA)
-        .and_then(firmware::read_pointer)
+        .and_then(image::read_pointer)
         .and_then(|metadata| metadata.checked_add(METADATA_ROOT))
-        .and_then(firmware::read_u32)
+        .and_then(image::read_u32)
         .map(u32::cast_signed)
         .filter(|root| (0..=127).contains(root))
         .unwrap_or(DEFAULT_ROOT)
@@ -186,20 +184,10 @@ pub fn geometry(sample: usize) -> Option<(u32, u16, u32)> {
     if frames == 0 {
         return None;
     }
-    let metadata = firmware::read_pointer(sample.checked_add(SAMPLE_METADATA)?)?;
-    let channels = u16::try_from(firmware::read_u32(metadata)? & 0xffff).ok()?;
-    let rate = firmware::read_u32(metadata.checked_add(8)?)?;
+    let metadata = image::read_pointer(sample.checked_add(SAMPLE_METADATA)?)?;
+    let channels = u16::try_from(image::read_u32(metadata)? & 0xffff).ok()?;
+    let rate = image::read_u32(metadata.checked_add(8)?)?;
     Some((frames, channels, rate))
-}
-
-/// The frame count of a sample object, for the C glue.
-///
-/// # Safety
-///
-/// `sample` must be zero or the address of a sample object.
-#[must_use]
-pub unsafe extern "C" fn frames_of_sample(sample: usize) -> u32 {
-    frames(sample)
 }
 
 #[cfg(test)]

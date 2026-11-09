@@ -5,7 +5,7 @@
 //! walk: the sample's metadata block holds a vector of slice pointers, and each
 //! slice carries its start and end in frames.
 
-use crate::firmware;
+use crate::image;
 
 /// `[sample + 0x130]` is the sample's metadata block.
 const SAMPLE_METADATA: usize = 0x130;
@@ -39,10 +39,10 @@ pub fn slice_count(sample: usize) -> Option<Slices> {
     if sample == 0 {
         return None;
     }
-    let metadata = firmware::read_pointer(sample.checked_add(SAMPLE_METADATA)?)?;
-    let begin = firmware::read_pointer(metadata.checked_add(SLICES_BEGIN)?)?;
-    let end = firmware::read_pointer(metadata.checked_add(SLICES_END)?)?;
-    let capacity = firmware::read_pointer(metadata.checked_add(SLICES_CAPACITY)?)?;
+    let metadata = image::read_pointer(sample.checked_add(SAMPLE_METADATA)?)?;
+    let begin = image::read_pointer(metadata.checked_add(SLICES_BEGIN)?)?;
+    let end = image::read_pointer(metadata.checked_add(SLICES_END)?)?;
+    let capacity = image::read_pointer(metadata.checked_add(SLICES_CAPACITY)?)?;
     if begin == 0 || end < begin || capacity < end {
         return None;
     }
@@ -69,12 +69,12 @@ pub fn verify(sample: usize, positions: &[u32], frames: u32) -> bool {
         return false;
     }
     for (index, position) in positions.iter().enumerate() {
-        let Some(slice) = firmware::read_pointer(slices.begin + index * 8) else {
+        let Some(slice) = image::read_pointer(slices.begin + index * 8) else {
             return false;
         };
         let (Some(start), Some(end)) = (
-            firmware::read_u32(slice + SLICE_START),
-            firmware::read_u32(slice + SLICE_END),
+            image::read_u32(slice + SLICE_START),
+            image::read_u32(slice + SLICE_END),
         ) else {
             return false;
         };
@@ -107,17 +107,11 @@ const SELECTION_INDEX: usize = 0x618;
 /// result: a short write shows up as a mismatch in [`verify`], never as a
 /// quietly wrong pad.
 #[must_use]
-pub fn write_markers(
-    base: usize,
-    sample: usize,
-    positions: &[u32],
-    frames: u32,
-    screen: usize,
-) -> bool {
+pub fn write_markers(sample: usize, positions: &[u32], frames: u32, screen: usize) -> bool {
     let Some(slices) = slice_count(sample) else {
         return false;
     };
-    let Some(selection) = firmware::read_pointer(screen.checked_add(SCREEN_SELECTION).unwrap_or(0))
+    let Some(selection) = image::read_pointer(screen.checked_add(SCREEN_SELECTION).unwrap_or(0))
     else {
         return false;
     };
@@ -127,10 +121,10 @@ pub fn write_markers(
     // SAFETY: the offsets are the app's own entries, called the way the stock
     // Chop UI calls them.
     unsafe {
-        firmware::void_of_pointer(base + SLICE_RESET, slices.continuation);
+        image::void_of_pointer(image::base() + SLICE_RESET, slices.continuation);
         for (index, position) in positions.iter().enumerate() {
-            let assigned = firmware::insert_slice(
-                base + SLICE_INSERT,
+            let assigned = image::insert_slice(
+                image::base() + SLICE_INSERT,
                 slices.continuation,
                 *position,
                 1,
@@ -140,10 +134,10 @@ pub fn write_markers(
                 return false;
             }
         }
-        firmware::void_of_pointer_value(base + SLICE_SET_END, slices.continuation, frames);
+        image::void_of_pointer_value(image::base() + SLICE_SET_END, slices.continuation, frames);
         let mut first: i32 = 0;
-        firmware::void_of_two_pointers(
-            base + SELECT_SLICE,
+        image::void_of_two_pointers(
+            image::base() + SELECT_SLICE,
             selection + SELECTION_INDEX,
             core::ptr::addr_of_mut!(first) as usize,
         );
@@ -171,32 +165,32 @@ const BINDING_FALLBACK: usize = 0x80;
 /// view's cached enum alone does not take, which is why this goes through the
 /// callback whenever the binding is still alive.
 #[must_use]
-pub fn set_manual(base: usize, screen: usize) -> bool {
+pub fn set_manual(screen: usize) -> bool {
     let Some(binding) = screen
         .checked_add(SCREEN_BINDING)
-        .and_then(firmware::read_pointer)
+        .and_then(image::read_pointer)
     else {
         return false;
     };
     let Some(owner) = binding
         .checked_add(BINDING_OWNER)
-        .and_then(firmware::read_pointer)
+        .and_then(image::read_pointer)
     else {
         return false;
     };
-    let Some(flags) = firmware::read_u32(binding.saturating_add(BINDING_FLAGS)) else {
+    let Some(flags) = image::read_u32(binding.saturating_add(BINDING_FLAGS)) else {
         return false;
     };
     if flags & 1 == 0 && owner != 0 {
         let Some(manager) = binding
             .checked_add(BINDING_MANAGER)
-            .and_then(firmware::read_pointer)
+            .and_then(image::read_pointer)
         else {
             return false;
         };
         let Some(invoke) = binding
             .checked_add(BINDING_INVOKE)
-            .and_then(firmware::read_pointer)
+            .and_then(image::read_pointer)
         else {
             return false;
         };
@@ -206,7 +200,7 @@ pub fn set_manual(base: usize, screen: usize) -> bool {
         let mut manual: i32 = 0;
         // SAFETY: the binding's invoke slot is the app's model callback.
         unsafe {
-            firmware::void_of_three_pointers(
+            image::void_of_three_pointers(
                 invoke,
                 binding + BINDING_CALL,
                 owner,
@@ -216,10 +210,25 @@ pub fn set_manual(base: usize, screen: usize) -> bool {
     } else {
         // SAFETY: the fallback is the app's own cached-mode setter.
         unsafe {
-            firmware::void_of_pointer_value(base + SET_CHOP_MODE, binding + BINDING_FALLBACK, 0);
+            image::void_of_pointer_value(
+                image::base() + SET_CHOP_MODE,
+                binding + BINDING_FALLBACK,
+                0,
+            );
         }
     }
     true
+}
+
+/// The binding's type byte, or -1 when there is no binding.
+#[must_use]
+pub fn chop_kind(screen: usize) -> i32 {
+    /// `[screen + 0x168]` is the chop binding, `+0x9c` its type.
+    const SCREEN_BINDING: usize = 0x168;
+    const BINDING_TYPE: usize = 0x9c;
+    image::read_pointer(screen.checked_add(SCREEN_BINDING).unwrap_or(0))
+        .and_then(|binding| image::read_u32(binding.wrapping_add(BINDING_TYPE)))
+        .map_or(-1, u32::cast_signed)
 }
 
 #[cfg(test)]

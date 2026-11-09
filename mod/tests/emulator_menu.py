@@ -28,9 +28,9 @@ def main():
     def tap(name):
         control(name, 'press', 100)
         control(name, 'release')
-    ROW0 = 55          # centre of the first SAMPLE OPTIONS row
-    ROW_STEP = 24      # rows are 24 px apart (draw code: y + 32 + i * 24)
-    ROWS = 7           # HPSS, Spectral, Reverb, Vinyl, Lo-Fi, Bass, Close
+    ROW0 = 43          # centre of the first SAMPLE OPTIONS row
+    ROW_STEP = 20      # rows are 20 px apart (draw code: y + 26 + i * 20)
+    ROWS = 8           # HPSS, Spectral, Reverb, Vinyl, Lo-Fi, Bass, Looper, Close
     HIGHLIGHT = (58, 42, 16)
 
     def selected():

@@ -247,9 +247,10 @@ impl Preview {
 /// The preview engine, only ever touched by the audio writer thread.
 struct PreviewCell(core::cell::UnsafeCell<Option<Preview>>);
 
-// SAFETY: the synth is only ever reached through `with_preview`, which is only
-// called from the audio writer hook; the pad and UI threads only use the
-// atomics below.
+// SAFETY: the synth is only ever reached through `with_preview`, which runs on
+// the audio writer thread; the pad and UI threads only use the atomics below.
+// In particular `preview_enable` must not touch the synth: it is called from the
+// UI thread and would race the mixer.
 unsafe impl Sync for PreviewCell {}
 
 static PREVIEW: PreviewCell = PreviewCell(core::cell::UnsafeCell::new(None));
@@ -274,12 +275,13 @@ fn with_preview<R>(f: impl FnOnce(&mut Preview) -> R) -> R {
     }
 }
 
-/// Turn the preview on or off; turning it off silences every voice.
+/// Turn the preview on or off.
+///
+/// Only the flag is written here: the synth belongs to the audio thread, which
+/// silences every voice on its next block once the flag is off.  Reaching the
+/// synth from this thread would race the mixer.
 pub fn preview_enable(enabled: bool) {
     ENABLED.store(enabled, Ordering::Release);
-    if !enabled {
-        with_preview(Preview::stop);
-    }
 }
 
 /// Set the three knobs, each 0..1.
@@ -303,6 +305,21 @@ pub fn preview_note(pad: usize, velocity: f32) {
 /// its next block, so a page that just opened never plays a stale note.
 pub fn preview_reset() {
     RESET.store(true, Ordering::Release);
+}
+
+/// Mix the preview into up to two channel slices.
+///
+/// The slices must all be at least `frames` long; extra channels are ignored,
+/// matching the stereo preview.
+pub fn preview_mix_slices(channels: &mut [&mut [f32]], frames: usize, rate: u32) -> f32 {
+    let mut pointers: [*mut f32; 2] = [core::ptr::null_mut(); 2];
+    let count = channels.len().min(2);
+    for (slot, channel) in pointers.iter_mut().zip(channels.iter_mut()).take(count) {
+        *slot = channel.as_mut_ptr();
+    }
+    // SAFETY: every pointer addresses a slice of at least `frames` samples, and
+    // the count matches the pointers filled.
+    unsafe { preview_mix(&mut pointers[..count], frames, rate) }
 }
 
 /// Mix the preview into the device's output channels and report its peak.
@@ -519,6 +536,7 @@ mod tests {
         preview_note(0, 0.8);
         let mut left = vec![0.0_f32; 4_096];
         let mut right = vec![0.0_f32; 4_096];
+        // SAFETY: both channel buffers hold `left.len()` samples.
         let peak = unsafe {
             preview_mix(
                 &mut [left.as_mut_ptr(), right.as_mut_ptr()],
@@ -530,6 +548,7 @@ mod tests {
         assert!(left.iter().any(|v| *v != 0.0));
         assert_eq!(left, right, "both channels get the same voice mix");
         preview_enable(false);
+        // SAFETY: both channel buffers still hold `left.len()` samples.
         let silent = unsafe {
             preview_mix(
                 &mut [left.as_mut_ptr(), right.as_mut_ptr()],

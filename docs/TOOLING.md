@@ -229,7 +229,7 @@ on this kernel a read through an `O_RDWR` descriptor returns `EIO`, which once
 froze the UI.
 
 Hook templates: `install_hook(base + offset, fn)` (Rust: `Hooks::install` in
-`rust/crates/minimod/src/hooks.rs`) allocates a relay slot and a
+`rust/crates/mpc-sample-sdk/src/hook.rs`) allocates a relay slot and a
 trampoline within ±128 MB, verifies the prologue and refuses if it starts
 PC-relative. `FN(offset, type)` calls an app function by mod offset. The
 technique and its rules are in [`MODDING.md`](MODDING.md).
@@ -239,7 +239,7 @@ technique and its rules are in [`MODDING.md`](MODDING.md).
 | harness | what it does |
 |---|---|
 | `mod/tests/emulator_*.py` | drive the panel, then read the model/audio independently: exact slice boundaries, trim frames, output WAV, status strings, pid/`NRestarts` |
-| `rust/check.sh` | format, clippy (`-D warnings`, pedantic, no `#[allow]`), the host unit tests and the golden fixtures that pin the DSP to the original C output, and the aarch64 release build |
+| `rust/check.sh` | format, clippy (`-D warnings`, pedantic), a no-`unsafe` guard on the feature crate, rustdoc, the host unit tests and the golden fixtures that pin the DSP to the original C output, and the aarch64 release build |
 | `tools/hpss/hpss.py` | reference HPSS implementation and the tuning bed; `wavio`, `wavdiff`, `excerpt`, `mix`, `onsets`, `spectral_chop` are the helpers |
 | `tools/fit_*.py`, `probe_render.py` | converter-side fitting and render checks (see `converter/`) |
 | `tools/device/probe-tanf.c` | `LD_PRELOAD` interposer on `tanf`: the app builds every JUCE IIR coefficient as `tanf(pi·f/fs)`, so this logs the **actual cutoff in Hz** each pad gets — ground truth a mixdown cannot give |
@@ -277,10 +277,11 @@ exported by the device (`converter/docs/DEVICE-PROBE.md`).
 ## 7. Static analysis
 
 The Rust crates are linted by `rust/check.sh`: `cargo fmt --check`, clippy with
-`all`, `pedantic` and `cargo` at `-D warnings`, no `#[allow]` anywhere,
-`unreachable_pub`, `missing_docs` and `unused_qualifications` denied, then the
-tests and the aarch64 cross build. Every `unsafe` block carries a `// SAFETY:`
-comment, which clippy enforces.
+`all`, `pedantic` and `cargo` at `-D warnings`, `unreachable_pub`, `missing_docs`
+and `unused_qualifications` denied, a rustdoc build with warnings denied, then the
+tests and the aarch64 cross build. Every `unsafe` block in the SDK carries a
+`// SAFETY:` comment, which clippy enforces. The feature crate (`crates/minimod`)
+contains no `unsafe` at all and the script fails if one appears.
 
 `mod/build.sh` adds two checks on the shipped library: it fails on any
 unresolved symbol that is not versioned glibc (the firmware's loader would

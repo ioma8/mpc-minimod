@@ -1,52 +1,57 @@
 # Handoff: minimod on the Rust crates
 
-**Branch** `feature/live-looper`
-**State** the mod is Rust only (`rust/crates/dsp`, `rust/crates/minimod`). `main`'s
-consolidated docs and its C fixes have been merged in (see §1). The merge commit is
-not tagged and nothing is released.
+**Branch** `main`
+**State** the mod is Rust only (`rust/crates/dsp`, `rust/crates/mpc-sample-sdk`,
+`rust/crates/minimod`). The
+port is merged; no C or C++ is compiled for the mod. Nothing at `HEAD` is tagged
+(the last release tag is `v0.7.0`).
 
-## 1. What changed on this branch
+## 1. What the tree is
 
 - **The C is gone.** `mod/src`, the vendored DaisySP, the golden-fixture generators
-  and the host tests that compiled C are deleted. Nothing compiles C for the mod.
-- **`main` is merged.** `main` kept fixing the C while this branch removed it, so a
-  textual merge was impossible. Each C fix was re-implemented in the crates; the table
-  in [`docs/RUST-PORT.md`](docs/RUST-PORT.md#merging-main-into-the-port-november-2026)
-  maps each one to its module. The highlights:
-  - Bass preview: envelope, reset, output through the exported `snd_pcm_writei` tap,
-    pads consumed at the control surface.
-  - In-memory audio for AutoTrim, SAMPLE OPTIONS and Spectral (the WAV is the fallback).
-  - Chromatic MIDI measured from the sample's root note.
-  - Hook engine: `B.cond` and read-back. Arm lifetime and writer quiescence for Extract.
-  - Effect object validation. Spectral deadline and off-page cancel.
-  - Effects no longer back up or restore the source sample.
-- **The hook table has 16 sites**, not 17. The planar writer hook was removed with the
-  bass preview fix.
-- **Exports:** the cdylib exports 24 symbols: the 4 ALSA taps and 20 `g_*` statics the
-  device tests read (`g_surface` was added for the root-note test).
-- **Docs:** `docs/` is main's consolidated set, plus `RUST-PORT.md` (final state and the
-  merge table), `LIVE-LOOPER.md`, and the Rust notes in the other docs.
-- **Build:** `mod/build.sh` builds the crate as a cdylib and cross-links it with
-  `zig-cc-aarch64-linux-gnu`. It fails on unresolved non-glibc symbols and on glibc
-  versions newer than 2.39.
+  and the host tests that compiled C are deleted. `mod/build.sh` builds the
+  `minimod` crate as a `cdylib` and cross-links it with
+  `zig-cc-aarch64-linux-gnu`; it fails on unresolved non-glibc symbols and on
+  glibc versions newer than 2.39.
+- **The crates.** `crates/mpc-sample-sdk` is the universal SDK: firmware image and
+  the 36-word check, the hook engine and all 16 sites, the `Mod` trait and event
+  decoding, the ALSA taps, drawing, and typed access to the app's page, sample,
+  pad, slice, WAV, control-surface, effect and Extract objects.  `crates/minimod`
+  is the `LD_PRELOAD` library and only the features, built on the SDK through
+  `impl Mod` and `export_mod!(Minimod)`.  `crates/dsp` is pure audio DSP over
+  slices: looper, HPSS, onset detection, FFT, the Karplus-Strong bass synth, and
+  the S32↔f32 conversion.
+- **The hook table has 16 sites.** `mpc_sample_sdk::sites` installs them and keeps
+  every displaced original; `mpc_sample_sdk::loader` checks 36 words of the loaded
+  image first, so a different firmware is refused rather than hooked at the wrong
+  offsets.
+- **Exports:** the cdylib exports 24 symbols: the 4 ALSA taps and 20 `g_*` statics
+  the device tests read.
+- **Docs:** `docs/` is main's consolidated set, plus `RUST-PORT.md`,
+  `LIVE-LOOPER.md`, and the Rust notes in the other docs.
 
 ## 2. What is verified, and what is not
 
-- `rust/check.sh` passes: fmt, clippy `all`+`pedantic` `-D warnings` with no `#[allow]`,
-  74 minimod tests, 36 dsp tests, aarch64 release build.
-- **Emulator, on the merged build:**
-  - pass: bass sample (now also checks the live preview: notes reach it, blocks are
-    mixed, the selected sample does not change, and the preview stops after its envelope),
-    looper, HPSS, MIDI chromatic (deltas -28/-27/-21 at root 88), reverb.
-  - **not yet verified:** spectral and AutoTrim (the runner failed on argument
-    handling, not on the mod), and the menu suite (it needs Pillow, which is not
-    installed in the interpreter that ran it). Re-run them before relying on this build.
-- Emulator-verified and hardware-verified are kept separate. Only the 16 Levels pitch
-  shift and external MIDI chromatic playback were verified on real hardware.
-- **Bass preview on device:** main's C concluded the unversioned `snd_pcm_writei` does
-  not interpose and patched the PLT stub `0xb51ff8`. The emulator reaches the Rust tap,
-  so the stub is not used. If the preview is silent on a real device, port the stub patch
-  from `main`'s `mod/src/minimod.c` (`patch_writei_plt`).
+- `rust/check.sh` passes: fmt, clippy `all` + `pedantic` + `cargo` with
+  `-D warnings`, a rustdoc build with warnings denied, a guard that
+  `crates/minimod/src` contains no `unsafe` token,
+  **59 SDK tests**, **35 minimod tests** and **37 dsp tests** (including the
+  golden fixtures), and the aarch64 release build.
+- **Golden fixtures:** the DSP is compared with the original C where the
+  arithmetic is deterministic: the looper trace and loop buffers are
+  bit-identical, the bass render is bit-identical, HPSS stays under 1e-4, and the
+  spectral onsets match exactly.
+- **Emulator, recorded green on the Rust-only build:** bass sample, looper, HPSS,
+  MIDI chromatic, reverb, spectral. AutoTrim and the menu have their own scripts
+  (`mod/tests/emulator_autotrim.py`, `mod/tests/emulator_menu.py`); see
+  [`docs/FEATURES.md`](docs/FEATURES.md) for what each asserts.
+- Emulator-verified and hardware-verified are kept separate. Only the 16 Levels
+  pitch shift and external MIDI chromatic playback were verified on real hardware.
+- **Bass preview on device:** main's C concluded the unversioned
+  `snd_pcm_writei` does not interpose and patched the PLT stub `0xb51ff8`. The
+  emulator reaches the Rust tap, so the stub is not used. If the preview is silent
+  on a real device, port the stub patch from `main`'s `mod/src/minimod.c`
+  (`patch_writei_plt`).
 
 ## 3. The emulator
 

@@ -78,7 +78,7 @@ sits at 72, not 20) and handles PCM 16/24/32-bit and IEEE float32, including
 | float32 A09 (98,280 frames) | `76..83103` |
 | current emulator check, 10,501 frames | `14..8159`, `23..7503`, `24..7453`, clear `0..10500`, start mirror consistent, no restart |
 
-The unit tests of `rust/crates/minimod/src/{wav,trim}.rs` check the parser and the
+The unit tests of `rust/crates/mpc-sample-sdk/src/platform/{wav,trim}.rs` check the parser and the
 scan (PCM16/24/32 + float32, negative full-scale, malformed headers, the
 memory path); `mod/tests/emulator_autotrim.py` reads the trim bounds from the
 live model (`layer+0x7b8` start, `+0x810` end, `+0x868` mirror) and asserts the
@@ -255,7 +255,7 @@ The source is not replaced. If there is no free pad, or the selected sample
 changes during processing, the action stops without submitting output.
 
 **Implementation.** The input audio is the selected sample's in-memory float32
-buffer, with the WAV as the fallback for streamed samples. `rust/crates/minimod/src/effect.rs`
+buffer, with the WAV as the fallback for streamed samples. `rust/crates/mpc-sample-sdk/src/platform/effect.rs`
 creates a standalone effect instance
 (factory by mod offset, context `{rate, 0, 512}`, vtable slot 9 setup with the
 context pointer, slot 11 per stereo block, slot 1 destroy). Parameters are
@@ -304,7 +304,7 @@ The selected pad's sample is not rewritten.
 exponentially from 700 Hz to about 16.8 kHz (or 45 % of the sample rate). The
 live preview is mixed into the real output call: the app writes interleaved
 S32_LE (4 channels, 44.1 kHz) through `snd_pcm_writei`, and the mod's exported
-`snd_pcm_writei` tap (`audio.rs`, the one the looper uses) adds the preview to
+`snd_pcm_writei` tap (`backend/audio.rs`, the one the looper uses) adds the preview to
 channels 0/1 (format and rate read from the PCM handle once). Each voice decays
 over 1.2 s at level 0.5, and pads are consumed at the control-surface event hook
 while the page is open, so the firmware never selects or switches the sample
@@ -334,7 +334,7 @@ cd mod
 ./pack.sh           # SD package with a valid autorun.check
 
 # host-side checks (no emulator, no device)
-cd ../rust && ./check.sh         # fmt, clippy, unit tests, golden DSP fixtures, aarch64 build
+cd ../rust && ./check.sh         # fmt, clippy, rustdoc, unit tests, golden DSP fixtures, aarch64 build
 ```
 
 Emulator scenarios need the sibling `virtual-mpc-sample` checkout and a preloaded
