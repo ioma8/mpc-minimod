@@ -429,14 +429,13 @@ static SITES: [Site; 16] = [
     },
     Site {
         offset: 0x0211_b090,
-        handler: glue_midi_note as *const (),
+        handler: crate::midi::minimod_hook_midi_note as *const (),
     },
 ];
 
 // The handlers that are still C.
 unsafe extern "C" {
     fn ui_buttons(event: usize);
-    fn midi_note_event(app: usize, context: usize, event: usize, source: usize);
     fn install_screen_paint() -> i32;
     fn minimod_glue_set_originals(originals: *const Originals);
     fn minimod_glue_finished(touched: i32);
@@ -466,12 +465,6 @@ pub struct Originals {
 unsafe extern "C" fn glue_buttons(event: usize) {
     // SAFETY: the app calls this with its own event.
     unsafe { ui_buttons(event) };
-}
-
-/// The MIDI note event, as the glue installs it.
-unsafe extern "C" fn glue_midi_note(app: usize, context: usize, event: usize, source: usize) {
-    // SAFETY: the app calls this with its own event.
-    unsafe { midi_note_event(app, context, event, source) };
 }
 
 /// How many sites the glue has to patch.

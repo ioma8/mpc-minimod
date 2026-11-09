@@ -252,9 +252,6 @@ static uintptr_t base;
 static int hook_mask = 0xf2; /* 2 proc, 16 buttons, 32 note_on, 64 cs, 128 note_off */ /* 1 ctor (crashes, disabled), 2 proc, 16 buttons,
                                 32 note_on, 64 cs_event, 128 note_off */ /* 1 ctor, 2 proc, 4 plus, 8 minus, 16 buttons,
                                 32 note_on, 64 cs_event, 128 note_off */
-static int safe_mode;
-static int debug_mode;
-static int probe_mode;
 
 
 static void mlog(const char *fmt, ...);
@@ -366,7 +363,7 @@ static void *install_hook(uintptr_t site, void *hook)
  * entry instruction is swapped in when 16 Levels turns on and restored when
  * it turns off or the Sample page goes away. */
 static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
-static 
+
 static void midi_hook_set(int on)
 {
     /* The dispatcher is hooked once at load; this only changes behaviour, so no
@@ -1043,10 +1040,6 @@ void audio_writer(void *self, void *input, size_t frames, int offset);
 /* The trim core is called by the broadcaster's listener loop, which keeps the
  * property in x20: learning that pair is what lets autotrim drive the page. */
 
-uintptr_t slider_for_value(float pct)
-{
-    return minimod_slider_for_value((uintptr_t)g_screen, base, pct);
-}
 
 
 
@@ -1064,10 +1057,6 @@ uintptr_t slider_for_value(float pct)
 /* Read-only ownership test: the property's listener chain must reference the
  * parameter (or its model) somewhere within two hops. No broadcasting, so a
  * wrong candidate can never disturb the app. */
-int prop_references(uintptr_t P, uintptr_t param)
-{
-    return minimod_prop_references(P, param);
-}
 
 /* The object in x20 at a trim-core call is the *listener*, not the property.
  * The property that owns it is the one whose list contains a node whose target
@@ -1118,10 +1107,6 @@ int prop_references(uintptr_t P, uintptr_t param)
 /* The app's own CC path: 0x159f230(range, event, raw) divides raw by range and
  * broadcasts through the property at *(event[0]+0x10) + 0x1ac0 (CC 0x10 = K1)
  * or +0x1b18 (CC 0x11 = K2). Calling it is exactly a knob turn. */
-uintptr_t ctl_obj_for(uintptr_t surface)
-{
-    return minimod_ctl_obj_for(surface);
-}
 
 /* A real CC event captured from the app, replayed with our own number so the
  * app performs exactly what a knob does. */
@@ -1190,10 +1175,6 @@ void minimod_glue_save(void)
  * the control surface without needing a knob move first. */
 
 
-uintptr_t find_knob_props(void)
-{
-    return minimod_find_knob_props(base);
-}
 
 /* Every listener of a real property has a vtable inside the app's
  * .data.rel.ro. If one does not, the property is not the one the page uses and
@@ -1304,14 +1285,6 @@ static void set_filter_text(const char *t)
  * Keep the firmware's MIDI input, note-on/off matching, sustain and audio
  * routing intact. The SampQOL reference confirms the native pitch setter takes
  * the event property block at +0x14 and a semitone delta as argument four. */
-void midi_note_event(void *app, void *context, void *event,
-                            uintptr_t source)
-{
-    minimod_midi_handle((uintptr_t)app, (uintptr_t)context, (unsigned char *)event,
-                        (uintptr_t)source, &g_midi,
-                        (minimod_note_event_fn)orig_midi_note_event,
-                        (minimod_pitch_off_fn)orig_pitch_off);
-}
 
 /* -------------------------------------------------------- probe threads */
 
