@@ -326,17 +326,12 @@ struct rng {
     uintptr_t lo, hi;
     int w;
 };
-static struct rng g_rng[512];
-static int g_nrng;
-static int g_rng_loaded;
 
 /* /proc/self/mem keeps reads and writes out of the C compiler's way: no aliasing
  * surprises, no faults when the app unmaps a page under us. */
 /* Cached descriptors. Reads and writes need *separate* descriptors: on this
  * kernel a read through an O_RDWR /proc/self/mem returns EIO, which silently
  * breaks every rd() and wedges the UI logic that depends on it. */
-static int mem_rd_fd = -1;
-static pthread_mutex_t g_mem_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 
 
@@ -612,7 +607,6 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
 /* The layout is defined once, in rust/crates/minimod/src/job.rs. */
 typedef struct minimod_job hpss_job;
 
-static volatile int g_hpss_done;
 static void hpss_repaint(void)
 {
     minimod_repaint_screen();
@@ -640,7 +634,6 @@ static void hpss_restore_chop(void)
 
 static void hpss_finished(void)
 {
-    __atomic_store_n(&g_hpss_done, 1, __ATOMIC_RELEASE);
 }
 
 static const struct minimod_glue_hooks g_job_hooks;
