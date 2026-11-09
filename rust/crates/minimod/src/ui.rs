@@ -549,6 +549,40 @@ pub unsafe extern "C" fn minimod_restore_chop() {
     unsafe { original(event.as_ptr() as usize) };
 }
 
+/// Repaint the component the page last painted.
+///
+/// # Safety
+///
+/// The app's own repaint is used.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_repaint_screen() {
+    let painted = crate::audio::painted();
+    let component = if painted != 0 {
+        painted
+    } else {
+        paint::screen()
+    };
+    // SAFETY: the original is the app's own repaint.
+    if let Some(original) = crate::glue::original_repaint()
+        && component != 0
+    {
+        // SAFETY: the app's own call.
+        unsafe { original(component, 0, (2000_u64 << 32) | 0x7d0) };
+    }
+}
+
+/// Whether the Sample page is showing.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_screen_visible() -> i32 {
+    page::minimod_page_visible(firmware::base(), paint::screen())
+}
+
+/// Whether the page is in chop mode.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_screen_chop_mode() -> i32 {
+    page::minimod_page_chop_mode(firmware::base(), paint::screen())
+}
+
 #[cfg(test)]
 mod tests {
     use super::State;

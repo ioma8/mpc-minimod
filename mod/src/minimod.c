@@ -77,6 +77,10 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+void minimod_repaint_screen(void);
+int32_t minimod_screen_visible(void);
+int32_t minimod_screen_chop_mode(void);
+
 void minimod_restore_chop(void);
 void minimod_set_chop_before(int32_t mode);
 void minimod_buttons_original(uintptr_t original);
@@ -611,19 +615,17 @@ typedef struct minimod_job hpss_job;
 static volatile int g_hpss_done;
 static void hpss_repaint(void)
 {
-    void *comp = g_paint_comp ? g_paint_comp : g_screen;
-    if (orig_repaint && comp)
-        orig_repaint(comp, 0, ((uint64_t)2000 << 32) | (uint64_t)2000);
+    minimod_repaint_screen();
 }
 
 static int sample_page_visible(void)
 {
-    return minimod_page_visible(base, (uintptr_t)g_screen);
+    return minimod_screen_visible();
 }
 
 static int hpss_chop_mode(void)
 {
-    return minimod_page_chop_mode(base, (uintptr_t)g_screen);
+    return minimod_screen_chop_mode();
 }
 
 /* Stock Extract can leave the Sample page in Chop mode.  Replay the CHOP
