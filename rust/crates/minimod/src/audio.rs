@@ -805,6 +805,24 @@ pub extern "C" fn minimod_pcm_channels() -> u32 {
     unsafe { g_pcm_channels }
 }
 
+/// Whether the repaint pump has been started.
+static PUMP_STARTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Start the repaint pump once.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_pump_start() {
+    use core::sync::atomic::Ordering;
+    if PUMP_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("minimod-pump".to_string())
+        .spawn(|| {
+            // SAFETY: the thread entry owns nothing and never returns.
+            let _ = unsafe { minimod_pump_thread(0) };
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CHANNEL_LIMIT, INPUT_ALT, INPUT_CHANNELS, OUTPUT_ALT, OUTPUT_CHANNELS, channels};

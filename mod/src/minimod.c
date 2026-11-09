@@ -80,6 +80,7 @@
 extern uint32_t g_bass_preview_notes;
 extern int32_t g_bass_preview_available;
 void minimod_bass_preview_set_active(int32_t active);
+void minimod_pump_start(void);
 
 int minimod_levels_bump(int32_t steps);
 
@@ -882,7 +883,6 @@ static void draw_text(void *g, const char *s, int x, int y, int w, int h,
  * covers the whole 320x240 area, so the looper really is a separate screen.
  * A small thread keeps it animating while it is open, the same way the toast
  * forces its own repaints. */
-static volatile int g_looper_pump_started;
 
 static void looper_cfg_save(void);
 
@@ -894,12 +894,7 @@ static volatile unsigned g_buf_out;
 
 static void looper_pump(void)
 {
-    if (__atomic_load_n(&g_looper_pump_started, __ATOMIC_ACQUIRE))
-        return;
-    __atomic_store_n(&g_looper_pump_started, 1, __ATOMIC_RELEASE);
-    pthread_t th;
-    if (pthread_create(&th, 0, (void *(*)(void *))minimod_pump_thread, 0) == 0)
-        pthread_detach(th);
+    minimod_pump_start();
 }
 
 #define LP_MAX_HINT (44100u * 8u)
