@@ -406,6 +406,49 @@ pub unsafe extern "C" fn minimod_midi_note_original(original: usize) {
     unsafe { ORIGINAL_NOTE_EVENT = crate::input::from_address(original) };
 }
 
+/// Whether the mod handles notes at all.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_midi_set(on: i32) {
+    // SAFETY: the record is this module's.
+    unsafe { g_midi.on = i32::from(on != 0) };
+}
+
+/// Whether 16 Levels is showing and its page predicate agrees.
+///
+/// # Safety
+///
+/// Reads the app's screen object.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_levels_active() -> i32 {
+    let screen = crate::paint::screen();
+    if screen == 0 {
+        return 0;
+    }
+    // The screen has to be the Sample page's own type.
+    // SAFETY: the object is the app's.
+    let kind = unsafe { *(screen as *const usize) };
+    if kind != crate::firmware::base() + 0x6e2_12a0 {
+        return 0;
+    }
+    // SAFETY: the app's own predicate, called the way it expects.
+    let predicate: unsafe extern "C" fn(usize) -> i32 = unsafe {
+        core::mem::transmute::<usize, unsafe extern "C" fn(usize) -> i32>(
+            crate::firmware::base() + 0x0112_fd50,
+        )
+    };
+    // SAFETY: see above.
+    if unsafe { predicate(screen) } == 0 {
+        // SAFETY: the record is this module's.
+        unsafe {
+            g_midi.levels = 0;
+        }
+        minimod_midi_set(0);
+        return 0;
+    }
+    // SAFETY: the record is this module's.
+    unsafe { g_midi.levels }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Note, decode};

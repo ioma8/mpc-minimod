@@ -77,6 +77,9 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+void minimod_midi_set(int32_t on);
+int32_t minimod_levels_active(void);
+
 void minimod_hpss_arm(uintptr_t source, uintptr_t buffer, size_t frames,
                       size_t source_frames, uint32_t channels, uint32_t start,
                       uint32_t end, int32_t rename);
@@ -367,9 +370,7 @@ static void (*orig_midi_note_event)(void *, void *, void *, uintptr_t);
 
 static void midi_hook_set(int on)
 {
-    /* The dispatcher is hooked once at load; this only changes behaviour, so no
-     * code is rewritten while the MIDI thread may be running it. */
-    g_midi.on = on ? 1 : 0;
+    minimod_midi_set(on);
 }
 
 /* -------------------------------------------------------- 16 Levels state */
@@ -391,16 +392,7 @@ static int in_chop_mode(void)
  * flag is dropped whenever the screen is not visible. */
 static int levels_active(void)
 {
-    void *s = g_screen;
-    if (!s || FIELD(s, 0, uintptr_t) != base + 0x6e212a0) /* SampleModeScreen */
-        return 0;
-    if (!FN(0x112fd50, int (*)(void *))(s)) {
-        if (g_midi.levels) mlog("lv: predicate 0, clearing\n");
-        g_midi.levels = 0;
-        midi_hook_set(0);
-        return 0;
-    }
-    return g_midi.levels;
+    return minimod_levels_active();
 }
 
 
@@ -881,6 +873,18 @@ static int32_t ui_bump_octave(int32_t steps)
     return bump_octave((int)steps);
 }
 
+
+static void ui_clear_marks(void)
+{
+    if (g_screen)
+        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
+            g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
+}
+
+static void ui_release_held(void)
+{
+    release_held_pads();
+}
 
 static void ui_toggle_levels(void)
 {
