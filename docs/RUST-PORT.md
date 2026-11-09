@@ -853,3 +853,31 @@ Twelve attempts, no landing.  The constructor stays in C, and this document says
 plainly rather than leaving it as an unfinished intention.  The remaining rounds go to
 the pieces that still *can* be moved, so the C file shrinks to the constructor and the
 handful of handlers it names - which is the smallest it can be without the answer above.
+
+## A serious finding: the table's offsets were invented
+
+While moving the site table into Rust as data (so the glue keeps doing the patching),
+the offsets were finally compared against the `#define`s in the glue - and **nine of the
+sixteen were wrong**:
+
+| site | glue | the table had |
+|---|---|---|
+| sixteen ctor | `0x1545a50` | `0x1ecb730` |
+| sixteen proc | `0x21472f0` | `0x1ecc0a0` |
+| buttons | `0x159f2f0` | `0x14a0b60` |
+| note on | `0x1e27360` | `0x1b5a740` |
+| note off | `0x1e270d0` | `0x1b5a7c0` |
+| surface event | `0x23aff60` | `0x1b5a840` |
+| bass writer | `0x03f398f0` | `0x1d8ab20` |
+| data signal | `0x140dbc0` | `0x1962840` |
+| pitch off | `0x27e4400` | `0x1e44d00` |
+
+They were reconstructed from the Ghidra addresses by subtracting the image base instead
+of being read from the glue.  Patching nine wrong addresses is why every attempt died
+before the first paint - and why the failure was silent, immediate and identical
+regardless of order, recorders, batching or base.
+
+Corrected, the table still did not run - there is at least one more difference - but this
+is the first *factual* error found in the twelve attempts, and it invalidates the earlier
+conclusion that "the calling context" was the last variable.  The next attempt starts
+from the corrected table.
