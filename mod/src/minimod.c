@@ -77,6 +77,10 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+void minimod_restore_chop(void);
+void minimod_set_chop_before(int32_t mode);
+void minimod_buttons_original(uintptr_t original);
+
 void minimod_midi_set(int32_t on);
 int32_t minimod_levels_active(void);
 
@@ -605,7 +609,6 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
 typedef struct minimod_job hpss_job;
 
 static volatile int g_hpss_done;
-static int g_hpss_chop_before;
 static void hpss_repaint(void)
 {
     void *comp = g_paint_comp ? g_paint_comp : g_screen;
@@ -628,20 +631,7 @@ static int hpss_chop_mode(void)
  * user had before HPSS. */
 static void hpss_restore_chop(void)
 {
-    if (!g_hpss_btn_valid || !orig_buttons || g_shift || !sample_page_visible()) {
-        g_hpss_restore_pending = 1;
-        return;
-    }
-    if (hpss_chop_mode() == g_hpss_chop_before)
-        return;
-    unsigned char ev[16];
-    memcpy(ev, g_hpss_btn, sizeof ev);
-    ev[8] = 0x4b; /* CHOP */
-    ev[9] = 0x7f;
-    orig_buttons(ev);
-    ev[9] = 0x00;
-    orig_buttons(ev);
-    mlog("HPSS: restored chop mode to %d\n", g_hpss_chop_before);
+    minimod_restore_chop();
 }
 
 
@@ -1395,8 +1385,10 @@ __attribute__((constructor)) static void load(void)
         void *t = install_hook(base + minimod_site_offset(i),
                                (void *)minimod_site_handler(i));
         minimod_site_record(i, (uintptr_t)t);
-        if (i == 8)
+        if (i == 8) {
             originals.buttons = (uintptr_t)t;
+            minimod_buttons_original((uintptr_t)t);
+        }
         else if (i == 6)
             originals.control = (uintptr_t)t;
         else if (i == 9)

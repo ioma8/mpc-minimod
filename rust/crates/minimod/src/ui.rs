@@ -4,7 +4,9 @@
 //! through the module's accessor, so its own readers did not have to change.
 
 use crate::buttons::{self, Action, Context, Held, Modals, OctaveKeys, Screens};
+use crate::firmware;
 use crate::looper_ffi;
+use crate::page;
 use crate::paint;
 
 /// A full press, as the app reports it.
@@ -472,6 +474,79 @@ pub unsafe extern "C" fn minimod_hook_buttons(event: usize, hooks: *const Hooks)
     let data_down = unsafe { &mut *core::ptr::addr_of_mut!(DATA_DOWN) };
     // SAFETY: the hooks are the glue's callbacks.
     unsafe { press(state, event, hooks, data_down) }
+}
+
+/// The app's own button dispatch, recorded at install.
+static mut ORIGINAL_BUTTONS: Option<unsafe extern "C" fn(usize)> = None;
+
+/// The chop mode the page was in before the mod armed an extraction.
+static mut CHOP_BEFORE: i32 = 0;
+
+/// Record the app's button dispatch.
+///
+/// # Safety
+///
+/// Called once at install, before any button arrives.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_buttons_original(original: usize) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        ORIGINAL_BUTTONS = crate::input::from_address(original);
+    }
+}
+
+/// Remember the chop mode before an extraction.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_set_chop_before(mode: i32) {
+    // SAFETY: only the UI thread writes it.
+    unsafe { CHOP_BEFORE = mode };
+}
+
+/// The chop mode before the last extraction.
+#[must_use]
+pub fn chop_before() -> i32 {
+    // SAFETY: only the UI thread reads it.
+    unsafe { CHOP_BEFORE }
+}
+
+/// Put the chop mode back by replaying a CHOP press, when that is safe.
+///
+/// # Safety
+///
+/// Reads the app's page objects.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_restore_chop() {
+    let visible = page::minimod_page_visible(firmware::base(), paint::screen());
+    // SAFETY: the state is this module's.
+    let (valid, original, shifted) = unsafe {
+        (
+            (*core::ptr::addr_of!(STATE)).event_valid,
+            *core::ptr::addr_of!(ORIGINAL_BUTTONS),
+            (*core::ptr::addr_of!(STATE)).shift,
+        )
+    };
+    let Some(original) = original else {
+        crate::menu::state_mut().restore_pending = 1;
+        return;
+    };
+    if valid == 0 || shifted != 0 || visible == 0 {
+        crate::menu::state_mut().restore_pending = 1;
+        return;
+    }
+    let mode = page::minimod_page_chop_mode(firmware::base(), paint::screen());
+    if mode == chop_before() {
+        return;
+    }
+    // Replay the CHOP key on the event the page last sent.
+    // SAFETY: the buffer is this module's and belongs to the page.
+    let mut event = unsafe { (*core::ptr::addr_of!(STATE)).event };
+    event[8] = 0x4b;
+    event[9] = 0x7f;
+    // SAFETY: the app's own dispatch takes this event.
+    unsafe { original(event.as_ptr() as usize) };
+    event[9] = 0x00;
+    // SAFETY: see above.
+    unsafe { original(event.as_ptr() as usize) };
 }
 
 #[cfg(test)]
