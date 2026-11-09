@@ -77,6 +77,17 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+/* The output tap and its counters live in Rust, under these names. */
+extern int32_t g_buf_dirty;
+extern uint32_t g_out_ch;
+extern int32_t g_out_s32;
+extern uint32_t g_out_delay;
+extern uint32_t g_out_delay_avg;
+extern uint32_t g_out_peak_bits;
+extern uint32_t g_out_write_calls;
+extern float g_outtap[];
+extern uint32_t g_outtap_w;
+
 void minimod_hook_midi_note(void *app, void *context, void *event, uintptr_t source);
 void minimod_midi_originals(void *note, void *pitch);
 
@@ -86,6 +97,17 @@ extern struct minimod_midi_state g_midi;
 /* The device geometry is Rust; it resolves ALSA itself. */
 uint32_t minimod_stream_geometry(uintptr_t pcm, uint32_t *channels, int32_t *s32);
 #include "audio_ffi.h"
+
+/* The output tap and its counters live in Rust, under these names. */
+extern int32_t g_buf_dirty;
+extern uint32_t g_out_ch;
+extern int32_t g_out_s32;
+extern uint32_t g_out_delay;
+extern uint32_t g_out_delay_avg;
+extern uint32_t g_out_peak_bits;
+extern uint32_t g_out_write_calls;
+extern float g_outtap[];
+extern uint32_t g_outtap_w;
 
 void minimod_hook_midi_note(void *app, void *context, void *event, uintptr_t source);
 
@@ -115,6 +137,17 @@ void minimod_hook_hpss_ctor(uintptr_t command, uintptr_t name, int32_t destinati
 
 #include "ui_ffi.h"
 #include "audio_ffi.h"
+
+/* The output tap and its counters live in Rust, under these names. */
+extern int32_t g_buf_dirty;
+extern uint32_t g_out_ch;
+extern int32_t g_out_s32;
+extern uint32_t g_out_delay;
+extern uint32_t g_out_delay_avg;
+extern uint32_t g_out_peak_bits;
+extern uint32_t g_out_write_calls;
+extern float g_outtap[];
+extern uint32_t g_outtap_w;
 
 void minimod_hook_midi_note(void *app, void *context, void *event, uintptr_t source);
 
@@ -437,7 +470,6 @@ static void set_filter_text(const char *t);
 static void do_autotrim(void);
 
 
-static volatile int g_buf_dirty; /* re-read the device rings on the audio thread */
 
 
 /* The stock code computes the 16 Levels pitch here; shift the whole row. */
@@ -853,9 +885,7 @@ static void looper_cfg_save(void);
  * with - the number the sampler itself uses, no probe needed. */
 static volatile unsigned g_buf_out;
 static volatile unsigned g_buf_in;
-static volatile unsigned g_out_ch; /* channels of the device buffer, from ALSA */
 static volatile unsigned g_in_ch;
-static volatile int g_out_s32;      /* output stream is S32_LE */
 static volatile int g_in_s32;       /* input stream is S32_LE */
 
 
@@ -1012,8 +1042,6 @@ static void release_held_pads(void)
  * puts us ahead of libasound in the global scope, so every read in the process
  * lands here, whichever device object owns the pcm handle. */
 static long (*real_snd_pcm_readi)(void *, void *, unsigned long);
-static long (*real_snd_pcm_writei)(void *, const void *, unsigned long);
-static long (*real_snd_pcm_delay)(void *, long *);
 static long (*real_snd_pcm_avail)(void *);
 
 /* ALSA's SND_PCM_FORMAT_S32_LE; minimod has no ALSA headers. */
@@ -1025,19 +1053,13 @@ static long (*real_snd_pcm_avail)(void *);
  * all from the stream's own hw params. Returns 0 when the device cannot be
  * queried, and callers must then leave the buffer alone. */
 
-static volatile unsigned g_out_delay; /* last output delay sample, frames */
-static volatile unsigned g_out_delay_avg; /* smoothed, what a take uses */
 static volatile unsigned g_in_delay;
 static int g_lat_fixed = -1; /* MINIMOD_LOOP_LAT: override the measurement */
 static int g_lat_extra;      /* MINIMOD_LOOP_LAT_EXTRA: calibration trim */
-static volatile unsigned g_out_peak_bits;
-static volatile unsigned g_out_write_calls;
 /* In-process tap of the last two seconds of written audio (mono, channel 0).
  * The lab's PCM socket does not always reflect what the app writes, so tests
  * read this instead of trusting the host-side capture. */
 #define OUTTAP_FRAMES (44100u * 2u)
-static volatile float g_outtap[OUTTAP_FRAMES];
-static volatile unsigned g_outtap_w;
 
 
 static long (*real_snd_pcm_readn)(void *, void **, unsigned long);
@@ -1054,100 +1076,6 @@ int snd_pcm_hw_params_set_channels(void *params, unsigned channels)
     return real_snd_pcm_set_channels ? real_snd_pcm_set_channels(params, channels) : -1;
 }
 
-long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size)
-{
-    if (!real_snd_pcm_writei)
-        real_snd_pcm_writei =
-            (long (*)(void *, const void *, unsigned long))dlsym(RTLD_NEXT, "snd_pcm_writei");
-    if (!real_snd_pcm_writei)
-        return -1;
-    int looper = looper_is_open();
-    if (looper && (!g_buf_out || g_buf_dirty)) {
-        unsigned c = 0;
-        int s32 = 0;
-        g_buf_out = minimod_stream_geometry((uintptr_t)pcm, &c, &s32);
-        if (c) {
-            g_out_ch = c;
-            g_out_s32 = s32;
-        }
-        if (g_buf_out && g_buf_in)
-            g_buf_dirty = 0;
-    }
-    unsigned ch = g_out_ch;
-    if (looper) {
-        long delay = 0;
-        if (!real_snd_pcm_delay)
-            real_snd_pcm_delay = (long (*)(void *, long *))dlsym(RTLD_NEXT, "snd_pcm_delay");
-        if (real_snd_pcm_delay && real_snd_pcm_delay(pcm, &delay) == 0 && delay >= 0) {
-            g_out_delay = (unsigned)delay;
-            unsigned avg = g_out_delay_avg;
-            g_out_delay_avg = avg ? (avg * 7 + g_out_delay) / 8 : g_out_delay;
-        }
-        if (g_lat_fixed >= 0) {
-            looper_set_latency_ex((unsigned)g_lat_fixed, 'F');
-        } else {
-            unsigned bo = g_buf_out, bi = g_buf_in;
-            long total;
-            char src;
-            if (bo > 0 && bi > 0) {
-                /* The firmware keeps one full ring in each direction; that is
-                 * the latency its own sampler works with. */
-                total = (long)bo + (long)bi;
-                src = 'B';
-            } else {
-                total = (long)g_out_delay_avg + (long)size + (long)g_in_delay +
-                        (long)looper_input_backlog();
-                src = 'E';
-            }
-            total += (long)g_lat_extra;
-            if (total < 0)
-                total = 0;
-            if (total > 16384) /* looper.c's LP_LAT_MAX */
-                total = 16384;
-            looper_set_latency_ex((unsigned)total, src);
-        }
-    }
-    if (looper && buffer && size && ch && g_out_s32)
-        looper_render_s32((int32_t *)buffer, ch, (unsigned)size);
-#if MINIMOD_LOG
-    {
-        static int n;
-        if (n < 6) {
-            n++;
-            uintptr_t lr = (uintptr_t)__builtin_return_address(0);
-            mlog("minimod: WRITEI caller=%p file=%#lx size=%lu\n", (void *)lr,
-                 (unsigned long)(lr - base), (unsigned long)size);
-        }
-    }
-#endif
-    long got = real_snd_pcm_writei(pcm, buffer, size);
-    if (!looper || got <= 0 || !buffer)
-        return got;
-    {
-        __atomic_add_fetch(&g_out_write_calls, 1, __ATOMIC_RELAXED);
-        const int32_t *s32 = buffer;
-        float peak = 0.f;
-        for (long i = 0; i < got * (long)ch; ++i) {
-            float v = (float)s32[i] * (1.0f / 2147483648.0f);
-            float a = v < 0.f ? -v : v;
-            if (a > peak)
-                peak = a;
-        }
-        unsigned pb = g_out_peak_bits;
-        float prev;
-        memcpy(&prev, &pb, sizeof prev);
-        if (peak > prev) {
-            unsigned nb;
-            memcpy(&nb, &peak, sizeof nb);
-            g_out_peak_bits = nb;
-        }
-        unsigned w = g_outtap_w;
-        for (long i = 0; i < got; ++i)
-            g_outtap[(w++) % OUTTAP_FRAMES] = (float)s32[i * (long)ch] * (1.0f / 2147483648.0f);
-        g_outtap_w = w;
-    }
-    return got;
-}
 
 long snd_pcm_readi(void *pcm, void *buffer, unsigned long size)
 {
@@ -1565,6 +1493,13 @@ static void do_autotrim(void)
 /* Re-arms the software watchpoint from /run/minimod.watch (hex address), so the
  * address can be set after the app has started and picked a new heap. */
 
+
+int32_t minimod_glue_lat_fixed(void) { return g_lat_fixed; }
+uint32_t minimod_glue_lat_extra(void) { return g_lat_extra > 0 ? (uint32_t)g_lat_extra : 0; }
+uint32_t minimod_glue_buf_out(void) { return g_buf_out; }
+void minimod_glue_set_buf_out(uint32_t frames) { g_buf_out = frames; }
+uint32_t minimod_glue_buf_in(void) { return g_buf_in; }
+uint32_t minimod_glue_in_delay(void) { return g_in_delay; }
 
 __attribute__((constructor)) static void load(void)
 {

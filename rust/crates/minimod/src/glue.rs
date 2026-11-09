@@ -274,6 +274,69 @@ unsafe fn is_mapped(address: *const u8) -> bool {
     unsafe { mapped(address) != 0 }
 }
 
+/// The latency override, or -1 when the mod measures instead.
+#[must_use]
+pub fn fixed_latency() -> i32 {
+    unsafe extern "C" {
+        fn minimod_glue_lat_fixed() -> i32;
+    }
+    // SAFETY: the glue's own accessor.
+    unsafe { minimod_glue_lat_fixed() }
+}
+
+/// The calibration trim, in frames.
+#[must_use]
+pub fn extra_latency() -> u32 {
+    unsafe extern "C" {
+        fn minimod_glue_lat_extra() -> u32;
+    }
+    // SAFETY: the glue's own accessor.
+    unsafe { minimod_glue_lat_extra() }
+}
+
+/// The output ring's size in frames.
+#[must_use]
+pub fn buffer_out() -> u32 {
+    unsafe extern "C" {
+        fn minimod_glue_buf_out() -> u32;
+    }
+    // SAFETY: the glue's own accessor.
+    unsafe { minimod_glue_buf_out() }
+}
+
+/// Record the output ring's size.
+///
+/// # Safety
+///
+/// The glue owns the value.
+pub unsafe fn set_buffer_out(frames: u32) {
+    unsafe extern "C" {
+        fn minimod_glue_set_buf_out(frames: u32);
+    }
+    // SAFETY: the glue's own setter.
+    unsafe { minimod_glue_set_buf_out(frames) }
+}
+
+/// The input ring's size in frames.
+#[must_use]
+pub fn buffer_in() -> u32 {
+    unsafe extern "C" {
+        fn minimod_glue_buf_in() -> u32;
+    }
+    // SAFETY: the glue's own accessor.
+    unsafe { minimod_glue_buf_in() }
+}
+
+/// The input delay the device reported.
+#[must_use]
+pub fn input_delay() -> u32 {
+    unsafe extern "C" {
+        fn minimod_glue_in_delay() -> u32;
+    }
+    // SAFETY: the glue's own accessor.
+    unsafe { minimod_glue_in_delay() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FIRMWARE_SITES, PT_LOAD, TEXT_OFFSET};

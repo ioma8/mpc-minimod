@@ -401,6 +401,206 @@ pub unsafe extern "C" fn minimod_audio_writer_original_now(original: usize) {
     unsafe { ORIGINAL_WRITER = crate::input::from_address(original) };
 }
 
+/// Frames the output tap keeps: two seconds at the device rate.
+pub const OUTTAP_FRAMES: usize = 44100 * 2;
+
+/// The last output delay the device reported, in frames.
+#[unsafe(no_mangle)]
+pub static mut g_out_delay: u32 = 0;
+/// The same, smoothed, which is what a take uses.
+#[unsafe(no_mangle)]
+pub static mut g_out_delay_avg: u32 = 0;
+/// The loudest sample written since the last reset, as bits.
+#[unsafe(no_mangle)]
+pub static mut g_out_peak_bits: u32 = 0;
+/// How many buffers have been written.
+#[unsafe(no_mangle)]
+pub static mut g_out_write_calls: u32 = 0;
+/// The output tap: the last two seconds, channel zero.
+#[unsafe(no_mangle)]
+pub static mut g_outtap: [f32; OUTTAP_FRAMES] = [0.0; OUTTAP_FRAMES];
+/// Where the tap is writing.
+#[unsafe(no_mangle)]
+pub static mut g_outtap_w: u32 = 0;
+/// Whether the device rings need re-reading.
+#[unsafe(no_mangle)]
+pub static mut g_buf_dirty: i32 = 0;
+/// The output stream's channel count.
+#[unsafe(no_mangle)]
+pub static mut g_out_ch: u32 = 0;
+/// Whether the output stream carries 32-bit samples.
+#[unsafe(no_mangle)]
+pub static mut g_out_s32: i32 = 0;
+
+/// The app's own `snd_pcm_writei`.
+static mut REAL_WRITEI: Option<unsafe extern "C" fn(usize, *const u8, u64) -> i64> = None;
+/// The app's own `snd_pcm_delay`.
+static mut REAL_DELAY: Option<unsafe extern "C" fn(usize, *mut i64) -> i64> = None;
+
+/// The output tap: measure the device's latency and record what is played.
+///
+/// # Safety
+///
+/// `buffer` must hold `size` bytes, as the app's own writer requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn snd_pcm_writei(pcm: usize, buffer: *const i32, size: u64) -> i64 {
+    // SAFETY: the static is this module's.
+    let mut real = unsafe { *core::ptr::addr_of!(REAL_WRITEI) };
+    if real.is_none() {
+        real = look_up(c"snd_pcm_writei");
+        // SAFETY: written once.
+        unsafe { REAL_WRITEI = real };
+    }
+    let Some(write) = real else {
+        return -1;
+    };
+    let looper = crate::looper_ffi::looper_is_open() != 0;
+    // The rings are only readable once the stream exists, so this is retried
+    // until both directions report one.
+    // SAFETY: the statics are this module's.
+    let stale = unsafe { g_buf_dirty } != 0;
+    if looper && (crate::glue::buffer_out() == 0 || stale) {
+        // SAFETY: the statics are this module's.
+        unsafe { refresh_rings(pcm) };
+    }
+    let channels = unsafe { g_out_ch };
+    if looper && !buffer.is_null() && size != 0 && channels != 0 && unsafe { g_out_s32 } != 0 {
+        // SAFETY: the buffer is the device's own output.
+        unsafe {
+            crate::looper_ffi::looper_render_s32(
+                buffer.cast_mut(),
+                channels,
+                u32::try_from(size).unwrap_or(0),
+            );
+        }
+    }
+    if looper {
+        // SAFETY: this module's statics.
+        unsafe { measure_latency(pcm, size) };
+    }
+    // SAFETY: the app's own writer takes these.
+    let written = unsafe { write(pcm, buffer.cast::<u8>(), size) };
+    if !looper || written <= 0 || buffer.is_null() {
+        return written;
+    }
+    // SAFETY: the statics are this module's and the buffer is the device's.
+    unsafe { record_output(buffer, written, channels) };
+    written
+}
+
+/// Read the device rings' geometry.
+///
+/// # Safety
+///
+/// `pcm` is the app's live handle.
+unsafe fn refresh_rings(pcm: usize) {
+    let mut channels = 0_u32;
+    let mut s32 = 0_i32;
+    // SAFETY: the geometry reads the stream's own parameters.
+    let frames = unsafe {
+        minimod_stream_geometry(
+            pcm,
+            core::ptr::from_mut(&mut channels),
+            core::ptr::from_mut(&mut s32),
+        )
+    };
+    // SAFETY: this module's statics and the glue's ring sizes.
+    unsafe {
+        crate::glue::set_buffer_out(frames);
+        if channels != 0 {
+            g_out_ch = channels;
+            g_out_s32 = s32;
+        }
+        if frames != 0 && crate::glue::buffer_in() != 0 {
+            g_buf_dirty = 0;
+        }
+    }
+}
+
+/// Measure the device's latency, the way the firmware's own sampler sees it.
+///
+/// # Safety
+///
+/// The statics are this module's.
+unsafe fn measure_latency(pcm: usize, size: u64) {
+    // SAFETY: this module's statics.
+    unsafe {
+        let mut real = *core::ptr::addr_of!(REAL_DELAY);
+        if real.is_none() {
+            real = look_up(c"snd_pcm_delay");
+            REAL_DELAY = real;
+        }
+        if let Some(delay_of) = real {
+            let mut delay = 0_i64;
+            if delay_of(pcm, core::ptr::from_mut(&mut delay)) == 0 && delay >= 0 {
+                g_out_delay = u32::try_from(delay).unwrap_or(0);
+                let average = g_out_delay_avg;
+                g_out_delay_avg = if average == 0 {
+                    g_out_delay
+                } else {
+                    (average * 7 + g_out_delay) / 8
+                };
+            }
+        }
+        let fixed = crate::glue::fixed_latency();
+        let (total, source) = if fixed >= 0 {
+            (u32::try_from(fixed).unwrap_or(0), b'F')
+        } else {
+            let out = crate::glue::buffer_out();
+            let input = crate::glue::buffer_in();
+            let (measured, source) = if out > 0 && input > 0 {
+                (u64::from(out) + u64::from(input), b'B')
+            } else {
+                (
+                    u64::from(g_out_delay_avg)
+                        + size
+                        + u64::from(crate::glue::input_delay())
+                        + u64::from(crate::looper_ffi::looper_input_backlog()),
+                    b'E',
+                )
+            };
+            let extra = crate::glue::extra_latency();
+            (
+                u32::try_from(measured.saturating_add(u64::from(extra)).min(16384))
+                    .unwrap_or(16384),
+                source,
+            )
+        };
+        crate::looper_ffi::looper_set_latency_ex(total, i8::try_from(source).unwrap_or(0x45));
+    }
+}
+
+/// Record what was written: the peak and the tap.
+///
+/// # Safety
+///
+/// `buffer` holds `written * channels` samples of 32-bit audio.
+unsafe fn record_output(buffer: *const i32, written: i64, channels: u32) {
+    const SCALE: f32 = 1.0 / 2_147_483_648.0;
+    // SAFETY: this module's statics and the device's buffer.
+    unsafe {
+        g_out_write_calls = g_out_write_calls.wrapping_add(1);
+        let count = usize::try_from(written).unwrap_or(0) * channels as usize;
+        let mut peak = 0.0_f32;
+        for index in 0..count {
+            let value = (*buffer.add(index) as f32) * SCALE;
+            peak = peak.max(value.abs());
+        }
+        if peak > f32::from_bits(g_out_peak_bits) {
+            g_out_peak_bits = peak.to_bits();
+        }
+        let mut write = g_outtap_w;
+        let frames = usize::try_from(written).unwrap_or(0);
+        let tap = core::ptr::addr_of_mut!(g_outtap).cast::<f32>();
+        for index in 0..frames {
+            let slot = write as usize % OUTTAP_FRAMES;
+            *tap.add(slot) = (*buffer.add(index * channels as usize) as f32) * SCALE;
+            write = write.wrapping_add(1);
+        }
+        g_outtap_w = write;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CHANNEL_LIMIT, INPUT_ALT, INPUT_CHANNELS, OUTPUT_ALT, OUTPUT_CHANNELS, channels};
