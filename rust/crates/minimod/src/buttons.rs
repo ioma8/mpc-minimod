@@ -142,7 +142,10 @@ pub fn dispatch(context: Context) -> Action {
     if (context.code == KEY_PLUS || context.code == KEY_MINUS) && context.screens.levels {
         let plus = context.code == KEY_PLUS;
         if !press {
-            return Action::Consume;
+            // Return through the bump action with no movement so `ui` clears
+            // the held flag; consuming here left it stuck and made the next
+            // MINUS look like a two-key reset.
+            return Action::BumpOctave(0);
         }
         // Both keys together reset the row instead of moving it.
         if if plus {
@@ -187,8 +190,8 @@ const fn encoder(context: Context, press: bool) -> Action {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, Context, Held, KEY_B3, KEY_DATA, KEY_LEVELS, KEY_SHIFT, Modals, OctaveKeys,
-        PRESSED, Screens, dispatch,
+        Action, Context, Held, KEY_B3, KEY_DATA, KEY_LEVELS, KEY_MINUS, KEY_PLUS, KEY_SHIFT,
+        Modals, OctaveKeys, PRESSED, Screens, dispatch,
     };
 
     fn base() -> Context {
@@ -299,6 +302,40 @@ mod tests {
             ..base()
         };
         assert_eq!(dispatch(context), Action::Forward);
+    }
+
+    #[test]
+    fn releasing_an_octave_key_clears_it_without_moving() {
+        let context = Context {
+            code: KEY_PLUS,
+            down: PRESSED,
+            screens: Screens {
+                levels: true,
+                ..Screens::default()
+            },
+            ..base()
+        };
+        assert_eq!(dispatch(context), Action::BumpOctave(1));
+        let context = Context {
+            code: KEY_PLUS,
+            down: 0,
+            screens: Screens {
+                levels: true,
+                ..Screens::default()
+            },
+            ..base()
+        };
+        assert_eq!(dispatch(context), Action::BumpOctave(0));
+        let context = Context {
+            code: KEY_MINUS,
+            down: PRESSED,
+            screens: Screens {
+                levels: true,
+                ..Screens::default()
+            },
+            ..base()
+        };
+        assert_eq!(dispatch(context), Action::BumpOctave(-1));
     }
 
     #[test]
