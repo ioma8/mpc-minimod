@@ -178,38 +178,44 @@ fn save_throttled(hooks: Hooks) {
     }
 }
 
-/// Handle one control change, for the C glue.
-///
-/// # Safety
-///
-/// `hooks` must be readable and hold the glue's callbacks.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_cc_handle(
-    context: *const Context,
-    control: u32,
-    hooks: *const Hooks,
-) -> Outcome {
-    if context.is_null() || hooks.is_null() {
-        return Outcome::default();
-    }
-    // SAFETY: the caller's contract.
-    let (context, hooks) = unsafe { (*context, *hooks) };
-    // SAFETY: the hooks are the glue's callbacks.
-    unsafe { handle(context, control, hooks) }
-}
-
 // The glue owns the screens, the key flags and the trim value; it builds the
 // context and applies what comes back.
-unsafe extern "C" {
-    fn minimod_glue_cc_context() -> Context;
-    fn minimod_glue_save();
+/// What the routing needs to know about the mod's screens and trim, right now.
+fn context() -> Context {
+    let menu = crate::menu::state();
+    // SAFETY: plain words, written by the UI thread.
+    let (spectral, trim, knobs) = unsafe {
+        (
+            (*core::ptr::addr_of!(crate::spectral::G_SPECTRAL)).active,
+            crate::glue::g_lat_extra,
+            *core::ptr::addr_of!(crate::menu::g_bass_knob),
+        )
+    };
+    Context {
+        replaying: 0,
+        value: 0,
+        range: 0.0,
+        looper_open: looper_ffi::looper_is_open(),
+        menu_open: menu.open,
+        bass_edit: menu.bass_edit,
+        busy: menu.busy,
+        spectral_active: i32::from(spectral == 1),
+        trim_frames: trim,
+        knobs,
+    }
+}
+
+/// Write the latency trim and the master level to the settings file.
+unsafe extern "C" fn save() {
+    // SAFETY: plain word, written by the UI thread.
+    let trim = unsafe { crate::glue::g_lat_extra };
+    crate::cfg_ffi::minimod_cfg_save(trim, looper_ffi::looper_master());
 }
 
 /// The app's own control-change handler, recorded at install time.
 static mut ORIGINAL: Option<unsafe extern "C" fn(usize, u32, f32, f32)> = None;
 
 /// Record the displaced handler, for the glue.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_hook_cc_original(
     original: Option<unsafe extern "C" fn(usize, u32, f32, f32)>,
 ) {
@@ -222,10 +228,8 @@ pub extern "C" fn minimod_hook_cc_original(
 /// # Safety
 ///
 /// The app calls this with its own event pointer.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_cc(event: usize, raw: u32, low: f32, range: f32) {
-    // SAFETY: the glue builds the context from state it owns.
-    let mut context = unsafe { minimod_glue_cc_context() };
+    let mut context = context();
     // The value and the range belong to the event, not to the glue.
     context.value = raw;
     context.range = range;
@@ -238,7 +242,7 @@ pub unsafe extern "C" fn minimod_hook_cc(event: usize, raw: u32, low: f32, range
     let hooks = Hooks {
         original: None,
         repaint: Some(crate::ui::minimod_repaint_screen),
-        save: Some(minimod_glue_save),
+        save: Some(save),
         notice: Some(notice_c),
     };
     // SAFETY: the hooks are the glue's callbacks.

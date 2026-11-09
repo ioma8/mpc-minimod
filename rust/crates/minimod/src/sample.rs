@@ -6,34 +6,10 @@
 
 use crate::firmware;
 
-/// `[param + 0xb0]` is the context whose `+0x60` is the instrument.
-const PARAM_CONTEXT: usize = 0xb0;
-/// `[context + 0x60]` is the instrument.
-const CONTEXT_INSTRUMENT: usize = 0x60;
-/// `[instrument + 0x22e8]` is the layer list.
-const INSTRUMENT_LAYERS: usize = 0x22e8;
 /// `[sample + 0x130]` is the sample's metadata block.
 const SAMPLE_METADATA: usize = 0x130;
 /// Shortest and longest sample rate the app accepts.
 const RATE_RANGE: core::ops::RangeInclusive<u32> = 8_000..=192_000;
-
-/// The instrument and layer list behind a parameter object.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Layers {
-    /// The layer list.
-    pub layers: usize,
-    /// The instrument that owns it.
-    pub instrument: usize,
-}
-
-/// The layers of the instrument that owns `parameter`.
-#[must_use]
-pub fn layers_of(parameter: usize) -> Option<Layers> {
-    let context = firmware::read_pointer(parameter.checked_add(PARAM_CONTEXT)?)?;
-    let instrument = firmware::read_pointer(context.checked_add(CONTEXT_INSTRUMENT)?)?;
-    let layers = firmware::read_pointer(instrument.checked_add(INSTRUMENT_LAYERS)?)?;
-    Some(Layers { layers, instrument })
-}
 
 /// The frame count of the sample object, or zero when its metadata is not a
 /// usable sample description.
@@ -74,35 +50,9 @@ pub fn frames(sample: usize) -> u32 {
 /// # Safety
 ///
 /// `sample` must be zero or the address of a sample object.
-#[unsafe(no_mangle)]
+#[must_use]
 pub unsafe extern "C" fn frames_of_sample(sample: usize) -> u32 {
     frames(sample)
-}
-
-/// The layers behind a parameter object.
-///
-/// # Safety
-///
-/// `layers` and `instr` must be writable, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn page_layers(
-    parameter: usize,
-    layers: *mut usize,
-    instrument: *mut usize,
-) -> i32 {
-    let Some(found) = layers_of(parameter) else {
-        return 0;
-    };
-    // SAFETY: the caller promises both pointers are writable or null.
-    unsafe {
-        if !layers.is_null() {
-            *layers = found.layers;
-        }
-        if !instrument.is_null() {
-            *instrument = found.instrument;
-        }
-    }
-    1
 }
 
 #[cfg(test)]

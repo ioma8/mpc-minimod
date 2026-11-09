@@ -91,7 +91,7 @@ controls. The caption is hidden when the Chop group is visible.
 
 ```sh
 cd mod
-./build.sh     # zig cc -target aarch64-linux-gnu -O2 -fno-omit-frame-pointer
+./build.sh     # builds the Rust cdylib for aarch64 (zig cc is only the cross linker)
 ./pack.sh      # -> mod/build/minimod.zip
 ```
 
@@ -323,7 +323,7 @@ Operational lessons (all learned the hard way):
 
 | path | contents |
 |---|---|
-| `mod/src/minimod.c` | the mod (~3 900 lines) |
+| `rust/crates/minimod/src/`, `rust/crates/dsp/src/` | the mod (Rust; see `docs/RUST-PORT.md` for the module map) |
 | `mod/build.sh`, `mod/pack.sh` | build and package |
 | `mod/build/minimod.zip` | **the deliverable** |
 | `docs/TRIM-PAGE.md` | the long-form investigation log (§1–32) |

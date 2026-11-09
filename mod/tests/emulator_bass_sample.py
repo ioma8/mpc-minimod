@@ -5,7 +5,7 @@ on a populated pad. Checks the knob page, output WAV/pitch, pad assignment, and
 that the firmware process did not restart.
 """
 import json
-import hashlib
+import panel_screen
 import math
 from pathlib import Path
 import shlex
@@ -79,18 +79,45 @@ def main():
     path_ptr = qword(holder + 0x120)
     source_path = read_mem(path_ptr, 256).split(b'\0', 1)[0].decode()
     source_dir = Path(source_path).parent
-    def wav_audio_bytes(data):
-        pos = 12
+    def decode_audio(data):
+        """The samples of a WAV as floats in -1..1, whatever the encoding.
+
+        The stock app re-encodes a source it extracts from (24-bit PCM becomes
+        32-bit float, with a metadata chunk), so the bytes change while the audio
+        does not. The audio is the thing the mod must leave alone.
+        """
+        assert data[:4] == b'RIFF' and data[8:12] == b'WAVE', 'not a WAV'
+        pos, fmt, samples = 12, None, None
         while pos + 8 <= len(data):
             tag = data[pos:pos + 4]
             size = int.from_bytes(data[pos + 4:pos + 8], 'little')
-            if tag == b'data':
-                return data[pos + 8:pos + 8 + size]
+            body = data[pos + 8:pos + 8 + size]
+            if tag == b'fmt ':
+                fmt = struct.unpack('<HHIIHH', body[:16])
+            elif tag == b'data':
+                assert fmt, 'data before fmt'
+                kind, _, _, _, _, bits = fmt
+                if kind == 3 and bits == 32:
+                    samples = list(struct.unpack('<%df' % (len(body) // 4), body[:len(body) // 4 * 4]))
+                elif kind == 1 and bits == 16:
+                    samples = [v / 32768 for v in struct.unpack('<%dh' % (len(body) // 2), body[:len(body) // 2 * 2])]
+                elif kind == 1 and bits == 24:
+                    count = len(body) // 3
+                    samples = [int.from_bytes(body[i * 3:i * 3 + 3], 'little', signed=True) / 8388608
+                               for i in range(count)]
+                elif kind == 1 and bits == 32:
+                    samples = [v / 2147483648 for v in struct.unpack('<%di' % (len(body) // 4), body[:len(body) // 4 * 4])]
+                else:
+                    raise AssertionError(f'unsupported WAV encoding {kind}/{bits}')
+                return samples
             pos += 8 + size + (size & 1)
         raise AssertionError('Source WAV has no audio data')
 
+    def same_audio(first, second):
+        return len(first) == len(second) and all(abs(a - b) < 1e-5 for a, b in zip(first, second))
+
     source_before = ssh('cat ' + shlex.quote(source_path))
-    source_digest = hashlib.sha256(wav_audio_bytes(source_before)).digest()
+    source_audio = decode_audio(source_before)
 
     def bass_outputs():
         pattern = shlex.quote(str(source_dir)) + '/' + shlex.quote('Bass C2') + '*.wav'
@@ -117,7 +144,7 @@ def main():
     assert all(abs(a - b) < .02 for a, b in zip(
         knob_values, (96 / 127, 48 / 127, 80 / 127))), knob_values
     source_pre_render = ssh('cat ' + shlex.quote(source_path))
-    assert hashlib.sha256(wav_audio_bytes(source_pre_render)).digest() == source_digest, \
+    assert same_audio(decode_audio(source_pre_render), source_audio), \
         'Source pad audio changed before rendering'
     tap('DATA')
 
@@ -132,6 +159,8 @@ def main():
             raise AssertionError(status)
         time.sleep(.2)
     assert status == 'Bass Synth: copy created', f'Unexpected result: {status}'
+    time.sleep(1.5)
+    panel_screen.assert_no_modal(args.panel, 'Bass Synth')
     current = bass_outputs()
     changed = [path for path, digest in current.items() if before.get(path) != digest]
     assert current, 'Native Extract did not write a Bass C2 WAV'
@@ -162,12 +191,10 @@ def main():
             pitch, peak = float(hz), strength
     assert abs(pitch - 65.406) < 4, f'Expected C2 fundamental, measured {pitch:.2f} Hz'
     source_after = ssh('cat ' + shlex.quote(source_path))
-    source_after_digest = hashlib.sha256(wav_audio_bytes(source_after)).digest()
-    if source_after_digest != source_digest:
+    if not same_audio(decode_audio(source_after), source_audio):
         time.sleep(.5)
         source_later = ssh('cat ' + shlex.quote(source_path))
-        source_later_digest = hashlib.sha256(wav_audio_bytes(source_later)).digest()
-        assert source_later_digest == source_digest, \
+        assert same_audio(decode_audio(source_later), source_audio), \
             f'Source audio differs immediately and after 500 ms: {source_path}'
     assert int(ssh('pidof "MPC Sample"')) == pid, 'Firmware restarted'
     assert ssh('systemctl show ac50 -p NRestarts').decode().strip() == restarts

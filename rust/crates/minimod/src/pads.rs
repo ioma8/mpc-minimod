@@ -59,15 +59,9 @@ pub fn free_estimate(base: usize, program: usize) -> usize {
 }
 
 /// The app's count of free pads.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_pads_free_pad(base: usize, program: usize) -> i32 {
     free_count(base, program)
-}
-
-/// The pad states' count of free pads.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_pads_free_estimate(base: usize, program: usize) -> i32 {
-    i32::try_from(free_estimate(base, program)).unwrap_or(0)
 }
 
 #[cfg(test)]

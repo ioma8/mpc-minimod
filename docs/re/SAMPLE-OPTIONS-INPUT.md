@@ -1,5 +1,10 @@
 # SAMPLE OPTIONS input — native DATA events
 
+> **Historical.** Written while the mod was C. `mod/src/minimod.c` and the other C and C++ sources are
+> gone (see git history); the equivalent code is in `rust/crates/`, mapped in the "Final state" section of
+> [`RUST-PORT.md`](../RUST-PORT.md). File, line and function references below point at the removed C, and build
+> commands that compile it no longer apply (`mod/build.sh` builds the Rust crate).
+
 Firmware **1.3.0.12**, corrected **2026-11-05**. This is the current input
 mechanism for HPSS / Spectral Chop / Close. It supersedes the raw-read,
 evdev, rotary and float-property experiments in earlier notes.

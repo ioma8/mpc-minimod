@@ -40,13 +40,13 @@ pub fn chop_mode(base: usize, screen: usize) -> bool {
 }
 
 /// The Sample page's visibility, for the C glue.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_page_visible(base: usize, screen: usize) -> i32 {
     i32::from(visible(base, screen))
 }
 
 /// The Sample page's chop mode, for the C glue.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_page_chop_mode(base: usize, screen: usize) -> i32 {
     i32::from(chop_mode(base, screen))
 }

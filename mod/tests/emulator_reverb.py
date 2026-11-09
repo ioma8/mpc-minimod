@@ -6,6 +6,7 @@ lofi to verify the two new native effects.
 """
 import argparse
 import json
+import panel_screen
 from pathlib import Path
 import shlex
 import struct
@@ -140,6 +141,8 @@ def main():
         if status.startswith(title + ':') and not status.startswith('Processing ') and not busy:
             raise AssertionError(status)
     assert status == f'{title}: copy created', f'Unexpected result: {status}'
+    time.sleep(1.5)
+    panel_screen.assert_no_modal(args.panel, title)
 
     current = output_hashes()
     changed = {path for path, digest in current.items() if before.get(path) != digest}

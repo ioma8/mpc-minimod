@@ -34,7 +34,7 @@ SHIFT + DATA   close
 
 ## Analysis
 
-`mod/src/spectral.c` implements:
+`rust/crates/dsp/src/spectral.rs` implements:
 
 | step | value |
 |---|---|
@@ -101,9 +101,7 @@ last slice ending at 88200.
 ./mod/build.sh
 ./mod/pack.sh
 python3 mod/tests/emulator_spectral.py --lab ~/projects/customs/virtual-mpc-sample --boots 1
-python3 mod/tests/spectral_onsets.py
-python3 mod/tests/hpss_dsp.py
-python3 mod/tests/wav_edges.py
+(cd rust && ./check.sh)   # onset detector, HPSS and trim scan: host tests and golden fixtures
 ```
 
 ## Limits

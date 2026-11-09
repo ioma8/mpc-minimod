@@ -1,5 +1,10 @@
 # Firmware built-in reverb
 
+> **Historical.** Written while the mod was C. `mod/src/minimod.c` and the other C and C++ sources are
+> gone (see git history); the equivalent code is in `rust/crates/`, mapped in the "Final state" section of
+> [`RUST-PORT.md`](../RUST-PORT.md). File, line and function references below point at the removed C, and build
+> commands that compile it no longer apply (`mod/build.sh` builds the Rust crate).
+
 Firmware analyzed: MPC Sample 1.3.0.12 (`knob.bin`) in Ghidra. Addresses below
 are Ghidra VAs; subtract `0x100000` for the mod's `base + offset` form.
 

@@ -5,7 +5,6 @@
 //! buffer therefore stays a plain static with its name intact; only the
 //! formatting moved.
 
-use core::ffi::CStr;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 /// Longest status line, including the terminating NUL.
@@ -82,21 +81,6 @@ fn lock() {
 
 fn unlock() {
     LOCK.store(0, Ordering::Release);
-}
-
-/// Borrow a NUL-terminated C string.
-///
-/// # Safety
-///
-/// `text` must be a valid NUL-terminated string, or null.
-#[must_use]
-pub unsafe fn c_text(text: *const core::ffi::c_char) -> &'static str {
-    if text.is_null() {
-        return "";
-    }
-    // SAFETY: the caller guarantees a NUL-terminated string.
-    let bytes = unsafe { CStr::from_ptr(text) }.to_bytes();
-    core::str::from_utf8(bytes).unwrap_or("")
 }
 
 #[cfg(test)]

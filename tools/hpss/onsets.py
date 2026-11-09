@@ -3,7 +3,7 @@
 
     python3 tools/hpss/onsets.py IN.wav [--max 16] [--start S] [--dur S]
 
-Uses numpy.  The shipped C version is mod/src/spectral.c; this script is the
+Uses numpy.  The shipped version is rust/crates/dsp/src/spectral.rs; this script is the
 readable reference for checking counts and positions.
 """
 import argparse

@@ -43,6 +43,9 @@ pub struct Arm {
 pub struct Outcome {
     /// Whether the writer consumed the whole buffer.
     pub write_ok: i32,
+    /// What the app's own method returned: zero is success, anything else makes
+    /// the caller report "Extract slice failed". It must reach the caller untouched.
+    pub status: i32,
 }
 
 /// Run the command, patching its range for the duration of the call.
@@ -55,13 +58,13 @@ pub struct Outcome {
 pub unsafe fn run(
     command: usize,
     arm: Arm,
-    execute: Option<unsafe extern "C" fn(usize)>,
+    execute: Option<unsafe extern "C" fn(usize) -> i32>,
 ) -> Outcome {
     let mut outcome = Outcome::default();
     if arm.armed == 0 {
         if let Some(execute) = execute {
             // SAFETY: the glue's own callback.
-            unsafe { execute(command) };
+            outcome.status = unsafe { execute(command) };
         }
         return outcome;
     }
@@ -98,7 +101,7 @@ pub unsafe fn run(
     };
     if let Some(execute) = execute {
         // SAFETY: the glue's own callback, running the app's own command.
-        unsafe { execute(command) };
+        outcome.status = unsafe { execute(command) };
     }
     if let Some((settings, old_start, old_end)) = patched {
         let _ = write_u64(settings + RANGE_START, old_start);
@@ -140,11 +143,11 @@ fn write_u64(address: usize, value: u64) -> bool {
 /// # Safety
 ///
 /// `arm` must be readable and `execute` the app's displaced method.
-#[unsafe(no_mangle)]
+#[must_use]
 pub unsafe extern "C" fn minimod_hpss_exec_run(
     command: usize,
     arm: *const Arm,
-    execute: Option<unsafe extern "C" fn(usize)>,
+    execute: Option<unsafe extern "C" fn(usize) -> i32>,
 ) -> Outcome {
     let Some(arm) = (unsafe { arm.as_ref().copied() }) else {
         return Outcome::default();
@@ -204,7 +207,6 @@ pub unsafe fn make_names(base: usize) {
 ///
 /// The app calls this with its own arguments, and `forward` is its own
 /// constructor.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_hpss_ctor(
     command: usize,
     name: usize,
@@ -269,7 +271,6 @@ pub unsafe extern "C" fn minimod_hook_hpss_ctor(
 ///
 /// Read from the UI thread.
 /// Forget the commands armed by the last extraction.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_hpss_forget() {
     // SAFETY: only the UI thread writes the list.
     unsafe { ARMED_COUNT = 0 };
@@ -280,7 +281,7 @@ pub extern "C" fn minimod_hpss_forget() {
 /// # Safety
 ///
 /// Read from the UI thread.
-#[unsafe(no_mangle)]
+#[must_use]
 pub unsafe extern "C" fn minimod_hpss_is_armed(command: usize) -> i32 {
     // SAFETY: see above.
     i32::from(unsafe {
@@ -305,14 +306,13 @@ static mut ORIGINAL_CTOR: Option<
     unsafe extern "C" fn(usize, usize, i32, usize, usize, usize, usize, usize, usize),
 > = None;
 /// The app's own slice method, recorded at install.
-static mut ORIGINAL_EXEC: Option<unsafe extern "C" fn(usize)> = None;
+static mut ORIGINAL_EXEC: Option<unsafe extern "C" fn(usize) -> i32> = None;
 
 /// Record the app's slice constructor alone.
 ///
 /// # Safety
 ///
 /// Called once at install.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hpss_ctor_original(constructor: usize) {
     // SAFETY: the caller's contract.
     unsafe {
@@ -329,32 +329,9 @@ pub unsafe extern "C" fn minimod_hpss_ctor_original(constructor: usize) {
 /// # Safety
 ///
 /// Called once at install.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hpss_exec_original(execute: usize) {
     // SAFETY: the caller's contract.
     unsafe {
-        ORIGINAL_EXEC = if execute == 0 {
-            None
-        } else {
-            Some(core::mem::transmute_copy::<usize, _>(&execute))
-        };
-    }
-}
-
-/// Record the app's slice command, for the hooks.
-///
-/// # Safety
-///
-/// Called once at install, before any command runs.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_hpss_originals(constructor: usize, execute: usize) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        ORIGINAL_CTOR = if constructor == 0 {
-            None
-        } else {
-            Some(core::mem::transmute_copy::<usize, _>(&constructor))
-        };
         ORIGINAL_EXEC = if execute == 0 {
             None
         } else {
@@ -373,7 +350,6 @@ static mut WRITE_OK: i32 = 0;
 /// # Safety
 ///
 /// Called on the UI thread while the app runs one Extract.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hpss_arm(
     source: usize,
     buffer: usize,
@@ -401,14 +377,13 @@ pub unsafe extern "C" fn minimod_hpss_arm(
 }
 
 /// Disarm after the app has run the command.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_hpss_disarm() {
     // SAFETY: the static is this module's.
     unsafe { ARM.armed = 0 };
 }
 
 /// Whether the writer consumed the whole buffer, for the caller.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_hpss_write_ok() -> i32 {
     // SAFETY: the static is this module's.
     unsafe { WRITE_OK }
@@ -419,7 +394,6 @@ pub extern "C" fn minimod_hpss_write_ok() -> i32 {
 /// # Safety
 ///
 /// The app calls this with its own arguments.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hpss_ctor_entry(
     one: usize,
     two: usize,
@@ -460,8 +434,7 @@ pub unsafe extern "C" fn minimod_hpss_ctor_entry(
 /// # Safety
 ///
 /// The app calls this with its own command.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_hpss_exec_entry(command: usize) {
+pub unsafe extern "C" fn minimod_hpss_exec_entry(command: usize) -> i32 {
     // SAFETY: the statics are this module's.
     let mut arm = unsafe { ARM };
     arm.armed = i32::from(arm.armed != 0 && unsafe { minimod_hpss_is_armed(command) } != 0);
@@ -473,6 +446,9 @@ pub unsafe extern "C" fn minimod_hpss_exec_entry(command: usize) {
         // SAFETY: the static is this module's.
         unsafe { WRITE_OK = outcome.write_ok };
     }
+    // The app's caller reads this: a zero is "slice done", anything else is
+    // reported to the user as a failed command.
+    outcome.status
 }
 
 /// The extract, in the shape the hooks want.
@@ -480,7 +456,6 @@ pub unsafe extern "C" fn minimod_hpss_exec_entry(command: usize) {
 /// # Safety
 ///
 /// The app's objects are the caller's.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_extract_cb(
     screen: usize,
     state: usize,
@@ -518,7 +493,6 @@ pub unsafe extern "C" fn minimod_extract_cb(
 /// # Safety
 ///
 /// `screen` and `state` are the app's live objects; `dest` may be null.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_extract_run(
     screen: usize,
     state: usize,
@@ -607,6 +581,6 @@ mod tests {
     fn the_range_slots_are_the_ones_the_app_uses() {
         assert_eq!(RANGE_START, 0x78);
         assert_eq!(RANGE_END, 0xd0);
-        assert_eq!(size_of::<Outcome>(), 4);
+        assert_eq!(size_of::<Outcome>(), 8);
     }
 }

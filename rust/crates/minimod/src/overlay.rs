@@ -56,7 +56,6 @@ pub struct Outcome {
 ///
 /// `component` and `graphics` must be the app's objects for this paint, `hooks`
 /// must be the glue's callbacks, and `flags` must point at the glue's flags.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_overlay_paint(
     component: usize,
     graphics: usize,
@@ -193,17 +192,11 @@ fn trim_marks(graphics: usize, first: f32, second: f32) {
     paint::rect(graphics, x1, 88, 3, 1);
 }
 
-/// Forget the chop machine when the hook is torn down.
-pub fn reset() {
-    crate::spectral_machine::reset();
-}
-
 /// Draw the effects menu over the page.
 ///
 /// # Safety
 ///
 /// `graphics` is the app's own.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_overlay_menu_draw(graphics: usize) {
     let menu = crate::menu::state();
     // SAFETY: the status line and the knobs are the crate's own.
@@ -224,7 +217,6 @@ pub unsafe extern "C" fn minimod_overlay_menu_draw(graphics: usize) {
 /// # Safety
 ///
 /// The crate's own state and the app's objects.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_overlay_finalize() {
     let hooks = crate::jobflow::glue_hooks();
     // SAFETY: the menu and the hooks are the crate's own.
@@ -243,7 +235,6 @@ pub unsafe extern "C" fn minimod_overlay_finalize() {
 /// # Safety
 ///
 /// The app calls this with its own component and graphics.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_overlay_paint_self(component: usize, graphics: usize) {
     let hooks = Hooks {
         original: crate::glue::minimod_paint_original(),

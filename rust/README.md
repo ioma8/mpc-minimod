@@ -4,8 +4,8 @@ The firmware mod, rewritten in Rust:
 
 * `crates/dsp` — audio DSP (looper, HPSS, onset detection, filters, synths). Pure
   computation over slices, no firmware addresses, host-testable.
-* `crates/minimod` — the `LD_PRELOAD` library itself: C ABI, hook engine, feature
-  glue.
+* `crates/minimod` — the `LD_PRELOAD` library itself: hook engine, entry points the app
+  calls, feature glue. `mod/build.sh` builds it as a `cdylib`; no C is involved.
 
 ```sh
 ./check.sh                                  # fmt, clippy, tests, cross build

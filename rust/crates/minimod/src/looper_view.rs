@@ -254,7 +254,6 @@ fn footer(graphics: usize, view: &View) {
 /// # Safety
 ///
 /// `graphics` must be the app's Graphics object.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_looper_draw(graphics: usize) {
     let Some(view) = snapshot() else {
         return;

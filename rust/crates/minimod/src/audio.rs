@@ -42,12 +42,6 @@ pub fn channels(self_address: usize, input_side: bool) -> usize {
     usize::try_from(count).unwrap_or(2)
 }
 
-/// The channel count of one side, for the C glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_audio_channels(self_address: usize, input_side: i32) -> i32 {
-    i32::try_from(channels(self_address, input_side != 0)).unwrap_or(2)
-}
-
 /// Frames the writer will ever see in one block.
 pub const MAX_FRAMES: usize = 4096;
 /// Channels the writer will ever see.
@@ -150,7 +144,6 @@ fn forward(
 /// # Safety
 ///
 /// See [`write`].
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_audio_writer(
     self_address: usize,
     input: *mut *mut f32,
@@ -175,45 +168,28 @@ pub unsafe extern "C" fn minimod_audio_writer(
 }
 
 /// How many times the app asked for audio, for the device tests.
-#[unsafe(no_mangle)]
-pub static mut g_audio_out_calls: u32 = 0;
+pub static mut G_AUDIO_OUT_CALLS: u32 = 0;
 
 /// How many blocks the bass preview produced.
-#[unsafe(no_mangle)]
-pub static mut g_bass_preview_blocks: u32 = 0;
+pub static mut G_BASS_PREVIEW_BLOCKS: u32 = 0;
 
 /// The loudest block the preview produced, as bits.
-#[unsafe(no_mangle)]
-pub static mut g_bass_preview_peak_bits: u32 = 0;
+pub static mut G_BASS_PREVIEW_PEAK_BITS: u32 = 0;
 
 /// Whether the bass preview is audible.
-#[unsafe(no_mangle)]
-pub static mut g_bass_preview_active: i32 = 0;
+pub static mut G_BASS_PREVIEW_ACTIVE: i32 = 0;
 
 /// The component the page last painted.
-#[unsafe(no_mangle)]
-pub static mut g_paint_comp: usize = 0;
+pub static mut G_PAINT_COMP: usize = 0;
 
 /// The app's own audio writer.
 static mut ORIGINAL_WRITER: Option<Writer> = None;
-
-/// Record the displaced writer, for the glue.
-///
-/// # Safety
-///
-/// The constructor calls this once, before any audio can arrive.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_audio_writer_original(original: Option<Writer>) {
-    // SAFETY: the caller's contract.
-    unsafe { ORIGINAL_WRITER = original };
-}
 
 /// The audio writer: count the call, and track the preview's peak.
 ///
 /// # Safety
 ///
 /// The app calls this with its own buffers.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_audio_writer(
     self_address: usize,
     input: *mut *mut f32,
@@ -221,9 +197,9 @@ pub unsafe extern "C" fn minimod_hook_audio_writer(
     offset: i32,
 ) {
     // SAFETY: the counters are statics in this module.
-    unsafe { core::ptr::addr_of_mut!(g_audio_out_calls).write_volatile(g_audio_out_calls + 1) };
+    unsafe { core::ptr::addr_of_mut!(G_AUDIO_OUT_CALLS).write_volatile(G_AUDIO_OUT_CALLS + 1) };
     // SAFETY: see above.
-    let preview = i32::from(unsafe { g_bass_preview_active } != 0);
+    let preview = i32::from(unsafe { G_BASS_PREVIEW_ACTIVE } != 0);
     let mut peak = 0.0_f32;
     // SAFETY: the original is the app's own writer.
     let original = unsafe { *core::ptr::addr_of!(ORIGINAL_WRITER) };
@@ -244,9 +220,9 @@ pub unsafe extern "C" fn minimod_hook_audio_writer(
     }
     // SAFETY: the counters are statics in this module.
     unsafe {
-        core::ptr::addr_of_mut!(g_bass_preview_blocks).write_volatile(g_bass_preview_blocks + 1);
-        if peak > f32::from_bits(g_bass_preview_peak_bits) {
-            core::ptr::addr_of_mut!(g_bass_preview_peak_bits).write_volatile(peak.to_bits());
+        core::ptr::addr_of_mut!(G_BASS_PREVIEW_BLOCKS).write_volatile(G_BASS_PREVIEW_BLOCKS + 1);
+        if peak > f32::from_bits(G_BASS_PREVIEW_PEAK_BITS) {
+            core::ptr::addr_of_mut!(G_BASS_PREVIEW_PEAK_BITS).write_volatile(peak.to_bits());
         }
     }
 }
@@ -256,7 +232,7 @@ pub unsafe extern "C" fn minimod_hook_audio_writer(
 /// # Safety
 ///
 /// Called as a thread entry point.
-#[unsafe(no_mangle)]
+#[must_use]
 pub unsafe extern "C" fn minimod_pump_thread(_arg: usize) -> usize {
     loop {
         std::thread::sleep(core::time::Duration::from_millis(60));
@@ -264,7 +240,7 @@ pub unsafe extern "C" fn minimod_pump_thread(_arg: usize) -> usize {
             continue;
         }
         // SAFETY: the paint statics are the glue's.
-        let painted = unsafe { g_paint_comp };
+        let painted = unsafe { G_PAINT_COMP };
         let component = if painted != 0 {
             painted
         } else {
@@ -339,7 +315,6 @@ impl Alsa {
 /// # Safety
 ///
 /// `pcm` must be the app's live PCM handle; the out pointers may be null.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_stream_geometry(
     pcm: usize,
     channels: *mut u32,
@@ -395,7 +370,6 @@ pub unsafe extern "C" fn minimod_stream_geometry(
 /// # Safety
 ///
 /// Called once, before any audio can arrive.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_audio_writer_original_now(original: usize) {
     // SAFETY: the caller's contract.
     unsafe { ORIGINAL_WRITER = crate::input::from_address(original) };
@@ -405,17 +379,13 @@ pub unsafe extern "C" fn minimod_audio_writer_original_now(original: usize) {
 pub const OUTTAP_FRAMES: usize = 44100 * 2;
 
 /// The last output delay the device reported, in frames.
-#[unsafe(no_mangle)]
-pub static mut g_out_delay: u32 = 0;
+pub static mut G_OUT_DELAY: u32 = 0;
 /// The same, smoothed, which is what a take uses.
-#[unsafe(no_mangle)]
-pub static mut g_out_delay_avg: u32 = 0;
+pub static mut G_OUT_DELAY_AVG: u32 = 0;
 /// The loudest sample written since the last reset, as bits.
-#[unsafe(no_mangle)]
-pub static mut g_out_peak_bits: u32 = 0;
+pub static mut G_OUT_PEAK_BITS: u32 = 0;
 /// How many buffers have been written.
-#[unsafe(no_mangle)]
-pub static mut g_out_write_calls: u32 = 0;
+pub static mut G_OUT_WRITE_CALLS: u32 = 0;
 /// The output tap: the last two seconds, channel zero.
 #[unsafe(no_mangle)]
 pub static mut g_outtap: [f32; OUTTAP_FRAMES] = [0.0; OUTTAP_FRAMES];
@@ -423,14 +393,11 @@ pub static mut g_outtap: [f32; OUTTAP_FRAMES] = [0.0; OUTTAP_FRAMES];
 #[unsafe(no_mangle)]
 pub static mut g_outtap_w: u32 = 0;
 /// Whether the device rings need re-reading.
-#[unsafe(no_mangle)]
-pub static mut g_buf_dirty: i32 = 0;
+pub static mut G_BUF_DIRTY: i32 = 0;
 /// The output stream's channel count.
-#[unsafe(no_mangle)]
-pub static mut g_out_ch: u32 = 0;
+pub static mut G_OUT_CH: u32 = 0;
 /// Whether the output stream carries 32-bit samples.
-#[unsafe(no_mangle)]
-pub static mut g_out_s32: i32 = 0;
+pub static mut G_OUT_S32: i32 = 0;
 
 /// The app's own `snd_pcm_writei`.
 static mut REAL_WRITEI: Option<unsafe extern "C" fn(usize, *const u8, u64) -> i64> = None;
@@ -458,13 +425,13 @@ pub unsafe extern "C" fn snd_pcm_writei(pcm: usize, buffer: *const i32, size: u6
     // The rings are only readable once the stream exists, so this is retried
     // until both directions report one.
     // SAFETY: the statics are this module's.
-    let stale = unsafe { g_buf_dirty } != 0;
+    let stale = unsafe { G_BUF_DIRTY } != 0;
     if looper && (crate::glue::buffer_out() == 0 || stale) {
         // SAFETY: the statics are this module's.
         unsafe { refresh_rings(pcm) };
     }
-    let channels = unsafe { g_out_ch };
-    if looper && !buffer.is_null() && size != 0 && channels != 0 && unsafe { g_out_s32 } != 0 {
+    let channels = unsafe { G_OUT_CH };
+    if looper && !buffer.is_null() && size != 0 && channels != 0 && unsafe { G_OUT_S32 } != 0 {
         // SAFETY: the buffer is the device's own output.
         unsafe {
             crate::looper_ffi::looper_render_s32(
@@ -508,11 +475,11 @@ unsafe fn refresh_rings(pcm: usize) {
     unsafe {
         crate::glue::set_buffer_out(frames);
         if channels != 0 {
-            g_out_ch = channels;
-            g_out_s32 = s32;
+            G_OUT_CH = channels;
+            G_OUT_S32 = s32;
         }
         if frames != 0 && crate::glue::buffer_in() != 0 {
-            g_buf_dirty = 0;
+            G_BUF_DIRTY = 0;
         }
     }
 }
@@ -533,39 +500,31 @@ unsafe fn measure_latency(pcm: usize, size: u64) {
         if let Some(delay_of) = real {
             let mut delay = 0_i64;
             if delay_of(pcm, core::ptr::from_mut(&mut delay)) == 0 && delay >= 0 {
-                g_out_delay = u32::try_from(delay).unwrap_or(0);
-                let average = g_out_delay_avg;
-                g_out_delay_avg = if average == 0 {
-                    g_out_delay
+                G_OUT_DELAY = u32::try_from(delay).unwrap_or(0);
+                let average = G_OUT_DELAY_AVG;
+                G_OUT_DELAY_AVG = if average == 0 {
+                    G_OUT_DELAY
                 } else {
-                    (average * 7 + g_out_delay) / 8
+                    (average * 7 + G_OUT_DELAY) / 8
                 };
             }
         }
-        let fixed = crate::glue::fixed_latency();
-        let (total, source) = if fixed >= 0 {
-            (u32::try_from(fixed).unwrap_or(0), b'F')
+        let out = crate::glue::buffer_out();
+        let input = crate::glue::buffer_in();
+        let (measured, source) = if out > 0 && input > 0 {
+            (u64::from(out) + u64::from(input), b'B')
         } else {
-            let out = crate::glue::buffer_out();
-            let input = crate::glue::buffer_in();
-            let (measured, source) = if out > 0 && input > 0 {
-                (u64::from(out) + u64::from(input), b'B')
-            } else {
-                (
-                    u64::from(g_out_delay_avg)
-                        + size
-                        + u64::from(crate::glue::input_delay())
-                        + u64::from(crate::looper_ffi::looper_input_backlog()),
-                    b'E',
-                )
-            };
-            let extra = crate::glue::extra_latency();
             (
-                u32::try_from(measured.saturating_add(u64::from(extra)).min(16384))
-                    .unwrap_or(16384),
-                source,
+                u64::from(G_OUT_DELAY_AVG)
+                    + size
+                    + u64::from(crate::glue::input_delay())
+                    + u64::from(crate::looper_ffi::looper_input_backlog()),
+                b'E',
             )
         };
+        let extra = crate::glue::extra_latency();
+        let total =
+            u32::try_from(measured.saturating_add(u64::from(extra)).min(16384)).unwrap_or(16384);
         crate::looper_ffi::looper_set_latency_ex(total, i8::try_from(source).unwrap_or(0x45));
     }
 }
@@ -579,15 +538,15 @@ unsafe fn record_output(buffer: *const i32, written: i64, channels: u32) {
     const SCALE: f32 = 1.0 / 2_147_483_648.0;
     // SAFETY: this module's statics and the device's buffer.
     unsafe {
-        g_out_write_calls = g_out_write_calls.wrapping_add(1);
+        G_OUT_WRITE_CALLS = G_OUT_WRITE_CALLS.wrapping_add(1);
         let count = usize::try_from(written).unwrap_or(0) * channels as usize;
         let mut peak = 0.0_f32;
         for index in 0..count {
             let value = (*buffer.add(index) as f32) * SCALE;
             peak = peak.max(value.abs());
         }
-        if peak > f32::from_bits(g_out_peak_bits) {
-            g_out_peak_bits = peak.to_bits();
+        if peak > f32::from_bits(G_OUT_PEAK_BITS) {
+            G_OUT_PEAK_BITS = peak.to_bits();
         }
         let mut write = g_outtap_w;
         let frames = usize::try_from(written).unwrap_or(0);
@@ -602,17 +561,13 @@ unsafe fn record_output(buffer: *const i32, written: i64, channels: u32) {
 }
 
 /// How many times the app asked for input audio.
-#[unsafe(no_mangle)]
-pub static mut g_audio_in_calls: u32 = 0;
+pub static mut G_AUDIO_IN_CALLS: u32 = 0;
 /// The input stream's channel count.
-#[unsafe(no_mangle)]
-pub static mut g_in_ch: u32 = 0;
+pub static mut G_IN_CH: u32 = 0;
 /// Whether the input stream carries 32-bit samples.
-#[unsafe(no_mangle)]
-pub static mut g_in_s32: i32 = 0;
+pub static mut G_IN_S32: i32 = 0;
 /// The input ring's size in frames, as last read.
-#[unsafe(no_mangle)]
-pub static mut g_in_delay: u32 = 0;
+pub static mut G_IN_DELAY: u32 = 0;
 /// The input ring's size in frames.
 #[unsafe(no_mangle)]
 pub static mut g_buf_in: u32 = 0;
@@ -621,7 +576,7 @@ pub static mut g_buf_in: u32 = 0;
 #[must_use]
 pub fn painted() -> usize {
     // SAFETY: only the UI thread writes it.
-    unsafe { g_paint_comp }
+    unsafe { G_PAINT_COMP }
 }
 
 /// The app's own `snd_pcm_readi`.
@@ -654,7 +609,7 @@ pub unsafe extern "C" fn snd_pcm_readi(pcm: usize, buffer: *mut i32, size: u64) 
     // The rings are only readable once the stream exists, so this is retried
     // until both directions report one.
     // SAFETY: the static is this module's.
-    let stale = unsafe { g_buf_dirty } != 0;
+    let stale = unsafe { G_BUF_DIRTY } != 0;
     if crate::glue::buffer_in() == 0 || stale {
         // SAFETY: the statics are this module's.
         unsafe { refresh_input_ring(pcm) };
@@ -664,14 +619,14 @@ pub unsafe extern "C" fn snd_pcm_readi(pcm: usize, buffer: *mut i32, size: u64) 
     if got > 0 {
         // SAFETY: this module's statics.
         unsafe {
-            g_audio_in_calls = g_audio_in_calls.wrapping_add(1);
+            G_AUDIO_IN_CALLS = G_AUDIO_IN_CALLS.wrapping_add(1);
         }
         // SAFETY: the buffer holds the frames just read.
         unsafe {
-            if looper && !buffer.is_null() && g_in_ch != 0 && g_in_s32 != 0 {
+            if looper && !buffer.is_null() && G_IN_CH != 0 && G_IN_S32 != 0 {
                 crate::looper_ffi::looper_input_s32_interleaved(
                     buffer,
-                    g_in_ch,
+                    G_IN_CH,
                     u32::try_from(got).unwrap_or(0),
                 );
             }
@@ -696,7 +651,7 @@ unsafe fn measure_input_delay(pcm: usize) {
         if let Some(avail_of) = real {
             let avail = avail_of(pcm);
             if avail > 0 {
-                g_in_delay = u32::try_from(avail).unwrap_or(0);
+                G_IN_DELAY = u32::try_from(avail).unwrap_or(0);
             }
         }
     }
@@ -722,18 +677,17 @@ unsafe fn refresh_input_ring(pcm: usize) {
     unsafe {
         crate::glue::set_buffer_in(frames);
         if channels != 0 {
-            g_in_ch = channels;
-            g_in_s32 = s32;
+            G_IN_CH = channels;
+            G_IN_S32 = s32;
         }
         if frames != 0 && crate::glue::buffer_out() != 0 {
-            g_buf_dirty = 0;
+            G_BUF_DIRTY = 0;
         }
     }
 }
 
 /// The channel count the app asked the device for.
-#[unsafe(no_mangle)]
-pub static mut g_pcm_channels: u32 = 4;
+pub static mut G_PCM_CHANNELS: u32 = 4;
 
 /// The app's own `snd_pcm_readn`.
 static mut REAL_READN: Option<unsafe extern "C" fn(usize, *mut *mut i32, u64) -> i64> = None;
@@ -764,12 +718,12 @@ pub unsafe extern "C" fn snd_pcm_readn(pcm: usize, buffers: *mut *mut i32, size:
     }
     // SAFETY: this module's statics.
     unsafe {
-        g_audio_in_calls = g_audio_in_calls.wrapping_add(1);
+        G_AUDIO_IN_CALLS = G_AUDIO_IN_CALLS.wrapping_add(1);
     }
     let looper = crate::looper_ffi::looper_is_open() != 0;
     // SAFETY: the buffers hold the frames just read.
     unsafe {
-        if looper && !buffers.is_null() && !(*buffers).is_null() && g_in_s32 != 0 {
+        if looper && !buffers.is_null() && !(*buffers).is_null() && G_IN_S32 != 0 {
             crate::looper_ffi::looper_input_s32(
                 buffers.cast::<*const i32>(),
                 1,
@@ -796,7 +750,7 @@ pub unsafe extern "C" fn snd_pcm_hw_params_set_channels(params: usize, channels:
     }
     if channels != 0 {
         // SAFETY: this module's static.
-        unsafe { g_pcm_channels = channels };
+        unsafe { G_PCM_CHANNELS = channels };
     }
     match real {
         // SAFETY: the app's own setter takes these.
@@ -805,18 +759,10 @@ pub unsafe extern "C" fn snd_pcm_hw_params_set_channels(params: usize, channels:
     }
 }
 
-/// The channel count the app asked for, for the glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_pcm_channels() -> u32 {
-    // SAFETY: this module's static.
-    unsafe { g_pcm_channels }
-}
-
 /// Whether the repaint pump has been started.
 static PUMP_STARTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Start the repaint pump once.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_pump_start() {
     use core::sync::atomic::Ordering;
     if PUMP_STARTED.swap(true, Ordering::AcqRel) {

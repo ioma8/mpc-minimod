@@ -1,4 +1,4 @@
-//! C ABI of the looper's persisted settings.
+//! Entry points for the looper's persisted settings, with the C calling convention the hook tables and callbacks use.
 
 use crate::cfg;
 
@@ -10,7 +10,6 @@ use crate::cfg;
 /// # Safety
 ///
 /// `trim_frames` and `master` must be writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_cfg_load(trim_frames: *mut i32, master: *mut i32) -> i32 {
     if trim_frames.is_null() || master.is_null() {
         return 0;
@@ -29,7 +28,6 @@ pub unsafe extern "C" fn minimod_cfg_load(trim_frames: *mut i32, master: *mut i3
 }
 
 /// Write the settings file.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_cfg_save(trim_frames: i32, master: u32) {
     let _ = cfg::save(
         std::path::Path::new(cfg::PATH),

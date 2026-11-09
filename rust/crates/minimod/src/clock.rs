@@ -18,12 +18,6 @@ pub fn now_ms() -> i64 {
     ts.tv_sec * 1000 + ts.tv_nsec / 1_000_000
 }
 
-/// Milliseconds since boot, for the C glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_now_ms() -> i64 {
-    now_ms()
-}
-
 #[cfg(test)]
 mod tests {
     use super::now_ms;

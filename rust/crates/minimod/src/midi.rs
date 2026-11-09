@@ -73,59 +73,6 @@ pub fn decode(event: &[u8], source: u64) -> Note {
     }
 }
 
-/// Decode a note event into a `#[repr(C)]` struct for the glue.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct RawNote {
-    /// The event's type tag.
-    pub kind: u32,
-    /// The note number.
-    pub note: u32,
-    /// The velocity.
-    pub velocity: f32,
-    /// Whether the event came from outside the app.
-    pub external: i32,
-    /// Whether this is a note on.
-    pub note_on: i32,
-    /// Whether this is a note off.
-    pub note_off: i32,
-    /// The 16 Levels row.
-    pub row: i32,
-}
-
-/// Decode a note event for the C glue.
-///
-/// # Safety
-///
-/// `event` must be readable for `EVENT_NOTE + 1` bytes and `out` must be
-/// writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_midi_decode(
-    event: *const u8,
-    source: u64,
-    out: *mut RawNote,
-) -> i32 {
-    if event.is_null() || out.is_null() {
-        return 0;
-    }
-    // SAFETY: the caller promises both pointers are valid.
-    let bytes = unsafe { core::slice::from_raw_parts(event, EVENT_NOTE + 1) };
-    let note = decode(bytes, source);
-    // SAFETY: the caller promises `out` is writable.
-    unsafe {
-        *out = RawNote {
-            kind: u32::from(note.kind),
-            note: u32::from(note.note),
-            velocity: note.velocity,
-            external: i32::from(note.external),
-            note_on: i32::from(note.note_on),
-            note_off: i32::from(note.note_off),
-            row: note.row,
-        };
-    }
-    1
-}
-
 /// The event fields the replay rewrites, so the caller can put them back.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -247,7 +194,6 @@ pub const REPLAY_SOURCE: usize = 0x7fff_fffa;
 /// `event` must be the app's event object (writable for `EVENT_NOTE + 1` bytes),
 /// `state` must be the glue's state, and both callbacks must be the app's
 /// originals when present.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_midi_handle(
     app: usize,
     context: usize,
@@ -352,29 +298,11 @@ static mut ORIGINAL_NOTE_EVENT: Option<NoteEvent> = None;
 /// The pitch handler.
 static mut ORIGINAL_PITCH: Option<levels::PitchOffset> = None;
 
-/// Record the displaced handlers, for the glue.
-///
-/// # Safety
-///
-/// The constructor calls this once, before any note can arrive.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_midi_originals(
-    note: Option<NoteEvent>,
-    pitch: Option<levels::PitchOffset>,
-) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        ORIGINAL_NOTE_EVENT = note;
-        ORIGINAL_PITCH = pitch;
-    }
-}
-
 /// The MIDI note event, as the app's own hook.
 ///
 /// # Safety
 ///
 /// The app calls this with its own event objects.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_midi_note(
     app: usize,
     context: usize,
@@ -400,14 +328,12 @@ pub unsafe extern "C" fn minimod_hook_midi_note(
 /// # Safety
 ///
 /// Called once at install, before any note can arrive.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_midi_note_original(original: usize) {
     // SAFETY: the caller's contract.
     unsafe { ORIGINAL_NOTE_EVENT = crate::input::from_address(original) };
 }
 
 /// Whether the mod handles notes at all.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_midi_set(on: i32) {
     // SAFETY: the record is this module's.
     unsafe { g_midi.on = i32::from(on != 0) };
@@ -418,7 +344,6 @@ pub extern "C" fn minimod_midi_set(on: i32) {
 /// # Safety
 ///
 /// Reads the crate's own state.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_toggle_levels() {
     // SAFETY: the record is this module's.
     unsafe {
@@ -437,7 +362,6 @@ pub unsafe extern "C" fn minimod_toggle_levels() {
 /// # Safety
 ///
 /// Reads the app's screen object.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_levels_active() -> i32 {
     let screen = crate::paint::screen();
     if screen == 0 {

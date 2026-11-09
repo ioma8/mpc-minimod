@@ -99,10 +99,10 @@ the mask starts to act like a hard gate and thins the hits.
 ## Status
 
 Reference prototype, not the device code. The shipped transform is the C port in
-[`mod/src/hpss.c`](../../mod/src/hpss.c); this Python version was used to settle
+[`rust/crates/dsp/src/hpss.rs`](../../rust/crates/dsp/src/hpss.rs); this Python version was used to settle
 the constants and to check the native output sample by sample. The device flow
-that writes the two results to empty pads is in `mod/src/minimod.c` (SAMPLE
-OPTIONS → HPSS).
+that writes the two results to empty pads is `jobflow.rs`/`hpss_exec.rs` in
+`rust/crates/minimod/src` (SAMPLE OPTIONS → HPSS).
 
 Helper scripts in this directory:
 

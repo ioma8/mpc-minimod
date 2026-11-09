@@ -35,8 +35,6 @@ pub enum Action {
     Erase(bool),
     /// The looper's own button handling.
     Looper,
-    /// The looper closed: release what it was holding.
-    LooperClosed,
     /// Open the effects menu.
     MenuOpen,
     /// Close it.
@@ -51,12 +49,6 @@ pub enum Action {
     ResetPitch,
     /// Toggle 16 Levels.
     ToggleLevels,
-    /// Rename the soft key while SHIFT is held.
-    RenameKey(bool),
-    /// SHIFT released: the trim cycle forgets its step.
-    TrimCycleReset,
-    /// SHIFT released while a chop restore was pending.
-    RestoreChop,
     /// The encoder press was consumed by the menu.
     MenuEncoder,
 }
@@ -66,10 +58,6 @@ pub enum Action {
 pub struct Held {
     /// SHIFT.
     pub shift: bool,
-    /// ERASE.
-    pub erase: bool,
-    /// The encoder, already down.
-    pub data: bool,
 }
 
 /// The 16 Levels octave keys, held.
@@ -97,8 +85,6 @@ pub struct Screens {
 pub struct Modals {
     /// The effects menu.
     pub menu: bool,
-    /// The bass control page.
-    pub bass_edit: bool,
     /// A spectral chop is running.
     pub spectral: bool,
 }
@@ -116,8 +102,6 @@ pub struct Context {
     pub octave: OctaveKeys,
     /// The screens that are up.
     pub screens: Screens,
-    /// Whether a job is running.
-    pub busy: bool,
     /// Whether the Sample page is visible.
     pub page_visible: bool,
 }
@@ -151,12 +135,9 @@ pub fn dispatch(context: Context) -> Action {
     if context.screens.modals.menu || context.screens.modals.spectral {
         return Action::Consume;
     }
+    // The release matters too: it is what lets the next press count again.
     if context.code == KEY_B3 && context.held.shift {
-        return if press {
-            Action::Autotrim
-        } else {
-            Action::Consume
-        };
+        return Action::Autotrim;
     }
     if (context.code == KEY_PLUS || context.code == KEY_MINUS) && context.screens.levels {
         let plus = context.code == KEY_PLUS;
@@ -203,85 +184,11 @@ const fn encoder(context: Context, press: bool) -> Action {
     Action::Forward
 }
 
-/// The decision, as the glue's action code plus its value.
-///
-/// # Safety
-///
-/// `value` must be writable when non-null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_button_action(
-    code: u32,
-    down: u32,
-    shift: i32,
-    erase: i32,
-    looper: i32,
-    menu: i32,
-    data_down: i32,
-    busy: i32,
-    bass_edit: i32,
-    spectral: i32,
-    levels: i32,
-    page_visible: i32,
-    plus_held: i32,
-    minus_held: i32,
-    value: *mut u32,
-) -> i32 {
-    let context = Context {
-        code,
-        down,
-        held: Held {
-            shift: shift != 0,
-            erase: erase != 0,
-            data: data_down != 0,
-        },
-        screens: Screens {
-            modals: Modals {
-                menu: menu != 0,
-                bass_edit: bass_edit != 0,
-                spectral: spectral != 0,
-            },
-            looper: looper != 0,
-            levels: levels != 0,
-        },
-        octave: OctaveKeys {
-            plus: plus_held != 0,
-            minus: minus_held != 0,
-        },
-        busy: busy != 0,
-        page_visible: page_visible != 0,
-    };
-    let action = dispatch(context);
-    let (kind, out) = match action {
-        Action::Forward => (0, 0),
-        Action::Consume
-        | Action::MenuEncoder
-        | Action::LooperClosed
-        | Action::RenameKey(_)
-        | Action::TrimCycleReset
-        | Action::RestoreChop => (1, 0),
-        Action::Shift(state) => (2, u32::from(state)),
-        Action::Erase(state) => (3, u32::from(state)),
-        Action::Looper => (4, 0),
-        Action::MenuOpen => (5, 0),
-        Action::MenuClose => (6, 0),
-        Action::MenuActivate => (7, 0),
-        Action::Autotrim => (8, 0),
-        Action::BumpOctave(steps) => (9, u32::from_ne_bytes(steps.to_ne_bytes())),
-        Action::ResetPitch => (12, 0),
-        Action::ToggleLevels => (10, 0),
-    };
-    if !value.is_null() {
-        // SAFETY: the caller promises this is writable.
-        unsafe { *value = out };
-    }
-    kind
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, Context, Held, KEY_DATA, KEY_LEVELS, KEY_SHIFT, Modals, OctaveKeys, PRESSED,
-        Screens, dispatch,
+        Action, Context, Held, KEY_B3, KEY_DATA, KEY_LEVELS, KEY_SHIFT, Modals, OctaveKeys,
+        PRESSED, Screens, dispatch,
     };
 
     fn base() -> Context {
@@ -291,7 +198,6 @@ mod tests {
             held: Held::default(),
             octave: OctaveKeys::default(),
             screens: Screens::default(),
-            busy: false,
             page_visible: true,
         }
     }
@@ -325,10 +231,7 @@ mod tests {
         let context = Context {
             code: KEY_DATA,
             down: PRESSED,
-            held: Held {
-                shift: true,
-                ..Held::default()
-            },
+            held: Held { shift: true },
             ..base()
         };
         assert_eq!(dispatch(context), Action::MenuOpen);
@@ -388,5 +291,20 @@ mod tests {
             ..base()
         };
         assert_eq!(dispatch(context), Action::Forward);
+    }
+
+    #[test]
+    fn both_edges_of_shift_b3_reach_the_trim_cycle() {
+        let mut context = Context {
+            code: KEY_B3,
+            down: PRESSED,
+            held: Held { shift: true },
+            octave: OctaveKeys::default(),
+            screens: Screens::default(),
+            page_visible: true,
+        };
+        assert_eq!(dispatch(context), Action::Autotrim);
+        context.down = 0;
+        assert_eq!(dispatch(context), Action::Autotrim);
     }
 }

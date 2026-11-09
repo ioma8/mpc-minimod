@@ -51,14 +51,6 @@ struct Machine {
 
 static mut MACHINE: Option<Machine> = None;
 
-/// Forget the machine; the caller calls this when a run finishes.
-pub fn reset() {
-    // SAFETY: only the UI thread touches the machine.
-    unsafe {
-        MACHINE = None;
-    }
-}
-
 /// Run one frame of the state machine.
 ///
 /// `active` is the caller's flag: 1 means a run was requested.
@@ -194,7 +186,6 @@ fn advance(base: usize, now: i64, running: &mut Machine) -> Step {
 ///
 /// `samples` must be readable for `frames * channels` values and `error` must be
 /// writable when non-null.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_spectral_begin(
     base: usize,
     now: i64,
@@ -251,7 +242,6 @@ pub unsafe extern "C" fn minimod_spectral_begin(
 /// # Safety
 ///
 /// `slices` and `error` must be writable when non-null.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_spectral_step(
     base: usize,
     now: i64,
@@ -275,10 +265,4 @@ pub unsafe extern "C" fn minimod_spectral_step(
             4
         }
     }
-}
-
-/// Forget the run, for the C glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_spectral_reset() {
-    reset();
 }

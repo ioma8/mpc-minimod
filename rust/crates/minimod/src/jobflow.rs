@@ -312,7 +312,6 @@ const fn success(job: &Job) -> Report {
 ///
 /// `job` must be the live job the worker finished, `hooks` must hold the app's
 /// extract and restore, and `screen` must be the page the job started from.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_job_finalize(
     job: *mut Job,
     hooks: *const Hooks,
@@ -409,7 +408,6 @@ fn into_malloc(values: &[f32]) -> *mut f32 {
 /// # Safety
 ///
 /// `knobs` must be readable for three values and `hooks` must be live.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_job_start(
     action: i32,
     base: usize,
@@ -498,12 +496,6 @@ pub fn busy() -> bool {
     !JOB.load(Ordering::Acquire).is_null()
 }
 
-/// Whether a job is running, for the C glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_job_busy() -> i32 {
-    i32::from(busy())
-}
-
 /// Finish the job if the worker is done.
 ///
 /// Returns 1 when a job was consumed, 0 when there was nothing to do.
@@ -511,7 +503,6 @@ pub extern "C" fn minimod_job_busy() -> i32 {
 /// # Safety
 ///
 /// `hooks` must be live for this call.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_job_finish(
     hooks: *const Hooks,
     screen: usize,
@@ -620,7 +611,6 @@ unsafe fn say_failure(toast: Option<unsafe extern "C" fn(*const u8)>, action: i3
 }
 
 /// Record the current screen; the glue calls this when it changes.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_job_set_screen(screen: usize) {
     SCREEN.store(screen as *mut (), Ordering::Release);
 }
@@ -655,7 +645,6 @@ pub struct GlueHooks {
 /// # Safety
 ///
 /// `menu` and `knobs` must be live and `hooks` readable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_glue_start(
     action: i32,
     base: usize,
@@ -699,7 +688,6 @@ pub unsafe extern "C" fn minimod_glue_start(
 /// # Safety
 ///
 /// `menu` must be live and `hooks` readable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_glue_finish(
     base: usize,
     screen: usize,
@@ -779,7 +767,6 @@ pub fn glue_hooks() -> GlueHooks {
 /// # Safety
 ///
 /// The app's objects are the caller's.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_job_start_self(action: i32, base: usize, screen: usize) -> i32 {
     let hooks = glue_hooks();
     // SAFETY: the knobs, menu and hooks are the crate's own.
@@ -800,7 +787,6 @@ pub unsafe extern "C" fn minimod_job_start_self(action: i32, base: usize, screen
 /// # Safety
 ///
 /// The app's objects are live while the page is showing.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_menu_activate_self() {
     let hooks = crate::menu::Hooks {
         repaint: Some(crate::ui::minimod_repaint_screen),
@@ -861,7 +847,7 @@ extern "C" fn start_looper() -> i32 {
     let opened = crate::looper_ffi::looper_activate();
     if opened != 0 {
         // SAFETY: the flag is the audio module's.
-        unsafe { crate::audio::g_buf_dirty = 1 };
+        unsafe { crate::audio::G_BUF_DIRTY = 1 };
         crate::bass_ffi::minimod_bass_preview_set_active(0);
         crate::audio::minimod_pump_start();
     }

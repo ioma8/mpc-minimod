@@ -1,4 +1,4 @@
-//! C ABI of the live looper engine.
+//! Entry points for the live looper engine, with the C calling convention the hook tables and callbacks use.
 //!
 //! These are the exact symbols and signatures the firmware glue calls, kept
 //! identical to the C header they replaced so the paint and input hooks did not
@@ -9,63 +9,49 @@ use core::ptr;
 use minimod_dsp::looper::{Engine, LatencySource, View};
 
 /// Open the fullscreen view.  Returns non-zero on success.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn looper_activate() -> i32 {
     i32::from(Engine::open())
 }
 
-/// Close the view, keeping the recorded loops.
-#[unsafe(no_mangle)]
-pub extern "C" fn looper_close() {
-    Engine::close();
-}
-
 /// Whether the view is open.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn looper_is_open() -> i32 {
     i32::from(Engine::is_open())
 }
 
 /// A pad press.  Returns non-zero when the looper owns the event.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn looper_pad(pad: i32, shift: i32, erase: i32) -> i32 {
     let index = usize::try_from(pad).unwrap_or(usize::MAX);
     i32::from(Engine::pad(index, shift != 0, erase != 0))
 }
 
 /// A control-surface button while the view is open.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn looper_button(code: u32, down: i32, shift: i32, erase: i32) -> i32 {
     i32::from(Engine::button(code, down != 0, shift != 0, erase != 0))
 }
 
-/// Stop every loop, keeping the material.
-#[unsafe(no_mangle)]
-pub extern "C" fn looper_stop_all() {
-    Engine::stop_all();
-}
-
 /// Set MAIN VOLUME, 0..127.
-#[unsafe(no_mangle)]
 pub extern "C" fn looper_set_master(value: u32) {
     Engine::set_master(value);
 }
 
 /// The current MAIN VOLUME.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn looper_master() -> u32 {
     Engine::master()
 }
 
 /// Set the record latency in frames and where it came from.
-#[unsafe(no_mangle)]
 pub extern "C" fn looper_set_latency_ex(frames: u32, source: i8) {
     let code = u8::try_from(source).unwrap_or(b'E');
     Engine::set_latency(frames, LatencySource::from_code(code));
 }
 
 /// Frames captured but not yet consumed by playback.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn looper_input_backlog() -> u32 {
     Engine::input_backlog()
 }
@@ -75,7 +61,6 @@ pub extern "C" fn looper_input_backlog() -> u32 {
 /// # Safety
 ///
 /// `text` must point at a NUL-terminated string, or be null.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn looper_notice(text: *const core::ffi::c_char) {
     if text.is_null() {
         return;
@@ -91,7 +76,6 @@ pub unsafe extern "C" fn looper_notice(text: *const core::ffi::c_char) {
 ///
 /// `channels` must point at at least `count` non-null channel pointers and
 /// `channels[0]` must be readable for `frames` samples.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn looper_input_s32(channels: *const *const i32, count: i32, frames: u32) {
     if channels.is_null() || count < 1 || frames == 0 {
         return;
@@ -112,7 +96,6 @@ pub unsafe extern "C" fn looper_input_s32(channels: *const *const i32, count: i3
 /// # Safety
 ///
 /// `buffer` must be readable for `frames * channels` samples.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn looper_input_s32_interleaved(
     buffer: *const i32,
     channels: u32,
@@ -136,7 +119,6 @@ pub unsafe extern "C" fn looper_input_s32_interleaved(
 /// # Safety
 ///
 /// `buffer` must be writable for `frames * channels` samples.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn looper_render_s32(buffer: *mut i32, channels: u32, frames: u32) {
     if buffer.is_null() || channels == 0 || frames == 0 {
         return;
@@ -156,7 +138,6 @@ pub unsafe extern "C" fn looper_render_s32(buffer: *mut i32, channels: u32, fram
 /// # Safety
 ///
 /// `view` must be writable for one [`View`].
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn looper_snapshot(view: *mut View) -> i32 {
     if view.is_null() {
         return 0;

@@ -6,8 +6,10 @@ action end to end (worker, writer, extract) and the status the menu shows.
 """
 import argparse
 import json
+import panel_screen
 import struct
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -22,11 +24,12 @@ def main():
                         help='the virtual lab checkout (for the mod ELF symbols)')
     args = parser.parse_args()
 
+    sys.path.insert(0, args.lab)
+    import lab
+
     def ssh(command):
         return subprocess.check_output(
-            ['ssh', '-p', '2022', '-o', 'StrictHostKeyChecking=no',
-             '-o', 'UserKnownHostsFile=/dev/null', '-o', 'LogLevel=ERROR',
-             'root@127.0.0.1', command], timeout=20)
+            ['ssh', *lab.ssh_base(), 'root@' + lab.HOST, command], timeout=20)
 
     def control(name, action, value=0):
         body = json.dumps(dict(name=name, action=action, value=value)).encode()
@@ -86,6 +89,9 @@ def main():
     # The mod sets this string only after *both* extracts reported an assigned
     # pad, so it is the action's own end-to-end assertion.
     assert result == 'HPSS: harmonic + percussive created', f'unexpected result: {result!r}'
+    # The status string is the mod's own; the app reports its own failures on screen.
+    time.sleep(1.5)
+    panel_screen.assert_no_modal(args.panel, 'HPSS')
     assert int(ssh('pidof "MPC Sample"')) == pid, 'firmware restarted'
     assert ssh('systemctl show ac50 -p NRestarts').decode().strip() == restarts
     print(f'PASS: {result!r}; no restart; pid={pid}')

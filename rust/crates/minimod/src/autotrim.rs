@@ -33,7 +33,7 @@ const PATH_LEN: usize = 512;
 #[derive(Clone, Copy)]
 pub struct Hooks {
     /// The app's control-surface setter.
-    pub set_control: Option<unsafe extern "C" fn(usize, usize, i32, i32, f32)>,
+    pub set_control: Option<unsafe extern "C" fn(usize, usize, i32, i32, f32) -> usize>,
     /// The app's repaint.
     pub repaint: Option<unsafe extern "C" fn(usize, u64, u64)>,
 }
@@ -238,46 +238,76 @@ fn edges_of(path: &str, info: &Info, ratio: f64) -> Option<(u32, u32)> {
     (ok != 0).then_some((first, last))
 }
 
-/// Run one press of the trim cycle, for the C glue.
+/// The app's control setter, as the page's knobs call it.
+type SetControl = unsafe extern "C" fn(usize, usize, i32, i32, f32) -> usize;
+
+/// The setter the mod displaced.
+static mut ORIGINAL_SET: Option<SetControl> = None;
+/// The control-surface object the app last handed to the setter.
+static mut SURFACE: usize = 0;
+/// The control context that came with it.
+static mut CONTROL: usize = 0;
+
+/// How far past the load address a vtable can point and still be the app's.
+const IMAGE_SPAN: usize = 0x1200_0000;
+
+/// Record the displaced setter, at install time.
 ///
 /// # Safety
 ///
-/// `context` and `hooks` must be readable and hold the app's live objects.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_autotrim_run(context: *const Context, hooks: *const Hooks) {
-    if context.is_null() || hooks.is_null() {
-        return;
+/// Called once, before the hook can run.
+pub unsafe fn record_set_control(original: usize) {
+    // SAFETY: the caller's contract; the address is the trampoline for a setter.
+    unsafe {
+        ORIGINAL_SET = (original != 0).then(|| core::mem::transmute::<usize, SetControl>(original));
     }
-    // SAFETY: the caller's contract.
-    let (context, hooks) = unsafe { (*context, *hooks) };
-    // SAFETY: the hooks are the glue's own callbacks.
-    unsafe { run(context, hooks) };
 }
 
-/// Run one press of the trim cycle, from the state the glue keeps.
+/// The app's setter, as a hook: learn the live surface, then pass the call on.
+///
+/// The page drives its trim through this entry; remembering the object it is
+/// called with is what lets [`minimod_autotrim_cycle`] do the same.
 ///
 /// # Safety
 ///
-/// The glue's pointers must be live.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_autotrim_cycle() {
-    unsafe extern "C" {
-        /// The control-surface object the app last handed to a button.
-        fn minimod_glue_surface() -> usize;
-        /// The control context that belongs to it.
-        fn minimod_glue_control_context() -> usize;
-        /// The app's own control setter.
-        fn minimod_glue_set_control() -> usize;
-        /// The app's own repaint.
-        fn minimod_glue_repaint_address() -> usize;
+/// The app calls this with its own objects.
+pub unsafe extern "C" fn minimod_hook_set_control(
+    control: usize,
+    surface: usize,
+    id: i32,
+    op: i32,
+    value: f32,
+) -> usize {
+    let base = crate::firmware::base();
+    let looks_live = surface != 0
+        && crate::firmware::read_pointer(surface)
+            .is_some_and(|vtable| (base..=base + IMAGE_SPAN).contains(&vtable));
+    // SAFETY: only the UI thread calls the setter.
+    unsafe {
+        if looks_live {
+            SURFACE = surface;
+            CONTROL = control;
+        }
+        // The setter tail-calls the app's own, so its result is its caller's.
+        match ORIGINAL_SET {
+            Some(original) => original(control, surface, id, op, value),
+            None => 0,
+        }
     }
-    // SAFETY: the glue's own accessors.
-    let (surface, control, set_control, repaint) = unsafe {
+}
+
+/// Run one press of the trim cycle on the surface the app last used.
+///
+/// # Safety
+///
+/// Called on the UI thread, with the hook installed.
+pub unsafe extern "C" fn minimod_autotrim_cycle() {
+    // SAFETY: only the UI thread writes these.
+    let (surface, control, set_control) = unsafe {
         (
-            minimod_glue_surface(),
-            minimod_glue_control_context(),
-            minimod_glue_set_control(),
-            minimod_glue_repaint_address(),
+            *core::ptr::addr_of!(SURFACE),
+            *core::ptr::addr_of!(CONTROL),
+            *core::ptr::addr_of!(ORIGINAL_SET),
         )
     };
     let context = Context {
@@ -291,15 +321,12 @@ pub unsafe extern "C" fn minimod_autotrim_cycle() {
         step: crate::ui::trim_step(),
         last_pad: crate::input::last_pad(),
     };
-    // SAFETY: the addresses are the app's own functions of these shapes.
-    let hooks = unsafe {
-        Hooks {
-            set_control: core::mem::transmute_copy(&set_control),
-            repaint: core::mem::transmute_copy(&repaint),
-        }
+    let hooks = Hooks {
+        set_control,
+        repaint: crate::glue::original_repaint(),
     };
     // SAFETY: the context and hooks are the app's own.
-    unsafe { minimod_autotrim_run(core::ptr::from_ref(&context), core::ptr::from_ref(&hooks)) };
+    unsafe { run(context, hooks) };
 }
 
 #[cfg(test)]

@@ -389,40 +389,6 @@ fn flush_icache(start: usize, end: usize) {
 #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
 fn flush_icache(_start: usize, _end: usize) {}
 
-/// The first four instructions of the MIDI dispatcher in firmware 1.3.0.12:
-/// `bti`, `sub sp`, `stp`, `str`.  Installing the note hook on anything else
-/// would rewrite a dispatcher we do not understand.
-pub const MIDI_DISPATCHER_PROLOGUE: [u8; 16] = [
-    0x3f, 0x23, 0x03, 0xd5, 0xff, 0x03, 0x03, 0xd1, 0xfd, 0x7b, 0x06, 0xa9, 0xfd, 0x83, 0x01, 0x91,
-];
-
-/// Whether the bytes at `base + offset` are exactly `want`.
-///
-/// A hook site is only safe to patch when the code there is the code we
-/// reverse-engineered; this is the check that turns a build mismatch into a
-/// refusal instead of a crash.
-#[must_use]
-pub fn site_matches(base: usize, offset: usize, want: &[u8]) -> bool {
-    let mut got = [0_u8; 32];
-    let Some(slice) = got.get_mut(..want.len()) else {
-        return false;
-    };
-    firmware::read(base + offset, slice) && slice == want
-}
-
-/// The native MIDI note-event dispatcher, as an offset from the image base.
-pub const MIDI_DISPATCHER: usize = 0x211_b090;
-
-/// Whether the MIDI dispatcher prologue is where this firmware should have it.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_midi_site_ok(base: usize) -> i32 {
-    i32::from(site_matches(
-        base,
-        MIDI_DISPATCHER,
-        &MIDI_DISPATCHER_PROLOGUE,
-    ))
-}
-
 /// The hook engine for the loaded app, created on first use.
 static ENGINE: std::sync::OnceLock<std::sync::Mutex<HookEngine>> = std::sync::OnceLock::new();
 
@@ -433,7 +399,6 @@ static ENGINE: std::sync::OnceLock<std::sync::Mutex<HookEngine>> = std::sync::On
 ///
 /// `site` must be an executable address inside the image at `base` and `hook`
 /// must be a function with the same ABI as the hooked one.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_install_hook(base: usize, site: usize, hook: usize) -> *mut u8 {
     if base == 0 || site <= base {
         return core::ptr::null_mut();
@@ -454,7 +419,6 @@ pub unsafe extern "C" fn minimod_install_hook(base: usize, site: usize, hook: us
 }
 
 /// Whether at least one hook was installed.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_hooks_touched() -> i32 {
     match ENGINE.get() {
         Some(engine) => match engine.lock() {
@@ -466,7 +430,6 @@ pub extern "C" fn minimod_hooks_touched() -> i32 {
 }
 
 /// Mark the hook pages executable once every hook is in place.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_seal_hooks() {
     if let Some(engine) = ENGINE.get()
         && let Ok(engine) = engine.lock()
@@ -536,16 +499,5 @@ mod tests {
         );
         // The second word is a literal load: only the first one moves.
         assert_eq!(displaced_words(&[0xd503_233f, 0x1800_0020, 0, 0]), 1);
-    }
-    #[test]
-    fn the_midi_prologue_is_the_documented_one() {
-        assert_eq!(super::MIDI_DISPATCHER_PROLOGUE[0], 0x3f, "bti");
-        assert_eq!(super::MIDI_DISPATCHER_PROLOGUE.len(), 16);
-    }
-
-    #[test]
-    fn a_site_that_cannot_be_read_is_not_a_match() {
-        assert!(!super::site_matches(0, 0, &[0_u8; 4]));
-        assert!(!super::site_matches(0, 0, &[0_u8; 64]));
     }
 }

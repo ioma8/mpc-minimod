@@ -27,38 +27,6 @@ static mut ORIGINAL_STR_ASSIGN: StrAssign = None;
 /// Where the page stores the soft key's label.
 static mut FILTER_DEST: usize = 0;
 
-/// Record the displaced hooks, for the glue.
-///
-/// # Safety
-///
-/// The constructor calls this once, before any of them can run.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_entries_originals(
-    ctor: SixteenCtor,
-    proc: SixteenProc,
-    pitch: PitchOff,
-    repaint: Repaint,
-    assign: StrAssign,
-    writer: Option<crate::substitute::Writer>,
-) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        ORIGINAL_CTOR = ctor;
-        ORIGINAL_PROC = proc;
-        ORIGINAL_PITCH = pitch;
-        ORIGINAL_REPAINT = repaint;
-        ORIGINAL_STR_ASSIGN = assign;
-        ORIGINAL_WRITER = writer;
-    }
-}
-
-/// The screen the 16 Levels view last created, for the glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_sixteen_screen() -> usize {
-    // SAFETY: only the UI thread writes it.
-    unsafe { SIXTEEN }
-}
-
 /// The 16 Levels view that was last created.
 static mut SIXTEEN: usize = 0;
 
@@ -67,7 +35,6 @@ static mut SIXTEEN: usize = 0;
 /// # Safety
 ///
 /// The app calls this with its own arguments.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_sixteen_ctor(
     a: usize,
     b: usize,
@@ -90,7 +57,6 @@ pub unsafe extern "C" fn minimod_hook_sixteen_ctor(
 /// # Safety
 ///
 /// The app calls this with its own arguments.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_sixteen_proc(self_address: usize, index: i32, out: usize) {
     // SAFETY: the original is the app's own handler.
     if let Some(original) = unsafe { *core::ptr::addr_of!(ORIGINAL_PROC) } {
@@ -104,7 +70,6 @@ pub unsafe extern "C" fn minimod_hook_sixteen_proc(self_address: usize, index: i
 /// # Safety
 ///
 /// The app calls this with its own arguments.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_pitch_off(a0: usize, a1: u64, a2: u64, a3: i32) {
     // SAFETY: the shape of the app's own call.
     unsafe {
@@ -124,7 +89,6 @@ pub unsafe extern "C" fn minimod_hook_pitch_off(a0: usize, a1: u64, a2: u64, a3:
 /// # Safety
 ///
 /// The app calls this with its own arguments.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_repaint(component: usize, a: u64, b: u64) {
     // SAFETY: the original is the app's own repaint.
     if let Some(original) = unsafe { *core::ptr::addr_of!(ORIGINAL_REPAINT) } {
@@ -139,7 +103,6 @@ pub unsafe extern "C" fn minimod_hook_repaint(component: usize, a: u64, b: u64) 
 /// # Safety
 ///
 /// `text` must be a NUL-terminated string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_str_assign(dest: usize, text: *const u8) {
     let mut label = text;
     if !label.is_null() {
@@ -165,19 +128,11 @@ pub unsafe extern "C" fn minimod_hook_str_assign(dest: usize, text: *const u8) {
 /// # Safety
 ///
 /// The app calls this with its own arguments.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_hpss_writer(closure: usize, block: *mut u8) {
     // SAFETY: the original is the app's own writer.
     let original = unsafe { *core::ptr::addr_of!(ORIGINAL_WRITER) };
     // SAFETY: the caller passed the app's arguments.
     unsafe { crate::substitute::minimod_substitute(closure, block, original) };
-}
-
-/// Where the soft key's label is stored, for the glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_filter_dest() -> usize {
-    // SAFETY: only the UI thread writes it.
-    unsafe { FILTER_DEST }
 }
 
 macro_rules! record {
@@ -187,7 +142,6 @@ macro_rules! record {
         /// # Safety
         ///
         /// Called once, before the hook can run.
-        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(original: usize) {
             // SAFETY: the caller names the shape the site has.
             unsafe { $slot = crate::input::from_address::<$ty>(original) };
@@ -225,7 +179,6 @@ record!(
 /// # Safety
 ///
 /// Called once, before the hook can run.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_writer_original(original: usize) {
     // SAFETY: the caller names the shape the site has.
     unsafe { ORIGINAL_WRITER = crate::input::from_address(original) };

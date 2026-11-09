@@ -57,7 +57,7 @@ path; a separate firmware branch in the renderer remains unhooked.
 cd mod
 ./build.sh
 ./pack.sh
-python3 tests/wav_edges.py
+(cd ../rust && ./check.sh)   # host tests, including the trim edge scan
 ```
 
 The emulator AutoTrim scenario is `python3 mod/tests/emulator_autotrim.py`

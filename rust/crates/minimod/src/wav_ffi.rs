@@ -1,4 +1,4 @@
-//! C ABI of the WAV helpers.
+//! Entry points for the WAV helpers, with the C calling convention the hook tables and callbacks use.
 //!
 //! The glue calls these by their pre-port names and signatures, so moving the
 //! parsing into Rust did not change a single call site.
@@ -42,38 +42,11 @@ fn to_malloc<T: Copy>(values: &[T]) -> *mut T {
     buffer
 }
 
-/// One sample, scaled to the 16-bit range the trim logic compares against.
-///
-/// # Safety
-///
-/// `bytes` must be readable for `width` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pcm_at(bytes: *const u8, width: u32, format: u32) -> i32 {
-    if bytes.is_null() {
-        return 0;
-    }
-    let Ok(width) = u16::try_from(width) else {
-        return 0;
-    };
-    if width == 0 || width > 8 {
-        return 0;
-    }
-    let encoding = if format == 3 {
-        Encoding::Float
-    } else {
-        Encoding::Pcm
-    };
-    // SAFETY: the caller promises `bytes` is readable for `width` bytes.
-    let slice = unsafe { core::slice::from_raw_parts(bytes, usize::from(width)) };
-    wav::scaled_sample(slice, width, encoding)
-}
-
 /// Read a WAV header.
 ///
 /// # Safety
 ///
 /// `path` must be a NUL-terminated string; every out-pointer may be null.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wav_info(
     path: *const c_char,
     frames: *mut u32,
@@ -117,61 +90,12 @@ pub unsafe extern "C" fn wav_info(
     1
 }
 
-/// Decode a WAV file into an interleaved f32 buffer the caller `free`s.
-///
-/// # Safety
-///
-/// `path` must be a NUL-terminated string; `out` and the optional outputs must
-/// be writable or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn wav_read_f32(
-    path: *const c_char,
-    want_frames: u32,
-    want_channel_count: u32,
-    want_rate: u32,
-    out: *mut *mut f32,
-    got_channels: *mut u32,
-    got_rate: *mut u32,
-) -> i32 {
-    if out.is_null() {
-        return 0;
-    }
-    // SAFETY: the caller promised `out` is writable.
-    unsafe { *out = ptr::null_mut() };
-    // SAFETY: see the function contract.
-    let Some(path) = (unsafe { c_path(path) }) else {
-        return 0;
-    };
-    let Ok(channels) = u16::try_from(want_channel_count) else {
-        return 0;
-    };
-    let Some(samples) = wav::read_f32(path, want_frames, channels, want_rate) else {
-        return 0;
-    };
-    let buffer = to_malloc(&samples);
-    if buffer.is_null() {
-        return 0;
-    }
-    // SAFETY: the caller promises the optional outputs are writable.
-    unsafe {
-        *out = buffer;
-        if !got_channels.is_null() {
-            *got_channels = u32::from(channels);
-        }
-        if !got_rate.is_null() {
-            *got_rate = want_rate;
-        }
-    }
-    1
-}
-
 /// Copy the `data` chunk of a WAV so it can be put back after the firmware
 /// rewrote it.
 ///
 /// # Safety
 ///
 /// `path` must be a NUL-terminated string; the outputs must be writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn bass_source_backup(
     path: *const c_char,
     data_offset: *mut i64,
@@ -212,7 +136,7 @@ pub unsafe extern "C" fn bass_source_backup(
 ///
 /// `path` must be a NUL-terminated string and `data` readable for `data_size`
 /// bytes.
-#[unsafe(no_mangle)]
+#[must_use]
 pub unsafe extern "C" fn bass_source_restore(
     path: *const c_char,
     data_offset: i64,
@@ -239,7 +163,6 @@ pub unsafe extern "C" fn bass_source_restore(
 /// # Safety
 ///
 /// `path` must be a NUL-terminated string; `first` and `last` must be writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wav_edges(
     path: *const c_char,
     frames: u32,

@@ -64,8 +64,18 @@ def main():
     expected_pairs = list(zip(expected, expected[1:] + [62259]))
     for boot in range(args.boots):
         ssh('systemctl restart ac50')
+        # The app needs about half a minute to come up; wait for it to map the mod.
+        deadline = time.monotonic() + 90
+        while True:
+            time.sleep(3)
+            try:
+                pid = int(ssh('pidof "MPC Sample"'))
+                if ssh(f'grep -c {args.library.name} /proc/{pid}/maps').strip() != b'0':
+                    break
+            except subprocess.CalledProcessError:
+                pass
+            assert time.monotonic() < deadline, 'App did not come back after restart'
         time.sleep(5)
-        pid = int(ssh('pidof "MPC Sample"'))
         baseline_restarts = ssh('systemctl show ac50 -p NRestarts')
         maps = ssh(f'cat /proc/{pid}/maps').decode().splitlines()
         mapping = next(x for x in maps if x.endswith('/' + args.library.name))
@@ -100,6 +110,8 @@ def main():
                               struct.unpack_from('<Q', blob, 0x58)[0]))
             kind = struct.unpack('<i', memory(qword(screen + 0x168) + 0x9c, 4))[0]
             return sample, kind, pairs
+        tap('SAMPLE')
+        time.sleep(1.5)
         if chop_mode():
             tap('CHOP')
             time.sleep(.3)

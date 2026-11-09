@@ -22,22 +22,11 @@ pub fn pitch_offset(applied: i32, shift: i32) -> i32 {
     applied + SEMITONES_PER_STEP * shift
 }
 
-/// A human-readable name for the shift, for the toast.
-#[must_use]
-pub fn describe(shift: i32) -> String {
-    if shift == 0 {
-        "Pitch reset".to_string()
-    } else {
-        format!("Pitch {:+} semitones", shift * SEMITONES_PER_STEP)
-    }
-}
-
 /// The next shift, for the C glue: writes `out` and returns 1 when it changed.
 ///
 /// # Safety
 ///
 /// `out` must be writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_levels_shift(current: i32, delta: i32, out: *mut i32) -> i32 {
     if out.is_null() {
         return 0;
@@ -50,63 +39,14 @@ pub unsafe extern "C" fn minimod_levels_shift(current: i32, delta: i32, out: *mu
     1
 }
 
-/// The pitch offset to hand the app.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_levels_pitch_offset(applied: i32, shift: i32) -> i32 {
-    pitch_offset(applied, shift)
-}
-
-/// The 16 Levels constructor trampoline: `void *(*)(void *, void *, void *, void *)`.
-pub type Constructor = unsafe extern "C" fn(usize, usize, usize, usize) -> usize;
-/// The 16 Levels render trampoline: `void (*)(void *, int, void *)`.
-pub type Render = unsafe extern "C" fn(usize, i32, usize);
 /// The pitch-offset setter: `void (*)(void *, u64, u64, int)`.
 pub type PitchOffset = unsafe extern "C" fn(usize, u64, u64, i32);
-
-/// Call the app's 16 Levels constructor and return its result.
-///
-/// # Safety
-///
-/// `original` must be the constructor this hook displaced.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_sixteen_ctor(
-    original: Option<Constructor>,
-    first: usize,
-    second: usize,
-    third: usize,
-    fourth: usize,
-) -> usize {
-    match original {
-        // SAFETY: the caller guarantees this is the displaced constructor.
-        Some(constructor) => unsafe { constructor(first, second, third, fourth) },
-        None => 0,
-    }
-}
-
-/// Call the app's 16 Levels renderer.
-///
-/// # Safety
-///
-/// `original` must be the renderer this hook displaced.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_sixteen_proc(
-    original: Option<Render>,
-    screen: usize,
-    index: i32,
-    out: usize,
-) {
-    if let Some(render) = original {
-        // SAFETY: the caller guarantees this is the displaced renderer.
-        unsafe { render(screen, index, out) };
-    }
-}
 
 /// Call the app's pitch-offset setter with our octave shift applied.
 ///
 /// # Safety
 ///
 /// `original` must be the setter this hook displaced.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_pitch_off(
     original: Option<PitchOffset>,
     first: usize,
@@ -124,7 +64,7 @@ pub unsafe extern "C" fn minimod_pitch_off(
 /// Move the 16 Levels row by `steps` and say so.
 ///
 /// Returns 1 when the shift was applied.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_levels_bump(steps: i32) -> i32 {
     let mut next = 0;
     // SAFETY: the out pointer is this frame's.
@@ -145,7 +85,7 @@ pub extern "C" fn minimod_levels_bump(steps: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{SEMITONES_PER_STEP, STEP_LIMIT, describe, pitch_offset, shift};
+    use super::{SEMITONES_PER_STEP, STEP_LIMIT, pitch_offset, shift};
 
     #[test]
     fn the_shift_clamps_at_both_ends() {
@@ -163,12 +103,5 @@ mod tests {
         assert_eq!(pitch_offset(3, -2), 3 - 2 * SEMITONES_PER_STEP);
         assert_eq!(SEMITONES_PER_STEP, 8);
         assert_eq!(STEP_LIMIT, 4);
-    }
-
-    #[test]
-    fn the_toast_says_what_changed() {
-        assert_eq!(describe(0), "Pitch reset");
-        assert_eq!(describe(1), "Pitch +8 semitones");
-        assert_eq!(describe(-2), "Pitch -16 semitones");
     }
 }

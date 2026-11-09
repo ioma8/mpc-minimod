@@ -1,5 +1,10 @@
 # Code review — `mod/src/minimod.c`
 
+> **Historical.** Written while the mod was C. `mod/src/minimod.c` and the other C and C++ sources are
+> gone (see git history); the equivalent code is in `rust/crates/`, mapped in the "Final state" section of
+> [`RUST-PORT.md`](RUST-PORT.md). File, line and function references below point at the removed C, and build
+> commands that compile it no longer apply (`mod/build.sh` builds the Rust crate).
+
 > Historical review of the pre-native AutoTrim implementation. The native
 > control path replaced its property writes and trim-edge overlay, and later
 > changes addressed the release-hardening items listed here. Treat findings

@@ -1,4 +1,4 @@
-//! C ABI of the sample-path resolution.
+//! Entry points for the sample-path resolution, with the C calling convention the hook tables and callbacks use.
 
 use core::ptr;
 use std::os::raw::c_char;
@@ -29,7 +29,6 @@ fn copy_path(path: &Path, out: *mut c_char, size: usize) -> bool {
 /// # Safety
 ///
 /// `out` must be writable for `size` bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn path_from_object(
     sample: usize,
     want_frames: u32,
@@ -48,7 +47,6 @@ pub unsafe extern "C" fn path_from_object(
 /// # Safety
 ///
 /// `out` must be writable for `size` bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wav_path_of(
     object: usize,
     want_frames: u32,
@@ -62,37 +60,11 @@ pub unsafe extern "C" fn wav_path_of(
     }
 }
 
-/// The file that backs the selected sample: object path, graph scan, then the
-/// unique recording with the same geometry.
-///
-/// # Safety
-///
-/// `path` must be writable for `path_size` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hpss_path_for(
-    sample: usize,
-    frames: u32,
-    channels: u32,
-    rate: u32,
-    path: *mut c_char,
-    path_size: usize,
-) -> i32 {
-    let Ok(channels) = u16::try_from(channels) else {
-        return 0;
-    };
-    match paths::for_sample(sample, frames, channels, rate) {
-        // SAFETY: see the function contract.
-        Some(found) => i32::from(copy_path(&found, path, path_size)),
-        None => 0,
-    }
-}
-
 /// The newest WAV under the temp project with this frame count.
 ///
 /// # Safety
 ///
 /// `out` must be writable for `size` bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn find_wav_by_frames(
     want_frames: u32,
     out: *mut c_char,

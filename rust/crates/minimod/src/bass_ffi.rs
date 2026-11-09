@@ -1,4 +1,4 @@
-//! C ABI of the bass synth.
+//! Entry points for the bass synth, with the C calling convention the hook tables and callbacks use.
 
 use core::mem::size_of;
 
@@ -13,7 +13,6 @@ use minimod_dsp::bass::{self, PADS};
 /// # Safety
 ///
 /// `output` and `output_frames` must be writable pointers.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn bass_sample_render(
     rate: u32,
     harmonics: f32,
@@ -52,19 +51,16 @@ pub unsafe extern "C" fn bass_sample_render(
 }
 
 /// Turn the realtime preview on or off.
-#[unsafe(no_mangle)]
 pub extern "C" fn bass_preview_enable(enabled: i32) {
     bass::preview_enable(enabled != 0);
 }
 
 /// Set the three preview knobs, each 0..1.
-#[unsafe(no_mangle)]
 pub extern "C" fn bass_preview_set_params(brightness: f32, excite: f32, cutoff: f32) {
     bass::preview_set_params(brightness, excite, cutoff);
 }
 
 /// Strike one pad for the preview.
-#[unsafe(no_mangle)]
 pub extern "C" fn bass_preview_note(pad: u32, velocity: f32) {
     if let Ok(pad) = usize::try_from(pad)
         && pad < PADS
@@ -73,62 +69,26 @@ pub extern "C" fn bass_preview_note(pad: u32, velocity: f32) {
     }
 }
 
-/// Mix the preview into the device's output channels and return its peak.
-///
-/// # Safety
-///
-/// Every non-null entry of `channels` must be writable for `frames` samples.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bass_preview_mix(
-    channels: *mut *mut f32,
-    frames: usize,
-    channel_count: u32,
-    rate: u32,
-) -> f32 {
-    if channels.is_null() || frames == 0 || channel_count == 0 {
-        return 0.0;
-    }
-    let count = usize::try_from(channel_count).unwrap_or(0);
-    // SAFETY: the caller guarantees each channel pointer is writable.
-    unsafe {
-        let first = *channels;
-        if first.is_null() {
-            return 0.0;
-        }
-        if count == 1 {
-            return bass::preview_mix(&mut [first], frames, rate);
-        }
-        let second = *channels.add(1);
-        if second.is_null() {
-            return bass::preview_mix(&mut [first], frames, rate);
-        }
-        bass::preview_mix(&mut [first, second], frames, rate)
-    }
-}
-
 /// Whether the bass preview can run: the note and audio hooks are installed.
-#[unsafe(no_mangle)]
-pub static mut g_bass_preview_available: i32 = 0;
+pub static mut G_BASS_PREVIEW_AVAILABLE: i32 = 0;
 
 /// How many notes the preview has replayed.
-#[unsafe(no_mangle)]
-pub static mut g_bass_preview_notes: u32 = 0;
+pub static mut G_BASS_PREVIEW_NOTES: u32 = 0;
 
 /// Turn the bass preview on or off, resetting its counters when it starts.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_bass_preview_set_active(active: i32) {
     // SAFETY: only the UI thread writes the flag.
-    let available = unsafe { g_bass_preview_available } != 0;
+    let available = unsafe { G_BASS_PREVIEW_AVAILABLE } != 0;
     let active = i32::from(active != 0 && available);
     if active != 0 {
         // SAFETY: the counters are this module's.
         unsafe {
-            g_bass_preview_notes = 0;
-            crate::audio::g_bass_preview_blocks = 0;
-            crate::audio::g_bass_preview_peak_bits = 0;
+            G_BASS_PREVIEW_NOTES = 0;
+            crate::audio::G_BASS_PREVIEW_BLOCKS = 0;
+            crate::audio::G_BASS_PREVIEW_PEAK_BITS = 0;
         }
     }
     // SAFETY: the flag is this module's.
-    unsafe { crate::audio::g_bass_preview_active = active };
+    unsafe { crate::audio::G_BASS_PREVIEW_ACTIVE = active };
     bass_preview_enable(active);
 }

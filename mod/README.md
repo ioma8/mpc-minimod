@@ -177,7 +177,7 @@ The earlier overlay investigation is in [`docs/AM-MOD-NOTES.md`](../docs/AM-MOD-
 ## Build
 
 ```sh
-./build.sh     # build/minimod.so  (zig cc -target aarch64-linux-gnu, -O2)
+./build.sh     # build/minimod.so  (the Rust cdylib, cross-linked with zig cc; no C is compiled)
 ./pack.sh      # build/minimod.zip (autorun package with a valid autorun.check)
 ```
 

@@ -62,7 +62,6 @@ pub struct Job {
 /// # Safety
 ///
 /// `job` must be a live job with its input filled in, run by one thread.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_job_run(job: *mut Job, knobs: *const f32, app_base: usize) -> i32 {
     if job.is_null() {
         return -1;
@@ -132,7 +131,6 @@ pub unsafe extern "C" fn minimod_job_run(job: *mut Job, knobs: *const f32, app_b
 /// # Safety
 ///
 /// `job` must have come from the glue's allocation and not be used afterwards.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_job_free(job: *mut Job) {
     if job.is_null() {
         return;

@@ -138,8 +138,6 @@ pub unsafe fn press(state: &mut State, event: usize, hooks: Hooks, data_down: &m
         down,
         held: Held {
             shift: state.shift != 0,
-            erase: state.erase != 0,
-            data: *data_down != 0,
         },
         octave: OctaveKeys {
             plus: state.plus_held != 0,
@@ -148,13 +146,11 @@ pub unsafe fn press(state: &mut State, event: usize, hooks: Hooks, data_down: &m
         screens: Screens {
             modals: Modals {
                 menu: ask(hooks.menu_open_state) != 0,
-                bass_edit: ask(hooks.bass_edit_state) != 0,
                 spectral: ask(hooks.spectral_state) != 0,
             },
             looper: looper_ffi::looper_is_open() != 0,
             levels: levels != 0,
         },
-        busy: ask(hooks.busy_state) != 0,
         page_visible: ask(hooks.page_visible) != 0,
     };
     let action = buttons::dispatch(context);
@@ -164,7 +160,7 @@ pub unsafe fn press(state: &mut State, event: usize, hooks: Hooks, data_down: &m
             Action::Erase(on) => state.erase = i32::from(on),
             Action::Looper => {
                 let was = looper_ffi::looper_is_open() != 0;
-                looper_ffi::looper_button(
+                let _ = looper_ffi::looper_button(
                     code,
                     i32::try_from(down).unwrap_or(0),
                     state.shift,
@@ -216,7 +212,7 @@ const fn kind(action: Action) -> i32 {
         Action::Consume => 1,
         Action::Shift(_) => 2,
         Action::Erase(_) => 3,
-        Action::Looper | Action::LooperClosed => 4,
+        Action::Looper => 4,
         Action::MenuOpen => 5,
         Action::MenuClose => 6,
         Action::MenuActivate => 7,
@@ -225,9 +221,6 @@ const fn kind(action: Action) -> i32 {
         Action::ToggleLevels => 10,
         Action::MenuEncoder => 11,
         Action::ResetPitch => 12,
-        Action::RenameKey(_) => 13,
-        Action::TrimCycleReset => 14,
-        Action::RestoreChop => 15,
     }
 }
 
@@ -331,12 +324,7 @@ unsafe fn apply(state: &mut State, event: Event<'_>) {
             }
             forward(address, hooks);
         }
-        Action::Erase(_)
-        | Action::Looper
-        | Action::LooperClosed
-        | Action::RestoreChop
-        | Action::TrimCycleReset
-        | Action::RenameKey(_) => {}
+        Action::Erase(_) | Action::Looper => {}
     }
 }
 
@@ -443,6 +431,13 @@ pub fn shift() -> i32 {
     unsafe { (*core::ptr::addr_of!(STATE)).shift }
 }
 
+/// Whether ERASE is held.
+#[must_use]
+pub fn erase() -> i32 {
+    // SAFETY: only the UI thread writes it.
+    unsafe { (*core::ptr::addr_of!(STATE)).erase }
+}
+
 /// The state itself.
 static mut STATE: State = State::new();
 
@@ -450,7 +445,6 @@ static mut STATE: State = State::new();
 static mut DATA_DOWN: i32 = 0;
 
 /// The UI state, for the glue.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_ui_state() -> *mut State {
     core::ptr::addr_of_mut!(STATE)
 }
@@ -461,7 +455,6 @@ pub extern "C" fn minimod_ui_state() -> *mut State {
 ///
 /// The app calls this with its own event object, and `hooks` must be the glue's
 /// callbacks.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_buttons(event: usize, hooks: *const Hooks) -> i32 {
     if hooks.is_null() {
         return -1;
@@ -501,19 +494,11 @@ static mut CHOP_BEFORE: i32 = 0;
 /// # Safety
 ///
 /// Called once at install, before any button arrives.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_buttons_original(original: usize) {
     // SAFETY: the caller's contract.
     unsafe {
         ORIGINAL_BUTTONS = crate::input::from_address(original);
     }
-}
-
-/// Remember the chop mode before an extraction.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_set_chop_before(mode: i32) {
-    // SAFETY: only the UI thread writes it.
-    unsafe { CHOP_BEFORE = mode };
 }
 
 /// The chop mode before the last extraction.
@@ -528,7 +513,6 @@ pub fn chop_before() -> i32 {
 /// # Safety
 ///
 /// Reads the app's page objects.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_restore_chop() {
     let visible = page::minimod_page_visible(firmware::base(), paint::screen());
     // SAFETY: the state is this module's.
@@ -568,7 +552,6 @@ pub unsafe extern "C" fn minimod_restore_chop() {
 /// # Safety
 ///
 /// The app's own repaint is used.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_repaint_screen() {
     let painted = crate::audio::painted();
     let component = if painted != 0 {
@@ -586,13 +569,13 @@ pub unsafe extern "C" fn minimod_repaint_screen() {
 }
 
 /// Whether the Sample page is showing.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_screen_visible() -> i32 {
     page::minimod_page_visible(firmware::base(), paint::screen())
 }
 
 /// Whether the page is in chop mode.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_screen_chop_mode() -> i32 {
     page::minimod_page_chop_mode(firmware::base(), paint::screen())
 }
@@ -602,7 +585,6 @@ pub extern "C" fn minimod_screen_chop_mode() -> i32 {
 /// # Safety
 ///
 /// `event` is the page's own event.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_ui_forward(event: usize) {
     // SAFETY: the pointer is the app's.
     if let Some(original) = original_buttons() {
@@ -615,17 +597,16 @@ pub unsafe extern "C" fn minimod_ui_forward(event: usize) {
 /// # Safety
 ///
 /// The app's own repaint is used.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_ui_clear_marks() {
     // SAFETY: the app's own repaint.
     unsafe { minimod_repaint_screen() };
 }
 
 /// Whether a spectral chop is running.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_ui_spectral_state() -> i32 {
     // SAFETY: the record is the spectral module's.
-    i32::from(unsafe { crate::spectral::g_spectral.active } == 1)
+    i32::from(unsafe { crate::spectral::G_SPECTRAL.active } == 1)
 }
 
 /// The button hooks, all in Rust.
@@ -633,7 +614,6 @@ pub extern "C" fn minimod_ui_spectral_state() -> i32 {
 /// # Safety
 ///
 /// Every entry is a crate function of the right shape.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_ui_hooks_self() -> Hooks {
     Hooks {
         forward: Some(minimod_ui_forward),
@@ -664,7 +644,6 @@ pub unsafe extern "C" fn minimod_ui_hooks_self() -> Hooks {
 /// # Safety
 ///
 /// `event` is the page's own event.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_ui_buttons(event: usize) {
     // SAFETY: the table is the crate's and the event the app's.
     unsafe {

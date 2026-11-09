@@ -130,7 +130,6 @@ pub type Writer = unsafe extern "C" fn(usize, usize);
 /// # Safety
 ///
 /// `block` must be the app's block descriptor and `writer` its original writer.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_substitute(
     closure: usize,
     block: *mut u8,
@@ -150,46 +149,6 @@ pub fn position() -> usize {
 #[must_use]
 pub fn total_frames() -> usize {
     FRAMES.load(Ordering::Acquire)
-}
-
-/// The writer's progress, for the C glue: consumed and total frames.
-///
-/// # Safety
-///
-/// `consumed` and `total` must be writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_substitute_progress(consumed: *mut usize, total: *mut usize) {
-    if consumed.is_null() || total.is_null() {
-        return;
-    }
-    // SAFETY: the caller promises both pointers are writable.
-    unsafe {
-        *consumed = position();
-        *total = total_frames();
-    }
-}
-
-/// Whether a substitution is running, for the C glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_substitute_active() -> i32 {
-    i32::from(active())
-}
-
-/// Start substituting a rendered buffer.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_substitute_arm(
-    buffer: usize,
-    frames: usize,
-    source_frames: usize,
-    channels: usize,
-) {
-    arm(buffer, frames, source_frames, channels);
-}
-
-/// Stop substituting.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_substitute_clear() {
-    clear();
 }
 
 #[cfg(test)]

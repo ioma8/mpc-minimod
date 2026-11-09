@@ -1,5 +1,10 @@
 # Native AutoTrim branch findings
 
+> **Historical.** Written while the mod was C. `mod/src/minimod.c` and the other C and C++ sources are
+> gone (see git history); the equivalent code is in `rust/crates/`, mapped in the "Final state" section of
+> [`RUST-PORT.md`](RUST-PORT.md). File, line and function references below point at the removed C, and build
+> commands that compile it no longer apply (`mod/build.sh` builds the Rust crate).
+
 The previous native replay supplied a null command context and normalized fractions.
 Real knob calls supply a live dispatcher context and frame positions. The integer
 argument formerly called mode is the pad index. Ghidra's FUN_02968450 resolves it
@@ -48,7 +53,7 @@ Verified in the emulator after this fix:
 - A07: 81..60816 of 90197 frames (0.666 seconds removed from the tail).
 - A09: 76..83103 of 98280 frames (0.344 seconds removed from the tail).
 
-`python3 mod/tests/wav_edges.py` compiles the production helpers and checks
+The `trim` and `wav` host tests (`cd rust && cargo test`) check
 matching boundaries for PCM16, PCM24, PCM32, and IEEE float32 fixtures with
 low-level noise, including a negative full-scale sample.
 

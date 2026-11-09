@@ -1,4 +1,4 @@
-//! C ABI of the firmware effects.
+//! Entry points for the firmware effects, with the C calling convention the hook tables and callbacks use.
 
 use core::mem::size_of;
 
@@ -15,7 +15,6 @@ use crate::firmware::Firmware;
 ///
 /// `input` must be readable for `frames * channels` floats; `output` and
 /// `output_frames` must be writable pointers.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn h3m_effect_render(
     app_base: usize,
     kind: i32,

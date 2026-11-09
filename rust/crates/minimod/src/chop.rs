@@ -86,56 +86,6 @@ pub fn verify(sample: usize, positions: &[u32], frames: u32) -> bool {
     true
 }
 
-/// The slice count of a sample, with the two pointers the app's Insert/Reset
-/// calls need.  Returns 0 when the sample is not chopped.
-///
-/// # Safety
-///
-/// `begin` and `continuation` must be writable or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_slice_count(
-    sample: usize,
-    begin: *mut usize,
-    continuation: *mut usize,
-) -> u32 {
-    let Some(slices) = slice_count(sample) else {
-        return 0;
-    };
-    // SAFETY: the caller promises both pointers are writable or null.
-    unsafe {
-        if !begin.is_null() {
-            *begin = slices.begin;
-        }
-        if !continuation.is_null() {
-            *continuation = slices.continuation;
-        }
-    }
-    slices.count
-}
-
-/// Whether the app's slices match `positions`, with the last ending at `frames`.
-///
-/// # Safety
-///
-/// `positions` must be readable for `count` entries.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_spectral_verify(
-    sample: usize,
-    positions: *const u32,
-    count: u32,
-    frames: u32,
-) -> i32 {
-    if positions.is_null() {
-        return 0;
-    }
-    let Ok(count) = usize::try_from(count) else {
-        return 0;
-    };
-    // SAFETY: the caller promises `positions` is readable for `count` entries.
-    let positions = unsafe { core::slice::from_raw_parts(positions, count) };
-    i32::from(verify(sample, positions, frames))
-}
-
 /// The app's slice Reset.
 const SLICE_RESET: usize = 0x295_0aa0;
 /// The app's slice Insert.
@@ -199,31 +149,6 @@ pub fn write_markers(
         );
     }
     verify(sample, positions, frames)
-}
-
-/// Write the boundaries through the app and verify them, for the C glue.
-///
-/// # Safety
-///
-/// `positions` must be readable for `count` entries.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_spectral_write_markers(
-    base: usize,
-    sample: usize,
-    positions: *const u32,
-    count: u32,
-    frames: u32,
-    screen: usize,
-) -> i32 {
-    if positions.is_null() {
-        return 0;
-    }
-    let Ok(count) = usize::try_from(count) else {
-        return 0;
-    };
-    // SAFETY: the caller promises `positions` is readable for `count` entries.
-    let positions = unsafe { core::slice::from_raw_parts(positions, count) };
-    i32::from(write_markers(base, sample, positions, frames, screen))
 }
 
 /// The view's cached chop mode callback, used when the binding is already torn
@@ -295,12 +220,6 @@ pub fn set_manual(base: usize, screen: usize) -> bool {
         }
     }
     true
-}
-
-/// Put the page's chop mode back to Manual, for the C glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_spectral_manual(base: usize, screen: usize) -> i32 {
-    i32::from(set_manual(base, screen))
 }
 
 #[cfg(test)]

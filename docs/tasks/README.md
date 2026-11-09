@@ -29,6 +29,6 @@ Shared anchors (file VAs; runtime = `base + addr`):
 | control dispatch `(ctx, surface, pad, controlId, value)` | `0x1968020` |
 | repaint `(comp, x, y)` | `0x1149880` |
 | paint hook | `SampleModeScreen` vtable `0x6e212a0`, slot 27 |
-| toast | existing `toast()` helper in `mod/src/minimod.c` |
+| toast | `paint::show_toast` in `rust/crates/minimod/src/paint.rs` |
 
 Status of every task: **not started.**

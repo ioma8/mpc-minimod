@@ -168,7 +168,7 @@ pub struct RawRoute {
 }
 
 /// Decide what to do, for the C glue.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_cc_route(
     replaying: i32,
     control: u32,

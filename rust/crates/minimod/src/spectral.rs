@@ -239,7 +239,6 @@ unsafe fn error_text(error: *const u8) -> String {
 /// # Safety
 ///
 /// `state` must be live and `event` readable for `length` bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_spectral_start(
     state: *mut State,
     event: *const u8,
@@ -262,7 +261,6 @@ pub unsafe extern "C" fn minimod_spectral_start(
 /// # Safety
 ///
 /// `state` and `menu_state` must be live and `hooks` readable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_spectral_tick(
     state: *mut State,
     menu_state: *mut core::ffi::c_void,
@@ -280,23 +278,8 @@ pub unsafe extern "C" fn minimod_spectral_tick(
     unsafe { tick(state, menu_state, base, screen, hooks) };
 }
 
-/// Whether a run is in flight, for the C glue.
-///
-/// # Safety
-///
-/// `state` must be live.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_spectral_active(state: *const State) -> i32 {
-    if state.is_null() {
-        return 0;
-    }
-    // SAFETY: the caller's contract.
-    unsafe { (*state).active }
-}
-
 /// The run in flight.  It keeps its name because the glue reads it.
-#[unsafe(no_mangle)]
-pub static mut g_spectral: State = State {
+pub static mut G_SPECTRAL: State = State {
     active: 0,
     phase: 0,
     slices: 0,
@@ -315,14 +298,13 @@ pub static mut g_spectral: State = State {
 /// # Safety
 ///
 /// The app's own dispatch is used.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_spectral_key_press() {
     // SAFETY: the event is this module's and the dispatch the app's.
     unsafe {
         let Some(original) = crate::ui::original_buttons() else {
             return;
         };
-        let mut event = (*core::ptr::addr_of!(g_spectral)).event;
+        let mut event = (*core::ptr::addr_of!(G_SPECTRAL)).event;
         event[8] = 0x4b;
         event[9] = 0x7f;
         original(event.as_ptr() as usize);
@@ -336,7 +318,6 @@ pub unsafe extern "C" fn minimod_spectral_key_press() {
 /// # Safety
 ///
 /// The app's own calls are used.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_spectral_frame(base: usize, screen: usize) {
     let hooks = Hooks {
         press_chop: Some(minimod_spectral_key_press),
@@ -346,7 +327,7 @@ pub unsafe extern "C" fn minimod_spectral_frame(base: usize, screen: usize) {
     // SAFETY: the state and the menu are the crate's own, and the hooks are above.
     unsafe {
         minimod_spectral_tick(
-            core::ptr::addr_of_mut!(g_spectral),
+            core::ptr::addr_of_mut!(G_SPECTRAL),
             core::ptr::addr_of_mut!(menu::g_menu).cast::<core::ffi::c_void>(),
             base,
             screen,
@@ -370,13 +351,12 @@ unsafe extern "C" fn minimod_status_c(text: *const u8) {
 /// # Safety
 ///
 /// Reads the crate's own state.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_spectral_run_start(busy: i32) -> i32 {
     let event = crate::ui::event_copy();
     // SAFETY: the record is this module's.
     unsafe {
         minimod_spectral_start(
-            core::ptr::addr_of_mut!(g_spectral),
+            core::ptr::addr_of_mut!(G_SPECTRAL),
             event.as_ptr(),
             i32::try_from(event.len()).unwrap_or(0),
             busy,

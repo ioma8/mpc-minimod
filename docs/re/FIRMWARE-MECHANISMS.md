@@ -1,5 +1,10 @@
 # MPC Sample 1.3.0.12 — firmware mechanisms we found
 
+> **Historical.** Written while the mod was C. `mod/src/minimod.c` and the other C and C++ sources are
+> gone (see git history); the equivalent code is in `rust/crates/`, mapped in the "Final state" section of
+> [`RUST-PORT.md`](../RUST-PORT.md). File, line and function references below point at the removed C, and build
+> commands that compile it no longer apply (`mod/build.sh` builds the Rust crate).
+
 A catalogue of the internal mechanisms this project reverse-engineered, how each
 was established, and where the deeper write-ups are. It is a reference, not a
 walkthrough.

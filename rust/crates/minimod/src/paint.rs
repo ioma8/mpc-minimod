@@ -101,7 +101,6 @@ pub type Repaint = unsafe extern "C" fn(usize, u64, u64);
 /// # Safety
 ///
 /// `repaint` must be the app's repaint and `component` a live component.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_toast(
     line: *const u8,
     repaint: Option<Repaint>,
@@ -175,76 +174,10 @@ pub fn toast_visible(now: i64) -> bool {
     toast.until > now && toast.text[0] != 0
 }
 
-/// The toast's text, for the paint hook.
-///
-/// # Safety
-///
-/// The returned pointer is valid until the next toast.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_toast_text() -> *const u8 {
-    // SAFETY: only the UI thread reads this.
-    unsafe { (*core::ptr::addr_of!(TOAST)).text.as_ptr() }
-}
-
-/// Fill a rectangle, for the C glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_paint_colour(graphics: usize, value: u32) {
-    colour(graphics, value);
-}
-
-/// Fill a rectangle, for the C glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_paint_rect(graphics: usize, x: i32, y: i32, width: i32, height: i32) {
-    rect(graphics, x, y, width, height);
-}
-
-/// Draw text, for the C glue.
-///
-/// # Safety
-///
-/// `line` must be a NUL-terminated string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_paint_text(
-    graphics: usize,
-    line: *const u8,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    size: f32,
-) {
-    if line.is_null() {
-        return;
-    }
-    // SAFETY: the caller promises a NUL-terminated string.
-    let bytes = unsafe { core::ffi::CStr::from_ptr(line.cast()) };
-    text(
-        graphics,
-        bytes.to_str().unwrap_or(""),
-        x,
-        y,
-        width,
-        height,
-        size,
-    );
-}
-
-/// Whether a toast is on screen, for the C glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_toast_visible(now: i64) -> i32 {
-    i32::from(toast_visible(now))
-}
-
 /// The Sample page the mod last painted.  It keeps its name because the device
 /// tests find the page through it.
 #[unsafe(no_mangle)]
 pub static mut g_screen: usize = 0;
-
-/// The screen slot, for the glue: it reads and writes the same object.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_screen_slot() -> *mut usize {
-    core::ptr::addr_of_mut!(g_screen)
-}
 
 /// The sample page the mod last painted, or zero.
 #[must_use]
@@ -261,14 +194,14 @@ pub fn screen() -> usize {
 unsafe extern "C" fn page_paint(component: usize, graphics: usize) {
     // SAFETY: the statics are this module's.
     unsafe {
-        crate::audio::g_paint_comp = component;
-        g_paint_gfx = graphics;
+        crate::audio::G_PAINT_COMP = component;
+        G_PAINT_GFX = graphics;
         crate::overlay::minimod_overlay_paint_self(component, graphics);
     }
 }
 
 /// Install the page's paint over the app's vtable slot.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_paint_install_self() -> i32 {
     // SAFETY: the base is the app's and the handler is this module's.
     if unsafe { crate::glue::minimod_paint_install(firmware::base(), page_paint as *const ()) } == 0
@@ -284,8 +217,7 @@ fn original_screen_paint() -> Option<unsafe extern "C" fn(usize, usize)> {
 }
 
 /// The graphics the page last painted with.
-#[unsafe(no_mangle)]
-pub static mut g_paint_gfx: usize = 0;
+pub static mut G_PAINT_GFX: usize = 0;
 
 #[cfg(test)]
 mod tests {

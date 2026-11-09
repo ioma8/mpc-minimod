@@ -12,49 +12,6 @@
 //! `/proc/self/mem` returns `EIO`, which silently breaks every read, so reads
 //! and writes open the file separately.
 
-/// First instruction of every site this build hooks, read from firmware
-/// 1.3.0.12.  If any of them does not match, nothing is installed: patching an
-/// offset in a different build would overwrite a random instruction.
-pub const KNOWN_BUILD_SITES: &[(usize, u32)] = &[
-    (0x00f5_35c0, 0xd503_233f),
-    (0x0114_9880, 0xd503_233f),
-    (0x013b_b930, 0xd503_233f),
-    (0x0140_dbc0, 0xd503_233f),
-    (0x0143_ed40, 0xd503_233f),
-    (0x0143_f0b0, 0xd503_233f),
-    (0x014a_7580, 0xd503_233f),
-    (0x0154_5a50, 0xd503_233f),
-    (0x0159_f230, 0x3940_2003),
-    (0x0159_f2f0, 0xd503_245f),
-    (0x015e_70c0, 0xd503_233f),
-    (0x016b_6060, 0xd503_245f),
-    (0x0192_d040, 0xd503_233f),
-    (0x0195_cf40, 0xd503_233f),
-    (0x0195_d1c0, 0xd503_233f),
-    (0x0196_0af0, 0xd503_233f),
-    (0x0196_0d50, 0xd503_233f),
-    (0x0196_8020, 0xd503_233f),
-    (0x01d8_aff0, 0xd503_233f),
-    (0x01e2_70d0, 0xd503_233f),
-    (0x01e2_7360, 0xd503_233f),
-    (0x020a_3b10, 0xd503_233f),
-    (0x020a_7140, 0xd503_233f),
-    (0x020a_9fa0, 0xd503_233f),
-    (0x020a_a9e0, 0xd503_233f),
-    (0x0211_b090, 0xd503_233f),
-    (0x0214_72f0, 0xd503_233f),
-    (0x023a_ff60, 0xd503_233f),
-    (0x027e_4400, 0xd503_233f),
-    (0x0280_4e90, 0xd503_233f),
-    (0x0280_dca0, 0xd503_233f),
-    (0x0281_00c0, 0xd503_233f),
-    (0x0281_2f10, 0xd503_245f),
-    (0x0281_4ec0, 0xd503_233f),
-    (0x0282_2260, 0xd503_233f),
-    (0x0294_1ff0, 0xd503_245f),
-    (0x03f3_98f0, 0xd503_233f),
-];
-
 /// Where the stock app is loaded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Firmware {
@@ -66,7 +23,6 @@ pub struct Firmware {
 static BASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Record the image base; the constructor calls this once.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_set_base(base: usize) {
     BASE.store(base, core::sync::atomic::Ordering::Release);
 }
@@ -104,92 +60,7 @@ impl Firmware {
     pub const fn addr(self, offset: usize) -> usize {
         self.base.wrapping_add(offset)
     }
-
-    /// Read the 32-bit word at `offset`.
-    #[must_use]
-    pub fn word(self, offset: usize) -> Option<u32> {
-        read_u32(self.addr(offset))
-    }
-
-    /// Read the 64-bit word at `offset`.
-    #[must_use]
-    pub fn qword(self, offset: usize) -> Option<u64> {
-        read_u64(self.addr(offset))
-    }
-
-    /// Read the pointer stored at `offset`; zero reads as `None`.
-    #[must_use]
-    pub fn pointer(self, offset: usize) -> Option<usize> {
-        self.qword(offset)
-            .filter(|value| *value != 0)
-            .map(|value| value as usize)
-    }
-
-    /// Write the 32-bit word at `offset`.
-    #[must_use]
-    pub fn set_word(self, offset: usize, value: u32) -> bool {
-        write(self.addr(offset), &value.to_le_bytes())
-    }
-
-    /// Check that every hooked site still holds the first instruction the
-    /// tested build has there.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first site that does not match, or that cannot be read.
-    pub fn check_known_build(self) -> Result<(), SiteMismatch> {
-        for &(offset, expected) in KNOWN_BUILD_SITES {
-            match self.word(offset) {
-                Some(word) if word == expected => {}
-                Some(found) => {
-                    return Err(SiteMismatch {
-                        offset,
-                        expected,
-                        found: Some(found),
-                    });
-                }
-                None => {
-                    return Err(SiteMismatch {
-                        offset,
-                        expected,
-                        found: None,
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
 }
-
-/// A hooked site whose first instruction is not the expected one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SiteMismatch {
-    /// Offset of the site in the image.
-    pub offset: usize,
-    /// The instruction the tested build has there.
-    pub expected: u32,
-    /// What is there now, or `None` when it could not be read.
-    pub found: Option<u32>,
-}
-
-impl core::fmt::Display for SiteMismatch {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self.found {
-            Some(found) => write!(
-                f,
-                "site {:#010x} holds {found:#010x}, expected {:#010x}",
-                self.offset, self.expected
-            ),
-            None => write!(
-                f,
-                "site {:#010x} is unreadable, expected {:#010x}",
-                self.offset, self.expected
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SiteMismatch {}
 
 /// Read exactly `out.len()` bytes of process memory.
 #[must_use]
@@ -538,27 +409,7 @@ pub unsafe fn string_from_c(address: usize, out: usize, text: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Firmware, KNOWN_BUILD_SITES};
-
-    #[test]
-    fn the_site_table_is_sorted_and_unique() {
-        assert_eq!(KNOWN_BUILD_SITES.len(), 37);
-        let mut offsets: Vec<usize> = KNOWN_BUILD_SITES.iter().map(|(o, _)| *o).collect();
-        offsets.sort_unstable();
-        offsets.dedup();
-        assert_eq!(offsets.len(), KNOWN_BUILD_SITES.len(), "duplicate site");
-    }
-
-    #[test]
-    fn every_site_starts_with_a_prologue_instruction() {
-        // `paciasp` and `bti c`, plus the one site that starts with a `str`.
-        for &(offset, word) in KNOWN_BUILD_SITES {
-            assert!(
-                word == 0xd503_233f || word == 0xd503_245f || word == 0x3940_2003,
-                "site {offset:#010x} has an unexpected prologue {word:#010x}"
-            );
-        }
-    }
+    use super::Firmware;
 
     #[test]
     fn addresses_are_relative_to_the_load_base() {

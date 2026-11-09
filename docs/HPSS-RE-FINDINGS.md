@@ -1,5 +1,10 @@
 # HPSS reverse-engineering findings and method (2026-11-04)
 
+> **Historical.** Written while the mod was C. `mod/src/minimod.c` and the other C and C++ sources are
+> gone (see git history); the equivalent code is in `rust/crates/`, mapped in the "Final state" section of
+> [`RUST-PORT.md`](RUST-PORT.md). File, line and function references below point at the removed C, and build
+> commands that compile it no longer apply (`mod/build.sh` builds the Rust crate).
+
 > Historical input experiments: the raw-read suppression described below was
 > replaced on 2026-11-05 by a single native signed DATA-event hook.
 > See [current input mechanism and validation](re/SAMPLE-OPTIONS-INPUT.md).

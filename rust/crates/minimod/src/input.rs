@@ -156,7 +156,6 @@ fn pad_index(pad: i32) -> Option<usize> {
 /// # Safety
 ///
 /// `state` must point at the glue's state and `callback` at the app's own hook.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_input_note_on(
     state: *mut State,
     input: usize,
@@ -179,7 +178,7 @@ pub unsafe extern "C" fn minimod_input_note_on(
     }
     if context.looper_open != 0 && pad >= 0 {
         if pad < LOOPER_PADS {
-            crate::looper_ffi::looper_pad(pad, context.shift, context.erase);
+            let _ = crate::looper_ffi::looper_pad(pad, context.shift, context.erase);
         }
         return;
     }
@@ -212,7 +211,6 @@ pub unsafe extern "C" fn minimod_input_note_on(
 /// # Safety
 ///
 /// `state` must point at the glue's state and `callback` at the app's own hook.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_input_note_off(
     state: *mut State,
     input: usize,
@@ -241,7 +239,6 @@ pub unsafe extern "C" fn minimod_input_note_off(
 /// # Safety
 ///
 /// `state` must point at the glue's state and `callback` at the app's own hook.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_input_release_held(state: *mut State, callback: Option<NoteOff>) {
     if state.is_null() {
         return;
@@ -267,7 +264,6 @@ pub unsafe extern "C" fn minimod_input_release_held(state: *mut State, callback:
 /// # Safety
 ///
 /// `state` must point at the glue's state and `callback` at the app's own hook.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_input_surface(
     state: *mut State,
     self_address: usize,
@@ -294,7 +290,6 @@ pub unsafe extern "C" fn minimod_input_surface(
 /// # Safety
 ///
 /// `state` must point at the glue's state and `callback` at the app's own hook.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_input_data(
     state: *mut State,
     selection: *mut i32,
@@ -329,30 +324,6 @@ pub unsafe extern "C" fn minimod_input_data(
     }
 }
 
-/// The input state, for the C glue.
-///
-/// The state lives here now; the glue keeps its field names by pointing at this.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_input_state() -> *mut State {
-    // Taking the address of a static needs no unsafe block; dereferencing it
-    // does, and that happens in the hooks below.
-    core::ptr::addr_of_mut!(STATE)
-}
-
-/// The pad pressed last, for the glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_input_last_pad() -> i32 {
-    // SAFETY: see above.
-    unsafe { (*core::ptr::addr_of!(STATE)).last_pad }
-}
-
-/// Remember the encoder's surface, for the glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_input_set_data_target(target: usize) {
-    // SAFETY: see above.
-    unsafe { (*core::ptr::addr_of_mut!(STATE)).data_target = target };
-}
-
 /// The pad the user pressed last, or -1.
 #[must_use]
 pub fn last_pad() -> i32 {
@@ -371,9 +342,31 @@ static mut STATE: State = State::new();
 
 // The glue owns the screens and the keys; it builds the context for us and
 // hands us its menu's selection slot.
-unsafe extern "C" {
-    fn minimod_glue_context() -> Context;
-    fn minimod_glue_selection() -> *mut i32;
+/// What the hooks need to know about the mod's screens and keys, right now.
+fn context() -> Context {
+    let menu = crate::menu::state();
+    // SAFETY: plain words, written by the UI thread (the preview flag by the
+    // audio thread, which is why it is read atomically).
+    let (spectral, preview) = unsafe {
+        (
+            (*core::ptr::addr_of!(crate::spectral::G_SPECTRAL)).active,
+            core::sync::atomic::AtomicI32::from_ptr(core::ptr::addr_of_mut!(
+                crate::audio::G_BASS_PREVIEW_ACTIVE
+            ))
+            .load(core::sync::atomic::Ordering::Acquire),
+        )
+    };
+    Context {
+        looper_open: crate::looper_ffi::looper_is_open(),
+        spectral_active: spectral,
+        preview_active: preview,
+        menu_open: menu.open,
+        bass_edit: menu.bass_edit,
+        busy: menu.busy,
+        shift: crate::ui::shift(),
+        erase: crate::ui::erase(),
+        repaint: Some(crate::ui::minimod_repaint_screen),
+    }
 }
 
 /// The app's own note-on, recorded at install time.
@@ -385,29 +378,11 @@ static mut ORIGINAL_SURFACE: Option<ControlSurface> = None;
 /// The app's own encoder handler.
 static mut ORIGINAL_DATA: Option<DataSignal> = None;
 
-/// Record the displaced hooks, for the glue.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_hook_originals(
-    on: Option<NoteOn>,
-    off: Option<NoteOff>,
-    surface: Option<ControlSurface>,
-    data: Option<DataSignal>,
-) {
-    // SAFETY: the constructor calls this once, before any event can arrive.
-    unsafe {
-        ORIGINAL_ON = on;
-        ORIGINAL_OFF = off;
-        ORIGINAL_SURFACE = surface;
-        ORIGINAL_DATA = data;
-    }
-}
-
 /// A pad press, as the app's own hook.
 ///
 /// # Safety
 ///
 /// The app calls this with its own event pointers.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_note_on(
     input: usize,
     src: i32,
@@ -415,8 +390,7 @@ pub unsafe extern "C" fn minimod_hook_note_on(
     props: usize,
     velocity: f32,
 ) {
-    // SAFETY: the glue builds the context from state it owns.
-    let context = unsafe { minimod_glue_context() };
+    let context = context();
     // SAFETY: the state is a static in this module.
     let state = core::ptr::addr_of_mut!(STATE);
     // SAFETY: the original is the app's own hook.
@@ -439,10 +413,8 @@ pub unsafe extern "C" fn minimod_hook_note_on(
 /// # Safety
 ///
 /// The app calls this with its own event pointers.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_note_off(input: usize, src: i32, pad: i32) {
-    // SAFETY: the glue builds the context from state it owns.
-    let context = unsafe { minimod_glue_context() };
+    let context = context();
     // SAFETY: the state is a static in this module.
     let state = core::ptr::addr_of_mut!(STATE);
     // SAFETY: the original is the app's own hook.
@@ -454,7 +426,6 @@ pub unsafe extern "C" fn minimod_hook_note_off(input: usize, src: i32, pad: i32)
 /// # Safety
 ///
 /// The app calls this with its own event pointers.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_surface(self_address: usize, code: i32, payload: usize) {
     // SAFETY: the state is a static in this module.
     let state = core::ptr::addr_of_mut!(STATE);
@@ -467,15 +438,10 @@ pub unsafe extern "C" fn minimod_hook_surface(self_address: usize, code: i32, pa
 /// # Safety
 ///
 /// The app calls this with its own event pointers.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_hook_data(self_address: usize, delta: i32) {
-    // SAFETY: the glue builds the context from state it owns.
-    let context = unsafe { minimod_glue_context() };
-    // SAFETY: the state and the menu's selection are Rust statics; the glue
-    // passes the menu through the context call.
+    let context = context();
     let state = core::ptr::addr_of_mut!(STATE);
-    // SAFETY: the glue owns the menu and returns a writable slot for its row.
-    let selection = unsafe { minimod_glue_selection() };
+    let selection = core::ptr::addr_of_mut!(crate::menu::state_mut().selection);
     // SAFETY: the state, the slot and the original are the caller's.
     unsafe {
         minimod_input_data(
@@ -494,7 +460,6 @@ pub unsafe extern "C" fn minimod_hook_data(self_address: usize, delta: i32) {
 /// # Safety
 ///
 /// Called once at install, before any note can arrive.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_note_on_original(original: usize) {
     // SAFETY: the caller's contract.
     unsafe { ORIGINAL_ON = from_address(original) };
@@ -505,7 +470,6 @@ pub unsafe extern "C" fn minimod_note_on_original(original: usize) {
 /// # Safety
 ///
 /// Called once at install, before any note can arrive.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_note_off_original(original: usize) {
     // SAFETY: the caller's contract.
     unsafe { ORIGINAL_OFF = from_address(original) };
@@ -516,7 +480,6 @@ pub unsafe extern "C" fn minimod_note_off_original(original: usize) {
 /// # Safety
 ///
 /// Called once at install, before any event can arrive.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_surface_original(original: usize) {
     // SAFETY: the caller's contract.
     unsafe { ORIGINAL_SURFACE = from_address(original) };
@@ -527,7 +490,6 @@ pub unsafe extern "C" fn minimod_surface_original(original: usize) {
 /// # Safety
 ///
 /// Called once at install, before any event can arrive.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_data_original(original: usize) {
     // SAFETY: the caller's contract.
     unsafe { ORIGINAL_DATA = from_address(original) };
@@ -548,7 +510,6 @@ pub fn from_address<T: Copy>(address: usize) -> Option<T> {
 /// # Safety
 ///
 /// The crate's own state and the app's own note-off.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_ui_release_held() {
     // SAFETY: the state is this module's and the hook is the crate's.
     unsafe {
@@ -557,7 +518,7 @@ pub unsafe extern "C" fn minimod_ui_release_held() {
 }
 
 /// The first word of the event the page sent, which is the pointer to its button.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_read_pointer(event: usize) -> usize {
     if event == 0 {
         return 0;

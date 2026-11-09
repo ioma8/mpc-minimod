@@ -1,8 +1,10 @@
 //! Golden-fixture tests against the original C implementation.
 //!
-//! `tests/golden/generate.sh` links the shipped C DSP and records what it
-//! produces for a fixed input; these tests replay the same input through the
-//! Rust port and compare.  A behavioural difference fails here, on the host,
+//! The fixtures in `tests/golden` were recorded from the original C DSP for a
+//! fixed input (the C sources are in this repository's history, before the
+//! commit that removed them); these tests replay the same input through the
+//! Rust port and compare.  The fixtures are the reference now: change them only
+//! on purpose.  A behavioural difference fails here, on the host,
 //! instead of on the device.
 
 use core::mem::size_of;

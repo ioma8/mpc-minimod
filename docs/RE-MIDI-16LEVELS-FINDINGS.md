@@ -1,5 +1,10 @@
 # MIDI → 16 Levels: decompiled facts (firmware 1.3.0.12)
 
+> **Historical.** Written while the mod was C. `mod/src/minimod.c` and the other C and C++ sources are
+> gone (see git history); the equivalent code is in `rust/crates/`, mapped in the "Final state" section of
+> [`RUST-PORT.md`](RUST-PORT.md). File, line and function references below point at the removed C, and build
+> commands that compile it no longer apply (`mod/build.sh` builds the Rust crate).
+
 Ghidra project `~/mcpsamplebin`, program `mpcsample.bin` (already analyzed).
 Ghidra VA = file VA + 0x100000. Decompiled with
 `tools/ghidra/hpss/ResearchDecompile.java` via analyzeHeadless (`-noanalysis`).

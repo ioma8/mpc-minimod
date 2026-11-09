@@ -64,20 +64,6 @@ pub struct Hooks {
     pub set_status: Option<unsafe extern "C" fn(*const u8)>,
 }
 
-/// Open the menu, if the page is showing and nothing is running.
-#[must_use]
-pub fn open(state: &mut State, hooks: Hooks, page_visible: bool) -> bool {
-    if !page_visible || state.busy != 0 {
-        return false;
-    }
-    state.open = 1;
-    state.selection = 0;
-    state.bass_edit = 0;
-    state.data_down = 0;
-    repaint(hooks);
-    true
-}
-
 /// Close the menu unless a job is running.
 pub fn close(state: &mut State, hooks: Hooks) -> bool {
     if state.busy != 0 {
@@ -153,26 +139,6 @@ pub unsafe fn activate(state: &mut State, hooks: Hooks) {
     }
 }
 
-/// Put the chop mode back to what it was before the action.
-///
-/// # Safety
-///
-/// `restore` must be the glue's callback when present.
-pub unsafe fn restore_chop(
-    state: &mut State,
-    restore: Option<unsafe extern "C" fn()>,
-    allowed: bool,
-) {
-    if !allowed {
-        state.restore_pending = 1;
-        return;
-    }
-    if let Some(restore) = restore {
-        // SAFETY: the caller's callback.
-        unsafe { restore() };
-    }
-}
-
 /// Redraw.
 fn repaint(hooks: Hooks) {
     if let Some(repaint) = hooks.repaint {
@@ -181,46 +147,11 @@ fn repaint(hooks: Hooks) {
     }
 }
 
-/// Open the menu, for the C glue.
-///
-/// # Safety
-///
-/// `state` and `hooks` must be live for this call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_menu_open(
-    state: *mut State,
-    hooks: *const Hooks,
-    page_visible: i32,
-) -> i32 {
-    if state.is_null() || hooks.is_null() {
-        return 0;
-    }
-    // SAFETY: the caller promises both pointers are live.
-    let (state, hooks) = unsafe { (&mut *state, *hooks) };
-    i32::from(open(state, hooks, page_visible != 0))
-}
-
-/// Close the menu, for the C glue.
-///
-/// # Safety
-///
-/// `state` and `hooks` must be live for this call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_menu_close(state: *mut State, hooks: *const Hooks) -> i32 {
-    if state.is_null() || hooks.is_null() {
-        return 0;
-    }
-    // SAFETY: the caller promises both pointers are live.
-    let (state, hooks) = unsafe { (&mut *state, *hooks) };
-    i32::from(close(state, hooks))
-}
-
 /// Run the selected row, for the C glue.
 ///
 /// # Safety
 ///
 /// `state` and `hooks` must be live for this call.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_menu_activate(state: *mut State, hooks: *const Hooks) {
     if state.is_null() || hooks.is_null() {
         return;
@@ -229,26 +160,6 @@ pub unsafe extern "C" fn minimod_menu_activate(state: *mut State, hooks: *const 
     let (state, hooks) = unsafe { (&mut *state, *hooks) };
     // SAFETY: the hooks are the caller's callbacks.
     unsafe { activate(state, hooks) };
-}
-
-/// Restore the chop mode, for the C glue.
-///
-/// # Safety
-///
-/// `state` and `hooks` must be live for this call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_menu_restore_chop(
-    state: *mut State,
-    hooks: *const Hooks,
-    allowed: i32,
-) {
-    if state.is_null() || hooks.is_null() {
-        return;
-    }
-    // SAFETY: the caller promises both pointers are live.
-    let (state, hooks) = unsafe { (&mut *state, *hooks) };
-    // SAFETY: the hook is the caller's callback.
-    unsafe { restore_chop(state, hooks.restore_chop, allowed != 0) };
 }
 
 /// The menu's colours.
@@ -398,7 +309,6 @@ pub const MENU_ROWS: usize = 8;
 /// # Safety
 ///
 /// `status` must be a NUL-terminated string and `graphics` the app's object.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_menu_draw(
     graphics: usize,
     selection: i32,
@@ -465,7 +375,6 @@ pub static mut g_bass_knob: [f32; 3] = [0.52, 0.18, 0.56];
 /// # Safety
 ///
 /// The app's own calls are used.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_menu_bass_page() {
     // SAFETY: the array is this module's.
     let knobs = unsafe { *core::ptr::addr_of!(g_bass_knob) };
@@ -474,7 +383,7 @@ pub unsafe extern "C" fn minimod_menu_bass_page() {
     crate::bass_ffi::bass_preview_set_params(knobs[0], knobs[1], knobs[2]);
     crate::bass_ffi::minimod_bass_preview_set_active(1);
     // SAFETY: the flag is the bass module's.
-    let available = unsafe { crate::bass_ffi::g_bass_preview_available } != 0;
+    let available = unsafe { crate::bass_ffi::G_BASS_PREVIEW_AVAILABLE } != 0;
     crate::status::set_status(if available {
         ""
     } else {
@@ -487,7 +396,6 @@ pub unsafe extern "C" fn minimod_menu_bass_page() {
 /// # Safety
 ///
 /// The crate's own state and the app's repaint.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_menu_open_self() {
     if crate::ui::minimod_screen_visible() == 0 || state().busy != 0 {
         return;
@@ -508,7 +416,6 @@ pub unsafe extern "C" fn minimod_menu_open_self() {
 /// # Safety
 ///
 /// The crate's own state and the app's repaint.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_menu_close_self() {
     if state().busy != 0 {
         return;
@@ -527,7 +434,6 @@ pub unsafe extern "C" fn minimod_menu_close_self() {
 /// # Safety
 ///
 /// The text is ignored; the rename happens on the paint.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_filter_text(_text: *const u8) {
     if paint::screen() != 0 {
         // SAFETY: the app's own repaint.
@@ -536,26 +442,26 @@ pub unsafe extern "C" fn minimod_filter_text(_text: *const u8) {
 }
 
 /// Whether the menu is open.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_menu_is_open() -> i32 {
     i32::from(state().open != 0)
 }
 
 /// Whether the bass control page is showing.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_menu_is_bass_edit() -> i32 {
     i32::from(state().bass_edit != 0)
 }
 
 /// Whether a job is running.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_menu_is_busy() -> i32 {
     i32::from(state().busy != 0)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Hooks, ROW_HPSS, State, close, open};
+    use super::{Hooks, State, close};
 
     fn hooks() -> Hooks {
         Hooks {
@@ -569,19 +475,6 @@ mod tests {
             start_looper: None,
             set_status: None,
         }
-    }
-
-    #[test]
-    fn the_menu_opens_only_on_the_page_and_when_idle() {
-        let mut state = State::default();
-        assert!(open(&mut state, hooks(), true));
-        assert_eq!(state.open, 1);
-        assert_eq!(state.selection, ROW_HPSS);
-        state.busy = 1;
-        state.open = 0;
-        assert!(!open(&mut state, hooks(), true), "busy");
-        state.busy = 0;
-        assert!(!open(&mut state, hooks(), false), "page not visible");
     }
 
     #[test]

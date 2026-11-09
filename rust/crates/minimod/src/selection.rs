@@ -84,7 +84,6 @@ pub fn current(base: usize, screen: usize) -> Option<Selection> {
 /// # Safety
 ///
 /// Every out-pointer must be writable, or null.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_sample_now(
     base: usize,
     screen: usize,

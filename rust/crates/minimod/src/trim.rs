@@ -34,17 +34,6 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// The layout of a parsed file.
-    #[must_use]
-    pub const fn of(info: &wav::Info) -> Self {
-        Self {
-            data_offset: info.data_offset,
-            channels: info.channels,
-            width: info.width,
-            encoding: info.encoding,
-        }
-    }
-
     /// Bytes of one interleaved frame.
     fn frame_bytes(&self) -> usize {
         usize::from(self.width) * usize::from(self.channels)
@@ -265,7 +254,16 @@ mod tests {
         file.extend_from_slice(&body);
         std::fs::write(&path, &file).expect("write");
         let info = Info::read(&path).expect("info");
-        (path, Layout::of(&info))
+        (path, layout_of(&info))
+    }
+
+    fn layout_of(info: &Info) -> Layout {
+        Layout {
+            data_offset: info.data_offset,
+            channels: info.channels,
+            width: info.width,
+            encoding: info.encoding,
+        }
     }
 
     #[test]

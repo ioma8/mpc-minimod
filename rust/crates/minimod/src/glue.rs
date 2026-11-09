@@ -2,6 +2,7 @@
 //! constructor needs before any hook is installed.
 
 use crate::firmware;
+use crate::hooks;
 
 /// The `.text` address the stock app's load segment must cover.
 const TEXT_OFFSET: usize = 0xb5_5b00;
@@ -85,7 +86,7 @@ unsafe extern "C" {
 /// # Safety
 ///
 /// `base` must be the app's load address.
-#[unsafe(no_mangle)]
+#[must_use]
 pub unsafe extern "C" fn minimod_firmware_ok(base: usize) -> i32 {
     for (offset, expected) in FIRMWARE_SITES {
         let Some(word) = firmware::read_u32(base + offset) else {
@@ -99,7 +100,6 @@ pub unsafe extern "C" fn minimod_firmware_ok(base: usize) -> i32 {
 }
 
 /// The stock app's load address, or zero when it is not loaded.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_find_main() -> usize {
     let mut found: usize = 0;
     // SAFETY: the callback only writes to `found`, which outlives the walk.
@@ -148,7 +148,6 @@ unsafe extern "C" fn find_main(info: *mut ModuleInfo, _size: usize, out: *mut us
 /// # Safety
 ///
 /// `dst` must be writable for `length` bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rd(address: usize, dst: *mut u8, length: usize) -> i32 {
     if dst.is_null() || length == 0 {
         return 0;
@@ -167,7 +166,6 @@ pub unsafe extern "C" fn rd(address: usize, dst: *mut u8, length: usize) -> i32 
 /// # Safety
 ///
 /// The pointer is only compared, never dereferenced.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mapped(address: *const u8) -> i32 {
     use std::sync::OnceLock;
     static RANGES: OnceLock<Vec<(usize, usize)>> = OnceLock::new();
@@ -200,19 +198,11 @@ pub unsafe extern "C" fn mapped(address: *const u8) -> i32 {
 /// The page's own paint, displaced by the mod.
 static mut ORIGINAL_PAINT: Option<unsafe extern "C" fn(usize, usize)> = None;
 
-/// The page's own paint, for the glue.
-#[must_use]
-pub fn original_paint() -> Option<unsafe extern "C" fn(usize, usize)> {
-    // SAFETY: written once at install.
-    unsafe { *core::ptr::addr_of!(ORIGINAL_PAINT) }
-}
-
 /// Install the paint hook in the screen's vtable.
 ///
 /// # Safety
 ///
 /// `base` must be the app's load address and `handler` the entry point to store.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minimod_paint_install(base: usize, handler: *const ()) -> i32 {
     let address = base + 0x6e2_12a0;
     if unsafe { !is_mapped(address as *const u8) } {
@@ -251,7 +241,7 @@ pub unsafe extern "C" fn minimod_paint_install(base: usize, handler: *const ()) 
 }
 
 /// The paint the mod displaced, for the glue.
-#[unsafe(no_mangle)]
+#[must_use]
 pub extern "C" fn minimod_paint_original() -> Option<unsafe extern "C" fn(usize, usize)> {
     // SAFETY: written once at install.
     unsafe { *core::ptr::addr_of!(ORIGINAL_PAINT) }
@@ -274,80 +264,56 @@ unsafe fn is_mapped(address: *const u8) -> bool {
     unsafe { mapped(address) != 0 }
 }
 
-/// The latency override, or -1 when the mod measures instead.
-#[must_use]
-pub fn fixed_latency() -> i32 {
-    unsafe extern "C" {
-        fn minimod_glue_lat_fixed() -> i32;
-    }
-    // SAFETY: the glue's own accessor.
-    unsafe { minimod_glue_lat_fixed() }
-}
+/// The output ring's size in frames, as last read from the device (the device tests read it by name).
+#[unsafe(no_mangle)]
+pub static mut g_buf_out: u32 = 0;
 
-/// The calibration trim, in frames.
+/// The calibration trim, in frames, never negative.
 #[must_use]
 pub fn extra_latency() -> u32 {
-    unsafe extern "C" {
-        fn minimod_glue_lat_extra() -> u32;
-    }
-    // SAFETY: the glue's own accessor.
-    unsafe { minimod_glue_lat_extra() }
+    // SAFETY: written only by the UI thread and the config load.
+    u32::try_from(unsafe { g_lat_extra }).unwrap_or(0)
 }
 
 /// The output ring's size in frames.
 #[must_use]
 pub fn buffer_out() -> u32 {
-    unsafe extern "C" {
-        fn minimod_glue_buf_out() -> u32;
-    }
-    // SAFETY: the glue's own accessor.
-    unsafe { minimod_glue_buf_out() }
+    // SAFETY: a word written by the audio thread that owns the stream.
+    unsafe { g_buf_out }
 }
 
 /// Record the output ring's size.
 ///
 /// # Safety
 ///
-/// The glue owns the value.
+/// Only the audio thread that owns the stream may call this.
 pub unsafe fn set_buffer_out(frames: u32) {
-    unsafe extern "C" {
-        fn minimod_glue_set_buf_out(frames: u32);
-    }
-    // SAFETY: the glue's own setter.
-    unsafe { minimod_glue_set_buf_out(frames) }
+    // SAFETY: the caller's contract.
+    unsafe { g_buf_out = frames };
 }
 
 /// The input ring's size in frames.
 #[must_use]
 pub fn buffer_in() -> u32 {
-    unsafe extern "C" {
-        fn minimod_glue_buf_in() -> u32;
-    }
-    // SAFETY: the glue's own accessor.
-    unsafe { minimod_glue_buf_in() }
+    // SAFETY: a word written by the audio thread that owns the stream.
+    unsafe { crate::audio::g_buf_in }
 }
 
 /// Record the input ring's size.
 ///
 /// # Safety
 ///
-/// The glue owns the value.
+/// Only the audio thread that owns the stream may call this.
 pub unsafe fn set_buffer_in(frames: u32) {
-    unsafe extern "C" {
-        fn minimod_glue_set_buf_in(frames: u32);
-    }
-    // SAFETY: the glue's own setter.
-    unsafe { minimod_glue_set_buf_in(frames) }
+    // SAFETY: the caller's contract.
+    unsafe { crate::audio::g_buf_in = frames };
 }
 
 /// The input delay the device reported.
 #[must_use]
 pub fn input_delay() -> u32 {
-    unsafe extern "C" {
-        fn minimod_glue_in_delay() -> u32;
-    }
-    // SAFETY: the glue's own accessor.
-    unsafe { minimod_glue_in_delay() }
+    // SAFETY: a word written by the audio thread that owns the stream.
+    unsafe { crate::audio::G_IN_DELAY }
 }
 
 /// One site the mod patches: its image offset and the handler to put there.
@@ -366,7 +332,7 @@ unsafe impl Send for Site {}
 
 /// Everything the constructor patches, in the glue's order, with the offsets read
 /// from the glue's own defines.
-static SITES: [Site; 16] = [
+static SITES: [Site; 17] = [
     Site {
         offset: 0x0154_5a50,
         handler: crate::entries::minimod_hook_sixteen_ctor as *const (),
@@ -431,53 +397,11 @@ static SITES: [Site; 16] = [
         offset: 0x0211_b090,
         handler: crate::midi::minimod_hook_midi_note as *const (),
     },
+    Site {
+        offset: 0x0196_8020,
+        handler: crate::autotrim::minimod_hook_set_control as *const (),
+    },
 ];
-
-// The handlers that are still C.
-unsafe extern "C" {
-    fn minimod_glue_set_originals(originals: *const Originals);
-    fn minimod_glue_finished(touched: i32);
-}
-
-/// The displaced functions the glue's own helpers still call.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct Originals {
-    /// The app's button dispatch.
-    pub buttons: usize,
-    /// The app's repaint.
-    pub repaint: usize,
-    /// The app's control-surface setter.
-    pub control: usize,
-    /// The app's MIDI note handler.
-    pub midi_note: usize,
-    /// The app's bass preview writer.
-    pub bass_writer: usize,
-    /// The slice command's constructor.
-    pub hpss_ctor: usize,
-    /// The slice command's execute method.
-    pub hpss_exec: usize,
-}
-
-/// How many sites the glue has to patch.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_site_count() -> usize {
-    SITES.len()
-}
-
-/// The offset of one site.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_site_offset(index: usize) -> usize {
-    SITES.get(index).map_or(0, |site| site.offset)
-}
-
-/// The handler for one site.
-#[unsafe(no_mangle)]
-pub extern "C" fn minimod_site_handler(index: usize) -> *const () {
-    SITES
-        .get(index)
-        .map_or(core::ptr::null(), |site| site.handler)
-}
 
 /// Whether the note-on hook was installed, which the preview needs.
 static mut NOTE_ON_OK: bool = false;
@@ -489,8 +413,7 @@ static mut WRITER_OK: bool = false;
 /// # Safety
 ///
 /// Called once per site, immediately after that site is patched.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_site_record(index: usize, original: usize) {
+unsafe fn record_site(index: usize, original: usize) -> bool {
     // SAFETY: the caller's contract.
     unsafe {
         match index {
@@ -505,6 +428,7 @@ pub unsafe extern "C" fn minimod_site_record(index: usize, original: usize) {
             5 => crate::input::minimod_note_off_original(original),
             6 => crate::cc::minimod_hook_cc_original(crate::input::from_address(original)),
             7 => crate::entries::minimod_pitch_original(original),
+            8 => crate::ui::minimod_buttons_original(original),
             9 => {
                 WRITER_OK = original != 0;
                 crate::audio::minimod_audio_writer_original_now(original);
@@ -515,48 +439,33 @@ pub unsafe extern "C" fn minimod_site_record(index: usize, original: usize) {
             13 => crate::hpss_exec::minimod_hpss_exec_original(original),
             14 => crate::entries::minimod_writer_original(original),
             15 => crate::midi::minimod_midi_note_original(original),
-            _ => {}
+            16 => crate::autotrim::record_set_control(original),
+            _ => return false,
         }
     }
+    true
 }
 
-/// Hand the glue the originals its own helpers call, install the paint hook and seal.
+/// Install the paint hook, seal the patched pages and say whether anything landed.
 ///
 /// # Safety
 ///
 /// Called once, after every site has been patched and recorded.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn minimod_after_sites(originals: *const Originals) -> i32 {
-    if originals.is_null() {
-        return 0;
-    }
-    // SAFETY: the caller's contract.
-    unsafe {
-        minimod_glue_set_originals(originals);
-        let _ = crate::paint::minimod_paint_install_self();
-    }
+unsafe fn after_sites() -> bool {
+    let _ = crate::paint::minimod_paint_install_self();
     // SAFETY: the engine's own queries.
-    let touched = unsafe { minimod_hooks_touched() != 0 };
+    let touched = hooks::minimod_hooks_touched() != 0;
     if touched {
         // SAFETY: sealing is the engine's own call.
-        unsafe { minimod_seal_hooks() };
+        hooks::minimod_seal_hooks();
     }
     // The bass preview needs the note hooks and the writer, exactly as the C
     // constructor required.
     // SAFETY: the flags are this module's.
     unsafe {
-        crate::bass_ffi::g_bass_preview_available = i32::from(NOTE_ON_OK && WRITER_OK);
-        minimod_glue_finished(i32::from(touched));
+        crate::bass_ffi::G_BASS_PREVIEW_AVAILABLE = i32::from(NOTE_ON_OK && WRITER_OK);
     }
-    i32::from(touched)
-}
-
-// The hook engine's own calls.
-unsafe extern "C" {
-    fn minimod_hooks_touched() -> i32;
-    fn minimod_seal_hooks();
-    fn minimod_install_hook(base: usize, site: usize, handler: usize) -> *mut u8;
-    fn minimod_glue_set_base(found: usize);
+    touched
 }
 
 /// The calibration trim the config file carries.
@@ -579,15 +488,12 @@ fn load_config() {
 }
 
 /// Install the mod: find the app, check the image, patch every site.
-#[unsafe(no_mangle)]
 pub extern "C" fn minimod_load() {
     let found = minimod_find_main();
     if found == 0 {
         return;
     }
     firmware::minimod_set_base(found);
-    // SAFETY: the glue keeps the copy its own code reads.
-    unsafe { minimod_glue_set_base(found) };
     // SAFETY: the image check reads the mapped file.
     let ok = unsafe { minimod_firmware_ok(found) };
     if ok == 0 {
@@ -599,34 +505,41 @@ pub extern "C" fn minimod_load() {
 
 /// Patch the sites the table names, in order.
 fn patch_sites(base: usize) {
-    let count = minimod_site_count();
-    let mut originals = Originals::default();
-    for index in 0..count {
-        let site = base + minimod_site_offset(index);
-        let handler = minimod_site_handler(index) as usize;
+    for (index, entry) in SITES.iter().enumerate() {
+        let site = base + entry.offset;
+        let handler = entry.handler as usize;
         // SAFETY: the site is a checked image offset and the handler is ours.
-        let trampoline = unsafe { minimod_install_hook(base, site, handler) };
-        let trampoline = trampoline as usize;
+        let trampoline = unsafe { hooks::minimod_install_hook(base, site, handler) };
         // SAFETY: the recorders take this site's number.
-        unsafe { minimod_site_record(index, trampoline) };
-        match index {
-            8 => originals.buttons = trampoline,
-            6 => originals.control = trampoline,
-            9 => originals.bass_writer = trampoline,
-            10 => originals.repaint = trampoline,
-            12 => originals.hpss_ctor = trampoline,
-            13 => originals.hpss_exec = trampoline,
-            15 => originals.midi_note = trampoline,
-            _ => {}
-        }
+        let recorded = unsafe { record_site(index, trampoline as usize) };
+        debug_assert!(recorded, "site {index} has no recorder");
     }
-    // SAFETY: the crate's own finish.
-    unsafe { minimod_after_sites(core::ptr::from_ref(&originals)) };
+    // SAFETY: every site is patched and recorded.
+    unsafe { after_sites() };
 }
+
+/// The loader runs this when the app maps the library.
+#[cfg(all(target_os = "linux", not(test)))]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static LOAD: extern "C" fn() = minimod_load;
 
 #[cfg(test)]
 mod tests {
     use super::{FIRMWARE_SITES, PT_LOAD, TEXT_OFFSET};
+
+    #[test]
+    fn every_site_has_a_recorder_for_its_displaced_function() {
+        // A site whose original is never recorded is a hook that swallows its
+        // event: the button dispatcher lost its recorder once and CHOP died.
+        for index in 0..super::SITES.len() {
+            // SAFETY: recording stores an address; nothing is called.
+            assert!(
+                unsafe { super::record_site(index, 0) },
+                "site {index} has no recorder"
+            );
+        }
+    }
 
     #[test]
     fn every_site_is_word_aligned_and_inside_the_image() {

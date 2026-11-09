@@ -1,11 +1,64 @@
 # Rust port
 
-The mod is being rewritten from C and C++ into Rust: idiomatic, clippy-clean with
-no inline lint annotations, host-tested against the original C as the reference,
-and validated on the emulator with the same acceptance tests as before.
+**The port is complete.** The mod is Rust: `mod/build.sh` builds the `minimod` crate as
+a `cdylib` and cross-links it; no C or C++ is compiled and none is left in the tree (the
+C sources are in git history, before the commit that removed them).  The crate is
+clippy-clean with no inline lint annotations, the DSP is host-tested against fixtures
+recorded from the original C, and all six emulator suites (`mod/tests/emulator_*.py`)
+pass on the shipped `.so`.
 
-This document is the working record: what is ported, how each piece is proven,
-and what is left.
+Everything below the "Final state" section is the dated working record of how the port
+was done, round by round, including dead ends.  It describes the C that existed at the
+time; where it contradicts this section, this section is right.
+
+## Final state
+
+| | |
+|---|---|
+| Source | `rust/crates/dsp` (audio DSP, host-testable) and `rust/crates/minimod` (the preload library) |
+| Build | `mod/build.sh` -> `build/minimod.so` (Rust `cdylib`, linked by `zig cc`, which only drives the cross linker) |
+| Exported symbols | 23: the 4 ALSA taps (`snd_pcm_*`, which the app resolves by name) and 19 `g_*` statics the device tests read by symbol |
+| Gate | `rust/check.sh`: fmt, clippy `all`+`pedantic`+`cargo` `-D warnings`, host tests, aarch64 cross build |
+| Device | `mod/tests/emulator_{looper,bass_sample,hpss,midi_chromatic,reverb,spectral}.py` |
+
+Where the C went (most of it was `mod/src/minimod.c`, one translation unit):
+
+| the C area | now |
+|---|---|
+| hook engine, trampolines | `hooks.rs` (engine), `glue.rs` (site table, install, the `.init_array` constructor) |
+| button dispatcher, SHIFT/ERASE/B3 | `buttons.rs` (decision ladder), `ui.rs` (state and effects) |
+| control changes, master/trim/knobs | `routing.rs` (decision), `cc.rs` (effects) |
+| note, pad and encoder hooks | `input.rs`, `midi.rs`, `levels.rs` |
+| effects menu, bass page, status line | `menu.rs`, `status.rs`, `overlay.rs`, `paint.rs` |
+| render jobs (HPSS, effects, bass) | `job.rs`, `jobflow.rs`, `hpss_exec.rs`, `substitute.rs`, `effect.rs` |
+| Spectral Chop | `spectral.rs`, `spectral_machine.rs`, `chop.rs`, `dsp/spectral.rs` |
+| AutoTrim | `autotrim.rs`, `trim.rs`, `wav.rs` |
+| audio taps, ring geometry, preview mix | `audio.rs`, `dsp/bass.rs` |
+| live looper | `dsp/looper.rs`, `looper_ffi.rs`, `looper_view.rs`, `cfg.rs` |
+| memory window, page and sample accessors | `firmware.rs`, `page.rs`, `selection.rs`, `sample.rs`, `pads.rs`, `paths.rs` |
+| HPSS, FFT, DSP primitives | `dsp/hpss.rs`, `dsp/fft.rs`, `dsp/sample.rs` |
+
+The `*_ffi.rs` modules are now thin wrappers over those, kept as separate files for
+their `extern "C"` hook-table shapes; they no longer cross any language boundary.
+
+Things worth knowing that the journal below does not say plainly:
+
+* **Every hook site needs a recorder.** `glue::record_site` stores each displaced
+  function; a site without one silently swallows its event (the button dispatcher lost
+  its recorder once and CHOP died).  A unit test fails if a site has none.
+* **A hook returns what the original returns.** The app's slice `execute` returns a status
+  its caller checks; a hook typed `-> ()` hands back register garbage, the app reports "Extract
+  slice failed" after succeeding, and aborts its source re-encode halfway (corrupt WAVs). All 17
+  sites were checked by disassembly; only `execute`, `set_control` (tail call) and the 16 Levels
+  constructor return something, and all three now forward it.
+* **Exports are deliberate.** Only `snd_pcm_*` and the `g_*` statics the tests read are
+  `#[no_mangle]`/`export_name`; everything else is an ordinary Rust item.  `mod/build.sh`
+  refuses a build that leaves any unresolved symbol of its own.
+* **The golden fixtures are the reference now.** `rust/tests/golden/*.bin` were recorded
+  from the original C; the generators went with the C.  Change a fixture only on purpose.
+* **AutoTrim** was a silent no-op after commit `317a9bd` (its control-surface capture was
+  deleted as a "probe"); it is fixed and its cycle verified on the device, but no
+  automated test asserts the trim itself.
 
 ## Layout
 
@@ -14,8 +67,8 @@ rust/
   crates/dsp       audio DSP.  Pure computation over slices: no firmware
                    addresses, no globals, no FFI, host-testable.
   crates/minimod   the LD_PRELOAD library: C ABI, hook engine, feature glue.
-  tests/golden     fixtures recorded from the shipped C implementation, plus
-                   the generator that records them (generate.sh).
+  tests/golden     fixtures recorded from the original C implementation (the
+                   generators went with the C; they are in git history).
   scripts          the aarch64 cross linker driver (zig).
   check.sh         fmt + clippy + tests + cross build, one command.
 ```
@@ -87,19 +140,14 @@ slice.
 | MIDI note hook (`midi::handle`) | ported | the chromatic test drives the whole hook: replay, pass-through, 16 Levels state |
 | 16 Levels octave shift (`levels`) | ported | 3 tests: clamping, 8 semitones per press, the toast text |
 | 16 Levels hook trampolines (ctor/proc/pitch) | ported | the chromatic MIDI test drives all three through the 16 Levels path |
-| `minimod.c` (hooks, features, UI glue) | C, shrinking | 7 683 -> 4 564 lines; dead code removed only where the compiler proved it, each pass verified by an identical binary |
+| `minimod.c` (hooks, features, UI glue) | removed | ported piece by piece, then deleted; all six device suites pass on the Rust-only build |
 
-The looper, the effects and the whole bass synth are already what the device
-runs: `mod/build.sh` links the Rust static library instead of the C engines, and
-the emulator acceptance test for each passes against it.  HPSS and Spectral Chop
-have Rust implementations validated by their fixtures, but the device still calls
-the C ones — they share `minimod.c`'s worker and are wired in when that glue
-moves.
+Everything in the table is Rust and is what the device runs.
 
 ## How the looper is proven
 
-`tests/golden/generate.sh` compiles the **shipped C sources** and records a
-scripted performance: record, stop, replay, overdub, sync pulse, a quantised
+The golden fixtures were recorded by compiling the **shipped C sources** (since
+removed; see git history) and replaying a scripted performance: record, stop, replay, overdub, sync pulse, a quantised
 second loop, stop-all, half master volume, clear, close. It writes the input
 frames, the rendered output, both loop buffers and the final `looper_view`.
 
@@ -116,7 +164,7 @@ That is the strongest check available without hardware: if the engine made a
 different decision, mixed at a different level, captured one frame less of the
 latency tail or quantised a length differently, the trace differs.
 
-## How the glue moves
+## How the glue moved (historical)
 
 `minimod.c` is one translation unit with shared state, so it cannot be split
 along module lines.  Instead, self-contained areas move out one at a time and the
@@ -269,14 +317,11 @@ which keeps the build silent without touching a lint.
 
 ```sh
 rust/check.sh                       # fmt, clippy, tests, cross build
-rust/tests/golden/generate.sh       # re-record the fixtures from the C sources
 cd mod && ./build.sh && ./pack.sh   # the SD package
 ```
 
-When a feature moves to Rust, `mod/build.sh` drops its C object and links the
-Rust static library in its place, and the emulator test for that feature becomes
-the acceptance gate. The C sources stay in `mod/src` until the whole mod is Rust
-because they are the reference the golden fixtures are recorded from.
+The emulator suite for a feature is the acceptance gate for a change to it; see
+`HANDOFF.md` for how to run the lab.
 
 ## The spectral state machine
 
@@ -908,58 +953,13 @@ the C constructor handed them over.
 The attempt is stashed as `constructor-via-table`; the certified build is restored and
 green.
 
-## Where the port stands
+## Where the port stood before the last round (historical)
 
-The mod installs itself from a Rust table, and every behaviour is Rust.  What is left in
-`minimod.c` is **812 lines of code** in 1 410 lines of file: the glue's adapters.
-
-### The shape of the last mile
-
-The remaining functions are a **mutual reference**, and that is why they have stopped
-coming one at a time:
-
-* `ui_buttons` and `screen_paint` are *tables* that name eight and five C functions
-  (`hpss_open`, `hpss_close`, `hpss_activate`, `hpss_restore_chop`, `set_filter_text`,
-  `spectral_tick`, `hpss_draw_menu`, `levels_active`, ...);
-* those functions, in turn, read C state and call back into the same tables
-  (`hpss_repaint` repaints through the paint hook, `hpss_set_status` writes the row the
-  menu draws, `spectral_press_chop_now` runs a chop that ends in `hpss_finalize`).
-
-Porting any one of them needs its two or three neighbours ported first, so the pieces
-stopped being separable.  Breaking it means doing the whole cluster - `ui_buttons`,
-`screen_paint` and about a dozen helpers - in one coordinated change, with the device
-available to bisect when it does not work the first time.
-
-### What is Rust
-
-Everything with behaviour: the DSP (looper, bass, HPSS, spectral, trim, FFT, filters),
-the menu and its rows, the overlay and the paint, the input hooks and the button ladder,
-the jobs and their flow, both ALSA taps and the stream geometry, the memory window, the
-firmware checks, the slice command's names and hooks, the MIDI record and flag, the
-audio counters and the tap, the menu state, the screen pointer, the install table.
-
-120 unit tests.  Six device suites, all green on every certified build.
-
-### What is C
-
-812 lines of adapters: the two handler tables, the ~15 helpers they name, `mlog`, and the
-constructor's 40-line loop that walks the Rust table and patches the sites.
-
-### What would finish it
-
-One coordinated change, in this order:
-
-1. move the helpers' C state (`g_surface`, `g_control_context`, `g_spectral`, the
-   `hpss_*` flags) into the modules that will own it;
-2. port the helpers onto that state;
-3. port `ui_buttons` and `screen_paint` onto the ported helpers;
-4. make the installer a Rust `#[used]` init section over the table and delete
-   `minimod.c`;
-5. run the six suites after 3 and after 4.
-
-That is roughly ten rounds at the pace this session has measured, and the last three
-attempts at this cluster each found one more coupling rather than a wall.  It is
-finishable; it is not finishable by grinding one function per round.
+At that point `minimod.c` was 812 lines of adapters and the remaining work was one
+coordinated change: move the helpers' C state into the modules that own it, port the
+helpers, port the two handler tables, make the installer a Rust `.init_array` entry and
+delete `minimod.c`.  That change was made in small, device-verified steps and the file is
+gone; the sections that follow record the attempts that preceded it.
 
 ## The cluster attempt, measured
 
