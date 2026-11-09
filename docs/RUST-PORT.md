@@ -343,38 +343,24 @@ build narrowed it to the phase-0 path; the signature was the difference.
 
 ## The button entry point
 
-`ui` holds what the button hook keeps - SHIFT and ERASE while the looper owns the
-pads, the trim cycle's step, the octave keys, the marks drawn last, the last press
-object and the event replayed to put the chop mode back - and runs one event
-through `buttons::dispatch`, applying the decision through a hook table.
+`ui` runs one button event end to end: it keeps what the dispatcher remembers
+(SHIFT and ERASE under the looper, the trim cycle's step, the octave keys, the
+marks, the last press object, the replayed event) and applies `buttons::dispatch`
+through a hook table.
 
-It is **not wired yet**.  Two attempts at it:
+Three things had to be right, and each cost a round:
 
-1. moving the state and pointing the glue's names at it with macros - **worked**,
-   and Looper and MIDI passed on it;
-2. replacing the C dispatcher with the Rust entry point - **failed**: the looper
-   view would not open and the bass page would not take its knobs.
+* **the state must be Rust's** while a dozen C readers keep their names - done with
+  accessor macros, as for `g_menu` and `g_input`;
+* **the event is not just forwarded**: the old dispatcher also stored it and
+  derived `data_target` from its context pointer, so the entry point does too;
+* **the hook table is a `#[repr(C)]` contract**: adding four fields to the Rust
+  struct and appending them to the C one misaligned every field after them, which
+  read as "the menu opens on every press".  Fields go in the same order on both
+  sides or the app misbehaves in ways no compiler sees.
 
-The cause of the second is known and specific: the old dispatcher did more than
-dispatch.  On every event it copied the event into the state *and* recomputed
-`data_target` from it (`context + 0x10` -> `surface + 0x2da8`).  The Rust entry
-point stores the event but never computes `data_target`, so the encoder hook never
-matches its object and the menu's row never moves - which is exactly the two
-symptoms.
-
-So the wiring needs that computation moved too, and it belongs with the event
-store.
-
-A third attempt moved it there (the event store now derives `data_target` from the
-event's context pointer) and still failed the same two ways, and a direct probe
-showed why the diagnosis was incomplete: **the menu never opens**.  SHIFT is
-handled - the chip's own `restore_pending` gets armed on its release, so the entry
-point is running - but the encoder press does not reach `hpss_open`.
-
-What is left to check, in order: whether `state.shift` survives the release that
-the panel sends between presses, whether `ask(page_visible)` is true at that
-moment, and whether the `menu_open` hook is reached at all.  That wants a logging
-build in the same round, not another blind edit.
+One more the tests caught: `looper_button` takes the raw key *value*, not "was it a
+press" - passing the boolean made every key in the view a release.
 
 ## The probe hooks were dead code too
 

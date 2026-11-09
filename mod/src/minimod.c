@@ -90,6 +90,23 @@
 #include "buttons_ffi.h"
 #include "hpss_exec_ffi.h"
 #include "props_ffi.h"
+
+#include "ui_ffi.h"
+
+struct minimod_ui_state *minimod_ui_state(void);
+#define g_shift (minimod_ui_state()->shift)
+#define g_erase_down (minimod_ui_state()->erase)
+#define g_trim_step (minimod_ui_state()->trim_step)
+#define g_b3_down (minimod_ui_state()->b3_down)
+#define g_plus_held (minimod_ui_state()->plus_held)
+#define g_minus_held (minimod_ui_state()->minus_held)
+#define g_octave (minimod_ui_state()->octave)
+#define g_mark_v0 (minimod_ui_state()->mark_v0)
+#define g_mark_v1 (minimod_ui_state()->mark_v1)
+#define g_last_press_obj (minimod_ui_state()->last_press_obj)
+#define g_hpss_btn (minimod_ui_state()->event)
+#define g_hpss_btn_valid (minimod_ui_state()->event_valid)
+
 #include "cc_ffi.h"
 #include "spectral_ffi.h"
 #include "menu_ffi.h"
@@ -319,9 +336,7 @@ static void midi_hook_set(int on)
 }
 
 /* -------------------------------------------------------- 16 Levels state */
-static int g_octave;
 /* 16 LEVELS mode lives in `g_midi.levels`, tracked from button 0x28. */
-static int g_plus_held, g_minus_held;   /* octave shift applied while 16 LEVELS is active */
 static void *g_sixteen; /* the live 16 Levels screen, if seen             */
 
 /* Chop mode replaces the Trim group with the Chop group on the Sample page.
@@ -368,8 +383,6 @@ static int bump_octave(int d)
 
 /* SHIFT+B3 cycles 3 % -> 6 % -> 9 % -> untrimmed while SHIFT stays held;
  * releasing SHIFT resets the cycle. */
-static int g_trim_step;
-static int g_b3_down;      /* edge detection: the button auto-repeats while held */
 
 
 
@@ -451,8 +464,7 @@ static void (*orig_repaint)(void *, uint64_t, uint64_t);
 static void set_filter_text(const char *t);
 static void do_autotrim(void);
 
-static volatile int g_shift;
-static volatile int g_erase_down;
+
 static volatile int g_buf_dirty; /* re-read the device rings on the audio thread */
 static int g_dbg;
 
@@ -484,7 +496,6 @@ static void pitch_off(void *a0, uint64_t a1, uint64_t a2, int a3)
                       g_octave);
 }
 
-static uintptr_t g_last_press_obj;
 /* "findv <float>" - every address in the small writable ranges holding exactly
  * this float. Run with two knob values and intersect to find the stored state. */
 
@@ -496,7 +507,6 @@ static void (*orig_screen_paint)(void *, void *);
 
 static void *g_paint_comp;
 static void *g_paint_gfx;
-static float g_mark_v0 = -1.0f, g_mark_v1 = -1.0f;
 
 /* ---------------------------------------------------------- HPSS bridge */
 /* Stock Chop Extract, used as the sample-creation/assignment mechanism.  The
@@ -691,8 +701,6 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
 typedef struct minimod_job hpss_job;
 
 static volatile int g_hpss_done;
-static unsigned char g_hpss_btn[16];
-static int g_hpss_btn_valid;
 static int g_hpss_chop_before;
 static void hpss_repaint(void)
 {
@@ -985,141 +993,86 @@ static void hpss_draw_menu(void *g)
 
 static void release_held_pads(void);
 
-static int button_action(unsigned code, unsigned down, int looper,
-                         int menu, int data_down, int busy, int bass_edit,
-                         int spectral, int levels, unsigned *value)
-{
-    return minimod_button_action(code, down, g_shift, g_erase_down, looper, menu,
-                                 data_down, busy, bass_edit, spectral, levels,
-                                 sample_page_visible(), g_plus_held, g_minus_held,
-                                 value);
-}
 
-static void buttons(void *event)
+static void ui_forward(void *event)
 {
-    unsigned code = event ? FIELD(event, 8, uint8_t) : 0;
-    unsigned down = event ? FIELD(event, 9, uint8_t) : 0;
-    unsigned value = 0;
-
-    /* Keep the lazy MIDI hook in sync with the visible mode: leaving the Sample
-     * page restores the stock dispatcher on the very next button. */
-    midi_hook_set(levels_active());
-    int looper = looper_is_open();
-    int action = button_action(code, down, looper, g_hpss_menu, g_hpss_data_down,
-                              g_hpss_busy, g_bass_edit,
-                              g_spectral.active,
-                              g_midi.levels, &value);
-    if (looper) {
-        switch (action) {
-        case MINIMOD_ACTION_SHIFT:
-            g_shift = value ? 1 : 0;
-            return;
-        case MINIMOD_ACTION_ERASE:
-            g_erase_down = value ? 1 : 0;
-            return;
-        case MINIMOD_ACTION_LOOPER: {
-            int was = looper_is_open();
-            looper_button(code, (int)down, g_shift, g_erase_down);
-            if (was && !looper_is_open()) {
-                g_shift = 0;
-                g_erase_down = 0;
-                release_held_pads();
-                hpss_repaint();
-            }
-            return;
-        }
-        default:
-            return;
-        }
-    }
-    if (event && rd((uintptr_t)event, g_hpss_btn, sizeof g_hpss_btn)) {
-        g_hpss_btn_valid = 1;
-        uintptr_t context = 0, surface = 0;
-        memcpy(&context, g_hpss_btn, sizeof context);
-        if (context && rd(context + 0x10, &surface, sizeof surface) && surface)
-            __atomic_store_n(&g_input.data_target, surface + 0x2da8, __ATOMIC_RELEASE);
-    }
-    if (code == 0x6f) {
-        g_hpss_data_down = down ? 1 : 0;
-        if (action == MINIMOD_ACTION_MENU_OPEN && sample_page_visible() && !g_hpss_busy) {
-            hpss_open();
-            return;
-        }
-        if (action == MINIMOD_ACTION_MENU_CLOSE) {
-            hpss_close();
-            return;
-        }
-        if (action == MINIMOD_ACTION_MENU_ACTIVATE) {
-            hpss_activate();
-            return;
-        }
-        if (action != MINIMOD_ACTION_FORWARD) {
-            if (!down)
-                g_hpss_data_down = 0;
-            else
-                g_hpss_data_down = 1;
-            return;
-        }
-    }
-    if (action == MINIMOD_ACTION_SHIFT) {
-        g_shift = value ? 1 : 0;
-        if (!down) {
-            g_trim_step = 0;
-            g_b3_down = 0;
-            if (g_hpss_restore_pending) {
-                g_hpss_restore_pending = 0;
-                hpss_restore_chop();
-            }
-        }
-        set_filter_text(down ? "AutoTrim" : "Filter");
-        if (orig_buttons)
-            orig_buttons(event);
-        return;
-    }
-    if (action == MINIMOD_ACTION_CONSUME || action == MINIMOD_ACTION_MENU_ENCODER)
-        return;
-    if (action == MINIMOD_ACTION_AUTOTRIM) {
-        if (down && !g_b3_down) {
-            do_autotrim();
-            g_trim_step = (g_trim_step + 1) % 4;
-        }
-        g_b3_down = down;
-        return;
-    }
-    if (action == MINIMOD_ACTION_BUMP_OCTAVE || action == MINIMOD_ACTION_RESET_PITCH) {
-        if (code == MINIMOD_KEY_PLUS)
-            g_plus_held = down ? 1 : 0;
-        else
-            g_minus_held = down ? 1 : 0;
-        if (action == MINIMOD_ACTION_RESET_PITCH) {
-            g_octave = 0;
-            toast("Pitch reset");
-        } else {
-            bump_octave((int)value);
-        }
-        return;
-    }
-    if (action == MINIMOD_ACTION_TOGGLE_LEVELS) {
-        g_midi.levels = !g_midi.levels;
-        if (g_midi.levels && g_input.last_pad >= 0 && g_input.last_pad < 16)
-            g_midi.pad_level_byte = g_input.last_pad;
-        midi_hook_set(levels_active());
-        return;
-    }
-    if (down && g_mark_v0 >= 0.0f) {
-        g_mark_v0 = -1.0f;
-        g_mark_v1 = -1.0f;
-        if (g_screen)
-            FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-                g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
-    }
-    if (code == 0x06 && down == 0x7f) {
-        uintptr_t ob = 0;
-        if (rd((uintptr_t)event, &ob, 8) && ob)
-            g_last_press_obj = ob;
-    }
     if (orig_buttons)
         orig_buttons(event);
+}
+
+static void ui_clear_marks(void)
+{
+    if (g_screen)
+        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
+            g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
+}
+
+static uintptr_t ui_read_pointer(void *event)
+{
+    uintptr_t value = 0;
+    if (event && rd((uintptr_t)event, &value, sizeof value))
+        return value;
+    return 0;
+}
+
+static int32_t ui_bump_octave(int32_t steps)
+{
+    return bump_octave((int)steps);
+}
+
+static void ui_release_held(void)
+{
+    release_held_pads();
+}
+
+static void ui_toggle_levels(void)
+{
+    g_midi.levels = !g_midi.levels;
+    if (g_midi.levels && g_input.last_pad >= 0 && g_input.last_pad < 16)
+        g_midi.pad_level_byte = g_input.last_pad;
+    midi_hook_set(levels_active());
+}
+
+static int32_t ui_menu_open(void) { return g_hpss_menu ? 1 : 0; }
+static int32_t ui_bass_edit(void) { return g_bass_edit ? 1 : 0; }
+static int32_t ui_busy(void) { return g_hpss_busy ? 1 : 0; }
+static int32_t ui_spectral(void) { return g_spectral.active == 1 ? 1 : 0; }
+static int32_t ui_page_visible(void)
+{
+    return sample_page_visible();
+}
+
+static void ui_menu_open_hook(void)
+{
+    hpss_open();
+}
+
+static const struct minimod_ui_hooks g_ui_hooks = {
+    .forward = ui_forward,
+    .toggle_levels = ui_toggle_levels,
+    .menu_open = ui_menu_open_hook,
+    .menu_close = hpss_close,
+    .menu_activate = hpss_activate,
+    .filter_text = set_filter_text,
+    .midi_sync = midi_hook_set,
+    .levels_active = levels_active,
+    .page_visible = ui_page_visible,
+    .restore_chop = hpss_restore_chop,
+    .repaint = hpss_repaint,
+    .clear_marks = ui_clear_marks,
+    .bump_octave = ui_bump_octave,
+    .run_autotrim = do_autotrim,
+    .release_held = ui_release_held,
+    .read_pointer = ui_read_pointer,
+    .menu_open_state = ui_menu_open,
+    .bass_edit_state = ui_bass_edit,
+    .busy_state = ui_busy,
+    .spectral_state = ui_spectral,
+};
+
+static void ui_buttons(void *event)
+{
+    minimod_hook_buttons(event, &g_ui_hooks);
 }
 
 /* The Rust entry points ask for this once per event. */
@@ -1898,7 +1851,7 @@ __attribute__((constructor)) static void load(void)
     /* The MIDI dispatcher is hooked lazily by midi_hook_set(): outside
      * 16 Levels the stock code must stay untouched. */
     mlog("minimod: MIDI hook deferred until 16 LEVELS\n");
-    void *t_btn = (hook_mask & 16) ? install_hook(base + A_BUTTONS, (void *)buttons) : 0;
+    void *t_btn = (hook_mask & 16) ? install_hook(base + A_BUTTONS, (void *)ui_buttons) : 0;
     void *t_bass_audio = install_hook(base + A_BASS_AUDIO_WRITER, (void *)audio_writer);
     void *t_rp = install_hook(base + A_REPAINT, (void *)repaint_hook);
     if (t_rp)

@@ -77,6 +77,8 @@ impl Default for State {
 pub struct Hooks {
     /// The app's own button handler.
     pub forward: Option<unsafe extern "C" fn(usize)>,
+    /// Toggle 16 Levels and keep the MIDI dispatcher in step.
+    pub toggle_levels: Option<unsafe extern "C" fn()>,
     /// Open the effects menu.
     pub menu_open: Option<unsafe extern "C" fn()>,
     /// Close it.
@@ -91,6 +93,14 @@ pub struct Hooks {
     pub levels_active: Option<unsafe extern "C" fn() -> i32>,
     /// Whether the Sample page is visible.
     pub page_visible: Option<unsafe extern "C" fn() -> i32>,
+    /// Whether the effects menu is open.
+    pub menu_open_state: Option<unsafe extern "C" fn() -> i32>,
+    /// Whether the bass control page is open.
+    pub bass_edit_state: Option<unsafe extern "C" fn() -> i32>,
+    /// Whether a job is running.
+    pub busy_state: Option<unsafe extern "C" fn() -> i32>,
+    /// Whether a spectral chop is running.
+    pub spectral_state: Option<unsafe extern "C" fn() -> i32>,
     /// Put the chop mode back.
     pub restore_chop: Option<unsafe extern "C" fn()>,
     /// Redraw the menu.
@@ -112,7 +122,7 @@ pub struct Hooks {
 /// # Safety
 ///
 /// `event` must be the app's event object and `hooks` its own functions.
-pub unsafe fn press(state: &mut State, event: usize, hooks: Hooks, data_down: &mut i32) {
+pub unsafe fn press(state: &mut State, event: usize, hooks: Hooks, data_down: &mut i32) -> i32 {
     let code = read_byte(event, 8);
     let down = read_byte(event, 9);
     let pressed = down == PRESSED;
@@ -134,11 +144,15 @@ pub unsafe fn press(state: &mut State, event: usize, hooks: Hooks, data_down: &m
             minus: state.minus_held != 0,
         },
         screens: Screens {
-            modals: Modals::default(),
+            modals: Modals {
+                menu: ask(hooks.menu_open_state) != 0,
+                bass_edit: ask(hooks.bass_edit_state) != 0,
+                spectral: ask(hooks.spectral_state) != 0,
+            },
             looper: looper_ffi::looper_is_open() != 0,
             levels: levels != 0,
         },
-        busy: false,
+        busy: ask(hooks.busy_state) != 0,
         page_visible: ask(hooks.page_visible) != 0,
     };
     let action = buttons::dispatch(context);
@@ -148,7 +162,12 @@ pub unsafe fn press(state: &mut State, event: usize, hooks: Hooks, data_down: &m
             Action::Erase(on) => state.erase = i32::from(on),
             Action::Looper => {
                 let was = looper_ffi::looper_is_open() != 0;
-                looper_ffi::looper_button(down, i32::from(pressed), state.shift, state.erase);
+                looper_ffi::looper_button(
+                    code,
+                    i32::try_from(down).unwrap_or(0),
+                    state.shift,
+                    state.erase,
+                );
                 if was && looper_ffi::looper_is_open() == 0 {
                     state.shift = 0;
                     state.erase = 0;
@@ -164,16 +183,12 @@ pub unsafe fn press(state: &mut State, event: usize, hooks: Hooks, data_down: &m
             }
             _ => {}
         }
-        return;
+        return -2;
     }
-    // Remember the event so the chop mode can be put back later.
-    if event != 0 {
-        let mut buffer = [0_u8; 16];
-        // SAFETY: the app's event is at least this long.
-        unsafe { read_replay(&mut buffer, event) };
-        state.event = buffer;
-        state.event_valid = 1;
-    }
+    // Remember the event: the chop mode is put back by replaying it, and the
+    // encoder's surface is reachable through the context it points at.
+    // SAFETY: the app's event is a struct with the context pointer first.
+    unsafe { remember(state, event, hooks) };
     // SAFETY: the hooks are the glue's callbacks.
     unsafe {
         apply(
@@ -188,6 +203,29 @@ pub unsafe fn press(state: &mut State, event: usize, hooks: Hooks, data_down: &m
                 data_down,
             },
         );
+    }
+    kind(action)
+}
+
+/// The action as a number, for the glue's log.
+const fn kind(action: Action) -> i32 {
+    match action {
+        Action::Forward => 0,
+        Action::Consume => 1,
+        Action::Shift(_) => 2,
+        Action::Erase(_) => 3,
+        Action::Looper | Action::LooperClosed => 4,
+        Action::MenuOpen => 5,
+        Action::MenuClose => 6,
+        Action::MenuActivate => 7,
+        Action::Autotrim => 8,
+        Action::BumpOctave(_) => 9,
+        Action::ToggleLevels => 10,
+        Action::MenuEncoder => 11,
+        Action::ResetPitch => 12,
+        Action::RenameKey(_) => 13,
+        Action::TrimCycleReset => 14,
+        Action::RestoreChop => 15,
     }
 }
 
@@ -268,9 +306,9 @@ unsafe fn apply(state: &mut State, event: Event<'_>) {
             paint::show_toast("Pitch reset");
         }
         Action::ToggleLevels => {
-            if let Some(sync) = hooks.midi_sync {
-                // SAFETY: the glue's own callback, re-read after the toggle.
-                unsafe { sync(ask(hooks.levels_active)) };
+            if let Some(toggle) = hooks.toggle_levels {
+                // SAFETY: the glue's own callback owns the mode and the hook.
+                unsafe { toggle() };
             }
         }
         Action::Forward => {
@@ -313,6 +351,29 @@ fn menu(action: Action, hooks: Hooks) {
     }
 }
 
+/// Store the event and derive what the encoder hook needs from it.
+unsafe fn remember(state: &mut State, event: usize, hooks: Hooks) {
+    if event == 0 {
+        return;
+    }
+    let mut buffer = [0_u8; 16];
+    // SAFETY: the app's event is at least this long.
+    unsafe { read_replay(&mut buffer, event) };
+    state.event = buffer;
+    state.event_valid = 1;
+    if let Some(read) = hooks.read_pointer {
+        // SAFETY: the glue's own reader.
+        let context = unsafe { read(event) };
+        if context != 0 {
+            // SAFETY: see above.
+            let surface = unsafe { read(context + 0x10) };
+            if surface != 0 {
+                crate::input::set_data_target(surface + 0x2da8);
+            }
+        }
+    }
+}
+
 /// The object the app's event points at, when it has one.
 unsafe fn read_object(address: usize, hooks: Hooks) -> Option<usize> {
     let read = hooks.read_pointer?;
@@ -351,6 +412,39 @@ fn read_byte(event: usize, offset: usize) -> u32 {
 unsafe fn read_replay(buffer: &mut [u8; 16], event: usize) {
     // SAFETY: the app's event is at least sixteen bytes.
     unsafe { core::ptr::copy_nonoverlapping(event as *const u8, buffer.as_mut_ptr(), 16) };
+}
+
+/// The state itself.
+static mut STATE: State = State::new();
+
+/// The menu's encoder-down flag, which the button hook tracks.
+static mut DATA_DOWN: i32 = 0;
+
+/// The UI state, for the glue.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_ui_state() -> *mut State {
+    core::ptr::addr_of_mut!(STATE)
+}
+
+/// One button event, as the app's own hook.
+///
+/// # Safety
+///
+/// The app calls this with its own event object, and `hooks` must be the glue's
+/// callbacks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hook_buttons(event: usize, hooks: *const Hooks) -> i32 {
+    if hooks.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's contract.
+    let hooks = unsafe { *hooks };
+    // SAFETY: the state is a static in this module.
+    let state = unsafe { &mut *core::ptr::addr_of_mut!(STATE) };
+    // SAFETY: the flag is a static in this module.
+    let data_down = unsafe { &mut *core::ptr::addr_of_mut!(DATA_DOWN) };
+    // SAFETY: the hooks are the glue's callbacks.
+    unsafe { press(state, event, hooks, data_down) }
 }
 
 #[cfg(test)]

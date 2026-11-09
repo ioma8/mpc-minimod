@@ -353,6 +353,12 @@ pub extern "C" fn minimod_input_set_data_target(target: usize) {
     unsafe { (*core::ptr::addr_of_mut!(STATE)).data_target = target };
 }
 
+/// Record the encoder's surface.
+pub fn set_data_target(target: usize) {
+    // SAFETY: only the UI thread writes the input state.
+    unsafe { (*core::ptr::addr_of_mut!(STATE)).data_target = target };
+}
+
 /// The state itself.
 static mut STATE: State = State::new();
 
