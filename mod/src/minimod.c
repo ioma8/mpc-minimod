@@ -76,7 +76,13 @@
 #include "spectral_machine_ffi.h"
 #include "routing_ffi.h"
 #include "audio_ffi.h"
+
+/* The device geometry is Rust; it resolves ALSA itself. */
+uint32_t minimod_stream_geometry(uintptr_t pcm, uint32_t *channels, int32_t *s32);
 #include "audio_ffi.h"
+
+/* The device geometry is Rust; it resolves ALSA itself. */
+uint32_t minimod_stream_geometry(uintptr_t pcm, uint32_t *channels, int32_t *s32);
 #include "substitute_ffi.h"
 #include "hooks_ffi.h"
 #include "levels_ffi.h"
@@ -93,6 +99,9 @@
 
 #include "ui_ffi.h"
 #include "audio_ffi.h"
+
+/* The device geometry is Rust; it resolves ALSA itself. */
+uint32_t minimod_stream_geometry(uintptr_t pcm, uint32_t *channels, int32_t *s32);
 
 /* The audio counters and the painted component live in Rust. */
 extern uint32_t g_audio_out_calls;
@@ -857,7 +866,6 @@ static volatile unsigned g_out_ch; /* channels of the device buffer, from ALSA *
 static volatile unsigned g_in_ch;
 static volatile int g_out_s32;      /* output stream is S32_LE */
 static volatile int g_in_s32;       /* input stream is S32_LE */
-static unsigned stream_geometry(void *pcm, unsigned *channels, int *s32);
 
 
 static void looper_pump(void)
@@ -1016,12 +1024,6 @@ static long (*real_snd_pcm_readi)(void *, void *, unsigned long);
 static long (*real_snd_pcm_writei)(void *, const void *, unsigned long);
 static long (*real_snd_pcm_delay)(void *, long *);
 static long (*real_snd_pcm_avail)(void *);
-static unsigned (*real_hw_malloc)(void **);
-static int (*real_hw_current)(void *, void *);
-static int (*real_hw_bufsize)(void *, unsigned long *);
-static int (*real_hw_channels)(void *, unsigned *);
-static int (*real_hw_format)(void *, int *);
-static void (*real_hw_free)(void *);
 
 /* ALSA's SND_PCM_FORMAT_S32_LE; minimod has no ALSA headers. */
 #define MM_FMT_S32_LE 10
@@ -1031,32 +1033,6 @@ static void (*real_hw_free)(void *);
 /* Frames in the ring, the channel count and whether the stream is S32_LE -
  * all from the stream's own hw params. Returns 0 when the device cannot be
  * queried, and callers must then leave the buffer alone. */
-static unsigned stream_geometry(void *pcm, unsigned *channels, int *s32)
-{
-    if (!pcm || !real_hw_malloc)
-        return 0;
-    void *hw = 0;
-    unsigned frames = 0;
-    if (real_hw_malloc(&hw) < 0 || !hw)
-        return 0;
-    if (real_hw_current(pcm, hw) >= 0) {
-        unsigned long f = 0;
-        if (real_hw_bufsize(hw, &f) >= 0 && f < 65536)
-            frames = (unsigned)f;
-        if (channels && real_hw_channels) {
-            unsigned c = 0;
-            if (real_hw_channels(hw, &c) >= 0 && c > 0 && c <= 32)
-                *channels = c;
-        }
-        if (s32 && real_hw_format) {
-            int f = -1;
-            *s32 = real_hw_format(hw, &f) >= 0 && f == MM_FMT_S32_LE;
-        }
-    }
-    if (real_hw_free)
-        real_hw_free(hw);
-    return frames;
-}
 
 static volatile unsigned g_out_delay; /* last output delay sample, frames */
 static volatile unsigned g_out_delay_avg; /* smoothed, what a take uses */
@@ -1098,7 +1074,7 @@ long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size)
     if (looper && (!g_buf_out || g_buf_dirty)) {
         unsigned c = 0;
         int s32 = 0;
-        g_buf_out = stream_geometry(pcm, &c, &s32);
+        g_buf_out = minimod_stream_geometry((uintptr_t)pcm, &c, &s32);
         if (c) {
             g_out_ch = c;
             g_out_s32 = s32;
@@ -1210,7 +1186,7 @@ long snd_pcm_readi(void *pcm, void *buffer, unsigned long size)
     if (!g_buf_in || g_buf_dirty) {
         unsigned c = 0;
         int s32 = 0;
-        g_buf_in = stream_geometry(pcm, &c, &s32);
+        g_buf_in = minimod_stream_geometry((uintptr_t)pcm, &c, &s32);
         if (c) {
             g_in_ch = c;
             g_in_s32 = s32;
@@ -1625,12 +1601,6 @@ __attribute__((constructor)) static void load(void)
     debug_mode = dbg_env && atoi(dbg_env) != 0;
     const char *probe_env = getenv("MINIMOD_PROBE");
     probe_mode = probe_env && atoi(probe_env) != 0;
-    real_hw_malloc = (unsigned (*)(void **))dlsym(RTLD_NEXT, "snd_pcm_hw_params_malloc");
-    real_hw_current = (int (*)(void *, void *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_current");
-    real_hw_bufsize = (int (*)(void *, unsigned long *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_get_buffer_size");
-    real_hw_channels = (int (*)(void *, unsigned *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_get_channels");
-    real_hw_format = (int (*)(void *, int *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_get_format");
-    real_hw_free = (void (*)(void *))dlsym(RTLD_NEXT, "snd_pcm_hw_params_free");
     looper_cfg_load();
     {
         const char *lat = getenv("MINIMOD_LOOP_LAT");

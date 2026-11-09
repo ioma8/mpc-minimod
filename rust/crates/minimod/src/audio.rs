@@ -280,6 +280,116 @@ pub unsafe extern "C" fn minimod_pump_thread(_arg: usize) -> usize {
     }
 }
 
+/// The PCM format code for signed 32-bit little-endian samples.
+const FORMAT_S32_LE: i32 = 10;
+/// The largest device buffer the mod will believe, in frames.
+const DEVICE_MAX_FRAMES: u64 = 65536;
+/// The largest device channel count the mod will believe.
+const DEVICE_MAX_CHANNELS: u32 = 32;
+
+/// The ALSA entry points, resolved once from the next object in the search order.
+type HwMalloc = unsafe extern "C" fn(*mut *mut libc::c_void) -> i32;
+type HwCurrent = unsafe extern "C" fn(*mut libc::c_void, *mut libc::c_void) -> i32;
+type HwBufsize = unsafe extern "C" fn(*mut libc::c_void, *mut libc::c_ulong) -> i32;
+type HwChannels = unsafe extern "C" fn(*mut libc::c_void, *mut libc::c_uint) -> i32;
+type HwFormat = unsafe extern "C" fn(*mut libc::c_void, *mut i32) -> i32;
+type HwFree = unsafe extern "C" fn(*mut libc::c_void);
+
+struct Alsa {
+    malloc: HwMalloc,
+    current: HwCurrent,
+    bufsize: HwBufsize,
+    channels: HwChannels,
+    format: HwFormat,
+    free: HwFree,
+}
+
+/// Resolve one symbol from the object after this one.
+fn look_up<T: Copy>(name: &core::ffi::CStr) -> Option<T> {
+    // SAFETY: the name is NUL-terminated and the search order is the loader's.
+    let address = unsafe { libc::dlsym(libc::RTLD_NEXT, name.as_ptr()) };
+    if address.is_null() {
+        return None;
+    }
+    // SAFETY: the caller names the type the symbol actually has.
+    Some(unsafe { core::mem::transmute_copy::<*mut libc::c_void, T>(&address) })
+}
+
+impl Alsa {
+    /// Resolve every entry point, or nothing if one is missing.
+    fn load() -> Option<&'static Self> {
+        static SLOT: std::sync::OnceLock<Option<Alsa>> = std::sync::OnceLock::new();
+        SLOT.get_or_init(|| {
+            Some(Self {
+                malloc: look_up(c"snd_pcm_hw_params_malloc")?,
+                current: look_up(c"snd_pcm_hw_params_current")?,
+                bufsize: look_up(c"snd_pcm_hw_params_get_buffer_size")?,
+                channels: look_up(c"snd_pcm_hw_params_get_channels")?,
+                format: look_up(c"snd_pcm_hw_params_get_format")?,
+                free: look_up(c"snd_pcm_hw_params_free")?,
+            })
+        })
+        .as_ref()
+    }
+}
+
+/// The device stream's geometry: its buffer in frames, its channels and whether
+/// it carries 32-bit samples.
+///
+/// # Safety
+///
+/// `pcm` must be the app's live PCM handle; the out pointers may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_stream_geometry(
+    pcm: usize,
+    channels: *mut u32,
+    s32: *mut i32,
+) -> u32 {
+    let Some(alsa) = Alsa::load() else {
+        return 0;
+    };
+    if pcm == 0 {
+        return 0;
+    }
+    let mut params: *mut libc::c_void = core::ptr::null_mut();
+    // SAFETY: the entry point allocates the parameters.
+    if unsafe { (alsa.malloc)(core::ptr::from_mut(&mut params)) } < 0 || params.is_null() {
+        return 0;
+    }
+    let mut frames = 0_u32;
+    // SAFETY: the handle is live and `params` is ours.
+    if unsafe { (alsa.current)(pcm as *mut libc::c_void, params) } >= 0 {
+        let mut size = 0_u64;
+        // SAFETY: see above.
+        if unsafe { (alsa.bufsize)(params, core::ptr::from_mut(&mut size)) } >= 0
+            && size < DEVICE_MAX_FRAMES
+        {
+            frames = u32::try_from(size).unwrap_or(0);
+        }
+        if !channels.is_null() {
+            let mut count = 0_u32;
+            // SAFETY: see above.
+            if unsafe { (alsa.channels)(params, core::ptr::from_mut(&mut count)) } >= 0
+                && count > 0
+                && count <= DEVICE_MAX_CHANNELS
+            {
+                // SAFETY: the caller passed a writable slot.
+                unsafe { *channels = count };
+            }
+        }
+        if !s32.is_null() {
+            let mut format = -1;
+            // SAFETY: see above.
+            let known = unsafe { (alsa.format)(params, core::ptr::from_mut(&mut format)) } >= 0;
+            // SAFETY: the caller passed a writable slot.
+            unsafe { *s32 = i32::from(known && format == FORMAT_S32_LE) };
+        }
+    }
+    // SAFETY: the parameters came from the malloc above.
+    unsafe { (alsa.free)(params) };
+    frames
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CHANNEL_LIMIT, INPUT_ALT, INPUT_CHANNELS, OUTPUT_ALT, OUTPUT_CHANNELS, channels};
