@@ -289,6 +289,192 @@ pub unsafe extern "C" fn minimod_hpss_is_armed(command: usize) -> i32 {
     })
 }
 
+/// The extraction the mod is about to run, as the hooks need to see it.
+static mut ARM: Arm = Arm {
+    armed: 0,
+    buffer: 0,
+    frames: 0,
+    source_frames: 0,
+    channels: 0,
+    start: 0,
+    end: 0,
+    rename: 0,
+};
+/// The app's own slice constructor, recorded at install.
+static mut ORIGINAL_CTOR: Option<
+    unsafe extern "C" fn(usize, usize, i32, usize, usize, usize, usize, usize, usize),
+> = None;
+/// The app's own slice method, recorded at install.
+static mut ORIGINAL_EXEC: Option<unsafe extern "C" fn(usize)> = None;
+
+/// Record the app's slice constructor alone.
+///
+/// # Safety
+///
+/// Called once at install.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hpss_ctor_original(constructor: usize) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        ORIGINAL_CTOR = if constructor == 0 {
+            None
+        } else {
+            Some(core::mem::transmute_copy::<usize, _>(&constructor))
+        };
+    }
+}
+
+/// Record the app's slice method alone.
+///
+/// # Safety
+///
+/// Called once at install.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hpss_exec_original(execute: usize) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        ORIGINAL_EXEC = if execute == 0 {
+            None
+        } else {
+            Some(core::mem::transmute_copy::<usize, _>(&execute))
+        };
+    }
+}
+
+/// Record the app's slice command, for the hooks.
+///
+/// # Safety
+///
+/// Called once at install, before any command runs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hpss_originals(constructor: usize, execute: usize) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        ORIGINAL_CTOR = if constructor == 0 {
+            None
+        } else {
+            Some(core::mem::transmute_copy::<usize, _>(&constructor))
+        };
+        ORIGINAL_EXEC = if execute == 0 {
+            None
+        } else {
+            Some(core::mem::transmute_copy::<usize, _>(&execute))
+        };
+    }
+}
+
+/// The pad state the extraction belongs to.
+static mut ARM_SOURCE: usize = 0;
+/// Whether the writer consumed the whole buffer.
+static mut WRITE_OK: i32 = 0;
+
+/// Arm an extraction: the hooks read this until it is cleared.
+///
+/// # Safety
+///
+/// Called on the UI thread while the app runs one Extract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hpss_arm(
+    source: usize,
+    buffer: usize,
+    frames: usize,
+    source_frames: usize,
+    channels: u32,
+    start: u32,
+    end: u32,
+    rename: i32,
+) {
+    // SAFETY: the statics are this module's.
+    unsafe {
+        ARM = Arm {
+            armed: 1,
+            buffer,
+            frames,
+            source_frames,
+            channels,
+            start,
+            end,
+            rename,
+        };
+        ARM_SOURCE = source;
+    }
+}
+
+/// Disarm after the app has run the command.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_hpss_disarm() {
+    // SAFETY: the static is this module's.
+    unsafe { ARM.armed = 0 };
+}
+
+/// Whether the writer consumed the whole buffer, for the caller.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_hpss_write_ok() -> i32 {
+    // SAFETY: the static is this module's.
+    unsafe { WRITE_OK }
+}
+
+/// The slice command's constructor: rename it and remember the command.
+///
+/// # Safety
+///
+/// The app calls this with its own arguments.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hpss_ctor_entry(
+    one: usize,
+    two: usize,
+    three: usize,
+    four: usize,
+    five: usize,
+    six: usize,
+    seven: usize,
+    eight: usize,
+    nine: usize,
+) {
+    let destination = i32::try_from(three).unwrap_or(0);
+    // SAFETY: the statics are this module's.
+    let (arm, source) = unsafe { (ARM, ARM_SOURCE) };
+    // SAFETY: the static is this module's.
+    let forward = unsafe { *core::ptr::addr_of!(ORIGINAL_CTOR) };
+    // SAFETY: the caller's contract.
+    unsafe {
+        minimod_hook_hpss_ctor(
+            one,
+            two,
+            destination,
+            four,
+            five,
+            six,
+            seven,
+            eight,
+            nine,
+            core::ptr::from_ref(&arm),
+            source,
+            forward,
+        );
+    }
+}
+
+/// The slice command's execute: run it with the armed buffer, if any.
+///
+/// # Safety
+///
+/// The app calls this with its own command.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_hpss_exec_entry(command: usize) {
+    // SAFETY: the statics are this module's.
+    let mut arm = unsafe { ARM };
+    arm.armed = i32::from(arm.armed != 0 && unsafe { minimod_hpss_is_armed(command) } != 0);
+    // SAFETY: the static is this module's.
+    let execute = unsafe { *core::ptr::addr_of!(ORIGINAL_EXEC) };
+    // SAFETY: the command and the app's method are the caller's.
+    let outcome = unsafe { minimod_hpss_exec_run(command, core::ptr::from_ref(&arm), execute) };
+    if arm.armed != 0 {
+        // SAFETY: the static is this module's.
+        unsafe { WRITE_OK = outcome.write_ok };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Outcome, RANGE_END, RANGE_START};

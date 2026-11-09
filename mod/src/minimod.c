@@ -77,6 +77,12 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+void minimod_hpss_arm(uintptr_t source, uintptr_t buffer, size_t frames,
+                      size_t source_frames, uint32_t channels, uint32_t start,
+                      uint32_t end, int32_t rename);
+void minimod_hpss_disarm(void);
+int32_t minimod_hpss_write_ok(void);
+
 void minimod_autotrim_cycle(void);
 
 extern uint32_t g_bass_preview_notes;
@@ -526,16 +532,6 @@ static void (*orig_hpss_writer)(void *, void *);
 
 /* One armed output.  The constructor hook maps the command it sees to this
  * buffer, and the writer callback consumes the buffer sequentially. */
-static volatile int g_hpss_arm;
-static uintptr_t g_hpss_arm_source;
-static const float *g_hpss_arm_buf;
-static size_t g_hpss_arm_frames;
-static size_t g_hpss_arm_source_frames;
-static unsigned g_hpss_arm_start;
-static unsigned g_hpss_arm_end;
-static unsigned g_hpss_arm_ch;
-static int g_hpss_arm_name;
-static volatile int g_hpss_write_ok;
 
 static float g_bass_knob[3] = {0.52f, 0.18f, 0.56f};
 static uint32_t bass_float_bits(float value)
@@ -556,47 +552,7 @@ static void hpss_repaint(void);
 
 
 
-void hpss_ctor_hook(void *cmd, void *name, int dest, void *settings,
-                           void *padstate, void *project, void *s1, void *s2,
-                           void *s3)
-{
-    struct minimod_hpss_arm arm = {
-        .armed = g_hpss_arm,
-        .buffer = (uintptr_t)g_hpss_arm_buf,
-        .frames = g_hpss_arm_frames,
-        .source_frames = g_hpss_arm_source_frames,
-        .channels = g_hpss_arm_ch,
-        .start = g_hpss_arm_start,
-        .end = g_hpss_arm_end,
-        .rename = g_hpss_arm_name,
-    };
-    minimod_hook_hpss_ctor((uintptr_t)cmd, (uintptr_t)name, dest, (uintptr_t)settings,
-                           (uintptr_t)padstate, (uintptr_t)project, (uintptr_t)s1,
-                           (uintptr_t)s2, (uintptr_t)s3, &arm,
-                           g_hpss_arm_source,
-                           (void (*)(uintptr_t, uintptr_t, int32_t, uintptr_t, uintptr_t,
-                                    uintptr_t, uintptr_t, uintptr_t,
-                                    uintptr_t))orig_hpss_ctor);
-}
 
-void hpss_exec_hook(void *cmd)
-{
-    int armed = minimod_hpss_is_armed((uintptr_t)cmd) ? 1 : 0;
-    struct minimod_hpss_arm arm = {
-        .armed = armed && g_hpss_arm,
-        .buffer = (uintptr_t)g_hpss_arm_buf,
-        .frames = g_hpss_arm_frames,
-        .source_frames = g_hpss_arm_source_frames,
-        .channels = g_hpss_arm_ch,
-        .start = g_hpss_arm_start,
-        .end = g_hpss_arm_end,
-        .rename = g_hpss_arm_name,
-    };
-    struct minimod_hpss_outcome outcome =
-        minimod_hpss_exec_run((uintptr_t)cmd, &arm, (void (*)(void *))orig_hpss_exec);
-    if (arm.armed)
-        g_hpss_write_ok = outcome.write_ok;
-}
 
 
 
@@ -631,17 +587,11 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
         *dest = before;
 
     minimod_hpss_forget();
-    g_hpss_arm_source = state;
-    g_hpss_arm_buf = buf;
-    g_hpss_arm_frames = buf ? buffer_frames : end - start;
-    g_hpss_arm_source_frames = source_frames;
-    g_hpss_arm_start = start;
-    g_hpss_arm_end = end;
-    g_hpss_arm_ch = ch;
-    g_hpss_arm_name = name;
-    g_hpss_arm = 1;
+    minimod_hpss_arm((uintptr_t)state, (uintptr_t)buf,
+                     buf ? buffer_frames : end - start, source_frames, ch, start, end,
+                     name);
     FN(A_HPSS_EXTRACT_HANDLER, void (*)(void *))(screen);
-    g_hpss_arm = 0;
+    minimod_hpss_disarm();
 
     /* The command may be executed on an executor thread after the handler
      * returns.  Wait for the pad to change before starting the next one. */
@@ -650,7 +600,7 @@ static int hpss_extract_ctx(void *screen, uintptr_t state, const float *buf,
         usleep(1000);
         after = minimod_pads_free_pad(base, (uintptr_t)program);
     }
-    int write_ok = buf ? g_hpss_write_ok : 1;
+    int write_ok = buf ? minimod_hpss_write_ok() : 1;
     int ok = after != before && write_ok;
     mlog("HPSS extract: pad %d -> free %d (%s, write %s) range %u..%u\n", before,
          after, after != before ? "assigned" : "NO ASSIGNMENT",

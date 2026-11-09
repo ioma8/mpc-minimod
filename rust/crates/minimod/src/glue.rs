@@ -417,11 +417,11 @@ static SITES: [Site; 16] = [
     },
     Site {
         offset: 0x0143_ed40,
-        handler: glue_hpss_ctor as *const (),
+        handler: crate::hpss_exec::minimod_hpss_ctor_entry as *const (),
     },
     Site {
         offset: 0x0143_f0b0,
-        handler: glue_hpss_exec as *const (),
+        handler: crate::hpss_exec::minimod_hpss_exec_entry as *const (),
     },
     Site {
         offset: 0x01d8_aff0,
@@ -437,18 +437,6 @@ static SITES: [Site; 16] = [
 unsafe extern "C" {
     fn ui_buttons(event: usize);
     fn midi_note_event(app: usize, context: usize, event: usize, source: usize);
-    fn hpss_ctor_hook(
-        one: usize,
-        two: usize,
-        three: usize,
-        four: usize,
-        five: usize,
-        six: usize,
-        seven: usize,
-        eight: usize,
-        nine: usize,
-    );
-    fn hpss_exec_hook(command: usize);
     fn install_screen_paint() -> i32;
     fn minimod_glue_set_originals(originals: *const Originals);
     fn minimod_glue_finished(touched: i32);
@@ -478,28 +466,6 @@ pub struct Originals {
 unsafe extern "C" fn glue_buttons(event: usize) {
     // SAFETY: the app calls this with its own event.
     unsafe { ui_buttons(event) };
-}
-
-/// The slice command's constructor, as the glue installs it.
-unsafe extern "C" fn glue_hpss_ctor(
-    one: usize,
-    two: usize,
-    three: usize,
-    four: usize,
-    five: usize,
-    six: usize,
-    seven: usize,
-    eight: usize,
-    nine: usize,
-) {
-    // SAFETY: the app calls this with its own arguments.
-    unsafe { hpss_ctor_hook(one, two, three, four, five, six, seven, eight, nine) };
-}
-
-/// The slice command's execute, as the glue installs it.
-unsafe extern "C" fn glue_hpss_exec(command: usize) {
-    // SAFETY: the app calls this with its own command.
-    unsafe { hpss_exec_hook(command) };
 }
 
 /// The MIDI note event, as the glue installs it.
@@ -560,6 +526,8 @@ pub unsafe extern "C" fn minimod_site_record(index: usize, original: usize) {
             }
             10 => crate::entries::minimod_repaint_original(original),
             11 => crate::entries::minimod_assign_original(original),
+            12 => crate::hpss_exec::minimod_hpss_ctor_original(original),
+            13 => crate::hpss_exec::minimod_hpss_exec_original(original),
             14 => crate::entries::minimod_writer_original(original),
             15 => crate::midi::minimod_midi_note_original(original),
             _ => {}
