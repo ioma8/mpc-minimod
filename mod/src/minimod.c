@@ -435,37 +435,10 @@ static struct {
 } g_pm[8];
 static volatile int g_npm;
 
-static uintptr_t learned_prop(uintptr_t param)
-{
-    for (int i = 0; i < g_npm; ++i)
-        if (g_pm[i].param == param)
-            return g_pm[i].prop;
-    return 0;
-}
 
 /* A property seen in a real broadcast whose cached value is exactly the
  * parameter's current value is the one that owns it. Exact equality keeps the
  * false positives (and the abort they caused) away. */
-static uintptr_t broadcast_prop(uintptr_t param, float cur)
-{
-    (void)param;
-    uintptr_t best = 0;
-    int hits = 0;
-    for (int i = 0; i < (g_nbc < 256 ? g_nbc : 256); ++i) {
-        uintptr_t p = g_bc[i].p;
-        if ((p & 7) || p < 0x10000 || !mapped((void *)p))
-            continue;
-        if (g_bc[i].v != cur)
-            continue;
-        float v50 = 0;
-        if (!rd(p + 0x50, &v50, 4) || v50 != cur)
-            continue;
-        if (best && p != best)
-            hits++;
-        best = p;
-    }
-    return hits ? 0 : best; /* ambiguous -> refuse */
-}
 
 /* ------------------------------------------------------------ app screens */
 
@@ -1833,39 +1806,6 @@ static void trim_probe(void *self, float v)
         orig_trim(self, v);
 }
 
-static void bcast_hook(void *self, float v)
-{
-    unsigned i = __atomic_fetch_add(&g_nbc, 1, __ATOMIC_RELAXED);
-    g_bc[i & 255].p = (uintptr_t)self;
-    g_bc[i & 255].v = v;
-    if (probe_mode && i < 64)
-        mlog("minimod: bcast %p v=%.4f\n", self, (double)v);
-
-    /* Record the property a *native* broadcast uses: that is the object the
-     * page listens to. Our own broadcasts are flagged. */
-    if (!g_own_call) {
-        static int lrc;
-        int nice = (v > 0.001f && v < 0.999f) && v != 0.5f;
-        if (nice && lrc < 24) {
-            lrc++;
-            mlog("minimod: bcast lr=%p prop=%p v=%.4f\n",
-                 __builtin_return_address(0), self, (double)v);
-        }
-        uintptr_t P = (uintptr_t)self;
-        int known = 0;
-        for (int k = 0; k < g_nbp; ++k)
-            if (g_bp[k] == P) {
-                known = 1;
-                break;
-            }
-        if (!known && g_nbp < 8) {
-            g_bp[g_nbp++] = P;
-            mlog("minimod: native bcast property=%p v=%.4f\n", self, (double)v);
-        }
-    }
-    if (orig_bcast)
-        orig_bcast(self, v);
-}
 
 /* ------------------------------------------------------- message-thread pump */
 static void *g_trim_param0, *g_trim_param1;
@@ -2077,44 +2017,8 @@ static void cc_capture(void *ev, unsigned raw, float lo, float range)
         orig_cc(ev, raw, lo, range);
 }
 
-static void cc_replay(unsigned cc, unsigned raw)
-{
-    unsigned char ev[32];
-    if (!g_cc_ev_valid) {
-        mlog("Spectral: no captured CC event, cannot replay\n");
-        return;
-    }
-    memcpy(ev, g_cc_ev, sizeof ev);
-    ev[8] = (unsigned char)cc;
-    g_in_cc_replay = 1;
-    if (orig_cc)
-        orig_cc(ev, raw, 0.0f, 127.0f);
-    g_in_cc_replay = 0;
-}
 
 
-static void cc_inject(uintptr_t obj, unsigned cc, unsigned raw)
-{
-    /* Static, not stack: the app may keep the pointer it was handed (the abort
-     * after the replay looked exactly like a dangling event). */
-    static unsigned char ev[64];
-    memset(ev, 0, sizeof ev);
-    *(uintptr_t *)ev = obj;
-    ev[8] = (unsigned char)cc;
-    /* Disassembly of 0x159f230:
-     *   ldrb w3,[x0,8]    -> x0 is the event, byte +8 is the CC
-     *   and  w2,w1,0x7f   -> w1 is the raw 7-bit value
-     *   fdiv s0,s0,s1     -> s1 is the range (so: two float parameters)
-     *   ldr  x0,[x0] / ldr x0,[x0,0x10] / add x0,x0,#0x1ac0 -> the property
-     * so the call is (event, raw, min, range). */
-    if (sigsetjmp(g_cc_jmp, 1) == 0) {
-        g_cc_recover = 1;
-        FN(0x159f230, void (*)(void *, unsigned, float, float))(ev, raw, 0.0f, 127.0f);
-        g_cc_recover = 0;
-    } else {
-        mlog("minimod: replay faulted - recovered\n");
-    }
-}
 
 /* Whole-heap fingerprint: hash every 4 KiB page of writable memory. Two
  * snapshots around a knob move show *everything* the knob changes (the model,
@@ -2146,24 +2050,6 @@ static int prop_listeners_sane(uintptr_t P)
 /* The trim parameter is the listener of the knob's property whose vtable is
  * TrimParameter's. That makes the Start/End pair exact, with no scanning and no
  * dependence on which knob was touched last. */
-static uintptr_t param_from_prop(uintptr_t P)
-{
-    uintptr_t node = 0;
-    if (!P || !rd(P + 0x10, &node, 8) || !node)
-        return 0;
-    for (int i = 0; i < 32 && node && node != P + 8; ++i) {
-        uintptr_t tgt = 0, next = 0, vt = 0;
-        if (!rd(node + 0x18, &tgt, 8) || !rd(node + 8, &next, 8))
-            return 0;
-        tgt &= ~(uintptr_t)3;
-        if (tgt && mapped((void *)tgt) && rd(tgt, &vt, 8) && vt == base + 0x6e1b240)
-            return tgt;
-        if (!next || !mapped((void *)next))
-            return 0;
-        node = next;
-    }
-    return 0;
-}
 
 static void do_poke(void)
 {
@@ -2203,365 +2089,6 @@ static void do_poke(void)
     }
 }
 
-static void commit_trim(void)
-{
-    void *p0 = g_trim_param0, *p1 = g_trim_param1;
-    float v0 = g_trim_v0, v1 = g_trim_v1;
-    if (!p0 || !p1)
-        return;
-
-    /* The Trim knobs' own effect, in their own order: the core (which stores
-     * the value and the applied value on the parameter), the layer frames the
-     * engine plays, then a repaint. Everything else tried so far - page cache
-     * fields, slider widgets, property broadcasts - was measured to be a no-op
-     * or to corrupt the page, so none of it is attempted any more. */
-    /* A learned property broadcasts exactly like a knob; the others are
-     * written through the trim core. Broadcasting even one of them is what
-     * makes the page repaint. */
-    if (getenv("MINIMOD_NODEPROBE"))
-        probe_node((uintptr_t)p0);
-
-    /* A property seen broadcasting the parameter's *current* value is the one
-     * that owns it. Broadcasting through it is the knob's own path: the
-     * broadcaster stores the value and notifies every listener, which is the
-     * step that repaints the page. */
-    float cur0 = 0, cur1 = 0;
-    rd((uintptr_t)p0 + T_VALUE, &cur0, 4);
-    rd((uintptr_t)p1 + T_VALUE, &cur1, 4);
-    uintptr_t pr0 = learned_prop((uintptr_t)p0);
-    uintptr_t pr1 = learned_prop((uintptr_t)p1);
-    if (!pr0)
-        pr0 = broadcast_prop((uintptr_t)p0, cur0);
-    if (!pr1)
-        pr1 = broadcast_prop((uintptr_t)p1, cur1);
-    if (!pr0)
-        pr0 = prop_of_param((uintptr_t)p0);
-    if (!pr1)
-        pr1 = prop_of_param((uintptr_t)p1);
-    mlog("minimod: props %p/%p (cur %.4f/%.4f, seen %d)\n", (void *)pr0,
-         (void *)pr1, (double)cur0, (double)cur1, g_nbc);
-
-    /* Exact pair from the knob properties, when we can find them. */
-    {
-        uintptr_t kp = find_knob_props();
-        if (kp) {
-            uintptr_t sp = param_from_prop(kp), ep = param_from_prop(kp + 0x58);
-            mlog("minimod: params from props %p/%p (had %p/%p)\n", (void *)sp, (void *)ep,
-                 g_trim_param0, g_trim_param1);
-            if (sp && ep) {
-                g_trim_param0 = (void *)sp;
-                g_trim_param1 = (void *)ep;
-                p0 = (void *)sp;
-                p1 = (void *)ep;
-            }
-        }
-    }
-
-    /* Replaying the knob through the app's CC dispatcher gives the exact visual
-     * result of a manual trim (verified pixel-identical), but it crashes the
-     * app when called from inside the button dispatch, so it is deferred to the
-     * paint hook (opt-in). */
-    if (getenv("MINIMOD_CCINJECT") && !g_in_inject) {
-        g_cc_step = 0;
-        g_pending_cc = 1;
-    }
-    if (g_in_inject) {
-        uintptr_t base = 0, obj = 0;
-        if (pr0)
-            base = pr0 - 0x1ac0;
-        else if (pr1)
-            base = pr1 - 0x1b18;
-        else {
-            uintptr_t kp = find_knob_props();
-            if (kp) {
-                base = kp - 0x1ac0;
-                mlog("minimod: knob property triple at %p\n", (void *)kp);
-            }
-        }
-        if (base) {
-            /* Only trust a control base whose K1/K2 properties really exist and
-             * have a terminated listener list; a wrong one crashes the app. */
-            uintptr_t p1 = base + 0x1ac0;
-            uintptr_t head = 0;
-            float v = 0;
-            int ok = rd(p1 + 0x10, &head, 8) && head && mapped((void *)head) &&
-                     rd(p1 + 0x50, &v, 4) && v >= -2.0f && v <= 2.0f;
-            if (ok) {
-                uintptr_t node = head;
-                int steps = 0;
-                for (; steps < 64 && node && node != p1 + 8; ++steps) {
-                    uintptr_t next = 0;
-                    if (!rd(node + 8, &next, 8) || !next || !mapped((void *)next))
-                        break;
-                    node = next;
-                }
-                if (node != p1 + 8)
-                    ok = 0; /* list does not terminate at the sentinel */
-            }
-            if (ok && !prop_listeners_sane(p1))
-                ok = 0;
-            if (ok && !prop_listeners_sane(base + 0x1b18))
-                ok = 0;
-            if (!ok) {
-                mlog("minimod: control base %p rejected\n", (void *)base);
-                base = 0;
-            } else {
-                obj = ctl_obj_for(base);
-            }
-        }
-        mlog("minimod: cc base=%p obj=%p\n", (void *)base, (void *)obj);
-        /* What exactly will be called? Log every listener and its call slot so
-         * a bad pointer can be matched against the fault address. */
-        if (obj) {
-            for (int k = 0; k < 2; ++k) {
-                uintptr_t P = base + 0x1ac0 + (uintptr_t)k * 0x58;
-                uintptr_t node = 0;
-                if (!rd(P + 0x10, &node, 8) || !node)
-                    continue;
-                for (int i = 0; i < 8 && node && node != P + 8; ++i) {
-                    uintptr_t tgt = 0, next = 0, vt = 0, slot = 0;
-                    if (!rd(node + 0x18, &tgt, 8) || !rd(node + 8, &next, 8))
-                        break;
-                    tgt &= ~(uintptr_t)3;
-                    if (rd(tgt, &vt, 8) && rd(vt + 0x28, &slot, 8))
-                        mlog("minimod: P%p listener %p vt=%p slot28=%p\n", (void *)P,
-                             (void *)tgt, (void *)vt, (void *)slot);
-                    if (!next || !mapped((void *)next))
-                        break;
-                    node = next;
-                }
-            }
-        }
-        if (obj) {
-            unsigned r0 = (unsigned)(v0 * 127.0f + 0.5f);
-            unsigned r1 = (unsigned)(v1 * 127.0f + 0.5f);
-            /* Default: one control per paint (safe, but the page does not
-             * update). MINIMOD_ONESHOT delivers both in one turn, which does
-             * update the model - and leaves the app faulting afterwards. */
-            if (getenv("MINIMOD_ONESHOT")) {
-                if (g_cc_ev_valid) {
-                    cc_replay(0x11, r1);
-                    cc_replay(0x10, r0);
-                } else {
-                    cc_inject(obj, 0x11, r1);
-                    cc_inject(obj, 0x10, r0);
-                }
-                mlog("minimod: one-shot replay done\n");
-                return;
-            }
-            if (g_cc_step == 0) {
-                g_cc_step = 1;
-                g_cc_obj = obj;
-                g_cc_r0 = r0;
-                g_cc_r1 = r1;
-                if (g_cc_ev_valid)
-                    cc_replay(0x11, r1);
-                else
-                    cc_inject(obj, 0x11, r1);
-                g_pending_cc = 1; /* come back for the second one */
-                mlog("minimod: step 1 done\n");
-                return;
-            }
-            if (g_cc_step == 1) {
-                g_cc_step = 2;
-                if (g_cc_ev_valid)
-                    cc_replay(0x10, g_cc_r0);
-                else
-                    cc_inject(g_cc_obj, 0x10, g_cc_r0);
-                mlog("minimod: step 2 done\n");
-                return;
-            }
-            mlog("minimod: injected CC 0x10=%u 0x11=%u\n", r0, r1);
-            {
-                float c0 = -9, c1 = -9;
-                if (pr0)
-                    rd(pr0 + 0x50, &c0, 4);
-                if (pr1)
-                    rd(pr1 + 0x50, &c1, 4);
-                mlog("minimod: app stored %.4f/%.4f (want %.4f/%.4f)\n", (double)c0,
-                     (double)c1, (double)v0, (double)v1);
-            }
-            /* The page draws its trim only when it reloads the pad, so repeat
-             * the pad press that is already in progress. */
-            {
-                int pd = g_input.last_pad;
-                if (pd >= 0 && pd < 128 && g_input.pad_rec[pd].valid && orig_note_on) {
-                    g_input.replaying = 1;
-                    orig_note_on((void *)g_input.pad_rec[pd].input, g_input.pad_rec[pd].src,
-                                 g_input.pad_rec[pd].pad, (void *)g_input.pad_rec[pd].props,
-                                 g_input.pad_rec[pd].velocity);
-                    g_input.replaying = 0;
-                    mlog("minimod: re-selected pad %d to refresh the page\n", pd);
-                }
-            }
-            /* Repaint the whole window, not just the page: the page is a
-             * child and the app repaints from the top-level component. */
-            if (g_screen) {
-                uintptr_t root = (uintptr_t)g_screen;
-                for (int i = 0; i < 8; ++i) {
-                    uintptr_t parent = 0;
-                    if (!rd(root + 0x18, &parent, 8) || !parent || !mapped((void *)parent))
-                        break;
-                    root = parent;
-                }
-                mlog("minimod: repaint root=%p (page %p)\n", (void *)root, g_screen);
-                FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-                    (void *)root, 0, FIELD(root, 0x28, uint64_t));
-                FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-                    g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
-            }
-            return;
-        }
-    }
-    /* Write the end first: the core clamps a start that would pass the current
-     * end, so the pair must move outward before inward. */
-    g_own_call = 1;
-    if (pr1)
-        FN(A_BROADCAST, void (*)(void *, float))((void *)pr1, v1);
-    else
-        FN(A_TRIM_CORE, void (*)(float, void *))(v1, p1);
-    if (pr0)
-        FN(A_BROADCAST, void (*)(void *, float))((void *)pr0, v0);
-    else
-        FN(A_TRIM_CORE, void (*)(float, void *))(v0, p0);
-    /* Either parameter can reject a write while it still holds -1 (the core
-     * treats that as "not yet bound"), so retry the pair a few times. */
-    for (int attempt = 0; attempt < 4; ++attempt) {
-        float c0 = 0, c1 = 0;
-        int ok0 = rd((uintptr_t)p0 + T_VALUE, &c0, 4) && c0 > -0.5f;
-        int ok1 = rd((uintptr_t)p1 + T_VALUE, &c1, 4) && c1 > -0.5f;
-        if (ok0 && ok1)
-            break;
-        mlog("minimod: retry %d (p0=%.3f p1=%.3f)\n", attempt, (double)c0, (double)c1);
-        if (!ok1)
-            FN(A_TRIM_CORE, void (*)(float, void *))(v1, p1);
-        if (!ok0)
-            FN(A_TRIM_CORE, void (*)(float, void *))(v0, p0);
-    }
-    g_own_call = 0;
-
-    if (g_trim_layer) {
-        unsigned fa = (unsigned)(v0 * (float)g_trim_frames + 0.5f);
-        unsigned fb = (unsigned)(v1 * (float)g_trim_frames + 0.5f);
-        if (fb <= fa)
-            fb = fa + 1;
-        wr(g_trim_layer + 0x4d8, &fa, 4);
-        wr(g_trim_layer + 0x588, &fa, 4);
-        wr(g_trim_layer + 0x530, &fb, 4);
-        mlog("minimod: layer %p <- %u..%u frames\n", (void *)g_trim_layer, fa, fb);
-    }
-
-    float a0 = v0, a1 = v1;
-    wr((uintptr_t)p0 + T_APPLIED, &a0, 4);
-    wr((uintptr_t)p1 + T_APPLIED, &a1, 4);
-
-    float check = 0, check2 = 0;
-    rd((uintptr_t)p0 + T_VALUE, &check, 4);
-    rd((uintptr_t)p1 + T_VALUE, &check2, 4);
-    /* Also write the property caches: the broadcaster stores the value there
-     * before notifying, so anything that polls the property sees the new trim. */
-    /* NOTE: do NOT store prop+0x50 directly. Property_Broadcast(value, prop)
-     * early-outs when the stored value already equals the new one, so writing
-     * the slot first suppresses the listener notification (which is what the
-     * page needs in order to update and redraw). The broadcast below does the
-     * store itself. */
-    /* Move the app's own slider widgets too: the page draws the Start/End bars
-     * from them at paint time. */
-    for (int i = 0; i < g_nps; ++i) {
-        float pct = -1.0f;
-        if (g_ps[i].param == (uintptr_t)p0)
-            pct = v0 * 100.0f;
-        else if (g_ps[i].param == (uintptr_t)p1)
-            pct = v1 * 100.0f;
-        if (pct >= 0.0f && g_ps[i].slider) {
-            if (wr(g_ps[i].slider + 0x1b4, &pct, 4))
-                mlog("minimod: slider %p -> %.2f%%\n", (void *)g_ps[i].slider,
-                     (double)pct);
-        }
-    }
-    g_mark_v0 = v0;
-    g_mark_v1 = v1;
-    mlog("minimod: commit core done p0=%.4f p1=%.4f (want %.4f/%.4f)\n",
-         (double)check, (double)check2, (double)v0, (double)v1);
-
-    /* Re-press the last control so the page reloads: it only redraws its trim
-     * when the pad is (re)selected. Off by default - the object recorded from a
-     * press is not always the pad and pressing it can open a menu. */
-    if (0 && g_last_press_obj && orig_buttons) {
-        static unsigned char ev[32];
-        memset(ev, 0, sizeof ev);
-        *(uintptr_t *)ev = g_last_press_obj;
-        ev[8] = 0x06;
-        ev[9] = 0x7f;
-        g_input.replaying = 1;
-        orig_buttons(ev);
-        ev[9] = 0x00;
-        orig_buttons(ev);
-        g_input.replaying = 0;
-        mlog("minimod: re-pressed %p to refresh the page\n", (void *)g_last_press_obj);
-    }
-    /* Repaint the page itself: with the property values written above, this is
-     * what makes the app's own Start/End edge follow the trim. */
-    if (g_livepage) {
-        uintptr_t vt = 0;
-        if (rd((uintptr_t)g_livepage, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
-            mlog("minimod: page vt=%#lx file=%#lx\n", (unsigned long)vt,
-                 (unsigned long)(vt - base));
-            for (int i = 20; i < 32; ++i) {
-                uintptr_t fn = 0;
-                if (rd(vt + i * 8, &fn, 8) && fn >= base && fn <= base + 0x12000000ULL)
-                    mlog("minimod:   slot %d -> %#lx\n", i, (unsigned long)(fn - base));
-            }
-        }
-    }
-    if (g_livepage) g_page = g_livepage;
-    uintptr_t pvt = 0;
-    if (g_page && rd((uintptr_t)g_page, &pvt, 8) &&
-        pvt >= base && pvt <= base + 0x12000000ULL) {
-        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-            g_page, 0, FIELD(g_page, 0x28, uint64_t));
-        mlog("minimod: repainted page %p\n", g_page);
-    }
-    /* Dry run: report the surface we would drive the controls with. */
-    if (g_surface) {
-        uintptr_t svt = 0;
-        int ok = rd((uintptr_t)g_surface, &svt, 8) && svt >= base && svt <= base + 0x12000000ULL;
-        mlog("minimod: surface=%p vt=%p valid=%d raw0=%d raw1=%d\n",
-             g_surface, (void *)svt, ok, (int)(v0 * 127.0f + 0.5f),
-             (int)(v1 * 127.0f + 0.5f));
-    }
-    /* Drive the app's own control path exactly like a knob turn:
-     * FUN_01a68020(surface, 0, controlId, value, mode) - the first argument is
-     * the surface (it dispatches through surface->vtable+0x160). */
-    /* The control-path call is experimental: it executes cleanly but does not
-     * move the app's display, so it stays behind an env flag. */
-    if (getenv("MINIMOD_CTL")) {
-        g_surface2 = g_surface;
-        orig_setctl2 = orig_setctl;
-        g_pending_r0 = (int)(v0 * 127.0f + 0.5f);
-        g_pending_r1 = (int)(v1 * 127.0f + 0.5f);
-        g_pending_v0 = v0 * g_trim_frames;
-        g_pending_v1 = v1 * g_trim_frames;
-        g_pending_ctl = 1;
-        mlog("minimod: armed paint-time ctl %d/%d\n", g_pending_r0, g_pending_r1);
-    }
-    /* Notify the property's listeners: the page syncs its widget from the
-     * property when it is told the value changed. */
-    if (orig_bcast) {
-        g_own_call = 1;
-        if (pr0)
-            orig_bcast((void *)pr0, v0);
-        if (pr1)
-            orig_bcast((void *)pr1, v1);
-        g_own_call = 0;
-        mlog("minimod: notified props %p/%p\n", (void *)pr0, (void *)pr1);
-    }
-    /* Also ask the screen to repaint with a clean (0,0) origin. */
-    if (g_screen) {
-        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))((void *)g_screen, 0, 0);
-        mlog("minimod: repainted screen %p\n", (void *)g_screen);
-    }
-}
 
 
 static void repaint_hook(void *comp, uint64_t a, uint64_t b)
@@ -2604,12 +2131,6 @@ __attribute__((unused)) static void draw_text(void *g, const char *s, int x, int
     minimod_paint_text((uintptr_t)g, s, x, y, w, h, size);
 }
 
-static void paint_commit_trim(void)
-{
-    g_in_inject = 1;
-    commit_trim();
-    g_in_inject = 0;
-}
 
 static void screen_paint(void *p, void *g)
 {
@@ -2617,7 +2138,6 @@ static void screen_paint(void *p, void *g)
     g_paint_gfx = g;
     struct minimod_overlay_hooks hooks = {0};
     hooks.original = (void (*)(void *, void *))orig_screen_paint;
-    hooks.commit_trim = paint_commit_trim;
     hooks.spectral_tick = spectral_tick;
     hooks.finalize = hpss_finalize;
     hooks.restore_chop = hpss_restore_chop;
@@ -2875,9 +2395,6 @@ __attribute__((constructor)) static void load(void)
     if (t_sc)
         orig_setctl = (void (*)(void *, void *, int, int, float))t_sc;
     void *t_trim = install_hook(base + A_TRIM_CORE, (void *)trim_probe); /* also learns param->property */
-    void *t_bc = install_hook(base + A_BROADCAST, (void *)bcast_hook);
-    if (t_bc)
-        orig_bcast = (void (*)(void *, float))t_bc;
     void *t_rp = install_hook(base + A_REPAINT, (void *)repaint_hook);
     if (t_rp)
         orig_repaint = (void (*)(void *, uint64_t, uint64_t))t_rp;

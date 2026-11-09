@@ -341,6 +341,21 @@ app's button hook, which takes the event pointer.  It read whatever was in the
 argument register as an event and the app died in the first frame.  A logging
 build narrowed it to the phase-0 path; the signature was the difference.
 
+## The trim cluster was dead code
+
+While preparing to port `commit_trim` I traced what feeds it: `g_trim_v0`/`v1` are
+never assigned, and `g_pending_cc` - the flag the paint hook checks before calling
+it - is only ever set *inside* `commit_trim` itself.  Nothing enters the loop.  It
+was research scaffolding from the tracing work, kept alive by its own helpers.
+
+So it was deleted rather than ported, with everything only it used: `commit_trim`,
+`cc_replay`, `cc_inject`, `learned_prop`, `broadcast_prop`, `param_from_prop` and
+`bcast_hook` (whose captured records `broadcast_prop` read).  The AutoTrim feature
+is unaffected: it applies the trim through the app's control surface, never
+through this path.
+
+483 lines gone; all six device tests pass.
+
 ## AutoTrim
 
 `autotrim` is the `SHIFT`+soft-key press: it walks the surface's pad tables to the
