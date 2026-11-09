@@ -341,6 +341,18 @@ app's button hook, which takes the event pointer.  It read whatever was in the
 argument register as an event and the app died in the first frame.  A logging
 build narrowed it to the phase-0 path; the signature was the difference.
 
+## The button entry point
+
+`ui` holds what the button hook keeps - SHIFT and ERASE while the looper owns the
+pads, the trim cycle's step, the octave keys, the marks drawn last, the last press
+object and the event replayed to put the chop mode back - and runs one event
+through `buttons::dispatch`, applying the decision through a hook table.
+
+It is **not wired yet**: its state is what a dozen C readers still reach for, and
+wiring it means replacing all of them with the module's fields in one edit.  The
+module is tested and compiles; the glue keeps its own state until that edit is
+made.
+
 ## The probe hooks were dead code too
 
 `trim_probe`, `sync_probe`, `loc_bounds`, `setctl_probe`, `obs_set` and `probe_node`

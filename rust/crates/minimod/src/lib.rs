@@ -50,5 +50,6 @@ pub mod status;
 pub mod status_ffi;
 pub mod substitute;
 pub mod trim;
+pub mod ui;
 pub mod wav;
 pub mod wav_ffi;
