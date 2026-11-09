@@ -731,3 +731,51 @@ pub unsafe extern "C" fn minimod_glue_finish(
     }
     1
 }
+
+/// Mark the job finished.
+extern "C" fn finished_noop() {}
+
+/// Show a toast, in the shape the hooks want.
+unsafe extern "C" fn toast_c(text: *const u8) {
+    // SAFETY: the caller promises a NUL-terminated string or null.
+    unsafe { crate::status_ffi::hpss_set_status(text.cast()) };
+}
+
+/// Stop the bass preview.
+extern "C" fn preview_off() {
+    crate::bass_ffi::minimod_bass_preview_set_active(0);
+}
+
+/// The hooks the crate uses for every job it starts.
+fn glue_hooks() -> GlueHooks {
+    GlueHooks {
+        finished: Some(finished_noop),
+        repaint: Some(crate::ui::minimod_repaint_screen),
+        toast: Some(toast_c),
+        chop_mode: Some(crate::ui::minimod_screen_chop_mode),
+        restore_chop: Some(crate::ui::minimod_restore_chop),
+        preview_off: Some(preview_off),
+        extract: Some(crate::hpss_exec::minimod_extract_cb),
+    }
+}
+
+/// Start a job from the crate.
+///
+/// # Safety
+///
+/// The app's objects are the caller's.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_job_start_self(action: i32, base: usize, screen: usize) -> i32 {
+    let hooks = glue_hooks();
+    // SAFETY: the knobs, menu and hooks are the crate's own.
+    unsafe {
+        minimod_glue_start(
+            action,
+            base,
+            screen,
+            core::ptr::addr_of!(crate::menu::g_bass_knob).cast::<f32>(),
+            core::ptr::addr_of_mut!(crate::menu::g_menu),
+            core::ptr::from_ref(&hooks),
+        )
+    }
+}

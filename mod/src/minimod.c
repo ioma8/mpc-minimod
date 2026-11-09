@@ -77,6 +77,8 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+int32_t minimod_job_start_self(int32_t action, uintptr_t base, uintptr_t screen);
+
 int32_t minimod_extract_run(uintptr_t screen, uintptr_t state, const float *buffer,
                             uint32_t start, uint32_t end, uint32_t source_frames,
                             uint32_t buffer_frames, uint32_t channels, int32_t name,
@@ -633,7 +635,7 @@ static void effect_start(int action) { sample_transform_start(action); }
 
 static void fmbass_start(void)
 {
-    minimod_glue_start(4, base, (uintptr_t)g_screen, g_bass_knob, &g_menu, &g_job_hooks);
+    minimod_job_start_self(4, base, (uintptr_t)g_screen);
 }
 
 static void hpss_close(void);

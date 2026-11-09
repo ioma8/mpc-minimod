@@ -475,6 +475,41 @@ pub unsafe extern "C" fn minimod_hpss_exec_entry(command: usize) {
     }
 }
 
+/// The extract, in the shape the hooks want.
+///
+/// # Safety
+///
+/// The app's objects are the caller's.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_extract_cb(
+    screen: usize,
+    state: usize,
+    buffer: *const f32,
+    start: u32,
+    end: u32,
+    source_frames: u32,
+    buffer_frames: u32,
+    channels: u32,
+    name: i32,
+    dest: *mut i32,
+) -> i32 {
+    // SAFETY: the caller's contract.
+    unsafe {
+        minimod_extract_run(
+            screen,
+            state,
+            buffer,
+            start,
+            end,
+            source_frames,
+            buffer_frames,
+            channels,
+            name,
+            dest,
+        )
+    }
+}
+
 /// Run one native Extract over source frames `[start, end)`.
 ///
 /// With a buffer the writer substitutes it; without one the app copies its own
