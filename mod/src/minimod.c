@@ -92,6 +92,7 @@
 #include "props_ffi.h"
 
 #include "ui_ffi.h"
+#include "entries_ffi.h"
 #include "glue_ffi.h"
 
 struct minimod_ui_state *minimod_ui_state(void);
@@ -431,35 +432,10 @@ static void do_autotrim(void);
 
 
 static volatile int g_buf_dirty; /* re-read the device rings on the audio thread */
-static int g_dbg;
 
-static void *sixteen_ctor(void *a, void *b, void *c, void *d)
-{
-    void *self = (void *)minimod_sixteen_ctor((minimod_sixteen_ctor_fn)orig_sixteen_ctor,
-                                              (uintptr_t)a, (uintptr_t)b, (uintptr_t)c,
-                                              (uintptr_t)d);
-    g_sixteen = self ? self : a;
-    if (debug_mode && g_dbg < 40) {
-        g_dbg++;
-        mlog("minimod: 16 levels ctor %p\n", g_sixteen);
-    }
-    return self;
-}
 
 /* The stock code computes the 16 Levels pitch here; shift the whole row. */
-static void sixteen_proc(void *self, int idx, void *out)
-{
-    /* pure pass-through: the pitch is set by A_PITCH_OFF, not by writing
-     * through the third argument (it is a context object, not a float). */
-    minimod_sixteen_proc((minimod_sixteen_proc_fn)orig_sixteen_proc,
-                         (uintptr_t)self, idx, (uintptr_t)out);
-}
 
-static void pitch_off(void *a0, uint64_t a1, uint64_t a2, int a3)
-{
-    minimod_pitch_off((minimod_pitch_off_fn)orig_pitch_off, (uintptr_t)a0, a1, a2, a3,
-                      g_octave);
-}
 
 /* "findv <float>" - every address in the small writable ranges holding exactly
  * this float. Run with two knob values and intersect to find the stored state. */
@@ -594,11 +570,6 @@ static void hpss_exec_hook(void *cmd)
         g_hpss_write_ok = outcome.write_ok;
 }
 
-static void hpss_writer_hook(void *closure, void *block)
-{
-    minimod_substitute((uintptr_t)closure, (unsigned char *)block,
-                       (minimod_writer)orig_hpss_writer);
-}
 
 
 
@@ -1528,11 +1499,6 @@ uintptr_t find_knob_props(void)
 
 
 
-static void repaint_hook(void *comp, uint64_t a, uint64_t b)
-{
-    if (orig_repaint)
-        orig_repaint(comp, a, b);
-}
 
 /* --------------------------------------------------------------- overlay */
 /* Overdraw, the way am-mod does it: take the screen's vtable slot 27 (paint),
@@ -1615,7 +1581,6 @@ static int install_screen_paint(void)
  * strings through 0xf535c0(dest, text). While SHIFT is held we swap the B3
  * label ("Filter") for "AutoTrim" and remember its destination so the release
  * can put it back. */
-static void *g_filter_dest;
 
 /* The soft-key labels are juce::Label objects whose text is only ever copied,
  * so the char* assign hook never sees "Filter". Label::getText (0x11bae00)
@@ -1639,20 +1604,6 @@ static void set_filter_text(const char *t)
                                                           FIELD(g_screen, 0x28, uint64_t));
 }
 
-static void str_assign_hook(void *dest, const char *text)
-{
-    static int seen;
-    if (debug_mode && text && seen < 25) {
-        seen++;
-        mlog("minimod: label '%s' dest=%p\n", text, dest);
-    }
-    if (text && !strcmp(text, "Filter"))
-        g_filter_dest = dest;
-    if (g_shift && text && !strcmp(text, "Filter"))
-        text = "AutoTrim";
-    if (orig_str_assign)
-        orig_str_assign(dest, text);
-}
 
 
 
@@ -1765,8 +1716,8 @@ __attribute__((constructor)) static void load(void)
         if (extra && *extra)
             g_lat_extra = atoi(extra);
     }
-    void *t_ctor = (hook_mask & 1) ? install_hook(base + A_SIXTEEN_CTOR, (void *)sixteen_ctor) : 0;
-    void *t_proc = (hook_mask & 2) ? install_hook(base + A_SIXTEEN_PROC, (void *)sixteen_proc) : 0;
+    void *t_ctor = (hook_mask & 1) ? install_hook(base + A_SIXTEEN_CTOR, (void *)minimod_hook_sixteen_ctor) : 0;
+    void *t_proc = (hook_mask & 2) ? install_hook(base + A_SIXTEEN_PROC, (void *)minimod_hook_sixteen_proc) : 0;
     /* The four input hooks are Rust entry points; they are handed the app's own
      * functions once, before any event can arrive. */
     void *t_data = install_hook(base + A_DATA_SIGNAL, (void *)minimod_hook_data);
@@ -1786,7 +1737,7 @@ __attribute__((constructor)) static void load(void)
     }
     void *t_cc = install_hook(base + 0x159f230, (void *)minimod_hook_cc);
     minimod_hook_cc_original((void (*)(void *, uint32_t, float, float))t_cc);
-    void *t_poff = install_hook(base + A_PITCH_OFF, (void *)pitch_off);
+    void *t_poff = install_hook(base + A_PITCH_OFF, (void *)minimod_hook_pitch_off);
     if (t_poff)
         orig_pitch_off = (void (*)(void *, uint64_t, uint64_t, int))t_poff;
     /* The MIDI dispatcher is hooked lazily by midi_hook_set(): outside
@@ -1794,10 +1745,10 @@ __attribute__((constructor)) static void load(void)
     mlog("minimod: MIDI hook deferred until 16 LEVELS\n");
     void *t_btn = (hook_mask & 16) ? install_hook(base + A_BUTTONS, (void *)ui_buttons) : 0;
     void *t_bass_audio = install_hook(base + A_BASS_AUDIO_WRITER, (void *)audio_writer);
-    void *t_rp = install_hook(base + A_REPAINT, (void *)repaint_hook);
+    void *t_rp = install_hook(base + A_REPAINT, (void *)minimod_hook_repaint);
     if (t_rp)
         orig_repaint = (void (*)(void *, uint64_t, uint64_t))t_rp;
-    void *t_sa = install_hook(base + A_STR_ASSIGN, (void *)str_assign_hook);
+    void *t_sa = install_hook(base + A_STR_ASSIGN, (void *)minimod_hook_str_assign);
 
     void *t_lt = 0;   /* Label::getText hook removed: wrong ABI, crashed the sample browser */
     void *t_dt = 0;   /* drawText overlay removed: the third slot is never drawn through it */
@@ -1826,7 +1777,9 @@ __attribute__((constructor)) static void load(void)
         t = install_hook(base + A_HPSS_EXTRACT_EXEC, (void *)hpss_exec_hook);
         if (t)
             orig_hpss_exec = (void (*)(void *))t;
-        t = install_hook(base + A_HPSS_WRITE_CB, (void *)hpss_writer_hook);
+        t = install_hook(base + A_HPSS_WRITE_CB, (void *)minimod_hook_hpss_writer);
+        minimod_entries_originals((void *)t_ctor, (void *)t_proc, (void *)t_poff,
+                                  (void *)t_rp, (void *)t_sa, (void *)t);
         if (t)
             orig_hpss_writer = (void (*)(void *, void *))t;
         mlog("HPSS hooks: ctor=%p exec=%p writer=%p\n",

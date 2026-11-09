@@ -414,6 +414,20 @@ unsafe fn read_replay(buffer: &mut [u8; 16], event: usize) {
     unsafe { core::ptr::copy_nonoverlapping(event as *const u8, buffer.as_mut_ptr(), 16) };
 }
 
+/// The 16 Levels octave shift.
+#[must_use]
+pub fn octave() -> i32 {
+    // SAFETY: only the UI thread writes it.
+    unsafe { (*core::ptr::addr_of!(STATE)).octave }
+}
+
+/// Whether SHIFT is held.
+#[must_use]
+pub fn shift() -> i32 {
+    // SAFETY: only the UI thread writes it.
+    unsafe { (*core::ptr::addr_of!(STATE)).shift }
+}
+
 /// The state itself.
 static mut STATE: State = State::new();
 
