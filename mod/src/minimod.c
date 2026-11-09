@@ -473,16 +473,6 @@ static void *g_surface;
 static void *g_control_context;
 static void (*orig_setctl)(void *, void *, int, int, float);
 
-static void setctl_probe(void *a0, void *a1, int a2, int a3, float v)
-{
-    uintptr_t vt = 0;
-    if (a1 && rd((uintptr_t)a1, &vt, 8) && vt >= base && vt <= base + 0x12000000ULL) {
-        g_surface = a1;
-        g_control_context = a0;
-    }
-    if (orig_setctl)
-        orig_setctl(a0, a1, a2, a3, v);
-}
 
 /* The page object, captured from the control handler FUN_02904e90(page, id, ...)
  * - refreshed on every knob turn, so it is always a live pointer. */
@@ -501,26 +491,6 @@ static void (*orig_bcast)(void *, float);
 static void (*orig_cc)(void *, unsigned, float, float);
 static void (*orig_sync)(void *, void *, void *, void *);
 
-static void sync_probe(void *a0, void *a1, void *a2, void *a3)
-{
-    static int n;
-    if (n < 12) {
-        n++;
-        float f0 = -1, f1 = -1, g0 = -1, g1 = -1;
-        if (a0) {
-            rd((uintptr_t)a0 + 0x1ac0, &f0, 4);
-            rd((uintptr_t)a0 + 0x1b18, &f1, 4);
-        }
-        if (a1) {
-            rd((uintptr_t)a1 + 0x1ac0, &g0, 4);
-            rd((uintptr_t)a1 + 0x1b18, &g1, 4);
-        }
-        mlog("minimod: sync a0=%p(a0k1=%.4f a0k2=%.4f) a1=%p(a1k1=%.4f a1k2=%.4f)\n",
-             a0, (double)f0, (double)f1, a1, (double)g0, (double)g1);
-    }
-    if (orig_sync)
-        orig_sync(a0, a1, a2, a3);
-}
 static uintptr_t g_bp[8];
 static volatile int g_nbp;
 
@@ -530,29 +500,7 @@ static volatile int g_nbp;
 #define MAX_LOC 12
 static uintptr_t g_loc[MAX_LOC];
 static volatile int g_nloc;
-static void (*orig_loc_bounds)(void *);
 
-static void loc_bounds(void *self)
-{
-    uintptr_t s = (uintptr_t)self;
-    if (s) {
-        int i, known = 0;
-        for (i = 0; i < g_nloc; ++i)
-            if (g_loc[i] == s) {
-                known = 1;
-                break;
-            }
-        if (!known && g_nloc < MAX_LOC) {
-            float pos = 0;
-            rd(s + 0x168, &pos, 4);
-            g_loc[g_nloc++] = s;
-            mlog("minimod: locator %p pos=%.4f\n", (void *)s, (double)pos);
-        }
-    }
-    if (orig_loc_bounds)
-        orig_loc_bounds(self);
-}
-static void (*orig_obs_set)(void *, float);
 static void (*orig_str_assign)(void *, const char *);
 static void *(*orig_label_text)(void *);
 static void (*orig_draw_text)(void *, const uint64_t *, int, int, int, int, int, int, float);
@@ -1276,7 +1224,6 @@ static void buttons(void *event)
         midi_hook_set(levels_active());
         return;
     }
-    do_poke();
     if (down && g_mark_v0 >= 0.0f) {
         g_mark_v0 = -1.0f;
         g_mark_v1 = -1.0f;
@@ -1634,177 +1581,7 @@ uintptr_t slider_for_value(float pct)
 static void *g_obs[8];
 static int g_nobs;
 
-static void obs_set(void *self, float v)
-{
-    /* records the property objects the control surface writes */
-    if (!g_own_call) {
-        int seen = 0;
-        for (int i = 0; i < g_nobs; ++i)
-            if (g_obs[i] == self)
-                seen = 1;
-        if (!seen && g_nobs < 8) {
-            g_obs[g_nobs++] = self;
-            mlog("minimod: obs property=%p v=%.4f\n", self, (double)v);
-        }
-    }
-    if (orig_obs_set)
-        orig_obs_set(self, v);
-}
 
-static void trim_probe(void *self, float v)
-{
-    static int logs;
-    if (g_own_call) {
-        if (orig_trim)
-            orig_trim(self, v);
-        return;
-    }
-    uintptr_t prop = 0;
-    __asm__ volatile("mov %0, x20" : "=r"(prop));
-    if (probe_mode) {
-        uintptr_t regs[8];
-        __asm__ volatile("mov %0, x19" : "=r"(regs[0]));
-        __asm__ volatile("mov %0, x20" : "=r"(regs[1]));
-        __asm__ volatile("mov %0, x21" : "=r"(regs[2]));
-        __asm__ volatile("mov %0, x22" : "=r"(regs[3]));
-        __asm__ volatile("mov %0, x23" : "=r"(regs[4]));
-        __asm__ volatile("mov %0, x24" : "=r"(regs[5]));
-        __asm__ volatile("mov %0, x25" : "=r"(regs[6]));
-        __asm__ volatile("mov %0, x26" : "=r"(regs[7]));
-        static int rl;
-        if (rl < 4) {
-            rl++;
-            for (int i = 0; i < 8; ++i) {
-                uintptr_t r = regs[i];
-                float c50 = 0;
-                int ok = r > 0x10000 && mapped((void *)r) && rd(r + 0x50, &c50, 4) &&
-                         c50 >= -0.001f && c50 <= 1.001f;
-                mlog("minimod: reg x%2d=%p propish=%d c50=%.4f\n", 19 + i, (void *)r,
-                     ok, ok ? (double)c50 : 0.0);
-            }
-        }
-    }
-    g_core_hit = 1;
-    {
-        uintptr_t sl = probe_mode ? slider_for_value(v * 100.0f) : 0;
-        if (sl) {
-            int i;
-            for (i = 0; i < g_nps; ++i)
-                if (g_ps[i].param == (uintptr_t)self) {
-                    g_ps[i].slider = sl;
-                    break;
-                }
-            if (i == g_nps && g_nps < 8) {
-                g_ps[g_nps].param = (uintptr_t)self;
-                g_ps[g_nps].slider = sl;
-                g_nps++;
-            }
-            mlog("minimod: knob param=%p slider=%p (%.2f%%)\n", self, (void *)sl,
-                 (double)(v * 100.0f));
-        }
-    }
-    if (prop && mapped((void *)prop)) {
-        int slot = -1;
-        for (int i = 0; i < g_nlis; ++i)
-            if (g_lis[i].param == (uintptr_t)self) { slot = i; break; }
-        if (slot < 0 && g_nlis < 8) { slot = g_nlis++; g_lis[slot].param = (uintptr_t)self; }
-        if (slot >= 0) g_lis[slot].listener = prop;
-    }
-    if (probe_mode && prop && mapped((void *)prop)) {
-        float v50 = 0;
-        int has = rd(prop + 0x50, &v50, 4);
-        int refs = prop_references(prop, (uintptr_t)self);
-        static int diag;
-        if (diag < 6) {
-            diag++;
-            mlog("minimod: diag prop=%p v50=%s%.4f refs=%d v=%.4f\n", (void *)prop,
-                 has ? "" : "?", (double)v50, refs, (double)v);
-        }
-    }
-    if (prop && mapped((void *)prop)) {
-        float v50 = 0;
-        /* When x20 really is the property (its cache equals the value), dump
-         * the listener list: that is the set of objects the page updates. */
-        if (rd(prop + 0x50, &v50, 4)) {
-            float d = v50 - v;
-            if (d < 0)
-                d = -d;
-            if (d <= 0.001f) {
-                static int walks;
-                if (walks < 2) {
-                    walks++;
-                    uintptr_t head = 0, node = 0;
-                    rd(prop + 0x10, &head, 8);
-                    node = head;
-                    mlog("minimod: prop %p head=%p sentinel=%p\n", (void *)prop,
-                         (void *)head, (void *)(prop + 8));
-                    for (int i = 0; i < 8 && node && node != prop + 8; ++i) {
-                        uintptr_t tgt = 0, next = 0;
-                        if (!rd(node + 0x18, &tgt, 8) || !rd(node + 8, &next, 8))
-                            break;
-                        mlog("minimod:   node %p target=%p next=%p\n", (void *)node,
-                             (void *)(tgt & ~(uintptr_t)3), (void *)next);
-                        node = next;
-                    }
-                }
-            }
-        }
-        static int learn_diag;
-        if (learn_diag < 12) {
-            learn_diag++;
-            int has = rd(prop + 0x50, &v50, 4);
-            mlog("minimod: learn? prop=%p c50=%s%.4f v=%.4f\n", (void *)prop,
-                 has ? "" : "?", (double)v50, (double)v);
-        }
-        if (rd(prop + 0x50, &v50, 4) && v50 >= -0.001f && v50 <= 1.001f) {
-            float d = v50 - v;
-            if (d < 0)
-                d = -d;
-            if (d <= 0.02f) {
-                int i;
-                for (i = 0; i < g_npm; ++i)
-                    if (g_pm[i].param == (uintptr_t)self)
-                        break;
-                if (i == g_npm && g_npm < 8)
-                    g_npm++;
-                if (i < 8) {
-                    g_pm[i].param = (uintptr_t)self;
-                    g_pm[i].prop = prop;
-                }
-                if (probe_mode && logs < 6) {
-                    logs++;
-                    mlog("minimod: learnt self=%p prop=%p v=%.4f\n", self,
-                         (void *)prop, (double)v);
-                }
-            }
-        }
-    }
-    if (!g_own_call) {
-        /* a real knob move takes over: drop our markers */
-        g_mark_v0 = -1.0f;
-        g_mark_v1 = -1.0f;
-    }
-    if (probe_mode && logs < 200) {
-        uintptr_t lay = 0, ins = 0;
-        if (page_layers((uintptr_t)self, &lay, &ins)) {
-            unsigned a = 0, b = 0, c = 0;
-            rd(lay + 0x4d8, &a, 4);
-            rd(lay + 0x530, &b, 4);
-            rd(lay + 0x588, &c, 4);
-            mlog("minimod: layer@knob %p 4d8=%u 530=%u 588=%u\n", (void *)lay, a, b, c);
-        }
-        uintptr_t vt = 0, val = 0, ap = 0;
-        rd((uintptr_t)self, &vt, 8);
-        rd((uintptr_t)self + T_VALUE, &val, 4);
-        rd((uintptr_t)self + T_APPLIED, &ap, 4);
-        logs++;
-        mlog("minimod: trim self=%p vptr=%p(base+0x%lx) v=%.4f val=%.4f ap=%.4f lr=%p\n",
-             self, (void *)vt, vt >= base ? (unsigned long)(vt - base) : 0UL,
-             (double)v, (double)val, (double)ap, __builtin_return_address(0));
-    }
-    if (orig_trim)
-        orig_trim(self, v);
-}
 
 
 /* ------------------------------------------------------- message-thread pump */
@@ -1865,48 +1642,6 @@ int prop_references(uintptr_t P, uintptr_t param)
 /* Find the listener node that points at `param` and report what looks like its
  * owner property. A property P keeps its list head at P+0x10 and its sentinel
  * at P+8; a node keeps its target (tagged) at +0x18 and its next at +8. */
-static void probe_node(uintptr_t param)
-{
-    ranges_load();
-    unsigned char *buf = malloc(65536);
-    if (!buf)
-        return;
-    int hits = 0;
-    for (int r = 0; r < g_nrng && hits < 4; ++r) {
-        if (!g_rng[r].w)
-            continue;
-        for (uintptr_t a = g_rng[r].lo; a + 8 < g_rng[r].hi && hits < 4; a += 65536) {
-            size_t n = (size_t)((g_rng[r].hi - a) < 65536 ? (g_rng[r].hi - a) : 65536);
-            n &= ~(size_t)7;
-            if (!rd(a, buf, n))
-                break;
-            for (size_t o = 0; o + 8 <= n && hits < 4; o += 8) {
-                uintptr_t q;
-                memcpy(&q, buf + o, 8);
-                if ((q & ~(uintptr_t)3) != param)
-                    continue;
-                uintptr_t node = a + o - 0x18;
-                uintptr_t owner = 0, next = 0, back = 0;
-                rd(node, &owner, 8);
-                rd(node + 8, &next, 8);
-                rd(node + 0x10, &back, 8);
-                mlog("minimod: node %p owner=%p next=%p back=%p\n", (void *)node,
-                     (void *)owner, (void *)next, (void *)back);
-                if (owner && mapped((void *)owner)) {
-                    uintptr_t head = 0;
-                    rd(owner + 0x10, &head, 8);
-                    float c50 = 0;
-                    int ok50 = rd(owner + 0x50, &c50, 4) && c50 >= -1.0f && c50 <= 1.0f;
-                    mlog("minimod:   owner+0x10=%p c50=%.4f (%d)\n", (void *)head,
-                         (double)c50, ok50);
-                }
-                hits++;
-                break;
-            }
-        }
-    }
-    free(buf);
-}
 
 /* Recover a parameter's owning property without watching a knob.
  *
@@ -2051,43 +1786,6 @@ static int prop_listeners_sane(uintptr_t P)
  * TrimParameter's. That makes the Start/End pair exact, with no scanning and no
  * dependence on which knob was touched last. */
 
-static void do_poke(void)
-{
-    if (g_poke_which >= 0) {
-        int which = g_poke_which;
-        g_poke_which = -1;
-        mlog("minimod: poke fire %d v=%.3f\n", which, (double)g_poke_value);
-        uintptr_t pp = prop_of_param((uintptr_t)g_trim_param0);
-        if (!pp)
-            pp = prop_of_param((uintptr_t)g_trim_param1);
-        if (!pp) {
-            uintptr_t kp = find_knob_props();
-            if (kp)
-                pp = kp;
-        }
-        mlog("minimod: poke prop=%p\n", (void *)pp);
-        if (pp) {
-            uintptr_t node = 0;
-            if (rd(pp + 0x10, &node, 8) && node) {
-                for (int i = 0; i < which && node && node != pp + 8; ++i) {
-                    uintptr_t next = 0;
-                    if (!rd(node + 8, &next, 8))
-                        break;
-                    node = next;
-                }
-                uintptr_t tgt = 0, vt = 0, slot = 0;
-                if (rd(node + 0x18, &tgt, 8) && rd(tgt & ~(uintptr_t)3, &vt, 8) &&
-                    rd(vt + 0x28, &slot, 8)) {
-                    uintptr_t t = tgt & ~(uintptr_t)3;
-                    mlog("minimod: poke %d target=%p slot=%p v=%.4f\n", which, (void *)t,
-                         (void *)slot, (double)g_poke_value);
-                    ((void (*)(float, void *))slot)(g_poke_value, (void *)t);
-                    mlog("minimod: poke done\n");
-                }
-            }
-        }
-    }
-}
 
 
 
@@ -2358,9 +2056,6 @@ __attribute__((constructor)) static void load(void)
         probe_bits = atoi(bits_env);
     void *t_ctor = (hook_mask & 1) ? install_hook(base + A_SIXTEEN_CTOR, (void *)sixteen_ctor) : 0;
     void *t_proc = (hook_mask & 2) ? install_hook(base + A_SIXTEEN_PROC, (void *)sixteen_proc) : 0;
-    void *t_sync = install_hook(base + 0x2822260, (void *)sync_probe);
-    if (t_sync)
-        orig_sync = (void (*)(void *, void *, void *, void *))t_sync;
     void *t_data = install_hook(base + A_DATA_SIGNAL, (void *)data_signal);
     if (midi_hook_site_ok()) {
         void *t_midi = install_hook(base + A_MIDI_NOTE_EVENT, (void *)midi_note_event);
@@ -2377,9 +2072,6 @@ __attribute__((constructor)) static void load(void)
     void *t_cc = install_hook(base + 0x159f230, (void *)cc_capture);
     if (t_cc)
         orig_cc = (void (*)(void *, unsigned, float, float))t_cc;
-    void *t_loc = install_hook(base + A_LOC_BOUNDS, (void *)loc_bounds);
-    if (t_loc)
-        orig_loc_bounds = (void (*)(void *))t_loc;
     void *t_poff = install_hook(base + A_PITCH_OFF, (void *)pitch_off);
     if (t_poff)
         orig_pitch_off = (void (*)(void *, uint64_t, uint64_t, int))t_poff;
@@ -2391,16 +2083,9 @@ __attribute__((constructor)) static void load(void)
     void *t_cs = (hook_mask & 64) ? install_hook(base + A_CS_EVENT, (void *)cs_event) : 0;
     void *t_off = (hook_mask & 128) ? install_hook(base + A_NOTE_OFF, (void *)note_off) : 0;
     void *t_bass_audio = install_hook(base + A_BASS_AUDIO_WRITER, (void *)audio_writer);
-    void *t_sc = install_hook(base + 0x1968020, (void *)setctl_probe);
-    if (t_sc)
-        orig_setctl = (void (*)(void *, void *, int, int, float))t_sc;
-    void *t_trim = install_hook(base + A_TRIM_CORE, (void *)trim_probe); /* also learns param->property */
     void *t_rp = install_hook(base + A_REPAINT, (void *)repaint_hook);
     if (t_rp)
         orig_repaint = (void (*)(void *, uint64_t, uint64_t))t_rp;
-    void *t_obs = install_hook(base + A_OBS_SET, (void *)obs_set);
-    if (t_obs)
-        orig_obs_set = (void (*)(void *, float))t_obs;
     void *t_sa = install_hook(base + A_STR_ASSIGN, (void *)str_assign_hook);
 
     void *t_lt = 0;   /* Label::getText hook removed: wrong ABI, crashed the sample browser */
@@ -2421,8 +2106,6 @@ __attribute__((constructor)) static void load(void)
         orig_bass_audio_writer = (void (*)(void *, void *, size_t, int))t_bass_audio;
     }
     g_bass_preview_available = t_note && t_off && t_bass_audio;
-    if (t_trim)
-        orig_trim = (void (*)(void *, float))t_trim;
     if (t_sa)
         orig_str_assign = (void (*)(void *, const char *))t_sa;
     if (t_lt)

@@ -341,6 +341,14 @@ app's button hook, which takes the event pointer.  It read whatever was in the
 argument register as an event and the app died in the first frame.  A logging
 build narrowed it to the phase-0 path; the signature was the difference.
 
+## The probe hooks were dead code too
+
+`trim_probe`, `sync_probe`, `loc_bounds`, `setctl_probe`, `obs_set` and `probe_node`
+were installed as hooks and did nothing but record registers and addresses into a
+log that release builds do not write.  `do_poke` poked a debug value behind an env
+variable.  All gone, with their registrations and their original-pointer plumbing:
+317 lines, and the hook table is seven entries shorter.
+
 ## The trim cluster was dead code
 
 While preparing to port `commit_trim` I traced what feeds it: `g_trim_v0`/`v1` are
