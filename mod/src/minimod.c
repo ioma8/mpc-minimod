@@ -404,10 +404,6 @@ static void *g_sixteen; /* the live 16 Levels screen, if seen             */
  * The two groups are mutually exclusive children of the screen object, so the
  * live visibility of the Chop group (+0x1ee0) is the mode. Cross-checked
  * against the panel's CHOP LED: LED bright <=> +0x1ee0 visible. */
-static int in_chop_mode(void)
-{
-    return minimod_page_chop_mode(base, (uintptr_t)g_screen);
-}
 
 /* 16 LEVELS has no readable state field we could find; the only way in or out
  * on the Sample page is the 16 LEVELS button (code 0x28), which is a toggle.
@@ -547,12 +543,6 @@ static void (*orig_hpss_writer)(void *, void *);
  * buffer, and the writer callback consumes the buffer sequentially. */
 
 extern float g_bass_knob[3];
-static uint32_t bass_float_bits(float value)
-{
-    uint32_t bits;
-    memcpy(&bits, &value, sizeof bits);
-    return bits;
-}
 static void bass_preview_set_active(int active)
 {
     minimod_bass_preview_set_active(active);
@@ -641,10 +631,6 @@ static void effect_start(int action) { sample_transform_start(action); }
 
 
 
-static void fmbass_start(void)
-{
-    minimod_job_start_self(4, base, (uintptr_t)g_screen);
-}
 
 static void hpss_close(void);
 
@@ -663,11 +649,6 @@ extern struct minimod_spectral_state g_spectral;
 
 
 
-static void spectral_start(void)
-{
-    if (minimod_spectral_run_start(g_hpss_busy || minimod_job_busy()))
-        hpss_repaint();
-}
 
 /* One phase per UI pass: a CHOP press schedules a page switch, so it cannot
  * be followed by a sleep/poll or by another toggle in the same callback. */
@@ -679,10 +660,6 @@ static void spectral_start(void)
 
 /* The machine presses CHOP through the app's own button handler; the event it
  * replays is the one that started the run, which lives in the Rust state. */
-static void spectral_press_chop_now(void)
-{
-    minimod_spectral_key_press();
-}
 
 static void spectral_tick(void)
 {
@@ -718,10 +695,6 @@ static const struct minimod_glue_hooks g_job_hooks = {
                          uint32_t, uint32_t, uint32_t, int32_t, int32_t *))hpss_extract_hook,
 };
 
-static void hpss_finalize(void)
-{
-    minimod_overlay_finalize();
-}
 
 static void hpss_open(void)
 {
@@ -747,26 +720,8 @@ static void hpss_close(void)
     hpss_repaint();
 }
 
-static void bass_page_open(void)
-{
-    minimod_menu_bass_page();
-}
 
-static int looper_menu_open(void)
-{
-    int opened = looper_activate();
-    if (opened) {
-        g_buf_dirty = 1; /* re-read the device rings on its own thread */
-        bass_preview_set_active(0);
-        looper_pump();
-    }
-    return opened;
-}
 
-static void hpss_activate(void)
-{
-    minimod_menu_activate_self();
-}
 
 static void draw_colour(void *g, uint32_t v);
 static void draw_rect(void *g, int x, int y, int w, int h);
@@ -797,68 +752,23 @@ static void looper_pump(void)
 
 
 
-static void hpss_draw_menu(void *g)
-{
-    minimod_overlay_menu_draw((uintptr_t)g);
-}
 
 static void release_held_pads(void);
 
 
-static void ui_forward(void *event)
-{
-    if (orig_buttons)
-        orig_buttons(event);
-}
 
 
-static uintptr_t ui_read_pointer(void *event)
-{
-    uintptr_t value = 0;
-    if (event && rd((uintptr_t)event, &value, sizeof value))
-        return value;
-    return 0;
-}
-
-static int32_t ui_bump_octave(int32_t steps)
-{
-    return bump_octave((int)steps);
-}
 
 
-static void ui_clear_marks(void)
-{
-    if (g_screen)
-        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-            g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
-}
 
-static void ui_release_held(void)
-{
-    release_held_pads();
-}
 
-static void ui_toggle_levels(void)
-{
-    g_midi.levels = !g_midi.levels;
-    if (g_midi.levels && g_input.last_pad >= 0 && g_input.last_pad < 16)
-        g_midi.pad_level_byte = g_input.last_pad;
-    midi_hook_set(levels_active());
-}
+
 
 static int32_t ui_menu_open(void) { return g_hpss_menu ? 1 : 0; }
 static int32_t ui_bass_edit(void) { return g_bass_edit ? 1 : 0; }
 static int32_t ui_busy(void) { return g_hpss_busy ? 1 : 0; }
 static int32_t ui_spectral(void) { return g_spectral.active == 1 ? 1 : 0; }
-static int32_t ui_page_visible(void)
-{
-    return sample_page_visible();
-}
 
-static void ui_menu_open_hook(void)
-{
-    hpss_open();
-}
 
 static struct minimod_ui_hooks hooks(void)
 {
