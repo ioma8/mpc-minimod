@@ -907,3 +907,56 @@ the C constructor handed them over.
 
 The attempt is stashed as `constructor-via-table`; the certified build is restored and
 green.
+
+## Where the port stands
+
+The mod installs itself from a Rust table, and every behaviour is Rust.  What is left in
+`minimod.c` is **812 lines of code** in 1 410 lines of file: the glue's adapters.
+
+### The shape of the last mile
+
+The remaining functions are a **mutual reference**, and that is why they have stopped
+coming one at a time:
+
+* `ui_buttons` and `screen_paint` are *tables* that name eight and five C functions
+  (`hpss_open`, `hpss_close`, `hpss_activate`, `hpss_restore_chop`, `set_filter_text`,
+  `spectral_tick`, `hpss_draw_menu`, `levels_active`, ...);
+* those functions, in turn, read C state and call back into the same tables
+  (`hpss_repaint` repaints through the paint hook, `hpss_set_status` writes the row the
+  menu draws, `spectral_press_chop_now` runs a chop that ends in `hpss_finalize`).
+
+Porting any one of them needs its two or three neighbours ported first, so the pieces
+stopped being separable.  Breaking it means doing the whole cluster - `ui_buttons`,
+`screen_paint` and about a dozen helpers - in one coordinated change, with the device
+available to bisect when it does not work the first time.
+
+### What is Rust
+
+Everything with behaviour: the DSP (looper, bass, HPSS, spectral, trim, FFT, filters),
+the menu and its rows, the overlay and the paint, the input hooks and the button ladder,
+the jobs and their flow, both ALSA taps and the stream geometry, the memory window, the
+firmware checks, the slice command's names and hooks, the MIDI record and flag, the
+audio counters and the tap, the menu state, the screen pointer, the install table.
+
+120 unit tests.  Six device suites, all green on every certified build.
+
+### What is C
+
+812 lines of adapters: the two handler tables, the ~15 helpers they name, `mlog`, and the
+constructor's 40-line loop that walks the Rust table and patches the sites.
+
+### What would finish it
+
+One coordinated change, in this order:
+
+1. move the helpers' C state (`g_surface`, `g_control_context`, `g_spectral`, the
+   `hpss_*` flags) into the modules that will own it;
+2. port the helpers onto that state;
+3. port `ui_buttons` and `screen_paint` onto the ported helpers;
+4. make the installer a Rust `#[used]` init section over the table and delete
+   `minimod.c`;
+5. run the six suites after 3 and after 4.
+
+That is roughly ten rounds at the pace this session has measured, and the last three
+attempts at this cluster each found one more coupling rather than a wall.  It is
+finishable; it is not finishable by grinding one function per round.
