@@ -348,10 +348,22 @@ pads, the trim cycle's step, the octave keys, the marks drawn last, the last pre
 object and the event replayed to put the chop mode back - and runs one event
 through `buttons::dispatch`, applying the decision through a hook table.
 
-It is **not wired yet**: its state is what a dozen C readers still reach for, and
-wiring it means replacing all of them with the module's fields in one edit.  The
-module is tested and compiles; the glue keeps its own state until that edit is
-made.
+It is **not wired yet**.  Two attempts at it:
+
+1. moving the state and pointing the glue's names at it with macros - **worked**,
+   and Looper and MIDI passed on it;
+2. replacing the C dispatcher with the Rust entry point - **failed**: the looper
+   view would not open and the bass page would not take its knobs.
+
+The cause of the second is known and specific: the old dispatcher did more than
+dispatch.  On every event it copied the event into the state *and* recomputed
+`data_target` from it (`context + 0x10` -> `surface + 0x2da8`).  The Rust entry
+point stores the event but never computes `data_target`, so the encoder hook never
+matches its object and the menu's row never moves - which is exactly the two
+symptoms.
+
+So the wiring needs that computation moved too, and it belongs with the event
+store.  Reverted; the glue keeps its dispatcher until then.
 
 ## The probe hooks were dead code too
 
