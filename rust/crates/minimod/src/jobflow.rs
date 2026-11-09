@@ -111,7 +111,7 @@ fn extract_one(
     name: &'static core::ffi::CStr,
     end: u32,
     source_frames: u32,
-) -> bool {
+) -> Option<extract::Extracted> {
     extract::run(&extract::Request {
         screen: job.source.screen,
         state: job.source.state,
@@ -122,7 +122,28 @@ fn extract_one(
         start: 0,
         end,
     })
-    .is_ok()
+    .ok()
+}
+
+/// The op that moves a pad's trim end.
+const SET_END: i32 = 0x466;
+
+/// Leave one percent of the rendered tail outside the new pad's trim.
+///
+/// Extract gives the new pad a range based on the source, which cuts most of a
+/// reverb tail. The pad object is already assigned, so move only its end trim
+/// through the app's own control surface.
+fn trim_reverb_tail(pad: i32, frames: usize) {
+    let Ok(frames) = u32::try_from(frames) else {
+        return;
+    };
+    let one_percent = (frames / 100).max(1);
+    let end = frames.saturating_sub(one_percent);
+    let surface = crate::control::surface();
+    if surface == 0 {
+        return;
+    }
+    let _ = crate::control::apply(crate::control::control(), surface, pad, SET_END, end as f32);
 }
 
 /// Write an effect or synth take to a pad.
@@ -144,15 +165,17 @@ fn extract_take(job: &RenderJob) -> Result<(), Report> {
         job.source.frames
     };
     let source_frames = end;
-    if extract_one(job, output, name, end, source_frames) {
-        Ok(())
-    } else {
-        Err(Report {
+    let Some(extracted) = extract_one(job, output, name, end, source_frames) else {
+        return Err(Report {
             raw: false,
             status: "output failed",
             toast: "Effect: write failed",
-        })
+        });
+    };
+    if job.kind == ACTION_REVERB {
+        trim_reverb_tail(extracted.pad, output.frames);
     }
+    Ok(())
 }
 
 /// Write the harmonic and percussive parts to two pads.
@@ -165,14 +188,14 @@ fn extract_split(job: &RenderJob) -> Result<(), Report> {
         });
     };
     let frames = u32::try_from(harmonic.frames).unwrap_or(job.source.frames);
-    if !extract_one(job, harmonic, names()[0], frames, frames) {
+    if extract_one(job, harmonic, names()[0], frames, frames).is_none() {
         return Err(Report {
             raw: true,
             status: "HPSS: first output failed",
             toast: "HPSS: write failed",
         });
     }
-    if !extract_one(job, percussive, names()[1], frames, frames) {
+    if extract_one(job, percussive, names()[1], frames, frames).is_none() {
         return Err(Report {
             raw: true,
             status: "HPSS: harmonic only (second failed)",

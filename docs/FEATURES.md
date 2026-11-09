@@ -267,7 +267,10 @@ through the Extract writer boundary described in
 [`MECHANISMS.md`](MECHANISMS.md#the-writer-boundary): the final source block is
 replaced by the remaining rendered buffer and its frame count is raised for that
 one call, so the native writer finalises the longer WAV and native Extract still
-registers and assigns it.
+registers and assigns it. Extract leaves the new reverb pad's trim at the source
+range, which would cut most of the tail; after the pad is assigned, minimod sets
+its trim end through the app's own control surface to 99% of the rendered frame
+count. The reverb copy therefore keeps its whole tail with only a 1% end trim.
 
 **Evidence.**
 
