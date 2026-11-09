@@ -626,3 +626,108 @@ pub extern "C" fn minimod_job_set_screen(screen: usize) {
 fn current_screen() -> usize {
     SCREEN.load(Ordering::Acquire) as usize
 }
+
+/// What the glue supplies for a start or a finish.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GlueHooks {
+    /// Mark the job finished.
+    pub finished: Option<unsafe extern "C" fn()>,
+    /// Redraw the screen.
+    pub repaint: Option<unsafe extern "C" fn()>,
+    /// Show a toast.
+    pub toast: Option<unsafe extern "C" fn(*const u8)>,
+    /// Read the chop mode.
+    pub chop_mode: Option<unsafe extern "C" fn() -> i32>,
+    /// Put the chop mode back.
+    pub restore_chop: Option<unsafe extern "C" fn()>,
+    /// Stop the bass preview.
+    pub preview_off: Option<unsafe extern "C" fn()>,
+    /// Extract the result.
+    pub extract: Option<Extract>,
+}
+
+/// Start a job, if nothing is running and the pad has a sample.
+///
+/// # Safety
+///
+/// `menu` and `knobs` must be live and `hooks` readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_glue_start(
+    action: i32,
+    base: usize,
+    screen: usize,
+    knobs: *const f32,
+    menu: *mut crate::menu::State,
+    hooks: *const GlueHooks,
+) -> i32 {
+    if menu.is_null() || knobs.is_null() || hooks.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's contract.
+    let (menu, hooks) = unsafe { (&mut *menu, *hooks) };
+    if menu.busy != 0 || busy() {
+        return 0;
+    }
+    let start = StartHooks {
+        finished: hooks.finished,
+        repaint: hooks.repaint,
+        toast: hooks.toast,
+    };
+    minimod_job_set_screen(screen);
+    // SAFETY: the knobs and hooks are the caller's.
+    if unsafe { minimod_job_start(action, base, knobs, core::ptr::from_ref(&start)) }.is_null() {
+        return 0;
+    }
+    if let Some(mode) = hooks.chop_mode {
+        // SAFETY: the glue's own callback.
+        unsafe { menu.restore_pending = mode() };
+    }
+    menu.busy = 1;
+    if let Some(repaint) = hooks.repaint {
+        // SAFETY: the glue's own callback.
+        unsafe { repaint() };
+    }
+    1
+}
+
+/// Finish a job that the worker completed.
+///
+/// # Safety
+///
+/// `menu` must be live and `hooks` readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_glue_finish(
+    base: usize,
+    screen: usize,
+    menu: *mut crate::menu::State,
+    hooks: *const GlueHooks,
+) -> i32 {
+    if menu.is_null() || hooks.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's contract.
+    let (menu, hooks) = unsafe { (&mut *menu, *hooks) };
+    let finish = Hooks {
+        extract: hooks.extract,
+        restore_chop: hooks.restore_chop,
+        toast: hooks.toast,
+    };
+    minimod_job_set_screen(screen);
+    // SAFETY: the hooks are the caller's.
+    if unsafe { minimod_job_finish(core::ptr::from_ref(&finish), screen, base) } == 0 {
+        return 0;
+    }
+    menu.busy = 0;
+    menu.open = 0;
+    if let Some(off) = hooks.preview_off {
+        // SAFETY: the glue's own callback.
+        unsafe { off() };
+    }
+    menu.data_down = 0;
+    if let Some(repaint) = hooks.repaint {
+        // SAFETY: the glue's own callback.
+        unsafe { repaint() };
+    }
+    1
+}

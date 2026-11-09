@@ -59,4 +59,23 @@ int32_t minimod_job_finalize(struct minimod_job *job,
                              const struct minimod_job_hooks *hooks,
                              uintptr_t screen, uintptr_t app_base);
 
+/* The start and finish orchestration, in Rust now. */
+struct minimod_glue_hooks {
+    void (*finished)(void);
+    void (*repaint)(void);
+    void (*toast)(const char *text);
+    int32_t (*chop_mode)(void);
+    void (*restore_chop)(void);
+    void (*preview_off)(void);
+    void (*extract)(uintptr_t closure, uintptr_t block, const float *samples,
+                    uint32_t frames, uint32_t channels, uint32_t rate,
+                    uint32_t start, uint32_t end, int32_t name, int32_t *ok);
+};
+
+int32_t minimod_glue_start(int32_t action, uintptr_t base, uintptr_t screen,
+                           const float *knobs, void *menu,
+                           const struct minimod_glue_hooks *hooks);
+int32_t minimod_glue_finish(uintptr_t base, uintptr_t screen, void *menu,
+                            const struct minimod_glue_hooks *hooks);
+
 #endif

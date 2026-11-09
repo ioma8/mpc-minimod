@@ -686,44 +686,24 @@ static void hpss_finished(void)
     __atomic_store_n(&g_hpss_done, 1, __ATOMIC_RELEASE);
 }
 
+static const struct minimod_glue_hooks g_job_hooks;
+
 static void sample_transform_start(int action)
 {
-    if (g_hpss_busy || minimod_job_busy())
-        return;
-    struct minimod_start_hooks hooks = {
-        .finished = hpss_finished,
-        .repaint = hpss_repaint,
-        .toast = toast,
-    };
-    minimod_job_set_screen((uintptr_t)g_screen);
-    if (!minimod_job_start(action, base, g_bass_knob, &hooks))
-        return;
-    g_hpss_chop_before = hpss_chop_mode();
-    g_hpss_busy = 1;
-    __atomic_store_n(&g_hpss_done, 0, __ATOMIC_RELEASE);
-    hpss_repaint();
+    minimod_glue_start(action, base, (uintptr_t)g_screen, g_bass_knob, &g_menu,
+                       &g_job_hooks);
 }
 
 static void hpss_start(void) { sample_transform_start(0); }
 static void effect_start(int action) { sample_transform_start(action); }
 
+
+
+
+
 static void fmbass_start(void)
 {
-    if (g_hpss_busy || minimod_job_busy())
-        return;
-    struct minimod_start_hooks hooks = {
-        .finished = hpss_finished,
-        .repaint = hpss_repaint,
-        .toast = toast,
-    };
-    minimod_job_set_screen((uintptr_t)g_screen);
-    hpss_job *job = minimod_job_start(4, base, g_bass_knob, &hooks);
-    if (!job)
-        return;
-    g_hpss_chop_before = hpss_chop_mode();
-    g_hpss_busy = 1;
-    __atomic_store_n(&g_hpss_done, 0, __ATOMIC_RELEASE);
-    hpss_repaint();
+    minimod_glue_start(4, base, (uintptr_t)g_screen, g_bass_knob, &g_menu, &g_job_hooks);
 }
 
 static void hpss_close(void);
@@ -792,21 +772,25 @@ static int hpss_extract_hook(uintptr_t screen, uintptr_t state, const float *buf
  * app's extract, the chop restore and the toast. */
 
 
+static void bass_preview_off(void)
+{
+    bass_preview_set_active(0);
+}
+
+static const struct minimod_glue_hooks g_job_hooks = {
+    .finished = hpss_finished,
+    .repaint = hpss_repaint,
+    .toast = toast,
+    .chop_mode = hpss_chop_mode,
+    .restore_chop = hpss_restore_chop,
+    .preview_off = bass_preview_off,
+    .extract = (void (*)(uintptr_t, uintptr_t, const float *, uint32_t, uint32_t,
+                         uint32_t, uint32_t, uint32_t, int32_t, int32_t *))hpss_extract_hook,
+};
+
 static void hpss_finalize(void)
 {
-    struct minimod_job_hooks hooks = {
-        .extract = hpss_extract_hook,
-        .restore_chop = hpss_restore_chop,
-        .toast = toast,
-    };
-    minimod_job_set_screen((uintptr_t)g_screen);
-    if (!minimod_job_finish(&hooks, (uintptr_t)g_screen, base))
-        return;
-    g_hpss_busy = 0;
-    g_hpss_menu = 0;
-    bass_preview_set_active(0);
-    g_hpss_data_down = 0;
-    hpss_repaint();
+    minimod_glue_finish(base, (uintptr_t)g_screen, &g_menu, &g_job_hooks);
 }
 
 static void hpss_open(void)
