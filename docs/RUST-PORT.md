@@ -341,6 +341,24 @@ app's button hook, which takes the event pointer.  It read whatever was in the
 argument register as an event and the app died in the first frame.  A logging
 build narrowed it to the phase-0 path; the signature was the difference.
 
+## The constructor
+
+The last C piece is the constructor: ~200 lines that are an install table, the
+environment flags, and one assignment per hook for the displaced function.
+
+An attempt at moving it whole ran into three things worth writing down before the
+next try:
+
+* the handlers the table names must be *global* symbols - half of them are still
+  `static` in the glue, so Rust cannot take their address until they are not;
+* the C helpers still need six originals back (buttons, repaint, control set,
+  MIDI note, bass writer, slice constructor), so the install has to hand them over
+  rather than keep them;
+* clippy's 100-line limit bites: the table wants to be several small functions
+  from the start.
+
+The attempt was reverted rather than half-landed; the glue is unchanged and green.
+
 ## The button entry point
 
 `ui` runs one button event end to end: it keeps what the dispatcher remembers
