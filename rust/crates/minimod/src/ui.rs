@@ -456,13 +456,18 @@ pub fn button(event: ButtonEvent) -> ButtonFlow {
         crate::input::set_data_target(mpc_sample_sdk::event::data_target(event.surface));
     }
     let kind = press(state, &event, hooks, data_down);
-    // SHIFT is the app's own key: the mod tracks it, but the app must still see
-    // the press and release.
-    if kind == 0 || kind == 2 {
+    // SHIFT and 16 LEVELS are the app's own keys: the mod tracks the mode, but
+    // the app must still see the press and release or it never toggles its UI.
+    if forwards(kind) {
         ButtonFlow::Forward
     } else {
         ButtonFlow::Consume
     }
+}
+
+/// Whether an action kind must also reach the app.
+const fn forwards(kind: i32) -> bool {
+    matches!(kind, 0 | 2 | 10)
 }
 
 /// The soft key's label: rename `Filter` to `AutoTrim` while SHIFT is held.
@@ -487,5 +492,18 @@ mod tests {
         assert_eq!(state.trim_step, 0);
         assert!(state.mark_v0 < 0.0 && state.mark_v1 < 0.0);
         assert_eq!(state.event.len(), 16);
+    }
+}
+
+#[cfg(test)]
+mod forwarding_tests {
+    use super::forwards;
+
+    #[test]
+    fn the_app_keeps_shift_and_16_levels() {
+        assert!(forwards(0), "forward");
+        assert!(forwards(2), "SHIFT");
+        assert!(forwards(10), "16 LEVELS");
+        assert!(!forwards(9), "mod-owned octave bump");
     }
 }
