@@ -77,6 +77,9 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+void minimod_spectral_key_press(void);
+void minimod_spectral_frame(uintptr_t base, uintptr_t screen);
+
 void minimod_repaint_screen(void);
 int32_t minimod_screen_visible(void);
 int32_t minimod_screen_chop_mode(void);
@@ -661,7 +664,8 @@ static void hpss_close(void);
 /* ------------------------------------------------------- spectral markers */
 /* The input hook is NOT the UI thread. Publish only a request there; all
  * model calls below run from screen_paint, after the stock paint returns. */
-static struct minimod_spectral_state g_spectral;
+/* The chop's state lives in Rust and keeps its name. */
+extern struct minimod_spectral_state g_spectral;
 
 
 
@@ -691,22 +695,12 @@ static void spectral_start(void)
  * replays is the one that started the run, which lives in the Rust state. */
 static void spectral_press_chop_now(void)
 {
-    if (!orig_buttons)
-        return;
-    g_spectral.event[8] = 0x4b;
-    g_spectral.event[9] = 0x7f;
-    orig_buttons(g_spectral.event);
-    g_spectral.event[9] = 0;
-    orig_buttons(g_spectral.event);
+    minimod_spectral_key_press();
 }
 
 static void spectral_tick(void)
 {
-    struct minimod_spectral_hooks hooks = {0};
-    hooks.press_chop = spectral_press_chop_now;
-    hooks.set_status = hpss_set_status;
-    hooks.repaint = hpss_repaint;
-    minimod_spectral_tick(&g_spectral, &g_menu, base, (uintptr_t)g_screen, &hooks);
+    minimod_spectral_frame(base, (uintptr_t)g_screen);
 }
 
 

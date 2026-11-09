@@ -479,6 +479,13 @@ pub unsafe extern "C" fn minimod_hook_buttons(event: usize, hooks: *const Hooks)
 /// The app's own button dispatch, recorded at install.
 static mut ORIGINAL_BUTTONS: Option<unsafe extern "C" fn(usize)> = None;
 
+/// The app's own button dispatch.
+#[must_use]
+pub fn original_buttons() -> Option<unsafe extern "C" fn(usize)> {
+    // SAFETY: written once at install.
+    unsafe { *core::ptr::addr_of!(ORIGINAL_BUTTONS) }
+}
+
 /// The chop mode the page was in before the mod armed an extraction.
 static mut CHOP_BEFORE: i32 = 0;
 

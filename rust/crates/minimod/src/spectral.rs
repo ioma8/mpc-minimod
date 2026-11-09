@@ -294,6 +294,77 @@ pub unsafe extern "C" fn minimod_spectral_active(state: *const State) -> i32 {
     unsafe { (*state).active }
 }
 
+/// The run in flight.  It keeps its name because the glue reads it.
+#[unsafe(no_mangle)]
+pub static mut g_spectral: State = State {
+    active: 0,
+    phase: 0,
+    slices: 0,
+    deadline: 0,
+    event: [0; 16],
+    screen: 0,
+    page_state: 0,
+    sample: 0,
+    frames: 0,
+    channels: 0,
+    rate: 0,
+};
+
+/// Press the app's own CHOP key on the event that started the run.
+///
+/// # Safety
+///
+/// The app's own dispatch is used.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_spectral_key_press() {
+    // SAFETY: the event is this module's and the dispatch the app's.
+    unsafe {
+        let Some(original) = crate::ui::original_buttons() else {
+            return;
+        };
+        let mut event = (*core::ptr::addr_of!(g_spectral)).event;
+        event[8] = 0x4b;
+        event[9] = 0x7f;
+        original(event.as_ptr() as usize);
+        event[9] = 0x00;
+        original(event.as_ptr() as usize);
+    }
+}
+
+/// One frame of the chop's state machine, driven from the paint.
+///
+/// # Safety
+///
+/// The app's own calls are used.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_spectral_frame(base: usize, screen: usize) {
+    let hooks = Hooks {
+        press_chop: Some(minimod_spectral_key_press),
+        set_status: Some(minimod_status_c),
+        repaint: Some(crate::ui::minimod_repaint_screen),
+    };
+    // SAFETY: the state and the menu are the crate's own, and the hooks are above.
+    unsafe {
+        minimod_spectral_tick(
+            core::ptr::addr_of_mut!(g_spectral),
+            core::ptr::addr_of_mut!(menu::g_menu).cast::<core::ffi::c_void>(),
+            base,
+            screen,
+            core::ptr::from_ref(&hooks),
+        );
+    }
+}
+
+/// The status setter, in the shape the hooks want.
+unsafe extern "C" fn minimod_status_c(text: *const u8) {
+    if text.is_null() {
+        return;
+    }
+    // SAFETY: the caller promises a NUL-terminated string.
+    let text = unsafe { core::ffi::CStr::from_ptr(text.cast()) };
+    crate::status::set_status(&text.to_string_lossy());
+}
+
 #[cfg(test)]
 mod tests {
     use super::{State, start};
