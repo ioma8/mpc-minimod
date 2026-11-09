@@ -960,3 +960,24 @@ One coordinated change, in this order:
 That is roughly ten rounds at the pace this session has measured, and the last three
 attempts at this cluster each found one more coupling rather than a wall.  It is
 finishable; it is not finishable by grinding one function per round.
+
+## The cluster attempt, measured
+
+Attempting the whole adapter cluster in one round, in the order the plan set out:
+
+* `hpss_open` and `hpss_close` are **pure Rust already** - every state they touch
+  (`g_menu`, the preview, the status line, the repaint) moved in earlier rounds, and the
+  page query did too;
+* `bass_page_open` needs only `g_bass_knob`, which is a three-float array;
+* `hpss_activate` needs the eight functions above it, three of which are
+  `sample_transform_start` in disguise;
+* `spectral_start` stops the cluster: it hands `minimod_spectral_start` the **C**
+  `g_spectral` record, and that record is written by `screen_paint` on every frame.
+
+So the chain is: the menu table needs the spectral start, the spectral start needs the
+paint's state, and the paint's state is written by the paint entry point the table
+installs. The record is the last thing holding the loop closed, and moving it means
+moving `screen_paint` at the same time - which is the coordinated change the plan named,
+not something a round can do in pieces.
+
+Reverted; certified build restored and green.
