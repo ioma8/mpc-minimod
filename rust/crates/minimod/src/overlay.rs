@@ -198,6 +198,27 @@ pub fn reset() {
     crate::spectral_machine::reset();
 }
 
+/// Draw the effects menu over the page.
+///
+/// # Safety
+///
+/// `graphics` is the app's own.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minimod_overlay_menu_draw(graphics: usize) {
+    let menu = crate::menu::state();
+    // SAFETY: the status line and the knobs are the crate's own.
+    unsafe {
+        crate::menu::minimod_menu_draw(
+            graphics,
+            menu.selection,
+            menu.bass_edit,
+            menu.busy,
+            core::ptr::addr_of!(crate::status::STATUS).cast::<u8>(),
+            core::ptr::addr_of!(crate::menu::g_bass_knob).cast::<f32>(),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Flags, Hooks, Outcome};

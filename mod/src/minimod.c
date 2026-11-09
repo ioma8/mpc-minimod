@@ -77,6 +77,8 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+void minimod_overlay_menu_draw(uintptr_t graphics);
+
 struct minimod_ui_hooks minimod_ui_hooks_self(void);
 
 void minimod_menu_activate_self(void);
@@ -795,8 +797,7 @@ static void looper_pump(void)
 
 static void hpss_draw_menu(void *g)
 {
-    minimod_menu_draw((uintptr_t)g, g_menu.selection, g_menu.bass_edit, g_menu.busy,
-                      g_hpss_status, g_bass_knob);
+    minimod_overlay_menu_draw((uintptr_t)g);
 }
 
 static void release_held_pads(void);

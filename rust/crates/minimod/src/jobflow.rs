@@ -6,6 +6,8 @@
 //! handler and waits on the app's writer - the one part that is still glue.
 
 use crate::firmware::base;
+use crate::glue::minimod_paint_original;
+use crate::paint::{self, Repaint, minimod_toast};
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
@@ -736,10 +738,22 @@ pub unsafe extern "C" fn minimod_glue_finish(
 /// Mark the job finished.
 extern "C" fn finished_noop() {}
 
-/// Show a toast, in the shape the hooks want.
+/// Show a toast, in the shape the hooks want: draw it and say it.
 unsafe extern "C" fn toast_c(text: *const u8) {
-    // SAFETY: the caller promises a NUL-terminated string or null.
-    unsafe { crate::status_ffi::hpss_set_status(text.cast()) };
+    let painted = crate::audio::painted();
+    let component = if painted != 0 {
+        painted
+    } else {
+        paint::screen()
+    };
+    // SAFETY: the text is the caller's and the repaint the app's.
+    unsafe {
+        let repaint: Option<Repaint> = minimod_paint_original().map(|original| {
+            // SAFETY: the app's paint takes the component and two coordinates.
+            core::mem::transmute::<unsafe extern "C" fn(usize, usize), Repaint>(original)
+        });
+        minimod_toast(text, repaint, component);
+    }
 }
 
 /// Stop the bass preview.
@@ -811,13 +825,13 @@ pub unsafe extern "C" fn minimod_menu_activate_self() {
 /// Start a transform job bound to no effect.
 extern "C" fn start_split() {
     // SAFETY: the app's objects are live.
-    unsafe { minimod_job_start_self(0, base(), crate::paint::screen()) };
+    unsafe { minimod_job_start_self(0, base(), paint::screen()) };
 }
 
 /// Start a transform job for one effect.
 extern "C" fn start_effect(action: i32) {
     // SAFETY: the app's objects are live.
-    unsafe { minimod_job_start_self(action, base(), crate::paint::screen()) };
+    unsafe { minimod_job_start_self(action, base(), paint::screen()) };
 }
 
 /// Start a spectral chop.
@@ -839,7 +853,7 @@ unsafe extern "C" fn start_bass_page() {
 /// Start the bass synth.
 extern "C" fn start_bass() {
     // SAFETY: the app's objects are live.
-    unsafe { minimod_job_start_self(4, base(), crate::paint::screen()) };
+    unsafe { minimod_job_start_self(4, base(), paint::screen()) };
 }
 
 /// Open the looper, re-reading the device's rings if it opened.
