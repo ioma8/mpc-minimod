@@ -185,9 +185,13 @@ The overlay technique (paint-slot swap, graphics calls) is described in [`docs/M
 ## Build
 
 ```sh
-./build.sh     # build/minimod.so  (the Rust cdylib, cross-linked with zig cc; no C is compiled)
-./pack.sh      # build/minimod.zip (autorun package with a valid autorun.check)
+./build.sh     # minimod.so + minimod.elf/map + minimod.zip
+./pack.sh      # compatibility alias: runs build.sh
 ```
 
-`pack.sh` regenerates `autorun.check` = `sha256(autorun.json + autorun.sh + salt)`;
-the firmware refuses a package whose check does not match.
+`build.sh` is a thin wrapper around the public SDK's `build-mod.sh`. The SDK
+script cross-builds the Rust `cdylib`, strips it, checks unresolved imports and
+glibc, and generates `autorun.check` =
+`sha256(autorun.json + autorun.sh + salt)`; the firmware refuses a package whose
+check does not match. `minimod.zip` is the SD install; `minimod.so` is the
+`LD_PRELOAD`/lab artifact.

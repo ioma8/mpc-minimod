@@ -330,8 +330,8 @@ firmware's synth. Real hardware untested. The investigation probe for the native
 
 ```sh
 cd mod
-./build.sh          # release .so, 0 warnings, glibc symbol versions <= 2.39
-./pack.sh           # SD package with a valid autorun.check
+./build.sh          # .so + .elf/map + SD zip, glibc symbol versions <= 2.39
+./pack.sh           # compatibility alias: runs build.sh
 
 # host-side checks (no emulator, no device)
 cd ../rust && ./check.sh         # fmt, clippy, rustdoc, unit tests, golden DSP fixtures, aarch64 build

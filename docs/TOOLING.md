@@ -283,8 +283,8 @@ tests and the aarch64 cross build. Every `unsafe` block in the SDK carries a
 `// SAFETY:` comment, which clippy enforces. The feature crate (`crates/minimod`)
 contains no `unsafe` at all and the script fails if one appears.
 
-`mod/build.sh` adds two checks on the shipped library: it fails on any
-unresolved symbol that is not versioned glibc (the firmware's loader would
+The SDK's `build-mod.sh` (called by `mod/build.sh`) adds two checks on the
+shipped library: it fails on any unresolved symbol that is not versioned glibc (the firmware's loader would
 reject the whole process), and it refuses a library that needs a glibc symbol
 version newer than the device's 2.39.
 

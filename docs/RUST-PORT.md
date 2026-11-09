@@ -98,7 +98,8 @@ Things worth knowing that the journal below does not say plainly:
 * **Exports are deliberate.** Only `snd_pcm_*` and the `g_*` statics the tests
   read are exported; the feature crate declares them through
   `mpc_sample_sdk::export_static!`, so its source has no `#[unsafe(no_mangle)]`.
-  `mod/build.sh` refuses a build that leaves any unresolved symbol of its own.
+  the SDK's `build-mod.sh` (called by `mod/build.sh`) refuses a build that
+  leaves any unresolved symbol of its own.
 * **The golden fixtures are the reference now.** `rust/tests/golden/*.bin` were
   recorded from the original C; the generators went with the C.  Change a
   fixture only on purpose.
@@ -252,7 +253,7 @@ fix was re-implemented in the crates.  What came across, and where:
 | Spectral deadline, off-page cancel/finalize, CHOP press only from a captured button | `spectral.rs`, `overlay.rs::poll_offpage`, `ui.rs`/`input.rs` hooks |
 | H3 effect object validation | SDK `platform/effect.rs` |
 | Spectral channels 1-2 only | `dsp/spectral.rs` |
-| glibc 2.39 guard in `build.sh` | `mod/build.sh` (merged with the Rust build) |
+| glibc 2.39 guard in `build-mod.sh` | SDK `build-mod.sh`, called by `mod/build.sh` |
 | `g_surface` for the root-note test | exported from SDK `platform/control.rs` |
 
 Not ported on purpose: the debug-only probes and `/run` commands, the dead C2
@@ -412,7 +413,7 @@ which keeps the build silent without touching a lint.
 
 ```sh
 rust/check.sh                       # fmt, clippy, tests, cross build
-cd mod && ./build.sh && ./pack.sh   # the SD package
+cd mod && ./build.sh                # .so + SD package via the SDK script
 ```
 
 The emulator suite for a feature is the acceptance gate for a change to it; see

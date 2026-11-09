@@ -1,72 +1,46 @@
 #!/bin/sh
-# Build the preload library (pack.sh makes the SD package) and the one
-# symbol the emulator test reads.
+# Thin wrapper: the build itself belongs to the public mpc-sample-sdk.
 set -eu
 cd "$(dirname "$0")"
-mkdir -p build
+rust_dir=$(CDPATH= cd -- ../rust && pwd)
 
-# The mod is a Rust cdylib: no C is compiled.  The cross linker driver (which also
-# silences lld's deprecated -O1 warning) lives in rust/scripts; it has to be on
-# PATH or rust/check.sh fails.
-if ! command -v zig-cc-aarch64-linux-gnu >/dev/null 2>&1; then
-    echo "zig-cc-aarch64-linux-gnu is not on PATH; install rust/scripts/zig-cc-aarch64-linux-gnu" >&2
-    exit 1
-fi
-(cd ../rust && cargo build --release --target aarch64-unknown-linux-gnu -p minimod --lib)
-rustlib=../rust/target/aarch64-unknown-linux-gnu/release/libminimod.so
-test -f "$rustlib" || { echo "Rust shared library missing" >&2; exit 1; }
-cp "$rustlib" build/minimod.elf
-nm build/minimod.elf | awk '$3=="g_screen"{print $1" g_screen"}' > build/minimod.map
-grep -q ' g_screen$' build/minimod.map || { echo "g_screen missing from the build" >&2; exit 1; }
-# The emulator test reads the looper's pad array and its stride by symbol.
-for symbol in g_pads g_pad_stride g_open g_click g_buf_out; do
-    nm build/minimod.elf | grep -q " $symbol\$" || {
-        echo "looper symbol $symbol missing from the build" >&2; exit 1; }
-done
-if [ -n "${LLVM_OBJCOPY:-}" ]; then
-    objcopy=$LLVM_OBJCOPY
-elif command -v llvm-objcopy >/dev/null 2>&1; then
-    objcopy=$(command -v llvm-objcopy)
-elif [ -x /opt/homebrew/opt/llvm/bin/llvm-objcopy ]; then
-    objcopy=/opt/homebrew/opt/llvm/bin/llvm-objcopy
-else
-    echo "llvm-objcopy is required to strip the shared library without shifting g_screen" >&2
-    exit 1
-fi
-# The preload library must not leave one of its own symbols unresolved: the
-# firmware's loader would fail the whole process (exit 127).  Everything it may
-# legitimately import is versioned (glibc); anything else is ours.
-unresolved=$(nm -D build/minimod.elf | grep ' U ' | grep -v '@' || true)
-if [ -n "$unresolved" ]; then
-    echo "unresolved symbols in the build:" >&2
-    echo "$unresolved" >&2
-    exit 1
-fi
-"$objcopy" --strip-all build/minimod.elf build/minimod.so
+# Find the SDK checkout cargo fetched for the git dependency, so this wrapper
+# always uses the same build script and revision as the crate.
+sdk_dir=$(
+    cargo metadata --format-version 1 --manifest-path "$rust_dir/Cargo.toml" |
+    python3 -c '
+import json
+import pathlib
+import sys
 
-# The MPC Sample ships glibc 2.39 (see the az0x open-source dump). Refuse a
-# library that would need a newer symbol version than the device has.
-if [ -n "${LLVM_OBJDUMP:-}" ]; then
-    objdump=$LLVM_OBJDUMP
-elif command -v llvm-objdump >/dev/null 2>&1; then
-    objdump=$(command -v llvm-objdump)
-elif [ -x /opt/homebrew/opt/llvm/bin/llvm-objdump ]; then
-    objdump=/opt/homebrew/opt/llvm/bin/llvm-objdump
-else
-    echo "llvm-objdump is required for the glibc symbol-version check" >&2
+metadata = json.load(sys.stdin)
+package = next(
+    (item for item in metadata["packages"]
+     if item["name"] == "mpc-sample-sdk" and item.get("source")),
+    None,
+)
+if package is None:
+    sys.exit("mpc-sample-sdk is not a git dependency")
+print(pathlib.Path(package["manifest_path"]).parent)
+'
+)
+[ -x "$sdk_dir/build-mod.sh" ] || {
+    echo "mpc-sample-sdk build script missing at $sdk_dir/build-mod.sh" >&2
     exit 1
-fi
-version=$("$objdump" -T build/minimod.so 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -u | sort -t. -k2 -n | tail -1)
-if [ -n "$version" ]; then
-    v=${version#GLIBC_}
-    major=${v%%.*}
-    minor=${v#*.}
-    if [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -gt 39 ]; }; then
-        echo "built against $version, newer than the MPC Sample's glibc 2.39" >&2
-        exit 1
-    fi
-    echo "glibc symbol versions: highest $version (device has 2.39)"
-else
-    echo "glibc symbol versions: none (static link?)"
-fi
-echo "built build/minimod.so ($(wc -c < build/minimod.so) bytes), g_screen $(cut -d' ' -f1 build/minimod.map)"
+}
+
+exec "$sdk_dir/build-mod.sh" \
+    --manifest-path "$rust_dir/Cargo.toml" \
+    --package minimod \
+    --name minimod \
+    --output-dir build \
+    --require-symbol g_screen \
+    --require-symbol g_pads \
+    --require-symbol g_pad_stride \
+    --require-symbol g_open \
+    --require-symbol g_click \
+    --require-symbol g_buf_out \
+    --pack \
+    --firmware-sha256 44507c7a7d3029c411b2e3780ea286ca3e08b7e3ffd7b5047d52f73bf5299d1f \
+    --display-name minimod \
+    --env MINIMOD_DEBUG=0

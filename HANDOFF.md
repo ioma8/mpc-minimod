@@ -9,10 +9,9 @@ port is merged; no C or C++ is compiled for the mod. Nothing at `HEAD` is tagged
 ## 1. What the tree is
 
 - **The C is gone.** `mod/src`, the vendored DaisySP, the golden-fixture generators
-  and the host tests that compiled C are deleted. `mod/build.sh` builds the
-  `minimod` crate as a `cdylib` and cross-links it with
-  `zig-cc-aarch64-linux-gnu`; it fails on unresolved non-glibc symbols and on
-  glibc versions newer than 2.39.
+  and the host tests that compiled C are deleted. `mod/build.sh` is a thin wrapper around the public SDK's
+  `build-mod.sh`, which builds the `minimod` crate as a `cdylib`, cross-links
+  it, and fails on unresolved non-glibc symbols and glibc newer than 2.39.
 - **The crates.** The public [`mpc-sample-sdk`](https://github.com/ioma8/mpc-sample-sdk) is the universal SDK: firmware image and
   the 36-word check, the hook engine and all 16 sites, the `Mod` trait and event
   decoding, the ALSA taps, drawing, and typed access to the app's page, sample,

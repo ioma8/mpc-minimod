@@ -22,6 +22,19 @@ Sample mod:
 **https://github.com/ioma8/mpc-sample-sdk** ·
 [hands-on guide](https://github.com/ioma8/mpc-sample-sdk/blob/main/docs/README.md).
 
+The SDK ships a ready-to-use **`build-mod.sh`**; minimod's `mod/build.sh` is only
+a thin wrapper around it. Build from the root:
+
+```sh
+cd mod
+./build.sh
+```
+
+That writes `mod/build/minimod.so` for `LD_PRELOAD`, `mod/build/minimod.zip`
+for the SD-card `autorun` install, plus the ELF and symbol map used by the
+emulator tests. To install the built zip, copy its `autorun` folder to the top
+level of the SD card and power on; see [Install](#install).
+
 | what | how |
 | --- | --- |
 | **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim | `SHIFT` + `B3` |
@@ -87,10 +100,17 @@ To go back to stock, delete `autorun` from the card (or boot without the card).
 ## Building
 
 ```sh
-cd mod && ./build.sh && ./pack.sh
+cd mod
+./build.sh          # builds, strips, checks and packs
+./pack.sh           # compatibility alias; does the same
 ```
 
-That writes `mod/build/minimod.zip` — the same package as the release.
+That writes the same package as the release:
+`mod/build/minimod.zip`, plus `minimod.so` for the lab and `minimod.elf`/
+`minimod.map` for the emulator tests.
+
+The build is delegated to the SDK's `build-mod.sh`; minimod does not maintain a
+second copy of the cross-compile, strip, glibc or autorun logic.
 
 The mod is Rust throughout: [`mpc-sample-sdk`](https://github.com/ioma8/mpc-sample-sdk) is the universal SDK
 (firmware image, hooks, input/audio/MIDI, drawing, typed platform objects),

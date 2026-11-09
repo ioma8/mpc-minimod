@@ -198,11 +198,11 @@ the planar block, mixes into private scratch, and calls the original writer. See
 
 ```sh
 cd mod
-./build.sh      # build/minimod.so  (the Rust cdylib, cross-linked with zig cc)
-./pack.sh       # build/minimod.zip (autorun package with a valid autorun.check)
+./build.sh      # minimod.so + minimod.elf/map + minimod.zip
+./pack.sh       # compatibility alias: runs build.sh
 ```
 
-`build.sh` builds the `minimod` crate (`rust/crates/minimod`, with the DSP in
+`build.sh` is a thin wrapper around the SDK's `build-mod.sh`, which builds the `minimod` crate (`rust/crates/minimod`, with the DSP in
 `rust/crates/dsp`) as a `cdylib` for `aarch64-unknown-linux-gnu`, then strips the
 `.so` with `llvm-objcopy --strip-all` **without shifting `g_screen`** (the
 emulator tests read that symbol through `build/minimod.map`). No C or C++ is
@@ -211,7 +211,7 @@ version newer than 2.39. The linker driver `zig-cc-aarch64-linux-gnu` (in
 `rust/scripts/`) must be on `PATH`. The library exports only the 4 ALSA taps and
 the `g_*` statics the device tests read.
 
-`pack.sh` stages `autorun/{autorun.json, autorun.sh, minimod.so}`, recomputes
+`build-mod.sh` stages `autorun/{autorun.json, autorun.sh, minimod.so}`, recomputes
 `autorun.check` with the salt, and zips the folder. That zip is the release
 artifact.
 
