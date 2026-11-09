@@ -446,6 +446,26 @@ mod tests {
     }
 
     #[test]
+    fn a_pad_note_reaches_the_non_bass_preview() {
+        let mut left = [0.0_f32; 512];
+        let mut right = [0.0_f32; 512];
+        crate::bass::preview_set_kind(Kind::Pads);
+        crate::bass::preview_enable(false);
+        super::preview_enable(true);
+        super::preview_set_params(Kind::Pads.defaults());
+        // The page opening resets the synth; consume that reset before a note,
+        // as the audio thread would on its next block.
+        let _ = crate::bass::preview_mix_slices(&mut [], 0, 44_100);
+        crate::bass::preview_note(0, 1.0);
+        let peak =
+            crate::bass::preview_mix_slices(&mut [&mut left[..], &mut right[..]], 512, 44_100);
+        super::preview_enable(false);
+        crate::bass::preview_reset();
+        crate::bass::preview_set_kind(Kind::Bass);
+        assert!(peak > 1e-4, "non-bass preview was silent: {peak}");
+    }
+
+    #[test]
     fn every_knob_changes_its_character() {
         for kind in Kind::ALL {
             if kind == Kind::Bass {

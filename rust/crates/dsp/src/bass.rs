@@ -456,6 +456,10 @@ pub fn preview_note(pad: usize, velocity: f32) {
     if velocity <= 0.0 || !velocity.is_finite() {
         return;
     }
+    if preview_kind() != Kind::Bass {
+        crate::synth::preview_note(pad, velocity);
+        return;
+    }
     if let Some(slot) = PENDING.get(pad) {
         slot.store(clamp01(velocity).to_bits(), Ordering::Release);
     }
@@ -600,7 +604,8 @@ fn clamp01(value: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BassError, PADS, Pluck, preview_enable, preview_mix, preview_note, render, render_with,
+        BassError, PADS, Pluck, preview_enable, preview_mix, preview_mix_slices, preview_note,
+        render, render_with,
     };
     use crate::dsp::SequenceNoise;
 
@@ -719,6 +724,9 @@ mod tests {
         let _: Pluck = render(44_100, 0.5, 0.3, 0.6).expect("renders");
         assert_eq!(PADS, 16);
         preview_enable(true);
+        // Let the thread consume any reset left by a previous test before the
+        // strike is queued.
+        let _ = preview_mix_slices(&mut [], 0, 44_100);
         preview_note(0, 0.8);
         let mut left = vec![0.0_f32; 4_096];
         let mut right = vec![0.0_f32; 4_096];
