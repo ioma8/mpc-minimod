@@ -432,6 +432,30 @@ pub unsafe extern "C" fn minimod_menu_draw(
     );
 }
 
+/// The menu's state.  It keeps its name because the glue reads its fields.
+#[unsafe(no_mangle)]
+pub static mut g_menu: State = State {
+    open: 0,
+    busy: 0,
+    bass_edit: 0,
+    data_down: 0,
+    selection: 0,
+    restore_pending: 0,
+};
+
+/// The menu's state, for the crate.
+#[must_use]
+pub fn state() -> &'static State {
+    // SAFETY: only the UI thread writes it.
+    unsafe { &*core::ptr::addr_of!(g_menu) }
+}
+
+/// The menu's state, to change.
+pub fn state_mut() -> &'static mut State {
+    // SAFETY: only the UI thread writes it.
+    unsafe { &mut *core::ptr::addr_of_mut!(g_menu) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Hooks, ROW_HPSS, State, close, open};

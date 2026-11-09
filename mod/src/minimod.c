@@ -257,7 +257,8 @@ static int hook_mask = 0xf2; /* 2 proc, 16 buttons, 32 note_on, 64 cs, 128 note_
 static void mlog(const char *fmt, ...);
 static void toast(const char *text);
 #include "clock_ffi.h"
-static struct minimod_menu g_menu __attribute__((used));
+/* The menu state lives in Rust and keeps its name. */
+extern struct minimod_menu g_menu;
 #define g_hpss_menu g_menu.open
 #define g_hpss_busy g_menu.busy
 #define g_bass_edit g_menu.bass_edit
@@ -866,12 +867,6 @@ static void ui_forward(void *event)
         orig_buttons(event);
 }
 
-static void ui_clear_marks(void)
-{
-    if (g_screen)
-        FN(0x1149880, void (*)(void *, uint64_t, uint64_t))(
-            g_screen, 0, FIELD(g_screen, 0x28, uint64_t));
-}
 
 static uintptr_t ui_read_pointer(void *event)
 {
@@ -886,10 +881,6 @@ static int32_t ui_bump_octave(int32_t steps)
     return bump_octave((int)steps);
 }
 
-static void ui_release_held(void)
-{
-    release_held_pads();
-}
 
 static void ui_toggle_levels(void)
 {
