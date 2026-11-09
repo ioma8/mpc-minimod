@@ -724,6 +724,87 @@ unsafe fn refresh_input_ring(pcm: usize) {
     }
 }
 
+/// The channel count the app asked the device for.
+#[unsafe(no_mangle)]
+pub static mut g_pcm_channels: u32 = 4;
+
+/// The app's own `snd_pcm_readn`.
+static mut REAL_READN: Option<unsafe extern "C" fn(usize, *mut *mut i32, u64) -> i64> = None;
+/// The app's own `snd_pcm_hw_params_set_channels`.
+static mut REAL_SET_CHANNELS: Option<unsafe extern "C" fn(usize, u32) -> i32> = None;
+
+/// The interleaved input tap, for callers that read several buffers at once.
+///
+/// # Safety
+///
+/// `buffers` must hold `size` bytes per buffer, as the app's own reader requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn snd_pcm_readn(pcm: usize, buffers: *mut *mut i32, size: u64) -> i64 {
+    // SAFETY: the static is this module's.
+    let mut real = unsafe { *core::ptr::addr_of!(REAL_READN) };
+    if real.is_none() {
+        real = look_up(c"snd_pcm_readn");
+        // SAFETY: written once.
+        unsafe { REAL_READN = real };
+    }
+    let Some(capture) = real else {
+        return -1;
+    };
+    // SAFETY: the app's own reader takes these.
+    let got = unsafe { capture(pcm, buffers, size) };
+    if got <= 0 {
+        return got;
+    }
+    // SAFETY: this module's statics.
+    unsafe {
+        g_audio_in_calls = g_audio_in_calls.wrapping_add(1);
+    }
+    let looper = crate::looper_ffi::looper_is_open() != 0;
+    // SAFETY: the buffers hold the frames just read.
+    unsafe {
+        if looper && !buffers.is_null() && !(*buffers).is_null() && g_in_s32 != 0 {
+            crate::looper_ffi::looper_input_s32(
+                buffers.cast::<*const i32>(),
+                1,
+                u32::try_from(got).unwrap_or(0),
+            );
+        }
+    }
+    got
+}
+
+/// Remember the channel count the app asked for, and pass the request on.
+///
+/// # Safety
+///
+/// `params` is the app's own parameters object.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn snd_pcm_hw_params_set_channels(params: usize, channels: u32) -> i32 {
+    // SAFETY: the static is this module's.
+    let mut real = unsafe { *core::ptr::addr_of!(REAL_SET_CHANNELS) };
+    if real.is_none() {
+        real = look_up(c"snd_pcm_hw_params_set_channels");
+        // SAFETY: written once.
+        unsafe { REAL_SET_CHANNELS = real };
+    }
+    if channels != 0 {
+        // SAFETY: this module's static.
+        unsafe { g_pcm_channels = channels };
+    }
+    match real {
+        // SAFETY: the app's own setter takes these.
+        Some(set) => unsafe { set(params, channels) },
+        None => -1,
+    }
+}
+
+/// The channel count the app asked for, for the glue.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_pcm_channels() -> u32 {
+    // SAFETY: this module's static.
+    unsafe { g_pcm_channels }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CHANNEL_LIMIT, INPUT_ALT, INPUT_CHANNELS, OUTPUT_ALT, OUTPUT_CHANNELS, channels};

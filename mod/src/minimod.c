@@ -77,6 +77,9 @@
 #include "routing_ffi.h"
 #include "audio_ffi.h"
 
+/* The channel count and the last two taps live in Rust. */
+extern uint32_t g_pcm_channels;
+
 /* The output tap and its counters live in Rust, under these names. */
 extern int32_t g_buf_dirty;
 extern uint32_t g_out_ch;
@@ -1070,37 +1073,10 @@ static int g_lat_extra;      /* MINIMOD_LOOP_LAT_EXTRA: calibration trim */
 #define OUTTAP_FRAMES (44100u * 2u)
 
 
-static long (*real_snd_pcm_readn)(void *, void **, unsigned long);
-static int (*real_snd_pcm_set_channels)(void *, unsigned);
-static volatile unsigned g_pcm_channels = 4;
-
-int snd_pcm_hw_params_set_channels(void *params, unsigned channels)
-{
-    if (!real_snd_pcm_set_channels)
-        real_snd_pcm_set_channels =
-            (int (*)(void *, unsigned))dlsym(RTLD_NEXT, "snd_pcm_hw_params_set_channels");
-    if (channels)
-        g_pcm_channels = channels;
-    return real_snd_pcm_set_channels ? real_snd_pcm_set_channels(params, channels) : -1;
-}
 
 
 
-long snd_pcm_readn(void *pcm, void **bufs, unsigned long size)
-{
-    if (!real_snd_pcm_readn)
-        real_snd_pcm_readn =
-            (long (*)(void *, void **, unsigned long))dlsym(RTLD_NEXT, "snd_pcm_readn");
-    if (!real_snd_pcm_readn)
-        return -1;
-    long got = real_snd_pcm_readn(pcm, bufs, size);
-    if (got > 0) {
-        __atomic_add_fetch(&g_audio_in_calls, 1, __ATOMIC_RELAXED);
-        if (looper_is_open() && bufs && bufs[0] && g_in_s32)
-            looper_input_s32((const int32_t *const *)bufs, 1, (unsigned)got);
-    }
-    return got;
-}
+
 
 /* Hand-edited latency trim survives a restart. */
 
