@@ -341,6 +341,22 @@ app's button hook, which takes the event pointer.  It read whatever was in the
 argument register as an event and the app died in the first frame.  A logging
 build narrowed it to the phase-0 path; the signature was the difference.
 
+## The memory window
+
+`rd` and `mapped` look like the easiest two functions in the file: read process
+memory, answer whether an address is mapped.  Pointing the glue's names at the
+crate's own `firmware::read` and `props::mapped` broke the button path - the menu
+stopped opening - even though both pairs look equivalent on the page.
+
+So they are **not** equivalent in one respect that matters: the crate's reader is
+the one the *mod* uses for the app's image, and the glue's is the one used for the
+app's *live objects* (events, pages, selection).  Whatever the difference is - a
+bounds check, a cached descriptor, the range table - it is load-bearing, and the
+next attempt starts by reading both implementations side by side rather than by
+assuming.
+
+Reverted; looper green.
+
 ## The constructor
 
 The last C piece is the constructor: ~200 lines that are an install table, the
