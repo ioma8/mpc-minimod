@@ -436,7 +436,6 @@ static SITES: [Site; 16] = [
 // The handlers that are still C.
 unsafe extern "C" {
     fn ui_buttons(event: usize);
-    fn install_screen_paint() -> i32;
     fn minimod_glue_set_originals(originals: *const Originals);
     fn minimod_glue_finished(touched: i32);
 }
@@ -541,7 +540,7 @@ pub unsafe extern "C" fn minimod_after_sites(originals: *const Originals) -> i32
     // SAFETY: the caller's contract.
     unsafe {
         minimod_glue_set_originals(originals);
-        install_screen_paint();
+        drop(crate::paint::minimod_paint_install_self());
     }
     // SAFETY: the engine's own queries.
     let touched = unsafe { minimod_hooks_touched() != 0 };

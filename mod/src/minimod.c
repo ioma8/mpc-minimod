@@ -1072,20 +1072,7 @@ __attribute__((unused)) static void draw_text(void *g, const char *s, int x, int
 }
 
 
-static void screen_paint(void *p, void *g)
-{
-    g_paint_comp = (uintptr_t)p;
-    g_paint_gfx = g;
-    minimod_overlay_paint_self((uintptr_t)p, (uintptr_t)g);
-}
 
-int install_screen_paint(void)
-{
-    if (!minimod_paint_install(base, (const void *)screen_paint))
-        return 0;
-    orig_screen_paint = minimod_paint_original();
-    return orig_screen_paint ? 1 : 0;
-}
 
 /* The soft-key row is rebuilt on SHIFT, and every rebuild assigns the label
  * strings through 0xf535c0(dest, text). While SHIFT is held we swap the B3

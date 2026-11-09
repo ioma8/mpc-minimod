@@ -252,6 +252,41 @@ pub fn screen() -> usize {
     // SAFETY: only the UI thread writes it.
     unsafe { core::ptr::addr_of!(g_screen).read() }
 }
+
+/// The page's paint, as the vtable calls it.
+///
+/// # Safety
+///
+/// The app calls this with its own component and graphics.
+unsafe extern "C" fn page_paint(component: usize, graphics: usize) {
+    // SAFETY: the statics are this module's.
+    unsafe {
+        crate::audio::g_paint_comp = component;
+        g_paint_gfx = graphics;
+        crate::overlay::minimod_overlay_paint_self(component, graphics);
+    }
+}
+
+/// Install the page's paint over the app's vtable slot.
+#[unsafe(no_mangle)]
+pub extern "C" fn minimod_paint_install_self() -> i32 {
+    // SAFETY: the base is the app's and the handler is this module's.
+    if unsafe { crate::glue::minimod_paint_install(firmware::base(), page_paint as *const ()) } == 0
+    {
+        return 0;
+    }
+    i32::from(original_screen_paint().is_some())
+}
+
+/// The app's own paint, as the vtable gave it back.
+fn original_screen_paint() -> Option<unsafe extern "C" fn(usize, usize)> {
+    crate::glue::minimod_paint_original()
+}
+
+/// The graphics the page last painted with.
+#[unsafe(no_mangle)]
+pub static mut g_paint_gfx: usize = 0;
+
 #[cfg(test)]
 mod tests {
     use super::toast_visible;
