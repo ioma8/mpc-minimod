@@ -8,6 +8,20 @@ original MPC Sample experience, with just small fixes that enhance it for better
 
 [![minimod — intro video](https://img.youtube.com/vi/bnnkfryecPY/maxresdefault.jpg)](https://youtu.be/bnnkfryecPY)
 
+## Built on the open Rust SDK
+
+minimod is built on **[mpc-sample-sdk](https://github.com/ioma8/mpc-sample-sdk)**,
+a memory-safe Rust SDK for the Akai MPC Sample made by the same author. The SDK
+owns the firmware finding and verification, the in-memory hooks, the event
+plumbing, audio/MIDI, drawing and typed access to the app's own objects, so
+custom mods can be written in **safe Rust** without raw pointers, C ABIs or
+`unsafe` in the feature code.
+
+The SDK is public and documented for anyone who wants to build their own MPC
+Sample mod:
+**https://github.com/ioma8/mpc-sample-sdk** ·
+[hands-on guide](https://github.com/ioma8/mpc-sample-sdk/blob/main/docs/README.md).
+
 | what | how |
 | --- | --- |
 | **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim | `SHIFT` + `B3` |
