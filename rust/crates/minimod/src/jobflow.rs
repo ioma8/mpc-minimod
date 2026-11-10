@@ -4,13 +4,14 @@
 //! feature owns what to read, what each output means and what to tell the user.
 //! `TASK` is the feature's only handle — it is not a result slot or a flag.
 
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::actions::{ACTION_BASS, ACTION_LOFI, ACTION_REVERB, ACTION_SPLIT, ACTION_VINYL};
 use crate::backend::bass::Kind;
 use crate::paint::{self, show_toast};
 use crate::{pads, selection, status};
+use mpc_sample_sdk::image;
 use mpc_sample_sdk::platform::extract;
 use mpc_sample_sdk::platform::selection::AudioReadError;
 use mpc_sample_sdk::render::RenderJob;
@@ -20,6 +21,71 @@ use mpc_sample_sdk::task::{Task, TaskError};
 static TASK: Mutex<Option<Task<RenderJob>>> = Mutex::new(None);
 /// The synth character of the running render, used for its pad name.
 static JOB_KIND: AtomicI32 = AtomicI32::new(0);
+/// The destination pad of a synth render.
+static JOB_PAD: AtomicI32 = AtomicI32::new(-1);
+/// Borrowed layer sample/holder for an empty source page.
+static BORROW_SLOT: AtomicUsize = AtomicUsize::new(0);
+static BORROW_SAMPLE: AtomicUsize = AtomicUsize::new(0);
+static BORROW_HOLDER: AtomicUsize = AtomicUsize::new(0);
+
+fn clear_borrow() {
+    BORROW_SLOT.store(0, Ordering::Release);
+    BORROW_SAMPLE.store(0, Ordering::Release);
+    BORROW_HOLDER.store(0, Ordering::Release);
+}
+
+fn restore_provider() {
+    let slot = BORROW_SLOT.swap(0, Ordering::AcqRel);
+    let sample = BORROW_SAMPLE.swap(0, Ordering::AcqRel);
+    let holder = BORROW_HOLDER.swap(0, Ordering::AcqRel);
+    if slot != 0 {
+        let _ = image::write(slot, &(sample as u64).to_le_bytes());
+        let _ = image::write(slot + 8, &(holder as u64).to_le_bytes());
+    }
+}
+
+fn borrow_provider(screen: usize) -> Option<(usize, u32)> {
+    let state = selection::page_state(screen)?;
+    let layers = image::read_pointer(state.checked_add(0x22e8)?)?;
+    let slot = layers.checked_add(0x4a8)?;
+    let short = usize::try_from(image::read_u64(slot)?).ok()?;
+    let short_holder = usize::try_from(image::read_u64(slot + 8).unwrap_or(0)).ok()?;
+    let surface = crate::control::surface();
+    if surface == 0 {
+        return None;
+    }
+    let mut provider = None;
+    let mut provider_frames = 0_u32;
+    for pad in 0..128 {
+        let Some(candidate) = pads::sample_for_pad(surface, pad).filter(|sample| *sample != short)
+        else {
+            continue;
+        };
+        let Some(metadata) = image::read_pointer(candidate.checked_add(0x130)?) else {
+            continue;
+        };
+        let Some(frames) = image::read_u32(metadata.checked_add(4)?) else {
+            continue;
+        };
+        if frames >= provider_frames {
+            provider = Some(candidate);
+            provider_frames = frames;
+        }
+    }
+    let provider = provider?;
+    let holder = image::read_pointer(provider.checked_add(0x30)?)?;
+    if !image::write(slot, &(provider as u64).to_le_bytes())
+        || !image::write(slot + 8, &(holder as u64).to_le_bytes())
+    {
+        let _ = image::write(slot, &(short as u64).to_le_bytes());
+        let _ = image::write(slot + 8, &(short_holder as u64).to_le_bytes());
+        return None;
+    }
+    BORROW_SLOT.store(slot, Ordering::Release);
+    BORROW_SAMPLE.store(short, Ordering::Release);
+    BORROW_HOLDER.store(short_holder, Ordering::Release);
+    Some((state, provider_frames))
+}
 /// One failure: what to put in the status line and what to toast.
 #[derive(Clone, Copy)]
 struct Report {
@@ -129,6 +195,7 @@ fn extract_one(
     name: &'static core::ffi::CStr,
     end: u32,
     source_frames: u32,
+    destination: Option<i32>,
 ) -> Option<extract::Extracted> {
     extract::run(&extract::Request {
         screen: job.source.screen,
@@ -139,6 +206,7 @@ fn extract_one(
         channels: output.channels,
         start: 0,
         end,
+        destination,
     })
     .ok()
 }
@@ -183,18 +251,27 @@ fn extract_take(job: &RenderJob) -> Result<(), Report> {
     // be shorter than its source and then uses its own frame count.
     let rendered = u32::try_from(output.frames).unwrap_or(job.source.frames);
     let end = if job.kind == ACTION_BASS {
-        rendered.min(job.source.frames)
+        // The synth generates its own note; never inherit the source length.
+        rendered
     } else {
         job.source.frames
     };
-    let source_frames = end;
-    let Some(extracted) = extract_one(job, output, name, end, source_frames) else {
+    let source_frames = if job.kind == ACTION_BASS {
+        job.source.frames
+    } else {
+        end
+    };
+    let destination = (job.kind == ACTION_BASS).then(|| JOB_PAD.load(Ordering::Acquire));
+    let Some(extracted) = extract_one(job, output, name, end, source_frames, destination) else {
         return Err(Report {
             raw: false,
             status: "output failed",
             toast: "Effect: write failed",
         });
     };
+    if job.kind == ACTION_BASS {
+        clear_borrow();
+    }
     if job.kind == ACTION_REVERB {
         trim_reverb_tail(extracted.pad, output.frames);
     }
@@ -211,14 +288,14 @@ fn extract_split(job: &RenderJob) -> Result<(), Report> {
         });
     };
     let frames = u32::try_from(harmonic.frames).unwrap_or(job.source.frames);
-    if extract_one(job, harmonic, names()[0], frames, frames).is_none() {
+    if extract_one(job, harmonic, names()[0], frames, frames, None).is_none() {
         return Err(Report {
             raw: true,
             status: "HPSS: first output failed",
             toast: "HPSS: write failed",
         });
     }
-    if extract_one(job, percussive, names()[1], frames, frames).is_none() {
+    if extract_one(job, percussive, names()[1], frames, frames, None).is_none() {
         return Err(Report {
             raw: true,
             status: "HPSS: harmonic only (second failed)",
@@ -263,20 +340,27 @@ fn finalize(job: &RenderJob, screen: usize) -> Report {
                 "HPSS: processing failed"
             },
         })
-    } else if screen != job.source.screen || !job.source.is_current() {
+    } else if screen != job.source.screen
+        || !crate::page::visible(job.source.screen)
+        || (job.kind != ACTION_BASS && !job.source.is_current())
+    {
         Err(cancelled(effect))
     } else {
-        room_for_pads(job, effect)
-            .and_then(|()| {
-                let wrote = if effect {
-                    extract_take(job)
-                } else {
-                    extract_split(job)
-                };
-                crate::ui::minimod_restore_chop(crate::ui::state());
-                wrote
-            })
-            .map(|()| success(job))
+        let room = if job.kind == ACTION_BASS {
+            Ok(())
+        } else {
+            room_for_pads(job, effect)
+        };
+        room.and_then(|()| {
+            let wrote = if job.kind == ACTION_SPLIT {
+                extract_split(job)
+            } else {
+                extract_take(job)
+            };
+            crate::ui::minimod_restore_chop(crate::ui::state());
+            wrote
+        })
+        .map(|()| success(job))
     };
     match outcome {
         Ok(report) | Err(report) => report,
@@ -332,20 +416,63 @@ pub fn start(action: i32, screen: usize, menu: &mut crate::menu::State) -> bool 
     if task_slot().is_some() {
         return false;
     }
-    let Some(source) = selection::current(screen) else {
-        fail(
-            action,
-            Report {
-                raw: false,
-                status: "no sample on this pad",
-                toast: if action == ACTION_SPLIT {
-                    "HPSS: no sample"
-                } else {
-                    "Effect: no sample"
+    let current = selection::current(screen);
+    let source = if action == ACTION_BASS {
+        let (state, frames) = if let Some(current) = &current {
+            (current.state, current.frames)
+        } else {
+            let Some((state, frames)) = borrow_provider(screen) else {
+                fail(
+                    action,
+                    Report {
+                        raw: false,
+                        status: "no sample to seed Extract",
+                        toast: "Synth: no source sample",
+                    },
+                );
+                return false;
+            };
+            (state, frames)
+        };
+        let pad = crate::input::last_pad();
+        if !(0..128).contains(&pad) {
+            restore_provider();
+            fail(
+                action,
+                Report {
+                    raw: false,
+                    status: "no destination pad",
+                    toast: "Synth: no destination pad",
                 },
-            },
-        );
-        return false;
+            );
+            return false;
+        }
+        JOB_PAD.store(pad, Ordering::Release);
+        selection::Selection {
+            screen,
+            state,
+            sample: 0,
+            frames,
+            channels: 2,
+            rate: 44_100,
+        }
+    } else {
+        let Some(source) = current else {
+            fail(
+                action,
+                Report {
+                    raw: false,
+                    status: "no sample on this pad",
+                    toast: if action == ACTION_SPLIT {
+                        "HPSS: no sample"
+                    } else {
+                        "Effect: no sample"
+                    },
+                },
+            );
+            return false;
+        };
+        source
     };
     let input = if action == ACTION_BASS {
         Vec::new()
@@ -396,6 +523,7 @@ pub fn busy() -> bool {
 
 /// Clear the menu and preview state after a terminal job.
 fn finish_state() {
+    restore_provider();
     let menu = crate::menu::state_mut();
     menu.busy = 0;
     menu.open = 0;

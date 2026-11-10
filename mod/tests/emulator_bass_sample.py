@@ -205,12 +205,9 @@ def main():
         if strength > peak:
             pitch, peak = float(hz), strength
     assert abs(pitch - 65.406) < 5, f'Expected C2 fundamental, measured {pitch:.2f} Hz'
-    source_after = ssh('cat ' + shlex.quote(source_path))
-    if not same_audio(decode_audio(source_after), source_audio):
-        time.sleep(.5)
-        source_later = ssh('cat ' + shlex.quote(source_path))
-        assert same_audio(decode_audio(source_later), source_audio), \
-            f'Source audio differs immediately and after 500 ms: {source_path}'
+    sample_after = qword(qword(qword(screen + 0x178) + 0x60) + 0x22e8 + 0x4a8)
+    assert sample_after != sample_before, \
+        'Selected pad did not receive the rendered sample'
     assert int(ssh('pidof "MPC Sample"')) == pid, 'Firmware restarted'
     assert ssh('systemctl show ac50 -p NRestarts').decode().strip() == restarts
     print(f'PASS: {output_path}; C2 peak {pitch:.2f} Hz; {len(audio)} stereo frames @ '

@@ -297,8 +297,9 @@ native undo grouping not exercised.
 
 **Behavior.** The menu opens a synth parameter page. Pads 1–16 audition
 C2–D#3 chromatically; the **DATA encoder switches the character**, and `DATA`
-renders the selected character's C2 (MIDI 36) note to the next free pad through
-stock Extract. The selected source sample is not rewritten. The page title shows
+renders the selected character's C2 (MIDI 36) note to the selected pad through
+stock Extract. The destination is overwritten whether it already holds a sample
+or is empty; the generated audio is independent of that pad's old contents. The page title shows
 the selected character and the three knobs change with it:
 
 | character | K1 | K2 | K3 | model |
