@@ -20,6 +20,7 @@ The converter (`mpc2stems`) is a separate product with its own docs in
 * **The Rust code** — [`RUST-PORT.md`](RUST-PORT.md) (crate layout, lint policy,
   the C-to-Rust module map, what is proven how) and
   [`../rust/README.md`](../rust/README.md).
+* **Recording and raw sample creation** — [`RE-RECORDING.md`](RE-RECORDING.md).
 * **The Live Looper** — [`LIVE-LOOPER.md`](LIVE-LOOPER.md).
 * **Interop with other mods/addins** — [`ADDIN-ECOSYSTEM.md`](ADDIN-ECOSYSTEM.md)
   (how other addins load, the shared installer rules, and what we can reuse).
