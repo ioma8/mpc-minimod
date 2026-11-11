@@ -28,15 +28,15 @@ pub const ACTION_BASS: i32 = 4;
 ///
 /// Returns the action code when the backend cannot produce the expected output.
 pub fn render(job: &mut RenderJob, knobs: &[f32], kind: bass::Kind) -> Result<(), i32> {
-    let channels = usize::from(job.source.channels);
-    let rate = job.source.rate;
+    let channels = usize::from(job.source.channels());
+    let rate = job.source.rate();
     match job.kind {
         ACTION_SPLIT => {
             let Some((harmonic, percussive)) = hpss::split(&job.input, channels, rate) else {
                 return Err(job.kind);
             };
-            let frames = usize::try_from(job.source.frames).unwrap_or(0);
-            let channels = job.source.channels;
+            let frames = usize::try_from(job.source.frames()).unwrap_or(0);
+            let channels = job.source.channels();
             job.push_output(
                 RenderOutput::with_frames(harmonic, frames, u32::from(channels)).ok_or(job.kind)?,
             );
@@ -66,14 +66,14 @@ pub fn render(job: &mut RenderJob, knobs: &[f32], kind: bass::Kind) -> Result<()
             let Some(audio) = mpc_sample_sdk::platform::effect::render_code(
                 kind - 1,
                 &job.input,
-                job.source.channels.into(),
+                job.source.channels().into(),
                 rate,
                 parameters,
             ) else {
                 return Err(job.kind);
             };
             job.push_output(
-                RenderOutput::new(audio, u32::from(job.source.channels)).ok_or(job.kind)?,
+                RenderOutput::new(audio, u32::from(job.source.channels())).ok_or(job.kind)?,
             );
             Ok(())
         }
@@ -88,14 +88,9 @@ mod tests {
     use mpc_sample_sdk::render::RenderJob;
 
     fn source() -> Selection {
-        Selection {
-            screen: 1,
-            state: 2,
-            sample: 3,
-            frames: 4,
-            channels: 2,
-            rate: 44_100,
-        }
+        // SAFETY: the test only carries geometry; `render` never reaches the
+        // firmware because the effect path is uninstalled on the host.
+        unsafe { Selection::from_parts(1, 2, 3, 4, 2, 44_100) }
     }
 
     #[test]

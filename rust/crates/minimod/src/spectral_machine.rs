@@ -51,7 +51,7 @@ static MACHINE: Global<Option<Machine>> = Global::new(None);
 /// Run one frame of the state machine.
 #[must_use]
 pub fn step(now: i64) -> Step {
-    match MACHINE.get_mut().as_mut() {
+    match crate::ui_write(&MACHINE).as_mut() {
         None => Step::Idle,
         Some(running) => advance(now, running),
     }
@@ -59,6 +59,7 @@ pub fn step(now: i64) -> Step {
 
 /// Begin a run: detect the boundaries in the samples the caller read, open
 /// Manual chop and store the machine.
+#[must_use]
 pub fn begin(
     now: i64,
     selected: &selection::Selection,
@@ -66,14 +67,14 @@ pub fn begin(
     press_chop: Option<&[u8; 16]>,
 ) -> Step {
     if samples.len()
-        != usize::try_from(selected.frames).unwrap_or(0) * usize::from(selected.channels)
+        != usize::try_from(selected.frames()).unwrap_or(0) * usize::from(selected.channels())
     {
         return Step::Failed("cannot read sample WAV");
     }
     let Some(detected) = spectral::detect(
         samples,
-        usize::from(selected.channels),
-        selected.rate,
+        usize::from(selected.channels()),
+        selected.rate(),
         MAX_SLICES,
     ) else {
         return Step::Failed("no onsets");
@@ -86,26 +87,29 @@ pub fn begin(
     }
     let mut positions = [0_u32; MAX_SLICES];
     for (index, position) in detected.iter().take(count).enumerate() {
-        if *position >= selected.frames || (index > 0 && *position <= positions[index - 1]) {
+        if *position >= selected.frames() || (index > 0 && *position <= positions[index - 1]) {
             return Step::Failed("invalid onsets");
         }
         positions[index] = *position;
     }
-    if !page::chop_mode(selected.screen)
-        && let Some(event) = press_chop
-    {
-        let _ = mpc_sample_sdk::sites::replay_button(event, crate::ui::CHOP_KEY);
+    // SAFETY: the selection is live and came from `selection::current`.
+    let manual = unsafe { page::chop_mode(selected.screen()) };
+    if !manual && let Some(event) = press_chop {
+        // SAFETY: `event` was captured during the button callback that started
+        // this chop; its context and surface are still live.
+        let _ = unsafe { mpc_sample_sdk::sites::replay_button(event, crate::ui::CHOP_KEY) };
     }
-    if !chop::set_manual(selected.screen) {
+    // SAFETY: the page is the live Sample page behind the selection.
+    if !unsafe { chop::set_manual(selected.screen()) } {
         return Step::Failed("cannot select Manual chop");
     }
-    *MACHINE.get_mut() = Some(Machine {
-        screen: selected.screen,
-        state: selected.state,
-        sample: selected.sample,
-        frames: selected.frames,
-        channels: selected.channels,
-        rate: selected.rate,
+    *crate::ui_write(&MACHINE) = Some(Machine {
+        screen: selected.screen(),
+        state: selected.state(),
+        sample: selected.sample(),
+        frames: selected.frames(),
+        channels: selected.channels(),
+        rate: selected.rate(),
         count: u32::try_from(count).unwrap_or(0),
         positions,
         phase: 1,
@@ -116,20 +120,23 @@ pub fn begin(
 
 /// Phases 1 and 2: wait for Manual chop, write the boundaries, verify them.
 fn advance(now: i64, running: &mut Machine) -> Step {
-    let Some(selected) = selection::current(running.screen) else {
+    // SAFETY: `running.screen` is the page the chop started on; this callback
+    // still runs on its UI thread.
+    let Some(selected) = (unsafe { selection::current(running.screen) }) else {
         return Step::Failed("sample changed; cancelled");
     };
-    if selected.screen != running.screen
-        || selected.state != running.state
-        || selected.sample != running.sample
-        || selected.frames != running.frames
-        || selected.channels != running.channels
-        || selected.rate != running.rate
+    if selected.screen() != running.screen
+        || selected.state() != running.state
+        || selected.sample() != running.sample
+        || selected.frames() != running.frames
+        || selected.channels() != running.channels
+        || selected.rate() != running.rate
     {
         return Step::Failed("sample changed; cancelled");
     }
     let kind = chop::chop_kind(running.screen);
-    if !page::chop_mode(running.screen) || kind != 0 {
+    // SAFETY: the page is the live Sample page this chop started on.
+    if !unsafe { page::chop_mode(running.screen) } || kind != 0 {
         return if now >= running.deadline {
             Step::Failed("Manual chop did not open")
         } else {
@@ -137,12 +144,16 @@ fn advance(now: i64, running: &mut Machine) -> Step {
         };
     }
     if running.phase == 1 {
-        if !chop::write_markers(
-            running.sample,
-            &running.positions[..usize::try_from(running.count).unwrap_or(0)],
-            running.frames,
-            running.screen,
-        ) {
+        // SAFETY: the sample and page are the live objects captured when the
+        // chop started, on this UI thread.
+        if !unsafe {
+            chop::write_markers(
+                running.sample,
+                &running.positions[..usize::try_from(running.count).unwrap_or(0)],
+                running.frames,
+                running.screen,
+            )
+        } {
             return Step::Failed("native marker write failed");
         }
         running.phase = 2;

@@ -79,9 +79,10 @@ fn pad_index(pad: i32) -> Option<usize> {
 }
 
 /// A pad press or release.
+#[must_use]
 pub fn pad(event: PadEvent) -> PadFlow {
     // only the app's input thread touches this state.
-    let state = STATE.get_mut();
+    let state = crate::ui_write(&STATE);
     if let Some(index) = pad_index(event.pad) {
         match event.action {
             PadAction::Press => {
@@ -128,7 +129,7 @@ pub fn surface(event: SurfaceEvent) -> SurfaceFlow {
 #[must_use]
 pub fn encoder(event: EncoderEvent) -> EncoderFlow {
     // only the app's input thread touches this state.
-    let state = STATE.get();
+    let state = crate::ui_read(&STATE);
     let context = context();
     if event.surface != state.data_target
         || (context.menu_open == 0 && context.spectral_active == 0)
@@ -157,13 +158,13 @@ pub fn encoder(event: EncoderEvent) -> EncoderFlow {
 #[must_use]
 pub fn last_pad() -> i32 {
     // only the UI thread writes it.
-    STATE.get().last_pad
+    crate::ui_read(&STATE).last_pad
 }
 
 /// Record the encoder's surface.
 pub fn set_data_target(target: usize) {
     // only the UI thread writes the input state.
-    STATE.get_mut().data_target = target;
+    crate::ui_write(&STATE).data_target = target;
 }
 
 /// The state itself.
@@ -173,7 +174,7 @@ static STATE: Global<State> = Global::new(State::new());
 fn context() -> Context {
     let menu = crate::menu::state();
     // a plain word, written by the UI thread.
-    let spectral = crate::spectral::G_SPECTRAL.get().active;
+    let spectral = crate::ui_read(&crate::spectral::G_SPECTRAL).active;
     Context {
         looper_open: crate::backend::looper::looper_is_open(),
         spectral_active: spectral,
@@ -205,17 +206,21 @@ fn bass_pad_event(event: SurfaceEvent) -> bool {
 
 /// Release every pad the app may think is held, through the app's own path.
 pub fn release_held() {
-    let state = STATE.get_mut();
+    let state = crate::ui_write(&STATE);
     for pad in 0..PADS {
         if state.held_on[pad] == 0 {
             continue;
         }
         state.held_on[pad] = 0;
-        mpc_sample_sdk::sites::send_note_off(
-            state.held_input[pad],
-            state.held_src[pad],
-            i32::try_from(pad).unwrap_or(0),
-        );
+        // SAFETY: the input object and source were captured from the app's own
+        // note event for this held pad; this is the matching release.
+        unsafe {
+            mpc_sample_sdk::sites::send_note_off(
+                state.held_input[pad],
+                state.held_src[pad],
+                i32::try_from(pad).unwrap_or(0),
+            );
+        }
     }
 }
 

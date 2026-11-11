@@ -142,25 +142,31 @@ fn start_run(
     hooks: Hooks,
     now: i64,
 ) {
-    let Some(selected) = crate::selection::current(screen) else {
+    // SAFETY: `screen` is the live Sample page recorded by the paint hook.
+    let Some(selected) = (unsafe { crate::selection::current(screen) }) else {
         finish(state, menu_state, hooks, Some("no sample on this pad"));
         return;
     };
-    let samples = crate::sample::memory(selected.sample)
+    let samples = crate::sample::memory(selected.sample())
         .filter(|memory| {
-            memory.frames == selected.frames
-                && memory.channels == selected.channels
-                && memory.rate == selected.rate
+            memory.frames == selected.frames()
+                && memory.channels == selected.channels()
+                && memory.rate == selected.rate()
         })
         .and_then(|memory| memory.read())
         .or_else(|| {
             let path = crate::paths::for_sample(
-                selected.sample,
-                selected.frames,
-                selected.channels,
-                selected.rate,
+                selected.sample(),
+                selected.frames(),
+                selected.channels(),
+                selected.rate(),
             )?;
-            crate::wav::read_f32(&path, selected.frames, selected.channels, selected.rate)
+            crate::wav::read_f32(
+                &path,
+                selected.frames(),
+                selected.channels(),
+                selected.rate(),
+            )
         });
     let Some(samples) = samples else {
         finish(state, menu_state, hooks, Some("cannot read sample audio"));
@@ -172,12 +178,12 @@ fn start_run(
             menu_state.open = 0;
             menu_state.busy = 1;
             state.phase = 1;
-            state.screen = selected.screen;
-            state.page_state = selected.state;
-            state.sample = selected.sample;
-            state.frames = selected.frames;
-            state.channels = u32::from(selected.channels);
-            state.rate = selected.rate;
+            state.screen = selected.screen();
+            state.page_state = selected.state();
+            state.sample = selected.sample();
+            state.frames = selected.frames();
+            state.channels = u32::from(selected.channels());
+            state.rate = selected.rate();
             state.deadline = now + DEADLINE_MS;
             repaint(hooks);
         }
@@ -195,7 +201,7 @@ fn start_run(
 ///
 /// Reads the app's page objects; the state is the crate's own.
 pub fn cancel_if_page_gone() {
-    let state = G_SPECTRAL.get_mut();
+    let state = crate::ui_write(&G_SPECTRAL);
     if state.active != 1 {
         return;
     }
@@ -211,7 +217,8 @@ pub fn cancel_if_page_gone() {
         return;
     }
     let screen = paint::screen();
-    let visible = crate::page::visible(screen);
+    // SAFETY: `screen` is the live component recorded by the paint hook.
+    let visible = unsafe { crate::page::visible(screen) };
     if visible && (state.screen == 0 || screen == state.screen) {
         return;
     }
@@ -239,13 +246,19 @@ pub fn frame(screen: usize) {
         set_status: Some(crate::status::set_status),
         repaint: Some(crate::ui::minimod_repaint_screen),
     };
-    tick(G_SPECTRAL.get_mut(), menu::state_mut(), screen, hooks);
+    tick(
+        crate::ui_write(&G_SPECTRAL),
+        menu::state_mut(),
+        screen,
+        hooks,
+    );
 }
 
 /// Start a chop from the crate's own record and the event that started it.
+#[must_use]
 pub fn run_start(busy: bool) -> bool {
     let event = crate::ui::event_copy();
-    start(G_SPECTRAL.get_mut(), &event, busy)
+    start(crate::ui_write(&G_SPECTRAL), &event, busy)
 }
 
 #[cfg(test)]

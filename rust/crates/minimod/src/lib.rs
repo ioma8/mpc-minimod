@@ -6,7 +6,8 @@
 //! pitch shift, external MIDI chromatic playback, and the Live Looper.
 //!
 //! Nothing in here may panic: a panic in a preloaded library aborts the sampler.
-//! Everything here is safe Rust: every firmware access and hook is an SDK call.
+//! The feature code is safe except for small, documented `unsafe` blocks at the
+//! SDK's explicit firmware boundaries.
 
 #![deny(clippy::panic, clippy::todo, clippy::unimplemented)]
 
@@ -35,8 +36,70 @@ pub use mpc_sample_sdk::{
     PadAction, PadEvent, PadFlow, PaintEvent, SurfaceEvent, SurfaceFlow,
 };
 
+/// The SDK's draw surface with the firmware calls wrapped for the mod.
+///
+/// The wrappers keep the single safety argument in one place: every drawing
+/// call is made from `on_paint` with the app's live `Graphics` handle on the UI
+/// thread.
+pub(crate) mod paint {
+    pub(crate) use mpc_sample_sdk::draw::*;
+    use mpc_sample_sdk::draw::{
+        colour as sdk_colour, rect as sdk_rect, start_repaint_pump as sdk_start_repaint_pump,
+        text as sdk_text,
+    };
+
+    /// Set the fill colour.
+    pub(crate) fn colour(graphics: usize, value: u32) {
+        // SAFETY: called only from `on_paint` with the live app Graphics.
+        unsafe { sdk_colour(graphics, value) }
+    }
+
+    /// Fill a rectangle in the current colour.
+    pub(crate) fn rect(graphics: usize, x: i32, y: i32, width: i32, height: i32) {
+        // SAFETY: called only from `on_paint` with the live app Graphics.
+        unsafe { sdk_rect(graphics, x, y, width, height) }
+    }
+
+    /// Draw one line of text in the current colour.
+    pub(crate) fn text(
+        graphics: usize,
+        line: &str,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        size: f32,
+    ) {
+        // SAFETY: called only from `on_paint` with the live app Graphics.
+        unsafe { sdk_text(graphics, line, x, y, width, height, size) }
+    }
+
+    /// Start the repaint pump used by the looper view.
+    pub(crate) fn start_repaint_pump(component: fn() -> usize) {
+        // SAFETY: `component` returns the paint hook's recorded component, or 0.
+        unsafe { sdk_start_repaint_pump(component) }
+    }
+}
+
+/// Read one UI-thread-only [`mpc_sample_sdk::state::Global`].
+pub(crate) fn ui_read<T>(value: &mpc_sample_sdk::state::Global<T>) -> &T {
+    // SAFETY: every feature `Global` is owned by the app's UI thread and no
+    // mutable borrow is held across a callback.
+    unsafe { value.get() }
+}
+
+/// Write one UI-thread-only [`mpc_sample_sdk::state::Global`].
+#[allow(
+    clippy::mut_from_ref,
+    reason = "Global is a single-threaded cell owned by the UI thread"
+)]
+pub(crate) fn ui_write<T>(value: &mpc_sample_sdk::state::Global<T>) -> &mut T {
+    // SAFETY: every feature `Global` is owned by the app's UI thread and this
+    // borrow is not held across a callback.
+    unsafe { value.get_mut() }
+}
+
 // The SDK's modules, under the names the feature code already uses.
-pub(crate) use mpc_sample_sdk::draw as paint;
 pub(crate) use mpc_sample_sdk::platform::{
     clock, control, pads, page, paths, sample, selection, slice as chop, status, trim, wav,
 };

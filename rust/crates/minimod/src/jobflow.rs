@@ -10,7 +10,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use crate::actions::{ACTION_BASS, ACTION_LOFI, ACTION_REVERB, ACTION_SPLIT, ACTION_VINYL};
 use crate::backend::bass::Kind;
 use crate::paint::{self, show_toast};
-use crate::{pads, selection, status};
+use crate::{pads, sample, selection, status};
 use mpc_sample_sdk::image;
 use mpc_sample_sdk::platform::extract;
 use mpc_sample_sdk::platform::selection::AudioReadError;
@@ -27,20 +27,66 @@ static JOB_PAD: AtomicI32 = AtomicI32::new(-1);
 static BORROW_SLOT: AtomicUsize = AtomicUsize::new(0);
 static BORROW_SAMPLE: AtomicUsize = AtomicUsize::new(0);
 static BORROW_HOLDER: AtomicUsize = AtomicUsize::new(0);
+static BORROW_PROVIDER: AtomicUsize = AtomicUsize::new(0);
+static EMPTY_BEFORE: Mutex<[bool; 128]> = Mutex::new([false; 128]);
 
 fn clear_borrow() {
-    BORROW_SLOT.store(0, Ordering::Release);
-    BORROW_SAMPLE.store(0, Ordering::Release);
-    BORROW_HOLDER.store(0, Ordering::Release);
+    let slot = BORROW_SLOT.load(Ordering::Acquire);
+    let provider = BORROW_PROVIDER.load(Ordering::Acquire);
+    if slot != 0 && image::read_u64(slot) == Some(provider as u64) {
+        restore_provider();
+    } else {
+        BORROW_SLOT.store(0, Ordering::Release);
+        BORROW_SAMPLE.store(0, Ordering::Release);
+        BORROW_HOLDER.store(0, Ordering::Release);
+        BORROW_PROVIDER.store(0, Ordering::Release);
+    }
+}
+
+/// Write one pointer-sized field of a live sample/layer object.
+fn write_slot(slot: usize, value: u64) -> bool {
+    // SAFETY: `slot` is a field of the app's live sample/layer object and the
+    // value is a sample or holder pointer the app itself stores there.
+    unsafe { image::write(slot, &value.to_le_bytes()) }
 }
 
 fn restore_provider() {
     let slot = BORROW_SLOT.swap(0, Ordering::AcqRel);
     let sample = BORROW_SAMPLE.swap(0, Ordering::AcqRel);
     let holder = BORROW_HOLDER.swap(0, Ordering::AcqRel);
+    BORROW_PROVIDER.store(0, Ordering::Release);
     if slot != 0 {
-        let _ = image::write(slot, &(sample as u64).to_le_bytes());
-        let _ = image::write(slot + 8, &(holder as u64).to_le_bytes());
+        let _ = write_slot(slot, sample as u64);
+        let _ = write_slot(slot + 8, holder as u64);
+    }
+}
+
+/// Record only pads whose empty state can be read before borrowing.
+fn capture_empty_pads(surface: usize) {
+    let mut empty = EMPTY_BEFORE.lock().unwrap_or_else(PoisonError::into_inner);
+    empty.fill(false);
+    let (Some(first), Some(end)) = (
+        image::read_pointer(surface + 0x2808),
+        image::read_pointer(surface + 0x2810),
+    ) else {
+        return;
+    };
+    for (index, item) in empty
+        .iter_mut()
+        .enumerate()
+        .take((end.saturating_sub(first) / 8).min(128))
+    {
+        let Some(state) = image::read_u64(first + index * 8) else {
+            continue;
+        };
+        if state == 0 {
+            *item = true;
+            continue;
+        }
+        let Some(layers) = image::read_pointer(state as usize + 0x22e8) else {
+            continue;
+        };
+        *item = image::read_u64(layers + 0x4a8) == Some(0);
     }
 }
 
@@ -74,17 +120,59 @@ fn borrow_provider(screen: usize) -> Option<(usize, u32)> {
     }
     let provider = provider?;
     let holder = image::read_pointer(provider.checked_add(0x30)?)?;
-    if !image::write(slot, &(provider as u64).to_le_bytes())
-        || !image::write(slot + 8, &(holder as u64).to_le_bytes())
-    {
-        let _ = image::write(slot, &(short as u64).to_le_bytes());
-        let _ = image::write(slot + 8, &(short_holder as u64).to_le_bytes());
+    capture_empty_pads(surface);
+    if !write_slot(slot, provider as u64) || !write_slot(slot + 8, holder as u64) {
+        let _ = write_slot(slot, short as u64);
+        let _ = write_slot(slot + 8, short_holder as u64);
         return None;
     }
+    BORROW_PROVIDER.store(provider, Ordering::Release);
     BORROW_SLOT.store(slot, Ordering::Release);
     BORROW_SAMPLE.store(short, Ordering::Release);
     BORROW_HOLDER.store(short_holder, Ordering::Release);
     Some((state, provider_frames))
+}
+
+/// Borrow a real native sample when no pad can provide one.
+fn seed_provider(screen: usize) -> Option<(usize, u32)> {
+    let state = selection::page_state(screen)?;
+    let slot = image::read_pointer(state.checked_add(0x22e8)?)?.checked_add(0x4a8)?;
+    let old_sample = image::read_u64(slot)?;
+    let old_holder = image::read_u64(slot + 8)?;
+    let seed = sample::silent_seed()?;
+    let frames = seed.frames();
+    capture_empty_pads(crate::control::surface());
+    if !write_slot(slot, seed.sample() as u64) {
+        return None;
+    }
+    if !write_slot(slot + 8, seed.holder() as u64) {
+        let _ = write_slot(slot, old_sample);
+        return None;
+    }
+    BORROW_PROVIDER.store(seed.sample(), Ordering::Release);
+    BORROW_SLOT.store(slot, Ordering::Release);
+    BORROW_SAMPLE.store(old_sample as usize, Ordering::Release);
+    BORROW_HOLDER.store(old_holder as usize, Ordering::Release);
+    Some((state, frames))
+}
+/// Remove only new provider copies, preserving every previously populated pad.
+fn clear_extra_provider_pads(provider: usize, destination: i32) {
+    if provider == 0 {
+        return;
+    }
+    let surface = crate::control::surface();
+    let empty = EMPTY_BEFORE.lock().unwrap_or_else(PoisonError::into_inner);
+    for (index, was_empty) in empty.iter().enumerate() {
+        let Ok(pad) = i32::try_from(index) else {
+            continue;
+        };
+        if *was_empty && pad != destination && pads::sample_for_pad(surface, pad) == Some(provider)
+        {
+            // SAFETY: `pad` is a live pad on the surface recorded by the
+            // control hook, on its owning UI thread.
+            let _ = unsafe { crate::control::set(pad, 0x40d, 0.0) };
+        }
+    }
 }
 /// One failure: what to put in the status line and what to toast.
 #[derive(Clone, Copy)]
@@ -132,7 +220,8 @@ fn broken(job: &RenderJob, effect: bool) -> bool {
 /// Whether the program still has room for the pads the action needs.
 fn room_for_pads(job: &RenderJob, effect: bool) -> Result<(), Report> {
     let required = if effect { 1 } else { 2 };
-    if pads::has_room(selection::program(job.source.state), required) {
+    // SAFETY: the program came from the live selection that produced this job.
+    if unsafe { pads::has_room(selection::program(job.source.state()), required) } {
         return Ok(());
     }
     Err(if effect {
@@ -197,17 +286,21 @@ fn extract_one(
     source_frames: u32,
     destination: Option<i32>,
 ) -> Option<extract::Extracted> {
-    extract::run(&extract::Request {
-        screen: job.source.screen,
-        state: job.source.state,
-        name,
-        buffer: output.audio.get(..),
-        source_frames,
-        channels: output.channels,
-        start: 0,
-        end,
-        destination,
-    })
+    // SAFETY: the request names the live page/state from the job and the
+    // rendered buffer outlives this call; no other code mutates the program.
+    unsafe {
+        extract::run(&extract::Request {
+            screen: job.source.screen(),
+            state: job.source.state(),
+            name,
+            buffer: output.audio.get(..),
+            source_frames,
+            channels: output.channels,
+            start: 0,
+            end,
+            destination,
+        })
+    }
     .ok()
 }
 
@@ -229,7 +322,11 @@ fn trim_reverb_tail(pad: i32, frames: usize) {
     if surface == 0 {
         return;
     }
-    let _ = crate::control::apply(crate::control::control(), surface, pad, SET_END, end as f32);
+    // SAFETY: the control context and surface were recorded by the control
+    // hook in this UI callback; `pad` is live on that surface.
+    let _ = unsafe {
+        crate::control::apply(crate::control::control(), surface, pad, SET_END, end as f32)
+    };
 }
 
 /// Write an effect or synth take to a pad.
@@ -249,15 +346,15 @@ fn extract_take(job: &RenderJob) -> Result<(), Report> {
     };
     // The app's Extract takes the source length for an effect; a synth take may
     // be shorter than its source and then uses its own frame count.
-    let rendered = u32::try_from(output.frames).unwrap_or(job.source.frames);
+    let rendered = u32::try_from(output.frames).unwrap_or(job.source.frames());
     let end = if job.kind == ACTION_BASS {
         // The synth generates its own note; never inherit the source length.
         rendered
     } else {
-        job.source.frames
+        job.source.frames()
     };
     let source_frames = if job.kind == ACTION_BASS {
-        job.source.frames
+        job.source.frames()
     } else {
         end
     };
@@ -270,7 +367,19 @@ fn extract_take(job: &RenderJob) -> Result<(), Report> {
         });
     };
     if job.kind == ACTION_BASS {
+        let destination = JOB_PAD.load(Ordering::Acquire);
+        let provider = BORROW_PROVIDER.load(Ordering::Acquire);
         clear_borrow();
+        clear_extra_provider_pads(provider, destination);
+        // SAFETY: the surface was recorded by the control hook and `destination`
+        // is the pad this job just assigned on that surface.
+        if !unsafe { pads::set_layer_active(crate::control::surface(), destination, true) } {
+            return Err(Report {
+                raw: false,
+                status: "layer not enabled",
+                toast: "Synth: could not enable pad",
+            });
+        }
     }
     if job.kind == ACTION_REVERB {
         trim_reverb_tail(extracted.pad, output.frames);
@@ -287,7 +396,7 @@ fn extract_split(job: &RenderJob) -> Result<(), Report> {
             toast: "HPSS: write failed",
         });
     };
-    let frames = u32::try_from(harmonic.frames).unwrap_or(job.source.frames);
+    let frames = u32::try_from(harmonic.frames).unwrap_or(job.source.frames());
     if extract_one(job, harmonic, names()[0], frames, frames, None).is_none() {
         return Err(Report {
             raw: true,
@@ -340,8 +449,10 @@ fn finalize(job: &RenderJob, screen: usize) -> Report {
                 "HPSS: processing failed"
             },
         })
-    } else if screen != job.source.screen
-        || !crate::page::visible(job.source.screen)
+    } else if screen != job.source.screen()
+        // SAFETY: the screen is the one recorded by the paint hook in this UI
+        // callback and belongs to the live selection.
+        || !unsafe { crate::page::visible(job.source.screen()) }
         || (job.kind != ACTION_BASS && !job.source.is_current())
     {
         Err(cancelled(effect))
@@ -416,12 +527,17 @@ pub fn start(action: i32, screen: usize, menu: &mut crate::menu::State) -> bool 
     if task_slot().is_some() {
         return false;
     }
-    let current = selection::current(screen);
+    // SAFETY: `screen` is the live Sample page recorded by the paint hook in
+    // this UI callback.
+    let current = unsafe { selection::current(screen) };
     let source = if action == ACTION_BASS {
         let (state, frames) = if let Some(current) = &current {
-            (current.state, current.frames)
+            capture_empty_pads(crate::control::surface());
+            BORROW_PROVIDER.store(current.sample(), Ordering::Release);
+            (current.state(), current.frames())
         } else {
-            let Some((state, frames)) = borrow_provider(screen) else {
+            let Some((state, frames)) = borrow_provider(screen).or_else(|| seed_provider(screen))
+            else {
                 fail(
                     action,
                     Report {
@@ -448,14 +564,9 @@ pub fn start(action: i32, screen: usize, menu: &mut crate::menu::State) -> bool 
             return false;
         }
         JOB_PAD.store(pad, Ordering::Release);
-        selection::Selection {
-            screen,
-            state,
-            sample: 0,
-            frames,
-            channels: 2,
-            rate: 44_100,
-        }
+        // SAFETY: `screen` is the live page recorded by the paint hook and
+        // `state` is its live state; a synth take has no selected sample.
+        unsafe { selection::Selection::from_parts(screen, state, 0, frames, 2, 44_100) }
     } else {
         let Some(source) = current else {
             fail(
@@ -523,7 +634,9 @@ pub fn busy() -> bool {
 
 /// Clear the menu and preview state after a terminal job.
 fn finish_state() {
-    restore_provider();
+    let provider = BORROW_PROVIDER.load(Ordering::Acquire);
+    clear_borrow();
+    clear_extra_provider_pads(provider, JOB_PAD.load(Ordering::Acquire));
     let menu = crate::menu::state_mut();
     menu.busy = 0;
     menu.open = 0;
@@ -616,7 +729,7 @@ fn start_looper() -> i32 {
     if opened != 0 {
         mpc_sample_sdk::audio::mark_buffers_stale();
         crate::backend::bass::preview_set_active(false);
-        mpc_sample_sdk::draw::start_repaint_pump(crate::backend::audio::pump_component);
+        paint::start_repaint_pump(crate::backend::audio::pump_component);
     }
     opened
 }

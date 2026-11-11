@@ -58,7 +58,7 @@ g_midi: mpc_sample_sdk::state::Global<MidiState> = mpc_sample_sdk::state::Global
 /// Handle one note event; the SDK forwards whatever this returns.
 pub fn note(event: &mut NoteEvent) -> NoteFlow {
     // the record is this module's and only the input thread writes it.
-    let state = g_midi.get_mut();
+    let state = crate::ui_write(&g_midi);
     if state.on == 0 {
         return NoteFlow::Forward;
     }
@@ -102,13 +102,13 @@ pub fn note(event: &mut NoteEvent) -> NoteFlow {
 
 /// Whether the mod handles notes at all.
 pub fn set_on(on: i32) {
-    g_midi.get_mut().on = i32::from(on != 0);
+    crate::ui_write(&g_midi).on = i32::from(on != 0);
 }
 
 /// Toggle 16 Levels and keep the dispatcher in step.
 pub fn toggle_levels() {
     let pad = crate::input::last_pad();
-    let state = g_midi.get_mut();
+    let state = crate::ui_write(&g_midi);
     state.levels = i32::from(state.levels == 0);
     if state.levels != 0 && (0..16).contains(&pad) {
         state.pad_level_byte = u32::try_from(pad).unwrap_or(0);
@@ -121,17 +121,21 @@ pub fn toggle_levels() {
 /// # Safety
 ///
 /// Reads the app's screen object.
+#[must_use]
 pub fn levels_active() -> i32 {
     let screen = crate::paint::screen();
     if screen == 0 {
         return 0;
     }
-    if !crate::page::is_sample_page(screen) || !crate::page::visible(screen) {
-        g_midi.get_mut().levels = 0;
+    // SAFETY: `screen` is the component the paint hook last recorded on this
+    // UI thread.
+    let visible = unsafe { crate::page::visible(screen) };
+    if !crate::page::is_sample_page(screen) || !visible {
+        crate::ui_write(&g_midi).levels = 0;
         set_on(0);
         return 0;
     }
-    g_midi.get().levels
+    crate::ui_read(&g_midi).levels
 }
 
 #[cfg(test)]
@@ -141,7 +145,7 @@ mod tests {
     #[test]
     fn the_state_starts_without_a_mode() {
         // the tests read a static the process owns.
-        let state = *g_midi.get();
+        let state = *crate::ui_read(&g_midi);
         assert_eq!(state.on, 0);
         assert_eq!(state.levels, 0);
         assert_eq!(state.replayed.len(), 128);

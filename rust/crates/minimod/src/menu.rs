@@ -317,12 +317,13 @@ g_menu: Global<State> = Global::new(State {
 /// The menu's state, for the crate.
 #[must_use]
 pub fn state() -> &'static State {
-    g_menu.get()
+    crate::ui_read(&g_menu)
 }
 
 /// The menu's state, to change.
+#[must_use]
 pub fn state_mut() -> &'static mut State {
-    g_menu.get_mut()
+    crate::ui_write(&g_menu)
 }
 
 export_static!(#[doc = "The bass page's three knobs, read by the device tests."]
@@ -334,14 +335,14 @@ g_bass_kind: Global<i32> = Global::new(0));
 /// The selected synth character.
 #[must_use]
 pub fn bass_kind() -> Kind {
-    Kind::from_index(*g_bass_kind.get())
+    Kind::from_index(*crate::ui_read(&g_bass_kind))
 }
 
 /// Select a synth character and reset its three knobs to that character's
 /// defaults.
 pub fn set_bass_kind(kind: Kind) {
-    *g_bass_kind.get_mut() = i32::try_from(kind.index()).unwrap_or(0);
-    *g_bass_knob.get_mut() = kind.defaults();
+    *crate::ui_write(&g_bass_kind) = i32::try_from(kind.index()).unwrap_or(0);
+    *crate::ui_write(&g_bass_knob) = kind.defaults();
 }
 
 /// Move the synth selection by `delta` encoder steps.
@@ -368,12 +369,12 @@ pub fn follow_preview() {
 /// The bass control page's three knobs.
 #[must_use]
 pub fn bass_knobs() -> [f32; 3] {
-    *g_bass_knob.get()
+    *crate::ui_read(&g_bass_knob)
 }
 
 /// Store the bass control page's three knobs.
 pub fn set_bass_knobs(knobs: [f32; 3]) {
-    *g_bass_knob.get_mut() = knobs;
+    *crate::ui_write(&g_bass_knob) = knobs;
 }
 
 /// Show the bass control page and start its preview.

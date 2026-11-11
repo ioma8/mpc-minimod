@@ -16,9 +16,10 @@ measured, and what is still open. Mechanisms are catalogued in
 | Add Reverb / Vinyl / Lo-Fi | menu → effect | emulator-verified |
 | Synth | menu → Synth | host + emulator-verified |
 
-Two invariants hold across the mod: **it never writes a sample file** and it
-refuses rather than guesses. Every action either reports what it did
-(`<Action>: copy created`, `Spectral: n slices`) or names the reason it stopped.
+The mod does not edit project files directly. When a feature uses stock Extract,
+the firmware writes the sample WAV into project data. Every action either
+reports what it did (`<Action>: copy created`, `Spectral: n slices`) or names
+the reason it stopped.
 
 ---
 
@@ -299,7 +300,9 @@ native undo grouping not exercised.
 C2–D#3 chromatically; the **DATA encoder switches the character**, and `DATA`
 renders the selected character's C2 (MIDI 36) note to the selected pad through
 stock Extract. The destination is overwritten whether it already holds a sample
-or is empty; the generated audio is independent of that pad's old contents. The page title shows
+or is empty, including when no pad has a sample; the generated audio is
+independent of that pad's old contents. Extract registers the result and writes
+a WAV. The page title shows
 the selected character and the three knobs change with it:
 
 | character | K1 | K2 | K3 | model |
@@ -326,14 +329,19 @@ preview is mixed into the real output call: the app writes interleaved S32_LE
 (`backend/audio.rs`) adds the preview to channels 0/1. Four voices are mixed;
 pads are consumed at the control-surface event hook while the page is open, so
 the firmware never selects or switches the sample underneath. The saved render
-is named after the selected character (`Bass C2`, `Piano C2`, …).
+is named after the selected character (`Bass C2`, `Piano C2`, …). Extract
+initially leaves its new layer inactive, so minimod enables the live
+`InstrumentLayer` with SDK `pads::set_layer_active`; the pad plays immediately
+and the active state persists in the project.
 
-**Evidence.** The default bass render is 33,075 stereo frames at 44.1 kHz with
-C2 fundamental (measured 70 Hz peak), RMS 0.08620, pad assigned,
-`Synth: copy created`, no restart. Host tests render all eight characters and
-check their declared length, non-silence and normalised peak. Live preview is
-checked from the emulator's PCM stream: a pad gives an audible pluck that decays
-and stops with no growth.
+**Evidence.** On a zero-sample project, Bass C2 rendered 33,075 stereo frames at
+44.1 kHz, RMS 0.09215 and a 69 Hz peak. After layer activation, A01 produced
+PCM RMS 495.95 while held; after save/reload it remained active and produced
+PCM RMS 495.99. A05 produced PCM RMS 1634.62, confirming the destination index
+lookup. Both emulator runs had no app restart. Host tests render all eight
+characters and check their declared length, non-silence and normalised peak.
+Live preview is checked from the emulator PCM stream: a pad gives an audible
+plucked sound that decays and stops with no growth.
 
 **Limits.** The native FMBass instrument is unresolved (see
 [`MECHANISMS.md`](MECHANISMS.md#h3-instrument-host-boundary-fmbass)); these are
@@ -364,6 +372,7 @@ python3 mod/tests/emulator_autotrim.py --lab ../virtual-mpc-sample --pad 1
 python3 mod/tests/emulator_spectral.py --lab ../virtual-mpc-sample --boots 1
 python3 mod/tests/emulator_reverb.py --lab ../virtual-mpc-sample --effect reverb
 python3 mod/tests/emulator_bass_sample.py --lab ../virtual-mpc-sample
+python3 mod/tests/emulator_synth_empty.py --lab ../virtual-mpc-sample --pad 1
 python3 mod/tests/emulator_midi_chromatic.py --lab ../virtual-mpc-sample  # Pad MIDI In on, Port = External
 ```
 

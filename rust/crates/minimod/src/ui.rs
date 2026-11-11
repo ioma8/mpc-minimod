@@ -347,12 +347,13 @@ static STATE: Global<State> = Global::new(State::new());
 /// The state, for the feature code.
 #[must_use]
 pub fn state() -> &'static State {
-    STATE.get()
+    crate::ui_read(&STATE)
 }
 
 /// The state, to change.
+#[must_use]
 pub fn state_mut() -> &'static mut State {
-    STATE.get_mut()
+    crate::ui_write(&STATE)
 }
 
 /// The trim marks the page draws.
@@ -377,22 +378,28 @@ static CHOP_BEFORE: Global<i32> = Global::new(0);
 /// The chop mode before the last extraction.
 #[must_use]
 pub fn chop_before() -> i32 {
-    *CHOP_BEFORE.get()
+    *crate::ui_read(&CHOP_BEFORE)
 }
 
 /// Put the chop mode back by replaying a CHOP press, when that is safe.
 pub fn minimod_restore_chop(state: &State) {
-    let visible = page::visible(paint::screen());
+    let screen = paint::screen();
+    // SAFETY: `screen` is the live component recorded by the paint hook on this
+    // UI thread.
+    let visible = unsafe { page::visible(screen) };
     let (valid, shifted) = (state.event_valid, state.shift);
     if valid == 0 || shifted != 0 || !visible {
         crate::menu::state_mut().restore_pending = 1;
         return;
     }
-    let mode = page::chop_mode(paint::screen());
+    // SAFETY: the same live page as above.
+    let mode = unsafe { page::chop_mode(screen) };
     if i32::from(mode) == chop_before() {
         return;
     }
-    if !mpc_sample_sdk::sites::replay_button(&state.event, CHOP_KEY) {
+    // SAFETY: `state.event` was captured by the button hook in this UI event
+    // path and its surface is still live.
+    if !unsafe { mpc_sample_sdk::sites::replay_button(&state.event, CHOP_KEY) } {
         crate::menu::state_mut().restore_pending = 1;
     }
 }
@@ -405,13 +412,15 @@ pub fn minimod_repaint_screen() {
 /// Whether the Sample page is showing.
 #[must_use]
 pub fn screen_visible() -> bool {
-    page::visible(paint::screen())
+    // SAFETY: the paint hook recorded this component on this UI thread.
+    unsafe { page::visible(paint::screen()) }
 }
 
 /// Whether the page is in chop mode.
 #[must_use]
 pub fn screen_chop_mode() -> bool {
-    page::chop_mode(paint::screen())
+    // SAFETY: the paint hook recorded this component on this UI thread.
+    unsafe { page::chop_mode(paint::screen()) }
 }
 
 /// Drop the trim edges the mod drew.
@@ -422,7 +431,7 @@ pub fn clear_marks() {
 /// Whether a spectral chop is running.
 #[must_use]
 pub fn spectral_state() -> bool {
-    crate::spectral::G_SPECTRAL.get().active == 1
+    crate::ui_read(&crate::spectral::G_SPECTRAL).active == 1
 }
 
 /// The feature callbacks the button ladder uses.
@@ -448,10 +457,11 @@ pub fn hooks() -> Hooks {
 }
 
 /// The button entry: run the ladder and tell the SDK whether to forward.
+#[must_use]
 pub fn button(event: ButtonEvent) -> ButtonFlow {
     let hooks = hooks();
     let state = state_mut();
-    let data_down = DATA_DOWN.get_mut();
+    let data_down = crate::ui_write(&DATA_DOWN);
     if event.surface != 0 {
         crate::input::set_data_target(mpc_sample_sdk::event::data_target(event.surface));
     }

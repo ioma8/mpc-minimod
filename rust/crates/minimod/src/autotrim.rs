@@ -73,21 +73,25 @@ pub fn run(context: Context) {
     // The toast has to be armed first: the trim's own repaint is what paints the
     // page, so a toast set afterwards waits for an unrelated frame.
     paint::show_toast(LABELS[usize::try_from(context.step).unwrap_or(3).min(3)]);
-    let _ = crate::control::apply(context.control, context.surface, pad, SET_START, 0.0);
-    let _ = crate::control::apply(
-        context.control,
-        context.surface,
-        pad,
-        SET_END,
-        last.saturating_add(1) as f32,
-    );
-    let _ = crate::control::apply(
-        context.control,
-        context.surface,
-        pad,
-        SET_START,
-        first as f32,
-    );
+    // SAFETY: the control context and surface came from the app's control hook
+    // in this UI callback; the pad and values are the trim fields the page owns.
+    unsafe {
+        let _ = crate::control::apply(context.control, context.surface, pad, SET_START, 0.0);
+        let _ = crate::control::apply(
+            context.control,
+            context.surface,
+            pad,
+            SET_END,
+            last.saturating_add(1) as f32,
+        );
+        let _ = crate::control::apply(
+            context.control,
+            context.surface,
+            pad,
+            SET_START,
+            first as f32,
+        );
+    }
 }
 
 /// The note the selected pad's sample plays at its original speed, C3 when the

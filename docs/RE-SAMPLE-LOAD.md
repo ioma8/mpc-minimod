@@ -64,7 +64,9 @@ The synth path does not construct a load request or call the assignment construc
 1. Render the synth buffer.
 2. Run the stock Extract command with an empty source provider when needed.
 3. Patch the Extract command’s destination at `command + 0x58` to the selected pad before execute.
-4. Extract writes the new sample directly to that pad.
+4. Extract writes and registers the new sample directly to that pad.
+5. Minimod activates the resulting `InstrumentLayer` with
+   `pads::set_layer_active` from SDK `v0.1.10`.
 
 The destination is restored after execute. `Extract::Request.destination` exposes this; `None` keeps the app’s free-pad behavior.
 
@@ -72,26 +74,16 @@ Verified in the emulator on empty pads `D04`, `D10`, `D11` and by overwriting `D
 
 ## Zero populated pads
 
-The zero-pad case is not yet supported. `borrow_provider` needs one populated
-pad to seed the Extract source; with none it reports `Synth: no source sample`.
-
-The missing object is a native source sample with a valid provider at
-`sample + 0x130 + 0x10`. Creating one without an existing pad requires:
-
-```text
-FUN_01ef6140 / FUN_01ef3710
-  -> FUN_02a43b40
-  -> FUN_02a42150
-```
-
-or a native recording command that builds the same sample object from the
-rendered buffer. Zeroed metadata alone is insufficient because Extract reads the
-provider object, not only the frame count.
-
+When all pads are empty, minimod borrows a valid native seed as Extract's
+source object. The seed is temporary; Extract writes and registers the rendered
+WAV, assigns it to the selected pad, and minimod removes only provider copies
+created for that render. Existing populated pads are preserved. The destination
+layer is then enabled through the SDK's `pads::set_layer_active` API. See
+[PAD-CREATION.md](PAD-CREATION.md) for the full flow and emulator evidence.
 
 ## Recording path
 
 The native recording completion chain and the raw-audio sample builder are
-documented in [RE-RECORDING.md](RE-RECORDING.md). It covers
-`FUN_01ef4ac0`, `FUN_01a95c10`, `FUN_01a967d0`, `FUN_02a31440`, the captured live
-contexts and the unresolved audio-layout issue.
+documented in [RE-RECORDING.md](RE-RECORDING.md). It records
+`FUN_01ef4ac0`, `FUN_01a95c10`, `FUN_01a967d0`, `FUN_02a31440` and the captured
+recording contexts; the synth pad path uses stock Extract instead.

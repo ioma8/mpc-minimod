@@ -4,8 +4,9 @@ set -eu
 cd "$(dirname "$0")"
 rust_dir=$(CDPATH= cd -- ../rust && pwd)
 
-# Find the SDK checkout cargo fetched for the git dependency, so this wrapper
-# always uses the same build script and revision as the crate.
+# Find the SDK checkout cargo resolved, so this wrapper always uses the same
+# build script and revision as the crate.  The dependency may be a git checkout
+# or a local path (a temporary [patch] while the SDK contracts are validated).
 sdk_dir=$(
     cargo metadata --format-version 1 --manifest-path "$rust_dir/Cargo.toml" |
     python3 -c '
@@ -16,11 +17,11 @@ import sys
 metadata = json.load(sys.stdin)
 package = next(
     (item for item in metadata["packages"]
-     if item["name"] == "mpc-sample-sdk" and item.get("source")),
+     if item["name"] == "mpc-sample-sdk"),
     None,
 )
 if package is None:
-    sys.exit("mpc-sample-sdk is not a git dependency")
+    sys.exit("mpc-sample-sdk is not a dependency")
 print(pathlib.Path(package["manifest_path"]).parent)
 '
 )

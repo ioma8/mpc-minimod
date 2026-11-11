@@ -152,11 +152,11 @@ pub fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
 /// Write the settings, at most once every few seconds.
 fn save_throttled(hooks: Hooks) {
     let now = clock::now_ms();
-    let saved = *SAVED_AT.get();
+    let saved = *crate::ui_read(&SAVED_AT);
     if now <= saved + SAVE_EVERY_MS {
         return;
     }
-    *SAVED_AT.get_mut() = now;
+    *crate::ui_write(&SAVED_AT) = now;
     if let Some(save) = hooks.save {
         save();
     }
@@ -168,7 +168,7 @@ fn save_throttled(hooks: Hooks) {
 fn context() -> Context {
     let menu = crate::menu::state();
     let (spectral, trim, knobs) = (
-        crate::spectral::G_SPECTRAL.get().active,
+        crate::ui_read(&crate::spectral::G_SPECTRAL).active,
         i32::try_from(mpc_sample_sdk::audio::extra_latency()).unwrap_or(0),
         crate::menu::bass_knobs(),
     );

@@ -27,8 +27,10 @@ The hands-on SDK guide is
 [`mpc-sample-sdk/docs/README.md`](https://github.com/ioma8/mpc-sample-sdk/blob/main/docs/README.md).
 
 `mpc-sample-sdk` is the part another mod would reuse unchanged.  It owns the
-`unsafe` and the process-wide state (`state::Global`, `export_static!`), so a mod
-writes safe feature code only. It owns:
+firmware image, the hooks, the event plumbing and the process-wide state
+(`state::Global`, `export_static!`). Its current safety contracts make raw
+firmware calls explicitly `unsafe`; the feature crate keeps those to small,
+documented boundary blocks. It owns:
 
 * finding the app with `dl_iterate_phdr`, verifying the 36 firmware words, and
   refusing a different image;
@@ -77,7 +79,7 @@ Where the C went (most of it was `mod/src/minimod.c`, one translation unit):
 The old `*_ffi.rs` names are gone.  The DSP adapters are grouped under
 `minimod/src/backend/` (`hpss`, `bass`, `looper`, `audio`); `actions.rs` maps an
 action code to those backends and `jobflow.rs` keeps only the feature workflow.
-They are ordinary safe Rust modules over the SDK and the DSP crate, with no
+They are ordinary Rust modules over the SDK and the DSP crate, with no
 `extern "C"` hook tables and no language boundary to cross.
 
 Things worth knowing that the journal below does not say plainly:
@@ -91,10 +93,12 @@ Things worth knowing that the journal below does not say plainly:
   the app reports "Extract slice failed" after succeeding, and aborts its source
   re-encode halfway (corrupt WAVs).  The SDK's sites preserve the return values
   of the command constructor and the control setter.
-* **The feature crate is safe Rust.** `crates/minimod/src` contains no `unsafe`
-  token at all; `rust/check.sh` fails if one appears.  Every firmware access, hook,
-  displaced function and exported static is behind an SDK item: the SDK owns the
-  `unsafe`, the feature code calls safe functions and the `Mod` trait.
+* **The feature crate is safe except at explicit boundaries.**
+  `crates/minimod/src` has only small, documented `unsafe` blocks where the SDK
+  now requires a lifetime, thread-ownership or exclusivity contract: drawing,
+  raw object handles, Extract and the repaint pump. Every block carries a
+  `SAFETY:` comment and `clippy::undocumented_unsafe_blocks` is denied. Hooks,
+  displaced functions and exported statics still live behind SDK items.
 * **Exports are deliberate.** Only `snd_pcm_*` and the `g_*` statics the tests
   read are exported; the feature crate declares them through
   `mpc_sample_sdk::export_static!`, so its source has no `#[unsafe(no_mangle)]`.

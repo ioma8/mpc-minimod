@@ -20,7 +20,8 @@ fn toast(graphics: usize) {
     paint::rect(graphics, x, y, w, 2);
     paint::rect(graphics, x, y + h - 2, w, 2);
     paint::colour(graphics, 0xffff_ffff);
-    let text = String::from_utf8_lossy(paint::toast_text());
+    let toast = paint::toast_text();
+    let text = String::from_utf8_lossy(&toast);
     paint::text(graphics, &text, x + 4, y + 6, w - 8, h - 12, 18.0);
 }
 
@@ -75,7 +76,10 @@ pub fn poll_offpage() {
         return;
     }
     let current = paint::screen();
-    if !crate::page::visible(current) || current != screen {
+    // SAFETY: `current` is the component the paint hook last recorded on this
+    // UI thread.
+    let visible = unsafe { crate::page::visible(current) };
+    if !visible || current != screen {
         finalize();
     }
 }
@@ -98,7 +102,7 @@ pub fn paint(graphics: Graphics, event: mpc_sample_sdk::PaintEvent) {
     let marks = crate::ui::marks();
     trim_marks(handle, marks[0], marks[1]);
     if crate::backend::looper::looper_is_open() != 0 {
-        mpc_sample_sdk::draw::start_repaint_pump(crate::backend::audio::pump_component);
+        paint::start_repaint_pump(crate::backend::audio::pump_component);
         crate::looper_view::draw(handle);
         return;
     }
