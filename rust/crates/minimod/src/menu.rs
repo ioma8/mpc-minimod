@@ -4,6 +4,7 @@
 //! it, the encoder picks a row, and a press runs it.  The state it keeps is the
 //! open flag, the selected row and whether the bass control page is showing.
 
+use crate::actions::Action;
 use crate::backend::bass::Kind;
 use crate::paint;
 use mpc_sample_sdk::export_static;
@@ -35,12 +36,8 @@ pub struct State {
     pub busy: i32,
     /// Whether the bass control page is showing.
     pub bass_edit: i32,
-    /// Whether the encoder went down already.
-    pub data_down: i32,
     /// The selected row.
     pub selection: i32,
-    /// Whether a chop restore is waiting for SHIFT to be released.
-    pub restore_pending: i32,
 }
 
 /// The feature callbacks the menu uses.
@@ -50,18 +47,16 @@ pub struct Hooks {
     pub repaint: Option<fn()>,
     /// Render the split.
     pub start_split: Option<fn(&mut State)>,
-    /// Render one effect, by its row.
-    pub start_effect: Option<fn(i32, &mut State)>,
-    /// Start the spectral chop.
-    pub start_spectral: Option<fn(&mut State)>,
+    /// Render one effect.
+    pub start_effect: Option<fn(Action, &mut State)>,
+    /// Start the spectral chop, with the event that asked for it.
+    pub start_spectral: Option<fn(&mut State, &[u8; 16])>,
     /// Start the bass synth with its source backup.
     pub start_bass: Option<fn(&mut State)>,
     /// Show the bass control page.
     pub start_bass_page: Option<fn(&mut State)>,
     /// Open the live looper.
     pub start_looper: Option<fn() -> i32>,
-    /// Replace the status line.
-    pub set_status: Option<fn(&str)>,
 }
 
 /// Close the menu unless a job is running.
@@ -71,13 +66,12 @@ pub fn close(state: &mut State, hooks: Hooks) -> bool {
     }
     state.open = 0;
     state.bass_edit = 0;
-    state.data_down = 0;
     repaint(hooks);
     true
 }
 
 /// Run the selected row.
-pub fn activate(state: &mut State, hooks: Hooks) {
+pub fn activate(state: &mut State, event: &[u8; 16], hooks: Hooks) {
     if state.busy != 0 {
         return;
     }
@@ -95,18 +89,25 @@ pub fn activate(state: &mut State, hooks: Hooks) {
         }
         ROW_SPECTRAL => {
             if let Some(start) = hooks.start_spectral {
-                start(state);
+                start(state, event);
             }
         }
-        ROW_REVERB | ROW_VINYL | ROW_LOFI => {
+        ROW_REVERB => {
             if let Some(start) = hooks.start_effect {
-                start(state.selection - 1, state);
+                start(Action::Reverb, state);
+            }
+        }
+        ROW_VINYL => {
+            if let Some(start) = hooks.start_effect {
+                start(Action::Vinyl, state);
+            }
+        }
+        ROW_LOFI => {
+            if let Some(start) = hooks.start_effect {
+                start(Action::LoFi, state);
             }
         }
         ROW_BASS => {
-            if let Some(status) = hooks.set_status {
-                status("Live preview unavailable");
-            }
             if let Some(page) = hooks.start_bass_page {
                 page(state);
             }
@@ -160,8 +161,7 @@ const TITLES: [&str; MENU_ROWS] = [
 ///
 /// `status` is the caller's status line (empty when there is nothing to say) and
 /// `knobs` are the bass synth's three values.
-#[must_use]
-pub fn draw(graphics: usize, state: &State, busy: bool, status: &str, knobs: [f32; 3]) -> bool {
+pub fn draw(graphics: usize, state: &State, busy: bool, status: &str, knobs: [f32; 3]) {
     let (x, y, w, h) = (14, 8, 292, 224);
     paint::colour(graphics, PANEL);
     paint::rect(graphics, x, y, w, h);
@@ -177,11 +177,11 @@ pub fn draw(graphics: usize, state: &State, busy: bool, status: &str, knobs: [f3
         if !status.is_empty() {
             paint::text(graphics, status, x + 10, y + 98, w - 20, 20, 12.0);
         }
-        return false;
+        return;
     }
     if state.bass_edit != 0 {
         draw_knobs(graphics, (x, y, w), status, knobs);
-        return false;
+        return;
     }
     for (index, title) in TITLES.iter().enumerate() {
         let row = y + 26 + i32::try_from(index).unwrap_or(0) * 20;
@@ -205,7 +205,6 @@ pub fn draw(graphics: usize, state: &State, busy: bool, status: &str, knobs: [f3
         14,
         10.0,
     );
-    true
 }
 
 /// The bass control page.
@@ -214,9 +213,9 @@ fn draw_knobs(graphics: usize, area: (i32, i32, i32), status: &str, knobs: [f32;
     let kind = bass_kind();
     let labels = kind.knobs();
     paint::colour(graphics, ACCENT);
-    paint::text(
+    paint::text_fmt(
         graphics,
-        &format!("SYNTH  {}", kind.name()),
+        format_args!("SYNTH  {}", kind.name()),
         x + 12,
         y + 6,
         w - 24,
@@ -236,9 +235,9 @@ fn draw_knobs(graphics: usize, area: (i32, i32, i32), status: &str, knobs: [f32;
     let columns = [x + 16, x + 108, x + 200];
     for (index, column) in columns.iter().enumerate() {
         paint::colour(graphics, ACCENT);
-        paint::text(
+        paint::text_fmt(
             graphics,
-            &format!("K{}", index + 1),
+            format_args!("K{}", index + 1),
             *column,
             y + 72,
             76,
@@ -253,9 +252,9 @@ fn draw_knobs(graphics: usize, area: (i32, i32, i32), status: &str, knobs: [f32;
         let filled = (76.0 * knobs[index].clamp(0.0, 1.0) + 0.5) as i32;
         paint::rect(graphics, *column, y + 116, filled, 4);
         paint::colour(graphics, WHITE);
-        paint::text(
+        paint::text_fmt(
             graphics,
-            &format!("{:.2}", knobs[index]),
+            format_args!("{:.2}", knobs[index]),
             *column,
             y + 128,
             76,
@@ -297,11 +296,9 @@ pub fn draw_menu(
         open: 1,
         busy,
         bass_edit,
-        data_down: 0,
         selection,
-        restore_pending: 0,
     };
-    let _ = draw(graphics, &state, busy != 0, status, knobs);
+    draw(graphics, &state, busy != 0, status, knobs);
 }
 
 export_static!(#[doc = "The menu's state, read by the device tests."]
@@ -309,21 +306,21 @@ g_menu: Global<State> = Global::new(State {
     open: 0,
     busy: 0,
     bass_edit: 0,
-    data_down: 0,
     selection: 0,
-    restore_pending: 0,
 }));
 
-/// The menu's state, for the crate.
+/// A copy of the menu's state, for the crate.
 #[must_use]
-pub fn state() -> &'static State {
-    crate::ui_read(&g_menu)
+pub fn state() -> State {
+    // SAFETY: `g_menu` is owned by the app's UI thread.
+    unsafe { g_menu.with(|menu| *menu) }
 }
 
-/// The menu's state, to change.
-#[must_use]
-pub fn state_mut() -> &'static mut State {
-    crate::ui_write(&g_menu)
+/// Run `f` with the menu's state, to change it.
+pub fn with_state_mut<R>(f: impl FnOnce(&mut State) -> R) -> R {
+    // SAFETY: `g_menu` is owned by the app's UI thread and the closure must not
+    // take another borrow of it.
+    unsafe { g_menu.with_mut(f) }
 }
 
 export_static!(#[doc = "The bass page's three knobs, read by the device tests."]
@@ -335,14 +332,19 @@ g_bass_kind: Global<i32> = Global::new(0));
 /// The selected synth character.
 #[must_use]
 pub fn bass_kind() -> Kind {
-    Kind::from_index(*crate::ui_read(&g_bass_kind))
+    // SAFETY: `g_bass_kind` is owned by the app's UI thread.
+    unsafe { g_bass_kind.with(|kind| Kind::from_index(*kind)) }
 }
 
 /// Select a synth character and reset its three knobs to that character's
 /// defaults.
 pub fn set_bass_kind(kind: Kind) {
-    *crate::ui_write(&g_bass_kind) = i32::try_from(kind.index()).unwrap_or(0);
-    *crate::ui_write(&g_bass_knob) = kind.defaults();
+    // SAFETY: both values are owned by the app's UI thread; the borrows are
+    // sequential, not nested.
+    unsafe {
+        g_bass_kind.with_mut(|slot| *slot = i32::try_from(kind.index()).unwrap_or(0));
+        g_bass_knob.with_mut(|knobs| *knobs = kind.defaults());
+    }
 }
 
 /// Move the synth selection by `delta` encoder steps.
@@ -369,19 +371,17 @@ pub fn follow_preview() {
 /// The bass control page's three knobs.
 #[must_use]
 pub fn bass_knobs() -> [f32; 3] {
-    *crate::ui_read(&g_bass_knob)
+    // SAFETY: `g_bass_knob` is owned by the app's UI thread.
+    unsafe { g_bass_knob.with(|knobs| *knobs) }
 }
 
 /// Store the bass control page's three knobs.
 pub fn set_bass_knobs(knobs: [f32; 3]) {
-    *crate::ui_write(&g_bass_knob) = knobs;
+    // SAFETY: `g_bass_knob` is owned by the app's UI thread.
+    unsafe { g_bass_knob.with_mut(|slot| *slot = knobs) };
 }
 
 /// Show the bass control page and start its preview.
-///
-/// # Safety
-///
-/// The app's own calls are used.
 pub fn bass_page(state: &mut State) {
     let knobs = bass_knobs();
     state.bass_edit = 1;
@@ -397,46 +397,34 @@ pub fn bass_page(state: &mut State) {
 }
 
 /// Open the effects menu, if the page is showing and nothing is running.
-///
-/// # Safety
-///
-/// The crate's own state and the app's repaint.
 pub fn open_menu() {
     if !crate::ui::screen_visible() || state().busy != 0 {
         return;
     }
-    let menu = state_mut();
-    menu.open = 1;
-    menu.selection = 0;
-    menu.bass_edit = 0;
-    menu.data_down = 0;
+    with_state_mut(|menu| {
+        menu.open = 1;
+        menu.selection = 0;
+        menu.bass_edit = 0;
+    });
     crate::backend::bass::preview_set_active(false);
     crate::status::set_status("");
     crate::ui::minimod_repaint_screen();
 }
 
 /// Close the menu, unless a job is running.
-///
-/// # Safety
-///
-/// The crate's own state and the app's repaint.
 pub fn close_menu() {
     if state().busy != 0 {
         return;
     }
-    let menu = state_mut();
-    menu.open = 0;
-    menu.bass_edit = 0;
-    menu.data_down = 0;
+    with_state_mut(|menu| {
+        menu.open = 0;
+        menu.bass_edit = 0;
+    });
     crate::backend::bass::preview_set_active(false);
     crate::ui::minimod_repaint_screen();
 }
 
 /// Rename the soft key, which the app draws itself.
-///
-/// # Safety
-///
-/// The text is ignored; the rename happens on the paint.
 pub fn filter_text() {
     if paint::screen() != 0 {
         crate::ui::minimod_repaint_screen();
@@ -447,12 +435,6 @@ pub fn filter_text() {
 #[must_use]
 pub fn is_open() -> bool {
     state().open != 0
-}
-
-/// Whether the bass control page is showing.
-#[must_use]
-pub fn is_bass_edit() -> bool {
-    state().bass_edit != 0
 }
 
 /// Whether a job is running.
@@ -474,7 +456,6 @@ mod tests {
             start_bass: None,
             start_bass_page: None,
             start_looper: None,
-            set_status: None,
         }
     }
 

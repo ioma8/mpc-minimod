@@ -5,8 +5,11 @@
 //! the bass page, and everything else is either swallowed (a modal screen owns
 //! the controls) or handed to the app.
 
+use core::sync::atomic::{AtomicI32, Ordering};
+
 use crate::backend::bass::preview_set_params;
 use crate::backend::looper::{self, looper_notice};
+use crate::cfg;
 use crate::clock;
 use crate::routing;
 use mpc_sample_sdk::state::Global;
@@ -29,8 +32,6 @@ pub struct Hooks {
 /// The state the routing reads.
 #[derive(Clone, Copy)]
 pub struct Context {
-    /// Whether the mod is replaying its own command.
-    pub replaying: i32,
     /// The raw value.
     pub value: u32,
     /// The controller's range.
@@ -68,6 +69,9 @@ pub struct Outcome {
 
 /// When the settings were last written.
 static SAVED_AT: Global<i64> = Global::new(0);
+/// The last knob-1 value seen, so the trim follows the knob's movement rather
+/// than its absolute position.
+static KNOB1_LAST: AtomicI32 = AtomicI32::new(-1);
 
 /// Handle one control-change event.
 #[must_use]
@@ -80,7 +84,6 @@ pub fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
         knobs_changed: 0,
     };
     let ladder = routing::Context {
-        replaying: context.replaying != 0,
         control: u16::try_from(control).unwrap_or(0xffff),
         value: context.value,
         range: context.range,
@@ -93,9 +96,7 @@ pub fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
             busy: context.busy != 0,
             spectral: context.spectral_active != 0,
         },
-        trim_frames: context.trim_frames,
     };
-    routing::set_trim(context.trim_frames);
     match routing::route(ladder) {
         // The master volume drives the loops, then the app's own mix.
         routing::Route::Master => {
@@ -107,19 +108,23 @@ pub fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
                 outcome.consumed = 1;
             }
         }
-        // The latency trim moves one millisecond per step.
-        routing::Route::Trim(frames) => {
+        // The latency trim moves one millisecond per step; the knob-to-frames
+        // mapping and its clamp live here, so the routing ladder stays pure.
+        routing::Route::Trim(value) => {
+            let frames = trim_frames(value, context.trim_frames);
             outcome.trim_frames = frames;
             outcome.trim_changed = i32::from(frames != context.trim_frames);
-            save_throttled(hooks);
-            if let Some(notice) = hooks.notice {
-                let millis = frames / 44;
-                let line = if millis >= 0 {
-                    format!("TRIM +{millis} ms")
-                } else {
-                    format!("TRIM {millis} ms")
-                };
-                notice(&line);
+            if outcome.trim_changed != 0 {
+                save_throttled(hooks);
+                if let Some(notice) = hooks.notice {
+                    let millis = frames / cfg::FRAMES_PER_MS;
+                    let line = if millis >= 0 {
+                        format!("TRIM +{millis} ms")
+                    } else {
+                        format!("TRIM {millis} ms")
+                    };
+                    notice(&line);
+                }
             }
             outcome.consumed = 1;
             return outcome;
@@ -131,7 +136,7 @@ pub fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
             knobs[index] = amount;
             outcome.knobs = knobs;
             outcome.knobs_changed = 1;
-            preview_set_params(knobs[0], knobs[1], knobs[2]);
+            // `control` applies the knobs once, after this ladder returns.
             if let Some(repaint) = hooks.repaint {
                 repaint();
             }
@@ -149,14 +154,42 @@ pub fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
     outcome
 }
 
+/// The trim the knob's movement asks for, clamped to the same range the
+/// settings file allows.
+fn trim_frames(value: u32, current: i32) -> i32 {
+    let Ok(value) = i32::try_from(value) else {
+        return current;
+    };
+    let last = KNOB1_LAST.load(Ordering::Acquire);
+    if last < 0 {
+        KNOB1_LAST.store(value, Ordering::Release);
+        return current;
+    }
+    if value == last {
+        return current;
+    }
+    KNOB1_LAST.store(value, Ordering::Release);
+    let frames = (value - last) * cfg::FRAMES_PER_MS;
+    let limit = cfg::TRIM_LIMIT_MS * cfg::FRAMES_PER_MS;
+    current.saturating_add(frames).clamp(-limit, limit)
+}
+
+/// Forget the knob position when a looper session starts or ends, so the first
+/// move of a new session cannot apply the delta from the previous one.
+pub fn reset_trim_tracking() {
+    KNOB1_LAST.store(-1, Ordering::Release);
+}
+
 /// Write the settings, at most once every few seconds.
 fn save_throttled(hooks: Hooks) {
     let now = clock::now_ms();
-    let saved = *crate::ui_read(&SAVED_AT);
+    // SAFETY: `SAVED_AT` is owned by the app's UI thread.
+    let saved = unsafe { SAVED_AT.with(|saved| *saved) };
     if now <= saved + SAVE_EVERY_MS {
         return;
     }
-    *crate::ui_write(&SAVED_AT) = now;
+    // SAFETY: `SAVED_AT` is owned by the app's UI thread.
+    unsafe { SAVED_AT.with_mut(|saved| *saved = now) };
     if let Some(save) = hooks.save {
         save();
     }
@@ -167,20 +200,16 @@ fn save_throttled(hooks: Hooks) {
 /// What the routing needs to know about the mod's screens and trim, right now.
 fn context() -> Context {
     let menu = crate::menu::state();
-    let (spectral, trim, knobs) = (
-        crate::ui_read(&crate::spectral::G_SPECTRAL).active,
-        i32::try_from(mpc_sample_sdk::audio::extra_latency()).unwrap_or(0),
-        crate::menu::bass_knobs(),
-    );
+    let trim = i32::try_from(mpc_sample_sdk::audio::extra_latency()).unwrap_or(0);
+    let knobs = crate::menu::bass_knobs();
     Context {
-        replaying: 0,
         value: 0,
         range: 0.0,
         looper_open: looper::looper_is_open(),
         menu_open: menu.open,
         bass_edit: menu.bass_edit,
         busy: menu.busy,
-        spectral_active: i32::from(spectral == 1),
+        spectral_active: i32::from(crate::spectral::is_active()),
         trim_frames: trim,
         knobs,
     }
@@ -220,11 +249,33 @@ pub fn control(event: CcEvent) -> CcFlow {
 
 #[cfg(test)]
 mod tests {
-    use super::{Context, Hooks, handle};
+    use super::{Context, Hooks, handle, reset_trim_tracking, trim_frames};
+    use crate::cfg;
+    use std::sync::Mutex;
+
+    /// The knob tracker is a process static, so its tests take turns.
+    static TRIM_TEST: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn the_trim_follows_the_knob_movement_and_stays_in_range() {
+        let _serial = TRIM_TEST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_trim_tracking();
+        // The first event only records the position.
+        assert_eq!(trim_frames(10, 0), 0);
+        assert_eq!(trim_frames(11, 0), cfg::FRAMES_PER_MS);
+        assert_eq!(trim_frames(10, 0), -cfg::FRAMES_PER_MS);
+        // The limit is the same one the settings file accepts.
+        let limit = cfg::TRIM_LIMIT_MS * cfg::FRAMES_PER_MS;
+        reset_trim_tracking();
+        assert_eq!(trim_frames(0, 0), 0);
+        assert_eq!(trim_frames(127, limit), limit);
+        reset_trim_tracking();
+    }
 
     fn context() -> Context {
         Context {
-            replaying: 0,
             value: 64,
             range: 127.0,
             looper_open: 0,

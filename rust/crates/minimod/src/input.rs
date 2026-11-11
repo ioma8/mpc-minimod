@@ -1,7 +1,8 @@
 //! The input policy: which screen owns a pad, a surface event or an encoder turn.
 //!
 //! The SDK decodes the app's events and forwards whatever this module does not
-//! consume; nothing here touches a displaced function.
+//! consume; nothing here touches a displaced function.  The pad counts come from
+//! the engine and synth tables, so there is no second copy to keep in sync.
 
 use mpc_sample_sdk::state::Global;
 use mpc_sample_sdk::{
@@ -10,15 +11,12 @@ use mpc_sample_sdk::{
 
 /// Pads the app can address.
 pub const PADS: usize = 128;
-/// Pads the looper owns; a test keeps it equal to the engine's table.
-pub const LOOPER_PADS: i32 = 16;
-/// Pads the bass preview listens to; a test keeps it equal to the synth's.
-pub const PREVIEW_PADS: i32 = 16;
-/// Entries on the effects menu; a test keeps it equal to the menu's rows.
-pub const MENU_ITEMS: i32 = 8;
+/// Pads the looper owns, from the engine's own table.
+pub const LOOPER_PADS: usize = crate::backend::looper::PADS;
+/// Pads the bass preview listens to, from the synth's own table.
+pub const PREVIEW_PADS: usize = crate::backend::bass::PADS;
 
 /// The state the input hooks keep.
-#[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct State {
     /// Pads whose note-on the app may have seen.
@@ -54,7 +52,6 @@ impl Default for State {
 }
 
 /// The screens and keys the policy reads.
-#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Context {
     /// Whether the looper view is open.
@@ -81,38 +78,48 @@ fn pad_index(pad: i32) -> Option<usize> {
 /// A pad press or release.
 #[must_use]
 pub fn pad(event: PadEvent) -> PadFlow {
-    // only the app's input thread touches this state.
-    let state = crate::ui_write(&STATE);
-    if let Some(index) = pad_index(event.pad) {
-        match event.action {
-            PadAction::Press => {
-                state.held_on[index] = 1;
-                state.held_input[index] = event.input;
-                state.held_src[index] = event.source;
-            }
-            PadAction::Release => state.held_on[index] = 0,
-        }
-    }
     let context = context();
-    if context.looper_open != 0 && event.pad >= 0 {
-        if context.looper_open != 0 && event.action == PadAction::Press && event.pad < LOOPER_PADS {
-            let _ = crate::backend::looper::looper_pad(event.pad, context.shift, context.erase);
-        }
-        return PadFlow::Consume;
+    // SAFETY: the input state is owned by the app's UI thread; the closure does
+    // not take another borrow of it.
+    unsafe {
+        STATE.with_mut(|state| {
+            if let Some(index) = pad_index(event.pad) {
+                match event.action {
+                    PadAction::Press => {
+                        state.held_on[index] = 1;
+                        state.held_input[index] = event.input;
+                        state.held_src[index] = event.source;
+                    }
+                    PadAction::Release => state.held_on[index] = 0,
+                }
+            }
+            if context.looper_open != 0 && event.pad >= 0 {
+                if event.action == PadAction::Press
+                    && usize::try_from(event.pad).is_ok_and(|pad| pad < LOOPER_PADS)
+                {
+                    let _ =
+                        crate::backend::looper::looper_pad(event.pad, context.shift, context.erase);
+                }
+                return PadFlow::Consume;
+            }
+            if context.spectral_active != 0 {
+                return PadFlow::Consume;
+            }
+            // While the bass page is open the pads belong to the preview, which
+            // the control-surface hook feeds; anything that still arrives here is
+            // swallowed so the app cannot start the project's sample under it.
+            if context.menu_open != 0
+                && context.bass_edit != 0
+                && usize::try_from(event.pad).is_ok_and(|pad| pad < PREVIEW_PADS)
+            {
+                return PadFlow::Consume;
+            }
+            if event.action == PadAction::Press {
+                state.last_pad = event.pad;
+            }
+            PadFlow::Forward
+        })
     }
-    if context.spectral_active != 0 {
-        return PadFlow::Consume;
-    }
-    // While the bass page is open the pads belong to the preview, which the
-    // control-surface hook feeds; anything that still arrives here is swallowed
-    // so the app cannot start the project's sample under it.
-    if context.menu_open != 0 && context.bass_edit != 0 && (0..PREVIEW_PADS).contains(&event.pad) {
-        return PadFlow::Consume;
-    }
-    if event.action == PadAction::Press {
-        state.last_pad = event.pad;
-    }
-    PadFlow::Forward
 }
 
 /// A control-surface event: the bass page consumes the pad notes it sees.
@@ -128,12 +135,10 @@ pub fn surface(event: SurfaceEvent) -> SurfaceFlow {
 /// The encoder: drive the open menu, or forward the turn.
 #[must_use]
 pub fn encoder(event: EncoderEvent) -> EncoderFlow {
-    // only the app's input thread touches this state.
-    let state = crate::ui_read(&STATE);
+    // SAFETY: the input state is owned by the app's UI thread.
+    let target = unsafe { STATE.with(|state| state.data_target) };
     let context = context();
-    if event.surface != state.data_target
-        || (context.menu_open == 0 && context.spectral_active == 0)
-    {
+    if event.surface != target || (context.menu_open == 0 && context.spectral_active == 0) {
         return EncoderFlow::Forward;
     }
     if context.menu_open != 0 && context.busy == 0 && event.delta != 0 {
@@ -145,8 +150,10 @@ pub fn encoder(event: EncoderEvent) -> EncoderFlow {
             crate::backend::bass::preview_set_params(knobs[0], knobs[1], knobs[2]);
         } else {
             let step = if event.delta > 0 { 1 } else { 7 };
-            let selection = &mut crate::menu::state_mut().selection;
-            *selection = (*selection + step) % MENU_ITEMS;
+            let rows = i32::try_from(crate::menu::MENU_ROWS).unwrap_or(1);
+            crate::menu::with_state_mut(|menu| {
+                menu.selection = (menu.selection + step).rem_euclid(rows);
+            });
         }
         // the app's own repaint; the UI thread is here.
         crate::ui::minimod_repaint_screen();
@@ -157,14 +164,14 @@ pub fn encoder(event: EncoderEvent) -> EncoderFlow {
 /// The pad the user pressed last, or -1.
 #[must_use]
 pub fn last_pad() -> i32 {
-    // only the UI thread writes it.
-    crate::ui_read(&STATE).last_pad
+    // SAFETY: the input state is owned by the app's UI thread.
+    unsafe { STATE.with(|state| state.last_pad) }
 }
 
 /// Record the encoder's surface.
 pub fn set_data_target(target: usize) {
-    // only the UI thread writes the input state.
-    crate::ui_write(&STATE).data_target = target;
+    // SAFETY: the input state is owned by the app's UI thread.
+    unsafe { STATE.with_mut(|state| state.data_target = target) };
 }
 
 /// The state itself.
@@ -173,11 +180,9 @@ static STATE: Global<State> = Global::new(State::new());
 /// What the policy needs to know about the mod's screens and keys, right now.
 fn context() -> Context {
     let menu = crate::menu::state();
-    // a plain word, written by the UI thread.
-    let spectral = crate::ui_read(&crate::spectral::G_SPECTRAL).active;
     Context {
         looper_open: crate::backend::looper::looper_is_open(),
-        spectral_active: spectral,
+        spectral_active: i32::from(crate::spectral::is_active()),
         menu_open: menu.open,
         bass_edit: menu.bass_edit,
         busy: menu.busy,
@@ -189,13 +194,16 @@ fn context() -> Context {
 /// Feed the bass preview a pad note while its page is open.
 fn bass_pad_event(event: SurfaceEvent) -> bool {
     let menu = crate::menu::state();
-    if menu.open == 0 || menu.bass_edit == 0 || !(0..PREVIEW_PADS).contains(&event.code) {
+    if menu.open == 0
+        || menu.bass_edit == 0
+        || !usize::try_from(event.code).is_ok_and(|code| code < PREVIEW_PADS)
+    {
         return false;
     }
-    if !matches!(event.kind, 0x80 | 0x90 | 0xa0) {
+    if !event.is_pad_event() {
         return false;
     }
-    if event.kind == 0x90 && event.velocity > 0 {
+    if event.is_pad_press() {
         crate::backend::bass::preview_note(
             u32::try_from(event.code).unwrap_or(0),
             f32::from(event.velocity) / 127.0,
@@ -206,49 +214,42 @@ fn bass_pad_event(event: SurfaceEvent) -> bool {
 
 /// Release every pad the app may think is held, through the app's own path.
 pub fn release_held() {
-    let state = crate::ui_write(&STATE);
-    for pad in 0..PADS {
-        if state.held_on[pad] == 0 {
+    // Take the releases out under the borrow, then call the app with no borrow
+    // held: the note path may re-enter the mod, and a second borrow of the input
+    // state would alias.
+    let mut releases = [None; PADS];
+    // SAFETY: the input state is owned by the app's UI thread.
+    unsafe {
+        STATE.with_mut(|state| {
+            for (pad, release) in releases.iter_mut().enumerate() {
+                if state.held_on[pad] != 0 {
+                    state.held_on[pad] = 0;
+                    *release = Some((state.held_input[pad], state.held_src[pad]));
+                }
+            }
+        });
+    }
+    for (pad, release) in releases.into_iter().enumerate() {
+        let Some((input, source)) = release else {
             continue;
-        }
-        state.held_on[pad] = 0;
+        };
         // SAFETY: the input object and source were captured from the app's own
         // note event for this held pad; this is the matching release.
         unsafe {
-            mpc_sample_sdk::sites::send_note_off(
-                state.held_input[pad],
-                state.held_src[pad],
-                i32::try_from(pad).unwrap_or(0),
-            );
+            mpc_sample_sdk::sites::send_note_off(input, source, i32::try_from(pad).unwrap_or(0));
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LOOPER_PADS, MENU_ITEMS, PREVIEW_PADS, State};
+    use super::State;
 
     #[test]
     fn a_fresh_state_remembers_nothing() {
         let state = State::new();
         assert_eq!(state.last_pad, -1);
         assert!(state.held_on.iter().all(|&held| held == 0));
-        assert_eq!(MENU_ITEMS, 8);
-    }
-
-    #[test]
-    fn the_shared_counts_match_their_owners() {
-        assert_eq!(
-            usize::try_from(LOOPER_PADS).unwrap_or(0),
-            crate::backend::looper::PADS
-        );
-        assert_eq!(
-            usize::try_from(PREVIEW_PADS).unwrap_or(0),
-            crate::backend::bass::PADS
-        );
-        assert_eq!(
-            usize::try_from(MENU_ITEMS).unwrap_or(0),
-            crate::menu::MENU_ROWS
-        );
+        assert_eq!(crate::menu::MENU_ROWS, 8);
     }
 }

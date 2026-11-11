@@ -17,7 +17,15 @@ cargo clippy --all-targets --workspace -- -D warnings
 
 echo '== feature safety =='
 # The feature crate is safe except at explicit firmware boundaries. Every unsafe
-# block carries a SAFETY comment; clippy's undocumented_unsafe_blocks enforces it.
+# block carries a SAFETY comment (clippy's undocumented_unsafe_blocks enforces
+# that); this guard also rejects a file that mentions `unsafe` without one, so a
+# block cannot be added to a feature-policy module unnoticed.
+for file in $(grep -rl 'unsafe' crates/minimod/src); do
+    if ! grep -q 'SAFETY' "$file"; then
+        echo "unsafe without a SAFETY comment: $file" >&2
+        exit 1
+    fi
+done
 
 echo '== doc =='
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --workspace

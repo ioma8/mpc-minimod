@@ -10,7 +10,7 @@
 //! outputs are the same length as the input and neither is gated or normalised:
 //! the caller decides what to do with them.
 
-use core::f32::consts::TAU;
+use core::mem::size_of;
 
 use crate::AnalysisError;
 use crate::fft::{Complex, Fft};
@@ -48,12 +48,25 @@ pub fn split(
     let frames = input.len() / channels;
     let rate_f = u32_to_f32(rate);
     let window_count = 1 + (frames + FRAME) / HOP;
+    // Refuse a length whose scratch would dwarf the project's own audio before
+    // allocating any of it.
+    let cells = window_count
+        .checked_mul(BINS)
+        .ok_or(AnalysisError::TooLarge)?;
+    // magnitude + harmonic median + complex spectrogram, plus both outputs and
+    // the overlap weights.
+    let scratch = cells
+        .checked_mul(size_of::<f32>() * 2 + size_of::<Complex>())
+        .and_then(|bytes| bytes.checked_add(input.len().checked_mul(size_of::<f32>() * 2)?))
+        .and_then(|bytes| bytes.checked_add(frames.checked_mul(size_of::<f32>())?))
+        .ok_or(AnalysisError::TooLarge)?;
+    crate::check_analysis_budget(scratch)?;
     let harmonic_width = odd_width(0.476 * rate_f / u32_to_f32(u32::try_from(HOP).unwrap_or(1)));
     let percussive_width =
         odd_width(366.0 * u32_to_f32(u32::try_from(FRAME).unwrap_or(1)) / rate_f);
 
     let fft = Fft::new(FRAME).map_err(|_| AnalysisError::UnsupportedRequest)?;
-    let window = analysis_window();
+    let window = crate::dsp::window::hann(FRAME);
     let weights = overlap_weights(&window, window_count, frames);
 
     let cells = window_count * BINS;
@@ -82,7 +95,7 @@ pub fn split(
             &mut analysis,
             &mut harmonic,
             &mut percussive,
-        );
+        )?;
     }
 
     for (t, &weight) in weights.iter().enumerate() {
@@ -107,17 +120,6 @@ struct ChannelAnalysis<'a> {
     magnitude: &'a mut [f32],
     spectrogram: &'a mut [Complex],
     harmonic_median: &'a mut [f32],
-}
-
-/// The Hann analysis/synthesis window.
-fn analysis_window() -> Vec<f32> {
-    let denominator = u32_to_f32(u32::try_from(FRAME - 1).unwrap_or(1));
-    (0..FRAME)
-        .map(|j| {
-            let phase = TAU * u32_to_f32(u32::try_from(j).unwrap_or(0)) / denominator;
-            0.5 - 0.5 * phase.cos()
-        })
-        .collect()
 }
 
 /// Overlap-add gain: the sum of the squared windows covering each frame.
@@ -145,7 +147,7 @@ fn analyse_channel(
     analysis: &mut ChannelAnalysis<'_>,
     harmonic: &mut [f32],
     percussive: &mut [f32],
-) {
+) -> Result<(), AnalysisError> {
     let frame_count = analysis.window_count;
     let bins = BINS;
     let mut frame = vec![Complex::ZERO; FRAME];
@@ -158,7 +160,10 @@ fn analyse_channel(
             let source = reflect_sample(f * HOP + j, FRAME, analysis.frames);
             frame[j] = Complex::from_real(input[source * channels + channel] * w);
         }
-        analysis.fft.forward_transform(&mut frame);
+        analysis
+            .fft
+            .forward_transform(&mut frame)
+            .map_err(|_| AnalysisError::UnsupportedRequest)?;
         for (b, value) in frame.iter().take(bins).enumerate() {
             let cell = f * bins + b;
             analysis.spectrogram[cell] = *value;
@@ -207,8 +212,14 @@ fn analyse_channel(
             frame[b] = Complex::new(frame[FRAME - b].re, -frame[FRAME - b].im);
             other[b] = Complex::new(other[FRAME - b].re, -other[FRAME - b].im);
         }
-        analysis.fft.inverse_transform(&mut frame);
-        analysis.fft.inverse_transform(&mut other);
+        analysis
+            .fft
+            .inverse_transform(&mut frame)
+            .map_err(|_| AnalysisError::UnsupportedRequest)?;
+        analysis
+            .fft
+            .inverse_transform(&mut other)
+            .map_err(|_| AnalysisError::UnsupportedRequest)?;
         let base = usize_to_i64(f * HOP) - usize_to_i64(FRAME);
         for (j, &w) in analysis.window.iter().enumerate() {
             let t = base + usize_to_i64(j);
@@ -221,24 +232,13 @@ fn analyse_channel(
             harmonic[index] += other[j].re * w;
         }
     }
+    Ok(())
 }
 
 /// Mirror a sample index into `0..length` so the median window has no edge
 /// effect, exactly like the reference implementation's reflected boundaries.
 fn reflect_sample(index: usize, offset: usize, length: usize) -> usize {
-    if length <= 1 {
-        return 0;
-    }
-    let length_i = usize_to_i64(length);
-    let period = 2 * (length_i - 1);
-    let mut reflected = (usize_to_i64(index) - usize_to_i64(offset)) % period;
-    if reflected < 0 {
-        reflected += period;
-    }
-    if reflected >= length_i {
-        reflected = period - reflected;
-    }
-    i64_to_usize(reflected)
+    reflect_index(usize_to_i64(index) - usize_to_i64(offset), length)
 }
 
 /// Mirror an index in a `0..length` dimension onto itself, for the median

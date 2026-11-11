@@ -9,8 +9,6 @@
 //! hook, which exists once.  Its parameters and pending pad strikes are atomics,
 //! so the pad thread never touches the synth itself.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-
 use crate::dsp::filters::Svf;
 use crate::dsp::string_voice::StringVoice;
 use crate::dsp::{Noise, WhiteNoise, fclamp};
@@ -18,6 +16,7 @@ use crate::num::f32_to_usize;
 
 /// The eight synth characters the control page can select.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Kind {
     /// Short Karplus-Strong bass.
     Bass,
@@ -112,29 +111,27 @@ impl Kind {
     /// The index in [`Kind::ALL`].
     #[must_use]
     pub const fn index(self) -> usize {
-        match self {
-            Self::Bass => 0,
-            Self::Piano => 1,
-            Self::Pads => 2,
-            Self::Lead => 3,
-            Self::Bells => 4,
-            Self::Strings => 5,
-            Self::Voice => 6,
-            Self::Organ => 7,
-        }
+        self as usize
     }
 
     /// The kind at an encoder index, wrapping.
     #[must_use]
     pub fn from_index(index: i32) -> Self {
-        let wrapped = index.rem_euclid(8);
+        let count = i32::try_from(Self::ALL.len()).unwrap_or(1);
+        let wrapped = index.rem_euclid(count);
         Self::ALL[usize::try_from(wrapped).unwrap_or(0)]
     }
 
     /// The next kind in the requested direction.
+    ///
+    /// The addition is saturating, so an extreme delta cannot overflow the
+    /// encoder position before it wraps.
     #[must_use]
     pub fn step(self, delta: i32) -> Self {
-        Self::from_index(i32::try_from(self.index()).unwrap_or(0) + delta)
+        let index = i64::from(delta).saturating_add(i64::try_from(self.index()).unwrap_or(0));
+        let count = i64::try_from(Self::ALL.len()).unwrap_or(1);
+        let wrapped = i32::try_from(index.rem_euclid(count)).unwrap_or(0);
+        Self::from_index(wrapped)
     }
 }
 
@@ -145,8 +142,6 @@ const VOICES: usize = 4;
 /// The rendered pluck's root: C2, MIDI 36.  Written as bits because it has to be
 /// the reference's `65.4063913f` exactly: one ulp here detunes every sample.
 const NOTE_HZ: f32 = f32::from_bits(0x4282_d013);
-/// Rendered note length, in seconds.  Short enough to stay a bass note.
-const DURATION: f32 = 0.75;
 /// Where the rendered note starts its final decay, in seconds.
 const GATE: f32 = 0.15;
 /// Drive/excitation is a fixed character now that the second knob is DECAY.
@@ -161,7 +156,7 @@ const PREVIEW_LENGTH: f32 = 0.7;
 /// Peak the preview mix is allowed to reach before it is clamped.
 const PREVIEW_PEAK: f32 = 0.85;
 /// Nominal rate the engine is built at before the device reports its own.
-const NOMINAL_RATE: u32 = 44_100;
+pub(crate) const NOMINAL_RATE: u32 = 44_100;
 
 /// A rendered pluck, interleaved stereo.
 #[derive(Clone, Debug)]
@@ -236,7 +231,7 @@ pub fn render_with(
         return Err(BassError::UnsupportedRate);
     }
     let rate_f = rate as f32;
-    let frames = f32_to_usize(rate_f * DURATION);
+    let frames = f32_to_usize(rate_f * Kind::Bass.duration());
     let harmonics = clamp01(harmonics);
     let decay = clamp01(decay);
     let cutoff = clamp01(cutoff);
@@ -314,49 +309,55 @@ impl Voice {
     }
 }
 
-/// The preview synth's state; only the audio writer thread touches it.
-struct Preview {
+/// The bass preview's voices; only the audio writer thread touches them.
+pub(crate) struct BassBank {
     rate: u32,
     voices: [Voice; VOICES],
     cursor: usize,
-    was_enabled: bool,
-    noise: WhiteNoise,
 }
 
-impl Preview {
-    fn new() -> Self {
-        let rate_f = NOMINAL_RATE as f32;
+impl BassBank {
+    /// Four cleared voices at `rate`.
+    pub(crate) fn new(rate: u32) -> Self {
+        let rate_f = rate as f32;
         Self {
-            rate: NOMINAL_RATE,
+            rate,
             voices: core::array::from_fn(|_| Voice::new(rate_f)),
             cursor: 0,
-            was_enabled: false,
-            noise: WhiteNoise::default(),
         }
     }
 
-    fn init(&mut self, rate: u32) {
-        self.rate = rate;
-        let rate_f = rate as f32;
+    /// Apply the live brightness and cutoff to the voices already sounding.
+    pub(crate) fn configure(&mut self, brightness: f32, cutoff: f32) {
+        let rate_f = self.rate as f32;
+        let cutoff_hz = 700.0 * 24.0_f32.powf(cutoff);
+        let safe_cutoff = if cutoff_hz < rate_f * 0.45 {
+            cutoff_hz
+        } else {
+            rate_f * 0.45
+        };
         for voice in &mut self.voices {
-            voice.string = StringVoice::new(rate_f);
-            voice.string.set_sustain(false);
-            voice.filter = Svf::new(rate_f);
-            voice.active = false;
-        }
-        self.cursor = 0;
-    }
-
-    fn stop(&mut self) {
-        for voice in &mut self.voices {
-            voice.active = false;
-        }
-        for pending in &PENDING {
-            pending.store(0, Ordering::Release);
+            if !voice.active {
+                continue;
+            }
+            voice.string.set_accent(0.65 + DRIVE * 0.35);
+            voice.string.set_structure(0.25 + DRIVE * 0.6);
+            voice.string.set_brightness(0.05 + brightness * 0.9);
+            voice.string.set_damping(0.35 + (1.0 - brightness) * 0.55);
+            voice.filter.set_frequency(safe_cutoff);
+            voice.filter.set_drive(DRIVE * 0.35);
         }
     }
 
-    fn trigger(&mut self, pad: usize, velocity: f32, brightness: f32, decay: f32, cutoff: f32) {
+    /// Strike one pad on the next free voice.
+    pub(crate) fn trigger(
+        &mut self,
+        pad: usize,
+        velocity: f32,
+        brightness: f32,
+        decay: f32,
+        cutoff: f32,
+    ) {
         let rate_f = self.rate as f32;
         let index = self.cursor % VOICES;
         self.cursor = self.cursor.wrapping_add(1);
@@ -386,209 +387,49 @@ impl Preview {
         voice.quiet = 0;
         voice.active = true;
     }
-}
 
-/// The preview engine, only ever touched by the audio writer thread.
-struct PreviewCell(core::cell::UnsafeCell<Option<Preview>>);
-
-// SAFETY: the synth is only ever reached through `with_preview`, which runs on
-// the audio writer thread; the pad and UI threads only use the atomics below.
-// In particular `preview_enable` must not touch the synth: it is called from the
-// UI thread and would race the mixer.
-unsafe impl Sync for PreviewCell {}
-
-static PREVIEW: PreviewCell = PreviewCell(core::cell::UnsafeCell::new(None));
-/// A reset the audio thread has not run yet.
-static RESET: AtomicBool = AtomicBool::new(false);
-static ENABLED: AtomicBool = AtomicBool::new(false);
-/// The selected synth character, as a [`Kind::ALL`] index.
-static KIND: AtomicU32 = AtomicU32::new(0);
-/// Brightness, as f32 bits.
-static BRIGHTNESS: AtomicU32 = AtomicU32::new(0.52_f32.to_bits());
-/// Decay, as f32 bits.
-static DECAY: AtomicU32 = AtomicU32::new(0.25_f32.to_bits());
-/// Filter cutoff, as f32 bits.
-static CUTOFF: AtomicU32 = AtomicU32::new(0.56_f32.to_bits());
-/// Velocity per pad, as f32 bits; zero means "no strike pending".
-static PENDING: [AtomicU32; PADS] = [const { AtomicU32::new(0) }; PADS];
-
-fn with_preview<R>(f: impl FnOnce(&mut Preview) -> R) -> R {
-    // SAFETY: see `PreviewCell`; a preview is built on first use and never
-    // removed.
-    unsafe {
-        let slot = &mut *PREVIEW.0.get();
-        f(slot.get_or_insert_with(Preview::new))
-    }
-}
-
-/// Select the synth character and silence any old voices.
-pub fn preview_set_kind(kind: Kind) {
-    KIND.store(u32::try_from(kind.index()).unwrap_or(0), Ordering::Release);
-    preview_reset();
-    crate::synth::preview_set_kind(kind);
-}
-
-/// The selected synth character.
-#[must_use]
-pub fn preview_kind() -> Kind {
-    Kind::from_index(i32::try_from(KIND.load(Ordering::Acquire)).unwrap_or(0))
-}
-
-/// Turn the preview on or off.
-///
-/// Only the flag is written here: the synth belongs to the audio thread, which
-/// silences every voice on its next block once the flag is off.  Reaching the
-/// synth from this thread would race the mixer.
-pub fn preview_enable(enabled: bool) {
-    ENABLED.store(enabled, Ordering::Release);
-}
-
-/// Set the three knobs, each 0..1.
-pub fn preview_set_params(brightness: f32, decay: f32, cutoff: f32) {
-    BRIGHTNESS.store(clamp01(brightness).to_bits(), Ordering::Release);
-    DECAY.store(clamp01(decay).to_bits(), Ordering::Release);
-    CUTOFF.store(clamp01(cutoff).to_bits(), Ordering::Release);
-    crate::synth::preview_set_params([brightness, decay, cutoff]);
-}
-
-/// Strike one pad; the audio thread picks the velocity up.
-pub fn preview_note(pad: usize, velocity: f32) {
-    if velocity <= 0.0 || !velocity.is_finite() {
-        return;
-    }
-    if preview_kind() != Kind::Bass {
-        crate::synth::preview_note(pad, velocity);
-        return;
-    }
-    if let Some(slot) = PENDING.get(pad) {
-        slot.store(clamp01(velocity).to_bits(), Ordering::Release);
-    }
-}
-
-/// Ask the audio thread to silence every voice and drop pending strikes before
-/// its next block, so a page that just opened never plays a stale note.
-pub fn preview_reset() {
-    RESET.store(true, Ordering::Release);
-    crate::synth::preview_reset();
-}
-
-/// Mix the preview into up to two channel slices.
-///
-/// The slices must all be at least `frames` long; extra channels are ignored,
-/// matching the stereo preview.
-pub fn preview_mix_slices(channels: &mut [&mut [f32]], frames: usize, rate: u32) -> f32 {
-    if preview_kind() != Kind::Bass {
-        return crate::synth::preview_mix_slices(channels, frames, rate);
-    }
-    let mut pointers: [*mut f32; 2] = [core::ptr::null_mut(); 2];
-    let count = channels.len().min(2);
-    for (slot, channel) in pointers.iter_mut().zip(channels.iter_mut()).take(count) {
-        *slot = channel.as_mut_ptr();
-    }
-    // SAFETY: every pointer addresses a slice of at least `frames` samples, and
-    // the count matches the pointers filled.
-    unsafe { preview_mix(&mut pointers[..count], frames, rate) }
-}
-
-/// Mix the preview into the device's output channels and report its peak.
-///
-/// # Safety
-///
-/// Every pointer in `channels` must be writable for `frames` samples, and
-/// `channels` itself may be empty (which mixes nothing).
-pub unsafe fn preview_mix(channels: &mut [*mut f32], frames: usize, rate: u32) -> f32 {
-    let channel_count = channels.len();
-    if RESET.swap(false, Ordering::AcqRel) {
-        with_preview(Preview::stop);
-    }
-    if !ENABLED.load(Ordering::Acquire)
-        || channel_count == 0
-        || frames == 0
-        || !(8_000..=192_000).contains(&rate)
-    {
-        with_preview(|preview| {
-            if preview.was_enabled {
-                preview.stop();
-            }
-            preview.was_enabled = false;
-        });
-        return 0.0;
-    }
-
-    let brightness = f32::from_bits(BRIGHTNESS.load(Ordering::Acquire));
-    let decay = f32::from_bits(DECAY.load(Ordering::Acquire));
-    let cutoff = f32::from_bits(CUTOFF.load(Ordering::Acquire));
-    let rate_f = rate as f32;
-    let cutoff_hz = 700.0 * 24.0_f32.powf(cutoff);
-    let safe_cutoff = if cutoff_hz < rate_f * 0.45 {
-        cutoff_hz
-    } else {
-        rate_f * 0.45
-    };
-
-    with_preview(|preview| {
-        if preview.rate != rate {
-            preview.init(rate);
-        }
-        preview.was_enabled = true;
-
-        for (pad, pending) in PENDING.iter().enumerate() {
-            let bits = pending.swap(0, Ordering::AcqRel);
-            if bits != 0 {
-                preview.trigger(pad, f32::from_bits(bits), brightness, decay, cutoff);
-            }
-        }
-        for voice in &mut preview.voices {
+    /// One frame of every active voice.
+    pub(crate) fn frame(&mut self, noise: &mut WhiteNoise, rate: u32) -> f32 {
+        let rate_f = rate as f32;
+        let max_age = rate_f * PREVIEW_LENGTH;
+        let max_quiet = rate / 3;
+        let mut sample = 0.0;
+        for voice in &mut self.voices {
             if !voice.active {
                 continue;
             }
-            voice.string.set_accent(0.65 + DRIVE * 0.35);
-            voice.string.set_structure(0.25 + DRIVE * 0.6);
-            voice.string.set_brightness(0.05 + brightness * 0.9);
-            voice.string.set_damping(0.35 + (1.0 - brightness) * 0.55);
-            voice.filter.set_frequency(safe_cutoff);
-            voice.filter.set_drive(DRIVE * 0.35);
+            voice.filter.process(voice.string.process(false, noise));
+            let t = voice.age as f32 / rate_f;
+            let value = voice.filter.low_pass() * voice.level * (-t / voice.decay).exp();
+            sample += value;
+            if value.abs() < 1e-5 {
+                voice.quiet += 1;
+            } else {
+                voice.quiet = 0;
+            }
+            voice.age += 1;
+            if voice.age as f32 > max_age || voice.quiet > max_quiet {
+                voice.active = false;
+            }
         }
+        fclamp(sample, -PREVIEW_PEAK, PREVIEW_PEAK)
+    }
 
-        let mut noise = preview.noise;
-        let max_age = rate_f * PREVIEW_LENGTH;
-        let max_quiet = rate / 3;
-        let mut peak = 0.0_f32;
-        for frame in 0..frames {
-            let mut sample = 0.0;
-            for voice in &mut preview.voices {
-                if !voice.active {
-                    continue;
-                }
-                voice
-                    .filter
-                    .process(voice.string.process(false, &mut noise));
-                let t = voice.age as f32 / rate_f;
-                let value = voice.filter.low_pass() * voice.level * (-t / voice.decay).exp();
-                sample += value;
-                if value.abs() < 1e-5 {
-                    voice.quiet += 1;
-                } else {
-                    voice.quiet = 0;
-                }
-                voice.age += 1;
-                if voice.age as f32 > max_age || voice.quiet > max_quiet {
-                    voice.active = false;
-                }
-            }
-            sample = fclamp(sample, -PREVIEW_PEAK, PREVIEW_PEAK);
-            for pointer in channels.iter_mut() {
-                // SAFETY: the caller promises each channel is writable for
-                // `frames` samples.
-                let channel = unsafe { core::slice::from_raw_parts_mut(*pointer, frames) };
-                channel[frame] = fclamp(channel[frame] + sample, -1.0, 1.0);
-            }
-            peak = peak.max(sample.abs());
+    /// Silence every voice.
+    pub(crate) fn stop(&mut self) {
+        for voice in &mut self.voices {
+            voice.active = false;
         }
-        preview.noise = noise;
-        peak
-    })
+    }
 }
+
+// The preview's public surface lives in `crate::preview`; these names are what
+// the feature and the tests already use.
+pub use crate::preview::{
+    enable as preview_enable, kind as preview_kind, mix_slices as preview_mix_slices,
+    note as preview_note, reset as preview_reset, set_kind as preview_set_kind,
+    set_params as preview_set_params,
+};
 
 /// Clamp to 0..1, treating a non-finite value as zero.
 fn clamp01(value: f32) -> f32 {
@@ -604,8 +445,8 @@ fn clamp01(value: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BassError, PADS, Pluck, preview_enable, preview_mix, preview_mix_slices, preview_note,
-        render, render_with,
+        BassError, Kind, PADS, Pluck, preview_enable, preview_mix_slices, preview_note, render,
+        render_with,
     };
     use crate::dsp::SequenceNoise;
 
@@ -673,6 +514,22 @@ mod tests {
     }
 
     #[test]
+    fn every_kind_round_trips_through_its_index() {
+        for (index, kind) in Kind::ALL.iter().enumerate() {
+            assert_eq!(kind.index(), index, "{kind:?}");
+            assert_eq!(Kind::from_index(i32::try_from(index).unwrap_or(-1)), *kind);
+        }
+        for index in -20..20 {
+            let kind = Kind::from_index(index);
+            assert_eq!(Kind::ALL[kind.index()], kind);
+            assert_eq!(Kind::from_index(index).step(0), kind);
+        }
+        assert_eq!(Kind::Bass.step(-1), Kind::Organ);
+        assert_eq!(Kind::Organ.step(1), Kind::Bass);
+        assert_eq!(Kind::Bass.step(i32::MAX), Kind::Bass.step(i32::MAX - 8));
+    }
+
+    #[test]
     fn unsupported_rates_are_refused() {
         assert_eq!(
             render(100, 0.5, 0.3, 0.6).unwrap_err(),
@@ -690,6 +547,9 @@ mod tests {
     #[test]
     fn a_preview_note_dies_within_its_envelope() {
         use super::preview_reset;
+        let _serial = crate::preview::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _serial = PREVIEW_TEST
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -698,13 +558,14 @@ mod tests {
         preview_note(3, 1.0);
         let rate = 44_100;
         let mut peak_late = 0.0_f32;
-        // Two seconds of 128-frame blocks; the voice is capped at 1.2 s.
+        // Two seconds of 128-frame blocks; the voice is capped at `PREVIEW_LENGTH`.
         for block in 0..(2 * rate / 128) {
-            let mut left = vec![0.0_f32; 128];
-            let mut right = vec![0.0_f32; 128];
-            let mut channels = [left.as_mut_ptr(), right.as_mut_ptr()];
-            // SAFETY: both channels hold 128 samples.
-            let peak = unsafe { preview_mix(&mut channels, 128, rate) };
+            let mut left = [0.0_f32; 128];
+            let mut right = [0.0_f32; 128];
+            // SAFETY: both slices hold 128 samples and this test is serialised
+            // against the other preview tests.
+            let peak =
+                unsafe { preview_mix_slices(&mut [&mut left[..], &mut right[..]], 128, rate) };
             if block * 128 > rate * 3 / 2 {
                 peak_late = peak_late.max(peak);
             }
@@ -718,6 +579,9 @@ mod tests {
 
     #[test]
     fn the_preview_strikes_a_pad_and_reports_a_peak() {
+        let _serial = crate::preview::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _serial = PREVIEW_TEST
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -726,30 +590,23 @@ mod tests {
         preview_enable(true);
         // Let the thread consume any reset left by a previous test before the
         // strike is queued.
-        let _ = preview_mix_slices(&mut [], 0, 44_100);
+        // SAFETY: the empty slice carries no writable memory.
+        let _ = unsafe { preview_mix_slices(&mut [], 0, 44_100) };
         preview_note(0, 0.8);
         let mut left = vec![0.0_f32; 4_096];
         let mut right = vec![0.0_f32; 4_096];
-        // SAFETY: both channel buffers hold `left.len()` samples.
-        let peak = unsafe {
-            preview_mix(
-                &mut [left.as_mut_ptr(), right.as_mut_ptr()],
-                left.len(),
-                44_100,
-            )
-        };
+        let frames = left.len();
+        // SAFETY: both slices hold `frames` samples and this test is serialised
+        // against the other preview tests.
+        let peak =
+            unsafe { preview_mix_slices(&mut [&mut left[..], &mut right[..]], frames, 44_100) };
         assert!(peak > 0.0, "the strike is audible: {peak}");
         assert!(left.iter().any(|v| *v != 0.0));
         assert_eq!(left, right, "both channels get the same voice mix");
         preview_enable(false);
-        // SAFETY: both channel buffers still hold `left.len()` samples.
-        let silent = unsafe {
-            preview_mix(
-                &mut [left.as_mut_ptr(), right.as_mut_ptr()],
-                left.len(),
-                44_100,
-            )
-        };
+        // SAFETY: both slices still hold `frames` samples.
+        let silent =
+            unsafe { preview_mix_slices(&mut [&mut left[..], &mut right[..]], frames, 44_100) };
         assert!(silent.abs() < f32::EPSILON);
     }
 }

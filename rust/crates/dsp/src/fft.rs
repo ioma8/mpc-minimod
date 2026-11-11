@@ -87,6 +87,13 @@ pub enum FftError {
     TooSmall,
     /// The requested size exceeds [`Fft::MAX_SIZE`].
     TooLarge,
+    /// The buffer is not exactly the transform size.
+    BufferLength {
+        /// The size the transform was built for.
+        expected: usize,
+        /// The length that was passed.
+        got: usize,
+    },
 }
 
 impl fmt::Display for FftError {
@@ -95,6 +102,9 @@ impl fmt::Display for FftError {
             Self::NotPowerOfTwo => f.write_str("FFT size must be a power of two"),
             Self::TooSmall => f.write_str("FFT size must be at least 2"),
             Self::TooLarge => f.write_str("FFT size is too large"),
+            Self::BufferLength { expected, got } => {
+                write!(f, "FFT buffer must hold {expected} points, got {got}")
+            }
         }
     }
 }
@@ -166,24 +176,35 @@ impl Fft {
 
     /// In-place forward transform.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics when `buffer` is not exactly [`Fft::size`] points long.  Callers
-    /// in this crate size their buffers from [`Fft::size`]; the FFI boundary
-    /// validates lengths before reaching here.
-    pub fn forward_transform(&self, buffer: &mut [Complex]) {
-        assert_eq!(buffer.len(), self.size, "FFT buffer length");
+    /// Returns [`FftError::BufferLength`] when `buffer` is not exactly
+    /// [`Fft::size`] points long.
+    pub fn forward_transform(&self, buffer: &mut [Complex]) -> Result<(), FftError> {
+        if buffer.len() != self.size {
+            return Err(FftError::BufferLength {
+                expected: self.size,
+                got: buffer.len(),
+            });
+        }
         self.permute(buffer);
         self.butterflies(buffer, &self.forward);
+        Ok(())
     }
 
     /// In-place inverse transform, scaled by `1/size`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics when `buffer` is not exactly [`Fft::size`] points long.
-    pub fn inverse_transform(&self, buffer: &mut [Complex]) {
-        assert_eq!(buffer.len(), self.size, "FFT buffer length");
+    /// Returns [`FftError::BufferLength`] when `buffer` is not exactly
+    /// [`Fft::size`] points long.
+    pub fn inverse_transform(&self, buffer: &mut [Complex]) -> Result<(), FftError> {
+        if buffer.len() != self.size {
+            return Err(FftError::BufferLength {
+                expected: self.size,
+                got: buffer.len(),
+            });
+        }
         self.permute(buffer);
         self.butterflies(buffer, &self.inverse);
         let scale = 1.0 / u32_to_f32(self.size as u32);
@@ -191,6 +212,7 @@ impl Fft {
             value.re *= scale;
             value.im *= scale;
         }
+        Ok(())
     }
 
     fn permute(&self, buffer: &mut [Complex]) {
@@ -237,6 +259,26 @@ mod tests {
     }
 
     #[test]
+    fn a_wrong_buffer_length_is_refused_instead_of_panicking() {
+        let fft = Fft::new(8).expect("valid");
+        let mut short = [Complex::ZERO; 4];
+        assert_eq!(
+            fft.forward_transform(&mut short),
+            Err(FftError::BufferLength {
+                expected: 8,
+                got: 4
+            })
+        );
+        assert_eq!(
+            fft.inverse_transform(&mut short),
+            Err(FftError::BufferLength {
+                expected: 8,
+                got: 4
+            })
+        );
+    }
+
+    #[test]
     fn round_trip_restores_the_input() {
         for size in [2, 4, 16, 1024] {
             let fft = Fft::new(size).expect("size is valid");
@@ -247,8 +289,8 @@ mod tests {
                 })
                 .collect();
             let original = buffer.clone();
-            fft.forward_transform(&mut buffer);
-            fft.inverse_transform(&mut buffer);
+            fft.forward_transform(&mut buffer).expect("length fits");
+            fft.inverse_transform(&mut buffer).expect("length fits");
             for (got, want) in buffer.iter().zip(original.iter()) {
                 assert!(
                     (got.re - want.re).abs() < 1e-5,
@@ -267,7 +309,7 @@ mod tests {
             let phase = 4.0 * u32_to_f32(i as u32) * core::f32::consts::TAU / 64.0;
             *value = Complex::new(phase.cos(), phase.sin());
         }
-        fft.forward_transform(&mut buffer);
+        fft.forward_transform(&mut buffer).expect("length fits");
         // e^{i 2 pi 4 n / 64} has all of its energy in bin 4.
         let peaks: Vec<usize> = buffer
             .iter()

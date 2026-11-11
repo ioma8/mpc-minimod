@@ -57,70 +57,88 @@ g_midi: mpc_sample_sdk::state::Global<MidiState> = mpc_sample_sdk::state::Global
 
 /// Handle one note event; the SDK forwards whatever this returns.
 pub fn note(event: &mut NoteEvent) -> NoteFlow {
-    // the record is this module's and only the input thread writes it.
-    let state = crate::ui_write(&g_midi);
-    if state.on == 0 {
-        return NoteFlow::Forward;
-    }
-    if !event.external {
-        state.pad_ctx = event.context;
-        if event.kind == PAD_EVENT && event.velocity > 0.0 {
-            state.pad_tune_mode = i32::from(event.mask & 1 == 0);
-            if event.mask & 1 != 0 {
-                state.pad_prop_val = i32::from(event.property);
-                state.pad_level_byte = u32::from(event.note);
-                state.pad_prop_pending = 1;
+    // SAFETY: the MIDI record is owned by the app's input thread; the closure
+    // does not take another borrow of it.
+    unsafe {
+        g_midi.with_mut(|state| {
+            if state.on == 0 {
+                return NoteFlow::Forward;
             }
-        }
-    }
-    let index = usize::from(event.note);
-    let held = state.replayed.get(index).copied().unwrap_or(0) != 0;
-    if state.levels != 0
-        && event.external
-        && event.note <= 127
-        && (event.kind == PAD_EVENT || event.note_off)
-        && (event.note_on || held)
-    {
-        // A chromatic note is measured from the sample's own root note.
-        let row = i32::from(event.note) - crate::autotrim::pad_root(crate::input::last_pad());
-        let pad = u8::try_from(state.pad_level_byte).unwrap_or(0);
-        let context = state.pad_ctx;
-        if event.replay_as_pad(pad, row, context) {
-            if let Some(slot) = state.replayed.get_mut(index) {
-                *slot = u8::from(event.note_on);
+            if !event.external {
+                state.pad_ctx = event.context;
+                if event.kind == PAD_EVENT && event.velocity > 0.0 {
+                    state.pad_tune_mode = i32::from(event.mask & 1 == 0);
+                    if event.mask & 1 != 0 {
+                        state.pad_prop_val = i32::from(event.property);
+                        state.pad_level_byte = u32::from(event.note);
+                        state.pad_prop_pending = 1;
+                    }
+                }
             }
-            if event.note_on {
-                state.chromatic_count = state.chromatic_count.wrapping_add(1);
-                state.chromatic_note = i32::from(event.note);
-                state.chromatic_delta = row;
+            let index = usize::from(event.note);
+            let held = state.replayed.get(index).copied().unwrap_or(0) != 0;
+            if state.levels != 0
+                && event.external
+                && event.note <= 127
+                && (event.kind == PAD_EVENT || event.note_off)
+                && (event.note_on || held)
+            {
+                // A chromatic note is measured from the sample's own root note.
+                let row =
+                    i32::from(event.note) - crate::autotrim::pad_root(crate::input::last_pad());
+                let pad = u8::try_from(state.pad_level_byte).unwrap_or(0);
+                let context = state.pad_ctx;
+                if event.replay_as_pad(pad, row, context) {
+                    if let Some(slot) = state.replayed.get_mut(index) {
+                        *slot = u8::from(event.note_on);
+                    }
+                    if event.note_on {
+                        state.chromatic_count = state.chromatic_count.wrapping_add(1);
+                        state.chromatic_note = i32::from(event.note);
+                        state.chromatic_delta = row;
+                    }
+                    return NoteFlow::Replayed;
+                }
             }
-            return NoteFlow::Replayed;
-        }
+            NoteFlow::Forward
+        })
     }
-    NoteFlow::Forward
 }
 
 /// Whether the mod handles notes at all.
+///
+/// Turning the mode off also drops 16 Levels: `ui` calls this with the value
+/// `levels_active` returned, so a page that went away cannot leave a mode that
+/// reappears when it comes back.
 pub fn set_on(on: i32) {
-    crate::ui_write(&g_midi).on = i32::from(on != 0);
+    // SAFETY: the MIDI record is owned by the app's input thread.
+    unsafe {
+        g_midi.with_mut(|state| {
+            let on = i32::from(on != 0);
+            state.on = on;
+            if on == 0 {
+                state.levels = 0;
+            }
+        });
+    }
 }
 
 /// Toggle 16 Levels and keep the dispatcher in step.
 pub fn toggle_levels() {
     let pad = crate::input::last_pad();
-    let state = crate::ui_write(&g_midi);
-    state.levels = i32::from(state.levels == 0);
-    if state.levels != 0 && (0..16).contains(&pad) {
-        state.pad_level_byte = u32::try_from(pad).unwrap_or(0);
+    // SAFETY: the MIDI record is owned by the app's input thread.
+    unsafe {
+        g_midi.with_mut(|state| {
+            state.levels = i32::from(state.levels == 0);
+            if state.levels != 0 && (0..16).contains(&pad) {
+                state.pad_level_byte = u32::try_from(pad).unwrap_or(0);
+            }
+            state.on = state.levels;
+        });
     }
-    state.on = state.levels;
 }
 
 /// Whether 16 Levels is showing and its page predicate agrees.
-///
-/// # Safety
-///
-/// Reads the app's screen object.
 #[must_use]
 pub fn levels_active() -> i32 {
     let screen = crate::paint::screen();
@@ -131,11 +149,10 @@ pub fn levels_active() -> i32 {
     // UI thread.
     let visible = unsafe { crate::page::visible(screen) };
     if !crate::page::is_sample_page(screen) || !visible {
-        crate::ui_write(&g_midi).levels = 0;
-        set_on(0);
         return 0;
     }
-    crate::ui_read(&g_midi).levels
+    // SAFETY: the MIDI record is owned by the app's input thread.
+    unsafe { g_midi.with(|state| state.levels) }
 }
 
 #[cfg(test)]
@@ -145,7 +162,8 @@ mod tests {
     #[test]
     fn the_state_starts_without_a_mode() {
         // the tests read a static the process owns.
-        let state = *crate::ui_read(&g_midi);
+        // SAFETY: the test is the only accessor while it runs.
+        let state = unsafe { g_midi.with(|state| *state) };
         assert_eq!(state.on, 0);
         assert_eq!(state.levels, 0);
         assert_eq!(state.replayed.len(), 128);

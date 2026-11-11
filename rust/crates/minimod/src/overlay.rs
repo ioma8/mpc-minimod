@@ -25,28 +25,6 @@ fn toast(graphics: usize) {
     paint::text(graphics, &text, x + 4, y + 6, w - 8, h - 12, 18.0);
 }
 
-/// The trim edges the last autotrim produced, drawn where the page's markers
-/// would be.
-fn trim_marks(graphics: usize, first: f32, second: f32) {
-    if first < 0.0 || second < 0.0 {
-        return;
-    }
-    let x0 = 10 + (first * 295.0 + 0.5) as i32;
-    let x1 = 10 + (second * 295.0 + 0.5) as i32;
-    paint::colour(graphics, 0xff1b_1b1e);
-    if x0 > 10 {
-        paint::rect(graphics, 10, 88, x0 - 10, 98);
-    }
-    if x1 < 305 {
-        paint::rect(graphics, x1, 88, 305 - x1, 98);
-    }
-    paint::colour(graphics, 0xffff_ffff);
-    paint::rect(graphics, x0, 88, 1, 98);
-    paint::rect(graphics, x1, 88, 1, 98);
-    paint::rect(graphics, x0, 88, 3, 1);
-    paint::rect(graphics, x1, 88, 3, 1);
-}
-
 /// Draw the effects menu over the page.
 fn menu(graphics: usize) {
     let state = crate::menu::state();
@@ -91,18 +69,10 @@ pub fn paint(graphics: Graphics, event: mpc_sample_sdk::PaintEvent) {
     }
     let component = event.component;
     let handle = graphics.handle();
-    crate::spectral::frame(component);
+    crate::spectral::frame();
     let _ = crate::jobflow::finish(component);
-    let restore_pending = crate::menu::state().restore_pending;
-    if restore_pending != 0 && crate::ui::shift() == 0 {
-        crate::menu::state_mut().restore_pending = 0;
-        crate::ui::minimod_restore_chop(crate::ui::state());
-    }
     toast(handle);
-    let marks = crate::ui::marks();
-    trim_marks(handle, marks[0], marks[1]);
     if crate::backend::looper::looper_is_open() != 0 {
-        paint::start_repaint_pump(crate::backend::audio::pump_component);
         crate::looper_view::draw(handle);
         return;
     }

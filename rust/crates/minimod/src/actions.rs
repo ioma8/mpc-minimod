@@ -8,16 +8,61 @@ use mpc_sample_sdk::render::{RenderJob, RenderOutput};
 
 use crate::backend::{bass, hpss};
 
-/// The HPSS split action.
-pub const ACTION_SPLIT: i32 = 0;
-/// The reverb action.
-pub const ACTION_REVERB: i32 = 1;
-/// The vinyl action.
-pub const ACTION_VINYL: i32 = 2;
-/// The lo-fi action.
-pub const ACTION_LOFI: i32 = 3;
-/// The bass synth action.
-pub const ACTION_BASS: i32 = 4;
+/// One render the SAMPLE OPTIONS menu can start.
+///
+/// The SDK carries the code as an opaque `i32` in [`RenderJob::kind`]; this is
+/// the only place that mapping exists, so an unknown code is an error instead of
+/// silently becoming an effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum Action {
+    /// Harmonic/percussive split.
+    Split = 0,
+    /// Reverb.
+    Reverb = 1,
+    /// Vinyl.
+    Vinyl = 2,
+    /// Lo-fi decimator.
+    LoFi = 3,
+    /// Bass synth.
+    Bass = 4,
+}
+
+impl Action {
+    /// Every action, in menu order.
+    pub const ALL: [Self; 5] = [
+        Self::Split,
+        Self::Reverb,
+        Self::Vinyl,
+        Self::LoFi,
+        Self::Bass,
+    ];
+
+    /// The code a [`RenderJob`] carries.
+    #[must_use]
+    pub const fn code(self) -> i32 {
+        self as i32
+    }
+
+    /// The action for a job code.
+    #[must_use]
+    pub const fn from_code(code: i32) -> Option<Self> {
+        match code {
+            0 => Some(Self::Split),
+            1 => Some(Self::Reverb),
+            2 => Some(Self::Vinyl),
+            3 => Some(Self::LoFi),
+            4 => Some(Self::Bass),
+            _ => None,
+        }
+    }
+
+    /// Whether this action renders one take rather than the two-way split.
+    #[must_use]
+    pub const fn is_effect(self) -> bool {
+        !matches!(self, Self::Split)
+    }
+}
 
 /// Render `job` according to its action code.
 ///
@@ -28,10 +73,11 @@ pub const ACTION_BASS: i32 = 4;
 ///
 /// Returns the action code when the backend cannot produce the expected output.
 pub fn render(job: &mut RenderJob, knobs: &[f32], kind: bass::Kind) -> Result<(), i32> {
+    let action = Action::from_code(job.kind).ok_or(job.kind)?;
     let channels = usize::from(job.source.channels());
     let rate = job.source.rate();
-    match job.kind {
-        ACTION_SPLIT => {
+    match action {
+        Action::Split => {
             let Some((harmonic, percussive)) = hpss::split(&job.input, channels, rate) else {
                 return Err(job.kind);
             };
@@ -46,7 +92,7 @@ pub fn render(job: &mut RenderJob, knobs: &[f32], kind: bass::Kind) -> Result<()
             );
             Ok(())
         }
-        ACTION_BASS => {
+        Action::Bass => {
             let params = match knobs {
                 [a, b, c, ..] => [*a, *b, *c],
                 _ => [0.5, 0.25, 0.5],
@@ -57,14 +103,15 @@ pub fn render(job: &mut RenderJob, knobs: &[f32], kind: bass::Kind) -> Result<()
             job.push_output(RenderOutput::with_frames(audio, frames, 2).ok_or(job.kind)?);
             Ok(())
         }
-        kind => {
-            let parameters: &[(usize, f32)] = match kind {
-                ACTION_VINYL => &[(0, 0.18), (5, 0.12)],
-                ACTION_LOFI => &[(0, 0.58), (4, 0.70)],
-                _ => &[],
+        action => {
+            let parameters: &[(usize, f32)] = match action {
+                Action::Reverb => &[],
+                Action::Vinyl => &[(0, 0.18), (5, 0.12)],
+                Action::LoFi => &[(0, 0.58), (4, 0.70)],
+                _ => return Err(job.kind),
             };
             let Some(audio) = mpc_sample_sdk::platform::effect::render_code(
-                kind - 1,
+                action.code() - 1,
                 &job.input,
                 job.source.channels().into(),
                 rate,
@@ -82,7 +129,7 @@ pub fn render(job: &mut RenderJob, knobs: &[f32], kind: bass::Kind) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::{ACTION_BASS, ACTION_SPLIT, render};
+    use super::{Action, render};
     use crate::backend::bass;
     use mpc_sample_sdk::platform::selection::Selection;
     use mpc_sample_sdk::render::RenderJob;
@@ -101,8 +148,16 @@ mod tests {
     }
 
     #[test]
-    fn the_action_codes_match_their_names() {
-        assert_eq!(ACTION_SPLIT, 0);
-        assert_eq!(ACTION_BASS, 4);
+    fn the_action_codes_round_trip() {
+        for (index, action) in Action::ALL.iter().enumerate() {
+            assert_eq!(
+                i32::try_from(index).unwrap_or(-1),
+                action.code(),
+                "{action:?}"
+            );
+            assert_eq!(Action::from_code(action.code()), Some(*action));
+        }
+        assert_eq!(Action::from_code(-1), None);
+        assert_eq!(Action::from_code(9), None);
     }
 }

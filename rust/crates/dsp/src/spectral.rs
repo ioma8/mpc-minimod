@@ -17,7 +17,7 @@
 //! * **limits** — no cuts in the last 120 ms, at most `max_positions` slices,
 //!   first in time.
 
-use core::f32::consts::TAU;
+use core::mem::size_of;
 
 use crate::fft::{Complex, Fft};
 use crate::num::{f32_to_u32, f32_to_usize};
@@ -75,14 +75,39 @@ pub fn detect(
         return Err(AnalysisError::UnsupportedRequest);
     }
 
-    let mono = mono_mix(input, channels);
     let window_count = (frames + HOP - 1).div_ceil(HOP).min(MAX_FRAMES);
+    // Only the analysed prefix is copied and allocated.  A sample longer than
+    // the window budget keeps its tail unanalysed instead of allocating the
+    // whole thing, and the budget check refuses a length that is still too big.
+    let analysed_frames = window_count
+        .saturating_mul(HOP)
+        .saturating_add(FRAME)
+        .min(frames);
+    let cells = window_count
+        .checked_mul(BINS)
+        .ok_or(AnalysisError::TooLarge)?;
+    let scratch = analysed_frames
+        .checked_mul(size_of::<f32>())
+        .and_then(|bytes| bytes.checked_add(cells.checked_mul(size_of::<f32>())?))
+        .and_then(|bytes| {
+            bytes.checked_add(
+                window_count
+                    .checked_mul(CHROMA + TBANDS)?
+                    .checked_mul(size_of::<f32>())?,
+            )
+        })
+        .ok_or(AnalysisError::TooLarge)?;
+    crate::check_analysis_budget(scratch)?;
+    let mono = mono_mix(input, channels, analysed_frames);
     let rate_f = u32_to_f32(rate);
     let fft = Fft::new(FRAME).map_err(|_| AnalysisError::UnsupportedRequest)?;
 
-    let window = analysis_window();
-    let (magnitude, mut chroma, mut timbre) =
-        analyse_frames(&fft, &mono, frames, window_count, rate_f, &window);
+    let window = crate::dsp::window::hann(FRAME);
+    let Analysis {
+        magnitude,
+        mut chroma,
+        mut timbre,
+    } = analyse_frames(&fft, &mono, analysed_frames, window_count, rate_f, &window)?;
     normalise_frames(&mut chroma, &mut timbre, window_count);
 
     let flux = attack_novelty(&magnitude, window_count, rate_f);
@@ -91,12 +116,12 @@ pub fn detect(
         &chroma,
         &timbre,
         &hits,
-        frames,
+        analysed_frames,
         window_count,
         rate_f,
         max_positions,
     );
-    let positions = refine_positions(&mono, &kept, rate, frames, max_positions);
+    let positions = refine_positions(&mono, &kept, rate, analysed_frames, max_positions);
 
     Ok(Onsets {
         positions,
@@ -104,20 +129,9 @@ pub fn detect(
     })
 }
 
-/// The Hann analysis window.
-fn analysis_window() -> Vec<f32> {
-    let denominator = u32_to_f32(u32::try_from(FRAME - 1).unwrap_or(1));
-    (0..FRAME)
-        .map(|j| {
-            let phase = TAU * u32_to_f32(u32::try_from(j).unwrap_or(0)) / denominator;
-            0.5 - 0.5 * phase.cos()
-        })
-        .collect()
-}
-
-/// Average the interleaved channels into one mono buffer.
-fn mono_mix(input: &[f32], channels: usize) -> Vec<f32> {
-    let frames = input.len() / channels;
+/// Average the interleaved channels into one mono buffer, up to `frames`.
+fn mono_mix(input: &[f32], channels: usize, frames: usize) -> Vec<f32> {
+    let frames = frames.min(input.len() / channels);
     let divisor = u32_to_f32(u32::try_from(channels).unwrap_or(1));
     (0..frames)
         .map(|t| {
@@ -130,6 +144,16 @@ fn mono_mix(input: &[f32], channels: usize) -> Vec<f32> {
         .collect()
 }
 
+/// The magnitude spectrogram and its two projections.
+struct Analysis {
+    /// Per-window, per-bin magnitude.
+    magnitude: Vec<f32>,
+    /// Per-window pitch-class energy.
+    chroma: Vec<f32>,
+    /// Per-window log-band energy.
+    timbre: Vec<f32>,
+}
+
 /// Magnitude spectrogram plus its chroma and timbre projections.
 fn analyse_frames(
     fft: &Fft,
@@ -138,7 +162,7 @@ fn analyse_frames(
     window_count: usize,
     rate: f32,
     window: &[f32],
-) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+) -> Result<Analysis, AnalysisError> {
     let mut magnitude = vec![0.0_f32; window_count * BINS];
     let mut chroma = vec![0.0_f32; window_count * CHROMA];
     let mut timbre = vec![0.0_f32; window_count * TBANDS];
@@ -153,7 +177,8 @@ fn analyse_frames(
             let sample = if t < frames { mono[t] * window[j] } else { 0.0 };
             frame[j] = Complex::from_real(sample);
         }
-        fft.forward_transform(&mut frame);
+        fft.forward_transform(&mut frame)
+            .map_err(|_| AnalysisError::UnsupportedRequest)?;
         let row = &mut magnitude[f * BINS..][..BINS];
         for (b, slot) in row.iter_mut().enumerate() {
             *slot = frame[b].magnitude();
@@ -166,7 +191,11 @@ fn analyse_frames(
             timbre[f * TBANDS + band] = sum;
         }
     }
-    (magnitude, chroma, timbre)
+    Ok(Analysis {
+        magnitude,
+        chroma,
+        timbre,
+    })
 }
 
 /// Band edges in bins for the 48 log-spaced timbre bands, 60 Hz to 12 kHz.

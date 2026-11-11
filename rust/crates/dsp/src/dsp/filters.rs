@@ -3,7 +3,7 @@
 
 use core::f32::consts::PI;
 
-use super::{HALF_PI, PI_F, fclamp, fmin};
+use super::{PI_F, fclamp, fmin};
 
 /// One-pole low-pass / high-pass, used as the string's damping filter.
 #[derive(Clone, Copy, Debug)]
@@ -11,7 +11,6 @@ pub struct OnePole {
     g: f32,
     gi: f32,
     state: f32,
-    high_pass: bool,
 }
 
 impl OnePole {
@@ -22,7 +21,6 @@ impl OnePole {
             g: 0.0,
             gi: 0.0,
             state: 0.0,
-            high_pass: false,
         }
     }
 
@@ -38,16 +36,11 @@ impl OnePole {
         self.gi = 1.0 / (1.0 + self.g);
     }
 
-    /// Switch between the low-pass and the high-pass output.
-    pub const fn set_high_pass(&mut self, high_pass: bool) {
-        self.high_pass = high_pass;
-    }
-
     /// Filter one sample.
     pub fn process(&mut self, input: f32) -> f32 {
         let low = (self.g * input + self.state) * self.gi;
         self.state = self.g * (input - low) + low;
-        if self.high_pass { input - low } else { low }
+        low
     }
 }
 
@@ -85,34 +78,17 @@ impl DcBlock {
     }
 }
 
-/// Which crossfade curve to use.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Curve {
-    /// Linear.
-    Linear,
-    /// Constant power.
-    ConstantPower,
-    /// Logarithmic.
-    Logarithmic,
-    /// Exponential.
-    Exponential,
-}
-
-/// A two-input crossfade.
+/// A two-input linear crossfade.
 #[derive(Clone, Copy, Debug)]
 pub struct CrossFade {
     position: f32,
-    curve: Curve,
 }
 
 impl CrossFade {
     /// A linear crossfade centred at 0.5.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            position: 0.5,
-            curve: Curve::Linear,
-        }
+        Self { position: 0.5 }
     }
 
     /// Move the crossfade position, 0..1.
@@ -124,23 +100,7 @@ impl CrossFade {
     #[must_use]
     pub fn process(&self, first: f32, second: f32) -> f32 {
         let position = self.position;
-        match self.curve {
-            Curve::Linear => first * (1.0 - position) + second * position,
-            Curve::ConstantPower => {
-                let first_scalar = (position * HALF_PI).sin();
-                let second_scalar = ((1.0 - position) * HALF_PI).sin();
-                first * second_scalar + second * first_scalar
-            }
-            Curve::Logarithmic => {
-                let scalar =
-                    (position * (1.0_f32.ln() - 0.000_001_f32.ln()) + 0.000_001_f32.ln()).exp();
-                first * (1.0 - scalar) + second * scalar
-            }
-            Curve::Exponential => {
-                let scalar = position * position;
-                first * (1.0 - scalar) + second * scalar
-            }
-        }
+        first * (1.0 - position) + second * position
     }
 }
 
@@ -173,7 +133,8 @@ pub struct Svf {
 }
 
 impl Svf {
-    /// A filter at 200 Hz, medium resonance and half drive.
+    /// A filter at the reference's default cutoff, medium resonance and half
+    /// drive.
     #[must_use]
     pub fn new(sample_rate: f32) -> Self {
         Self {

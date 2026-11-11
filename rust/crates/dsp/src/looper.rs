@@ -32,7 +32,7 @@
 use core::fmt::Write as _;
 use core::mem::size_of;
 use core::sync::atomic::{
-    AtomicI32, AtomicI64, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering,
+    AtomicBool, AtomicI32, AtomicI64, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering,
 };
 
 use crate::sample::{s32_pair_to_f32, s32_to_f32};
@@ -278,6 +278,9 @@ static SYNC_FRAMES: AtomicU32 = AtomicU32::new(0);
 static PULSE_EPOCH: AtomicU64 = AtomicU64::new(0);
 /// Played frames since the view opened; the engine's clock.
 static TRANSPORT: AtomicU64 = AtomicU64::new(0);
+/// Bumped whenever the engine opens or closes.  A callback that started before
+/// the reset checks it between blocks and exits instead of using reset state.
+static GENERATION: AtomicU32 = AtomicU32::new(0);
 /// Record latency in frames.
 static LATENCY: AtomicU32 = AtomicU32::new(0);
 /// Source of [`LATENCY`].
@@ -290,13 +293,14 @@ pub const LOOPTAP_FRAMES: usize = 8192;
 /// The loop's contribution after the mod's master, before it is added to the
 /// app's own output.  Unlike the device tap this holds nothing but the loops,
 /// so it is the only place a level can be measured without the app's playhead
-/// and monitor in the mix.
+/// and monitor in the mix.  Exported as raw f32 bits for the acceptance harness,
+/// which reads the symbol without going through the API.
 #[unsafe(export_name = "g_looptap")]
-pub static mut LOOPTAP: [f32; LOOPTAP_FRAMES] = [0.0; LOOPTAP_FRAMES];
+pub static LOOPTAP: [AtomicU32; LOOPTAP_FRAMES] = [const { AtomicU32::new(0) }; LOOPTAP_FRAMES];
 
 /// Write cursor of `g_looptap`.
 #[unsafe(export_name = "g_looptap_w")]
-pub static mut LOOPTAP_W: u32 = 0;
+pub static LOOPTAP_W: AtomicU32 = AtomicU32::new(0);
 
 /// MAIN VOLUME, 0..127.  Exported so the acceptance harness can read the value
 /// the mixer is actually using instead of inferring it from the audio.
@@ -310,6 +314,9 @@ static RING_WRITE: AtomicU32 = AtomicU32::new(0);
 static RING_READ: AtomicU32 = AtomicU32::new(0);
 /// Pads with a take in progress.
 static TAKE_COUNT: AtomicI32 = AtomicI32::new(0);
+/// Pads whose take a control thread asked for; the audio thread starts them, so
+/// it remains the only writer of a pad's samples.
+static START_REQUEST: [AtomicBool; PADS] = [const { AtomicBool::new(false) }; PADS];
 /// Input level as raw f32 bits.
 static INPUT_LEVEL: AtomicU32 = AtomicU32::new(0);
 /// The loop pool, mapped on open.
@@ -372,6 +379,7 @@ impl Engine {
         }
         RING_WRITE.store(0, Ordering::Release);
         RING_READ.store(0, Ordering::Release);
+        Self::clear_start_requests();
         TAKE_COUNT.store(0, Ordering::Release);
         INPUT_LEVEL.store(0, Ordering::Release);
         TRANSPORT.store(0, Ordering::Release);
@@ -381,6 +389,7 @@ impl Engine {
         // The metronome is off by default.
         CLICK.store(0, Ordering::Release);
         Self::clear_message();
+        GENERATION.fetch_add(1, Ordering::AcqRel);
         OPEN.store(1, Ordering::Release);
         Self::notice("PAD: record   SHIFT+PAD: overdub");
         true
@@ -392,14 +401,25 @@ impl Engine {
             return;
         }
         Self::stop_all();
+        Self::clear_start_requests();
         SYNC.store(0, Ordering::Release);
         INPUT_LEVEL.store(0, Ordering::Release);
+        GENERATION.fetch_add(1, Ordering::AcqRel);
         OPEN.store(0, Ordering::Release);
+    }
+
+    /// Cancel every take a control thread requested but the audio thread has
+    /// not started yet.
+    fn clear_start_requests() {
+        for request in &START_REQUEST {
+            request.store(false, Ordering::Release);
+        }
     }
 
     /// Stop every loop, keeping the material.
     pub fn stop_all() {
-        for pad in &PADS_ARRAY {
+        for (index, pad) in PADS_ARRAY.iter().enumerate() {
+            START_REQUEST[index].store(false, Ordering::Release);
             let state = pad.state();
             if state.is_take() {
                 if pad
@@ -434,7 +454,7 @@ impl Engine {
             return true;
         };
         if erase {
-            clear_pad(entry);
+            clear_pad(entry, pad);
             Self::notice("PAD CLEARED");
             return true;
         }
@@ -443,12 +463,12 @@ impl Engine {
             match state {
                 State::Play | State::Stop => start_overdub(entry),
                 State::Dub | State::Rec | State::Drain => finish_pad(entry),
-                State::Idle => start_record(entry, pad),
+                State::Idle => request_record(pad),
             }
             return true;
         }
         match state {
-            State::Idle => start_record(entry, pad),
+            State::Idle => request_record(pad),
             State::Rec | State::Dub => finish_pad(entry),
             State::Play => entry.set_state(State::Stop),
             State::Stop => {
@@ -482,8 +502,8 @@ impl Engine {
             // LOOP: sync pulse; ERASE+LOOP clears everything; SHIFT+LOOP is the click.
             0x4a if down => {
                 if erase {
-                    for pad in &PADS_ARRAY {
-                        clear_pad(pad);
+                    for (index, pad) in PADS_ARRAY.iter().enumerate() {
+                        clear_pad(pad, index);
                     }
                     SYNC.store(0, Ordering::Release);
                     SYNC_FRAMES.store(0, Ordering::Release);
@@ -544,8 +564,12 @@ impl Engine {
         if !Self::is_open() || channel.is_empty() {
             return;
         }
+        let generation = GENERATION.load(Ordering::Acquire);
         let mut block = [0.0_f32; BLOCK];
         for chunk in channel.chunks(BLOCK) {
+            if GENERATION.load(Ordering::Acquire) != generation {
+                return;
+            }
             let mut peak = 0.0_f32;
             for (slot, &frame) in block.iter_mut().zip(chunk) {
                 let value = s32_to_f32(frame);
@@ -561,10 +585,14 @@ impl Engine {
         if !Self::is_open() || channels == 0 || buffer.is_empty() {
             return;
         }
+        let generation = GENERATION.load(Ordering::Acquire);
         let frames = buffer.len() / channels;
         let mut block = [0.0_f32; BLOCK];
         let mut done = 0;
         while done < frames {
+            if GENERATION.load(Ordering::Acquire) != generation {
+                return;
+            }
             let count = (frames - done).min(BLOCK);
             let mut peak = 0.0_f32;
             for i in 0..count {
@@ -590,11 +618,18 @@ impl Engine {
             return;
         }
         let frames = buffer.len() / channels;
+        let generation = GENERATION.load(Ordering::Acquire);
+        start_requested(generation, TRANSPORT.load(Ordering::Acquire));
         let takes = TAKE_COUNT.load(Ordering::Acquire);
         let mut done = 0;
         let mut input = [0.0_f32; BLOCK];
         let mut add = [0.0_f32; BLOCK];
         while done < frames {
+            // An open or close while this callback runs makes the reset state
+            // meaningless; stop at the next block boundary.
+            if GENERATION.load(Ordering::Acquire) != generation {
+                return;
+            }
             let count = (frames - done).min(BLOCK);
             add[..count].fill(0.0);
             let got = if takes != 0 {
@@ -647,9 +682,21 @@ impl Engine {
                     let drain = pad.drain.load(Ordering::Acquire);
                     let left = drain.saturating_sub(count as u32);
                     pad.drain.store(left, Ordering::Release);
-                    if left == 0 {
+                    // Only the take that is still draining may become playback:
+                    // an erase or STOP in the meantime moved the state first, and
+                    // resurrecting it here would leave a `Play` pad with no loop.
+                    if left == 0
+                        && pad
+                            .state
+                            .compare_exchange(
+                                State::Drain.raw(),
+                                State::Play.raw(),
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                    {
                         pad.skip.store(0, Ordering::Release);
-                        pad.set_state(State::Play);
                         drop_take();
                     }
                 }
@@ -676,20 +723,14 @@ impl Engine {
 
     /// Record the loop-only probe, wrapping at its capacity.
     ///
-    /// # Safety
-    ///
-    /// Only the audio thread calls this; the acceptance harness reads the ring
-    /// through `/proc/<pid>/mem` without the language model.
+    /// Only the audio thread writes it; the acceptance harness reads the ring
+    /// through `/proc/<pid>/mem`.  A plain relaxed store is enough for a single
+    /// writer and a reader that only observes bytes.
     fn tap_loop(sample: f32) {
-        // SAFETY: one writer (this thread) and a reader that only reads.
-        unsafe {
-            let index = usize::try_from(LOOPTAP_W).unwrap_or(0) % LOOPTAP_FRAMES;
-            core::ptr::write(
-                core::ptr::addr_of_mut!(LOOPTAP).cast::<f32>().add(index),
-                sample,
-            );
-            LOOPTAP_W = LOOPTAP_W.wrapping_add(1);
-        }
+        let write = LOOPTAP_W.load(Ordering::Relaxed);
+        let index = usize::try_from(write).unwrap_or(0) % LOOPTAP_FRAMES;
+        LOOPTAP[index].store(sample.to_bits(), Ordering::Relaxed);
+        LOOPTAP_W.store(write.wrapping_add(1), Ordering::Relaxed);
     }
 
     /// Fill `out` with input frames, keeping the ring shallow.
@@ -859,7 +900,12 @@ impl TextLine {
 impl core::fmt::Write for TextLine {
     fn write_str(&mut self, text: &str) -> core::fmt::Result {
         let room = self.bytes.len() - self.len;
-        let take = text.len().min(room);
+        let mut take = text.len().min(room);
+        // Never cut a UTF-8 sequence: a truncated message would make `as_str`
+        // return an empty line instead of a readable prefix.
+        while !text.is_char_boundary(take) {
+            take -= 1;
+        }
         self.bytes[self.len..self.len + take].copy_from_slice(&text.as_bytes()[..take]);
         self.len += take;
         Ok(())
@@ -986,15 +1032,21 @@ fn finish_pad(pad: &Pad) {
 }
 
 /// Forget one take.
+///
+/// Saturating, so a defensive extra call can never erase another take's count:
+/// the old `fetch_sub` followed by a separate `store(0)` could zero a count a
+/// concurrent `start_record` had just published.
 fn drop_take() {
-    let left = TAKE_COUNT.fetch_sub(1, Ordering::AcqRel) - 1;
-    if left < 0 {
-        TAKE_COUNT.store(0, Ordering::Release);
-    }
+    let _ = TAKE_COUNT.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+        (count > 0).then_some(count - 1)
+    });
 }
 
 /// Clear one pad completely.
-fn clear_pad(pad: &Pad) {
+fn clear_pad(pad: &Pad, index: usize) {
+    if let Some(request) = START_REQUEST.get(index) {
+        request.store(false, Ordering::Release);
+    }
     let state = pad.state();
     if state.is_take()
         && pad
@@ -1018,31 +1070,57 @@ fn clear_pad(pad: &Pad) {
     pad.lat.store(0, Ordering::Release);
 }
 
-/// Start a fresh take on an idle pad.
-fn start_record(pad: &Pad, index: usize) {
-    let Some(pointer) = pad_ptr(index) else {
-        return;
-    };
-    // Silence the previous take before the audio thread can see the new state,
-    // and touch the pages on this (non-audio) thread.
-    pad.set_state(State::Idle);
-    // SAFETY: the pad was just moved to `Idle`, so the audio thread is no longer
-    // rendering it and this thread may write its samples.
-    unsafe { core::slice::from_raw_parts_mut(pointer, MAX_FRAMES) }.fill(0.0);
-    pad.len.store(0, Ordering::Release);
-    pad.rec.store(0, Ordering::Release);
-    pad.skip.store(0, Ordering::Release);
-    pad.drain.store(0, Ordering::Release);
-    pad.touched.store(0, Ordering::Release);
-    pad.origin
-        .store(TRANSPORT.load(Ordering::Acquire), Ordering::Release);
-    let latency = LATENCY.load(Ordering::Acquire).min(LAT_MAX);
-    pad.lat.store(latency, Ordering::Release);
-    LATENCY_USED.store(latency, Ordering::Release);
-    pad.skip.store(latency, Ordering::Release);
-    flush_input();
-    TAKE_COUNT.fetch_add(1, Ordering::AcqRel);
-    pad.set_state(State::Rec);
+/// Ask the audio thread to start a fresh take on an idle pad.
+///
+/// The control thread must not touch the pad's samples: the audio thread can
+/// still be rendering the previous take when the press arrives, so the clear and
+/// the state transition both happen in [`start_requested`], the single writer.
+fn request_record(index: usize) {
+    if let Some(request) = START_REQUEST.get(index) {
+        request.store(true, Ordering::Release);
+    }
+}
+
+/// Start every take a control thread requested, on the audio thread.
+fn start_requested(generation: u32, transport: u64) {
+    for (index, request) in START_REQUEST.iter().enumerate() {
+        if !request.swap(false, Ordering::AcqRel) {
+            continue;
+        }
+        // A close during this callback bumped the generation and cancelled the
+        // request; do not start a take on a closed engine.
+        if GENERATION.load(Ordering::Acquire) != generation || !Engine::is_open() {
+            return;
+        }
+        let Some(pad) = PADS_ARRAY.get(index) else {
+            continue;
+        };
+        if pad.state() != State::Idle {
+            continue;
+        }
+        let Some(pointer) = pad_ptr(index) else {
+            continue;
+        };
+        // Silence the previous take before the new state is visible.  Doing it
+        // here is what makes the clear race-free: this is the only thread that
+        // ever writes a pad's samples.
+        // SAFETY: the audio thread owns every pad buffer, the pool is never
+        // freed, and `index < PADS` keeps the slice inside the mapping.
+        unsafe { core::slice::from_raw_parts_mut(pointer, MAX_FRAMES) }.fill(0.0);
+        pad.len.store(0, Ordering::Release);
+        pad.rec.store(0, Ordering::Release);
+        pad.skip.store(0, Ordering::Release);
+        pad.drain.store(0, Ordering::Release);
+        pad.touched.store(0, Ordering::Release);
+        pad.origin.store(transport, Ordering::Release);
+        let latency = LATENCY.load(Ordering::Acquire).min(LAT_MAX);
+        pad.lat.store(latency, Ordering::Release);
+        LATENCY_USED.store(latency, Ordering::Release);
+        pad.skip.store(latency, Ordering::Release);
+        flush_input();
+        TAKE_COUNT.fetch_add(1, Ordering::AcqRel);
+        pad.set_state(State::Rec);
+    }
 }
 
 /// Start overdubbing an existing loop.
@@ -1088,15 +1166,20 @@ fn record(pad: &Pad, samples: &mut [f32], input: &[f32]) {
 
 /// Add one sample to a loop at the overdub position, latency shifted, wrapped.
 ///
-/// A position that lands before the loop start (the first `latency` frames of a
-/// take) is dropped: it belongs before the recording, not at its end.
+/// The input is `latency` frames old, so it belongs at `(pos - latency) mod
+/// len`; a position that lands before the loop start wraps to the end of the
+/// loop.  `latency` is always shorter than `len` (the caller reduces it), so the
+/// two arms below cover every position.
 fn dub_add(samples: &mut [f32], len: u32, latency: u32, pos: u64, value: f32) {
     if len == 0 {
         return;
     }
+    let latency = latency.min(len - 1) as usize;
     let target = wrap_index(pos, len);
-    let Some(shifted) = target.checked_sub(latency as usize) else {
-        return;
+    let shifted = if target >= latency {
+        target - latency
+    } else {
+        target + len as usize - latency
     };
     let Some(slot) = samples.get_mut(shifted) else {
         return;
@@ -1128,12 +1211,6 @@ fn mix_click(add: &mut [f32], transport: u64) {
     }
 }
 
-/// Whether any take is in progress; used by tests.
-#[must_use]
-pub fn takes() -> i32 {
-    TAKE_COUNT.load(Ordering::Acquire)
-}
-
 /// The first `count` samples of one pad's loop buffer.  Only for tests: it hands
 /// out the recorded material so a golden fixture can compare it with the
 /// reference implementation's buffer.
@@ -1147,20 +1224,15 @@ pub fn pad_samples_for_tests(index: usize, count: usize) -> Vec<f32> {
     unsafe { core::slice::from_raw_parts(pointer, count.min(MAX_FRAMES)) }.to_vec()
 }
 
-/// The transport position, for tests and diagnostics.
-#[must_use]
-pub fn transport() -> u64 {
-    TRANSPORT.load(Ordering::Acquire)
-}
-
 /// Reset every piece of engine state.  Only for tests: production code opens
 /// and closes the view instead.
 #[cfg(test)]
 pub fn reset_for_tests() {
     Engine::close();
-    for pad in &PADS_ARRAY {
-        clear_pad(pad);
+    for (index, pad) in PADS_ARRAY.iter().enumerate() {
+        clear_pad(pad, index);
     }
+    Engine::clear_start_requests();
     SYNC.store(0, Ordering::Release);
     SYNC_FRAMES.store(0, Ordering::Release);
     PULSE_EPOCH.store(0, Ordering::Release);
@@ -1177,7 +1249,7 @@ pub fn reset_for_tests() {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_FRAMES, QUANTIZE_SLACK, pool_limit, quantize, snap};
+    use super::{MAX_FRAMES, QUANTIZE_SLACK, dub_add, pool_limit, quantize, snap};
 
     /// The original step-by-step rule, kept as the oracle for [`snap`].
     fn reference(frames: u32, pulse: u32, max: u32) -> u32 {
@@ -1228,6 +1300,38 @@ mod tests {
         assert!(
             quantize(limit.saturating_add(1)) <= limit,
             "cut to the pool"
+        );
+    }
+
+    #[test]
+    fn an_overdub_wraps_to_the_end_of_the_loop() {
+        let mut samples = [0.0_f32; 10];
+        // pos 10 in a 10-frame loop is the next pass's first frame; with a
+        // latency of 3 it belongs at frame 7.
+        dub_add(&mut samples, 10, 3, 10, 1.0);
+        assert_eq!(samples.iter().position(|value| *value > 0.0), Some(7));
+        assert!(samples[..7].iter().all(|value| *value == 0.0));
+        // A target before the latency wraps to the end instead of being dropped:
+        // target 1 - latency 3 is frame 8.
+        dub_add(&mut samples, 10, 3, 11, 1.0);
+        assert!(samples[8] > 0.0, "the seam must be overdubbed");
+        // target == latency is frame 0.
+        dub_add(&mut samples, 10, 3, 13, 1.0);
+        assert!(samples[0] > 0.0);
+        // The wrap keeps every pass writing exactly one frame.
+        let mut written = [0_u8; 10];
+        for pos in 0..30 {
+            let mut one = [0.0_f32; 10];
+            dub_add(&mut one, 10, 3, pos, 1.0);
+            let index = one
+                .iter()
+                .position(|value| *value > 0.0)
+                .expect("writes one frame");
+            written[index] += 1;
+        }
+        assert!(
+            written.iter().all(|count| *count == 3),
+            "every frame is written once per pass: {written:?}"
         );
     }
 }

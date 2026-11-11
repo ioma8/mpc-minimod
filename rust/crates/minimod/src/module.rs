@@ -4,8 +4,8 @@
 //! type only decides what the features do with the events.
 
 use mpc_sample_sdk::{
-    ButtonEvent, ButtonFlow, CcEvent, CcFlow, EncoderEvent, EncoderFlow, Mod, NoteEvent, NoteFlow,
-    PadEvent, PadFlow, PaintEvent, SurfaceEvent, SurfaceFlow,
+    AudioHooks, ButtonEvent, ButtonFlow, CcEvent, CcFlow, EncoderEvent, EncoderFlow, Mod,
+    NoteEvent, NoteFlow, PadEvent, PadFlow, PaintEvent, SurfaceEvent, SurfaceFlow,
 };
 
 /// The mod.  Its state lives in the feature modules, as small process statics.
@@ -18,6 +18,10 @@ impl Mod for Minimod {
         // were installed.
         crate::backend::bass::set_available(mpc_sample_sdk::sites::notes_ready());
         crate::settings::load_into_mod();
+        // One pump for the life of the process: the looper's animation and the
+        // single frame a finished worker asks for both go through it, so no
+        // worker ever calls the app's UI from its own thread.
+        crate::paint::start_repaint_pump(crate::ui::pump_component);
     }
 
     fn on_pad(&mut self, event: PadEvent) -> PadFlow {
@@ -60,16 +64,12 @@ impl Mod for Minimod {
         crate::menu::follow_preview();
     }
 
-    fn on_input_interleaved(&mut self, frames: &[i32], channels: usize, rate: u32) {
-        crate::backend::audio::input_interleaved(frames, channels, rate);
-    }
-
-    fn on_input_planar(&mut self, channels: &[&[i32]], rate: u32) {
-        crate::backend::audio::input_planar(channels, rate);
-    }
-
-    fn on_output(&mut self, frames: &mut [i32], info: &mpc_sample_sdk::audio::OutputInfo) {
-        crate::backend::audio::output(frames, info);
+    fn audio(&self) -> AudioHooks {
+        AudioHooks {
+            output: Some(crate::backend::audio::output),
+            input_interleaved: Some(crate::backend::audio::input_interleaved),
+            input_planar: Some(crate::backend::audio::input_planar),
+        }
     }
 }
 

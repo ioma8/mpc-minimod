@@ -7,27 +7,9 @@
 //!
 //! The ladder is pure; the caller applies what it decides.
 
-use core::sync::atomic::{AtomicI32, Ordering};
-
-/// Master volume.
-pub const CC_MASTER: u16 = 0x13;
-/// Knob 1.
-pub const CC_KNOB1: u16 = 0x10;
-/// Knob 2.
-pub const CC_KNOB2: u16 = 0x11;
-/// Knob 3.
-pub const CC_KNOB3: u16 = 0x12;
-/// The encoder.
-pub const CC_DATA: u16 = 0x64;
-
-/// One millisecond of trim, in frames at 44.1 kHz.
-const FRAMES_PER_MS: i32 = 44;
-/// The trim knob's range, in milliseconds either way.
-const TRIM_LIMIT_MS: i32 = 400;
-
-/// The last knob-1 value seen, so the trim follows the knob's movement rather
-/// than its absolute position.
-static KNOB1_LAST: AtomicI32 = AtomicI32::new(-1);
+pub use mpc_sample_sdk::event::cc::{
+    DATA as CC_DATA, KNOB1 as CC_KNOB1, KNOB2 as CC_KNOB2, KNOB3 as CC_KNOB3, MASTER as CC_MASTER,
+};
 
 /// What the caller should do with the event.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,8 +18,8 @@ pub enum Route {
     Pass,
     /// Drive the loops' master, then pass the event on.
     Master,
-    /// Move the trim by this many frames.
-    Trim(i32),
+    /// The knob-1 value, for the trim; the caller owns the frame scale.
+    Trim(u32),
     /// Set this bass knob (0..2) to this value.
     Bass(usize, f32),
     /// Swallow the event.
@@ -67,8 +49,6 @@ pub struct Jobs {
 /// Everything the ladder looks at.
 #[derive(Clone, Copy, Debug)]
 pub struct Context {
-    /// Whether this event is the mod replaying its own command.
-    pub replaying: bool,
     /// The controller number.
     pub control: u16,
     /// The raw value.
@@ -79,22 +59,17 @@ pub struct Context {
     pub screens: Screens,
     /// What is running.
     pub jobs: Jobs,
-    /// The trim already applied, in frames.
-    pub trim_frames: i32,
 }
 
 /// Decide what to do with one control-change event.
 #[must_use]
 pub fn route(context: Context) -> Route {
-    if context.replaying {
-        return Route::Pass;
-    }
     if context.control == CC_MASTER {
         return Route::Master;
     }
     if context.screens.looper {
         if context.control == CC_KNOB1 {
-            return trim(context.value).map_or(Route::Consume, Route::Trim);
+            return Route::Trim(context.value);
         }
         // The looper owns the other controls while it is open.
         return Route::Consume;
@@ -125,43 +100,12 @@ fn pass_or_consume(context: Context) -> Route {
     Route::Pass
 }
 
-/// The trim the knob's movement asks for, or `None` when it did not move.
-fn trim(value: u32) -> Option<i32> {
-    let Ok(value) = i32::try_from(value) else {
-        return None;
-    };
-    let last = KNOB1_LAST.load(Ordering::Acquire);
-    if last < 0 {
-        KNOB1_LAST.store(value, Ordering::Release);
-        return None;
-    }
-    if value == last {
-        return None;
-    }
-    KNOB1_LAST.store(value, Ordering::Release);
-    let frames = (value - last) * FRAMES_PER_MS;
-    let existing = TRIM.load(Ordering::Acquire);
-    let updated = existing.saturating_add(frames);
-    Some(updated.clamp(
-        -TRIM_LIMIT_MS * FRAMES_PER_MS,
-        TRIM_LIMIT_MS * FRAMES_PER_MS,
-    ))
-}
-
-static TRIM: AtomicI32 = AtomicI32::new(0);
-
-/// Record the trim the caller actually applied, so the next step starts there.
-pub fn set_trim(frames: i32) {
-    TRIM.store(frames, Ordering::Release);
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Context, Jobs, Route, Screens, route as decide};
 
     fn plain() -> Context {
         Context {
-            replaying: false,
             control: 0x99,
             value: 0,
             range: 0.0,
@@ -174,7 +118,6 @@ mod tests {
                 busy: false,
                 spectral: false,
             },
-            trim_frames: 0,
         }
     }
 
@@ -197,18 +140,6 @@ mod tests {
                 ..plain()
             }),
             Route::Master
-        );
-    }
-
-    #[test]
-    fn a_replayed_command_never_routes_twice() {
-        assert_eq!(
-            decide(Context {
-                replaying: true,
-                control: 0x13,
-                ..with_screens(true, false, false)
-            }),
-            Route::Pass
         );
     }
 

@@ -141,9 +141,13 @@ app. They are requirements, not preferences.
   live behind `#if MINIMOD_DEBUG`; logger state behind `#if MINIMOD_LOG`. A
   release build must honour no environment switch except the documented
   `MINIMOD_TRIM_DB`.
-* **Bound UI-thread waits and report the timeout.** The native Extract command
-  finishes on an executor thread; the mod polls for the assignment. Keep the
-  budget in one constant, spend it only on failure, and say when it expired.
+* **Keep native Extract lifetime explicit.** Emulator synth and reverb traces on
+  firmware 1.3.0.12 show the handler and command execute nested on the same UI
+  thread. The SDK checks assignment and writer completion after the native call;
+  it retains a borrowed seed if a constructed command is still pending. The
+  native call itself cannot be interrupted by this check. Earlier device-era
+  notes describe a different execution order; see
+  [`re/hpss/extract-dispatch-investigation.md`](re/hpss/extract-dispatch-investigation.md).
 * **Never allocate app-owned objects from the mod.** The app's allocator is not
   libc's; a `Slice` or `Sample` allocated by the mod cannot be freed by the app.
 * **Do model work on the UI thread.** Input hooks publish a request; the paint

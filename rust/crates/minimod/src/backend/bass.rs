@@ -28,7 +28,7 @@ pub fn preview_enable(enabled: bool) {
 
 /// Set the three preview knobs.
 pub fn preview_set_params(harmonics: f32, decay: f32, cutoff: f32) {
-    bass::preview_set_params(harmonics, decay, cutoff);
+    bass::preview_set_params([harmonics, decay, cutoff]);
 }
 
 /// Select the synth character shown on the control page.
@@ -41,11 +41,6 @@ pub fn preview_set_kind(kind: Kind) {
 /// Play one preview note.
 pub fn preview_note(note: u32, velocity: f32) {
     bass::preview_note(usize::try_from(note).unwrap_or(0), velocity);
-}
-
-/// Stop every preview voice.
-pub fn preview_reset() {
-    bass::preview_reset();
 }
 
 /// Record whether the note hooks are installed.
@@ -69,7 +64,6 @@ pub fn preview_active() -> bool {
 pub fn preview_set_active(active: bool) {
     let on = active && available();
     bass::preview_enable(on);
-    minimod_dsp::synth::preview_enable(on && bass::preview_kind() != Kind::Bass);
     G_BASS_PREVIEW_ACTIVE.store(i32::from(on), Ordering::Release);
 }
 

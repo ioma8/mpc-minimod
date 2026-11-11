@@ -5,13 +5,11 @@
 //! Karplus-Strong model in [`crate::bass`]; this module supplies the other seven
 //! characters and their preview voices.
 
-use core::f32::consts::TAU;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-
-use crate::bass::{BassError, Kind, PADS, Pluck};
+use crate::bass::{BassError, Kind, Pluck};
 use crate::dsp::filters::Svf;
-use crate::dsp::{fclamp, fmin};
+use crate::dsp::{WhiteNoise, fclamp, fmin};
 use crate::num::f32_to_usize;
+use core::f32::consts::TAU;
 
 /// Voices the preview mixes.
 const VOICES: usize = 4;
@@ -218,51 +216,31 @@ pub fn render(kind: Kind, rate: u32, params: [f32; 3]) -> Result<Pluck, BassErro
     Ok(Pluck { audio, frames })
 }
 
-/// The preview engine, only ever touched by the audio writer thread.
-struct Preview {
+/// The oscillator characters' preview voices; only the audio writer thread
+/// touches them.
+pub(crate) struct SynthBank {
     rate: u32,
     kind: Kind,
-    params: [f32; 3],
     voices: [Voice; VOICES],
     active: [bool; VOICES],
     cursor: usize,
-    was_enabled: bool,
 }
 
-impl Preview {
-    fn new() -> Self {
-        let rate = 44_100;
+impl SynthBank {
+    /// Four voices of `kind` at `rate`.
+    pub(crate) fn new(kind: Kind, rate: u32, params: [f32; 3]) -> Self {
         let rate_f = rate as f32;
         Self {
             rate,
-            kind: Kind::Pads,
-            params: Kind::Pads.defaults(),
-            voices: core::array::from_fn(|_| {
-                Voice::new(Kind::Pads, rate_f, NOTE_HZ, Kind::Pads.defaults(), 0.5)
-            }),
+            kind,
+            voices: core::array::from_fn(|_| Voice::new(kind, rate_f, NOTE_HZ, params, 0.5)),
             active: [false; VOICES],
             cursor: 0,
-            was_enabled: false,
         }
     }
 
-    fn init(&mut self, rate: u32) {
-        self.rate = rate;
-        let rate_f = rate as f32;
-        self.voices =
-            core::array::from_fn(|_| Voice::new(self.kind, rate_f, NOTE_HZ, self.params, 0.5));
-        self.active = [false; VOICES];
-        self.cursor = 0;
-    }
-
-    fn stop(&mut self) {
-        self.active = [false; VOICES];
-        for pending in &PENDING {
-            pending.store(0, Ordering::Release);
-        }
-    }
-
-    fn trigger(&mut self, pad: usize, velocity: f32) {
+    /// Strike one pad on the next free voice.
+    pub(crate) fn trigger(&mut self, pad: usize, velocity: f32, params: [f32; 3]) {
         let rate_f = self.rate as f32;
         let index = self.cursor % VOICES;
         self.cursor = self.cursor.wrapping_add(1);
@@ -271,150 +249,33 @@ impl Preview {
             self.kind,
             rate_f,
             NOTE_HZ * 2.0_f32.powf(semitones),
-            self.params,
+            params,
             0.55 * fclamp(velocity, 0.0, 1.0),
         );
         self.active[index] = true;
     }
-}
 
-struct PreviewCell(core::cell::UnsafeCell<Option<Preview>>);
-
-// SAFETY: see `crate::bass`; only the audio writer thread reaches the synth.
-unsafe impl Sync for PreviewCell {}
-
-static PREVIEW: PreviewCell = PreviewCell(core::cell::UnsafeCell::new(None));
-static RESET: AtomicBool = AtomicBool::new(false);
-static ENABLED: AtomicBool = AtomicBool::new(false);
-static KIND: AtomicU32 = AtomicU32::new(Kind::Pads.index() as u32);
-static PARAMS: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
-static PENDING: [AtomicU32; PADS] = [const { AtomicU32::new(0) }; PADS];
-
-fn with_preview<R>(f: impl FnOnce(&mut Preview) -> R) -> R {
-    // SAFETY: only the audio writer thread calls this.
-    unsafe {
-        let slot = &mut *PREVIEW.0.get();
-        f(slot.get_or_insert_with(Preview::new))
-    }
-}
-
-/// Turn the non-bass preview on or off.
-pub fn preview_enable(enabled: bool) {
-    ENABLED.store(enabled, Ordering::Release);
-}
-
-/// Select the character; the next audio block rebuilds the voices.
-pub fn preview_set_kind(kind: Kind) {
-    KIND.store(kind.index() as u32, Ordering::Release);
-    preview_reset();
-}
-
-/// Set the three knobs, each 0..1.
-pub fn preview_set_params(params: [f32; 3]) {
-    for (slot, value) in PARAMS.iter().zip(params) {
-        slot.store(fclamp(value, 0.0, 1.0).to_bits(), Ordering::Release);
-    }
-}
-
-/// Ask the audio thread to silence every voice.
-pub fn preview_reset() {
-    RESET.store(true, Ordering::Release);
-}
-
-/// Strike one pad; the audio thread picks it up.
-pub fn preview_note(pad: usize, velocity: f32) {
-    if velocity <= 0.0 || !velocity.is_finite() {
-        return;
-    }
-    if let Some(slot) = PENDING.get(pad) {
-        slot.store(fclamp(velocity, 0.0, 1.0).to_bits(), Ordering::Release);
-    }
-}
-
-/// Mix the preview into up to two channel slices.
-pub fn preview_mix_slices(channels: &mut [&mut [f32]], frames: usize, rate: u32) -> f32 {
-    let mut pointers: [*mut f32; 2] = [core::ptr::null_mut(); 2];
-    let count = channels.len().min(2);
-    for (slot, channel) in pointers.iter_mut().zip(channels.iter_mut()).take(count) {
-        *slot = channel.as_mut_ptr();
-    }
-    // SAFETY: every pointer is writable for `frames` samples.
-    unsafe { preview_mix(&mut pointers[..count], frames, rate) }
-}
-
-/// Mix the preview into output channels and report its peak.
-///
-/// # Safety
-///
-/// Every pointer must be writable for `frames` samples.
-pub unsafe fn preview_mix(channels: &mut [*mut f32], frames: usize, rate: u32) -> f32 {
-    let channel_count = channels.len();
-    if RESET.swap(false, Ordering::AcqRel) {
-        with_preview(Preview::stop);
-    }
-    if !ENABLED.load(Ordering::Acquire)
-        || channel_count == 0
-        || frames == 0
-        || !(8_000..=192_000).contains(&rate)
-    {
-        with_preview(|preview| {
-            if preview.was_enabled {
-                preview.stop();
+    /// One frame of every active voice.
+    pub(crate) fn frame(&mut self, _noise: &mut WhiteNoise, _rate: u32) -> f32 {
+        let mut sample = 0.0;
+        for index in 0..VOICES {
+            if !self.active[index] {
+                continue;
             }
-            preview.was_enabled = false;
-        });
-        return 0.0;
-    }
-
-    let kind = Kind::from_index(i32::try_from(KIND.load(Ordering::Acquire)).unwrap_or(0));
-    let params = [
-        f32::from_bits(PARAMS[0].load(Ordering::Acquire)),
-        f32::from_bits(PARAMS[1].load(Ordering::Acquire)),
-        f32::from_bits(PARAMS[2].load(Ordering::Acquire)),
-    ];
-    with_preview(|preview| {
-        let params_changed = preview
-            .params
-            .iter()
-            .zip(params)
-            .any(|(old, new)| old.to_bits() != new.to_bits());
-        let changed = preview.rate != rate || preview.kind != kind || params_changed;
-        preview.kind = kind;
-        preview.params = params;
-        if changed {
-            preview.init(rate);
+            let voice = &mut self.voices[index];
+            if voice.age as f32 >= self.kind.duration() * self.rate as f32 {
+                self.active[index] = false;
+                continue;
+            }
+            sample += voice.process();
         }
-        preview.was_enabled = true;
-        for (pad, pending) in PENDING.iter().enumerate() {
-            let bits = pending.swap(0, Ordering::AcqRel);
-            if bits != 0 {
-                preview.trigger(pad, f32::from_bits(bits));
-            }
-        }
-        let mut peak = 0.0_f32;
-        for frame in 0..frames {
-            let mut sample = 0.0;
-            for index in 0..VOICES {
-                if !preview.active[index] {
-                    continue;
-                }
-                let voice = &mut preview.voices[index];
-                if voice.age as f32 >= kind.duration() * rate as f32 {
-                    preview.active[index] = false;
-                    continue;
-                }
-                sample += voice.process();
-            }
-            sample = fclamp(sample, -0.85, 0.85);
-            for pointer in channels.iter_mut() {
-                // SAFETY: the caller promises each channel is writable.
-                let channel = unsafe { core::slice::from_raw_parts_mut(*pointer, frames) };
-                channel[frame] = fclamp(channel[frame] + sample, -1.0, 1.0);
-            }
-            peak = peak.max(sample.abs());
-        }
-        peak
-    })
+        fclamp(sample, -0.85, 0.85)
+    }
+
+    /// Silence every voice.
+    pub(crate) fn stop(&mut self) {
+        self.active = [false; VOICES];
+    }
 }
 
 #[cfg(test)]
@@ -447,19 +308,26 @@ mod tests {
 
     #[test]
     fn a_pad_note_reaches_the_non_bass_preview() {
+        let _serial = crate::preview::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut left = [0.0_f32; 512];
         let mut right = [0.0_f32; 512];
         crate::bass::preview_set_kind(Kind::Pads);
         crate::bass::preview_enable(false);
-        super::preview_enable(true);
-        super::preview_set_params(Kind::Pads.defaults());
+        crate::bass::preview_enable(true);
+        crate::bass::preview_set_params(Kind::Pads.defaults());
         // The page opening resets the synth; consume that reset before a note,
         // as the audio thread would on its next block.
-        let _ = crate::bass::preview_mix_slices(&mut [], 0, 44_100);
+        // SAFETY: the empty slice carries no writable memory.
+        let _ = unsafe { crate::bass::preview_mix_slices(&mut [], 0, 44_100) };
         crate::bass::preview_note(0, 1.0);
-        let peak =
-            crate::bass::preview_mix_slices(&mut [&mut left[..], &mut right[..]], 512, 44_100);
-        super::preview_enable(false);
+        // SAFETY: both slices hold 512 samples and the preview tests are
+        // serialised by the bass module's mutex.
+        let peak = unsafe {
+            crate::bass::preview_mix_slices(&mut [&mut left[..], &mut right[..]], 512, 44_100)
+        };
+        crate::bass::preview_enable(false);
         crate::bass::preview_reset();
         crate::bass::preview_set_kind(Kind::Bass);
         assert!(peak > 1e-4, "non-bass preview was silent: {peak}");

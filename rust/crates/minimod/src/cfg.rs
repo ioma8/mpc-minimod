@@ -40,17 +40,30 @@ pub fn load(path: &Path) -> Option<Settings> {
     })
 }
 
-/// Write the settings, replacing the file.
+/// Write the settings atomically, replacing the file.
 ///
 /// # Errors
 ///
-/// Returns the standard I/O error of the open, write or flush.
+/// Returns the standard I/O error of the temporary create, write or rename.
 pub fn save(path: &Path, settings: Settings) -> std::io::Result<()> {
     let master = settings.master.unwrap_or(127).min(127);
     let text = format!("{} {master}\n", settings.trim_frames / FRAMES_PER_MS);
-    let mut file = std::fs::File::create(path)?;
-    file.write_all(text.as_bytes())?;
-    file.sync_data()
+    // Write a sibling and rename it over the real file, so a crash or a full
+    // disk leaves the previous settings intact instead of a truncated line.
+    let temporary = path.with_extension("tmp");
+    let written =
+        std::fs::File::create(&temporary).and_then(|mut file| file.write_all(text.as_bytes()));
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    // No `sync_data`: this runs on the settings thread, and losing the last
+    // trim or volume on a power cut is a better trade than a file-system stall.
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

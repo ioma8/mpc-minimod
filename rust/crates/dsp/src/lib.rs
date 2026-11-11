@@ -19,6 +19,7 @@ pub mod fft;
 pub mod hpss;
 pub mod looper;
 pub mod num;
+mod preview;
 pub mod sample;
 pub mod spectral;
 pub mod synth;
@@ -45,6 +46,9 @@ pub enum AnalysisError {
     NotFinite,
     /// The caller asked for an output that cannot be produced.
     UnsupportedRequest,
+    /// The sample is long enough that the analysis scratch would exceed the
+    /// device's budget.
+    TooLarge,
 }
 
 impl fmt::Display for AnalysisError {
@@ -56,11 +60,29 @@ impl fmt::Display for AnalysisError {
             Self::UnsupportedRate => f.write_str("unsupported sample rate"),
             Self::NotFinite => f.write_str("audio contains a non-finite sample"),
             Self::UnsupportedRequest => f.write_str("unsupported analysis request"),
+            Self::TooLarge => f.write_str("sample is too long for offline analysis"),
         }
     }
 }
 
 impl std::error::Error for AnalysisError {}
+
+/// Scratch both offline analyses may allocate for one sample.
+///
+/// The analyses are transient, but they run while the sampler owns its project
+/// audio, so a pathological sample length must be refused instead of driving the
+/// device into the OOM killer.  The budget is deliberately generous for normal
+/// material (a minute of stereo is well under it) and is only a guard.
+pub const MAX_ANALYSIS_BYTES: usize = 128 << 20;
+
+/// Refuse an analysis whose scratch would exceed [`MAX_ANALYSIS_BYTES`].
+pub(crate) fn check_analysis_budget(bytes: usize) -> Result<(), AnalysisError> {
+    if bytes <= MAX_ANALYSIS_BYTES {
+        Ok(())
+    } else {
+        Err(AnalysisError::TooLarge)
+    }
+}
 
 /// Validate a buffer both offline analyses share: non-empty, a supported sample
 /// rate, a whole number of frames per channel, and finite samples.
@@ -86,4 +108,19 @@ pub fn validate(input: &[f32], channels: usize, rate: u32) -> Result<(), Analysi
         return Err(AnalysisError::NotFinite);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AnalysisError, MAX_ANALYSIS_BYTES, check_analysis_budget};
+
+    #[test]
+    fn the_analysis_budget_is_a_hard_ceiling() {
+        assert_eq!(check_analysis_budget(0), Ok(()));
+        assert_eq!(check_analysis_budget(MAX_ANALYSIS_BYTES), Ok(()));
+        assert_eq!(
+            check_analysis_budget(MAX_ANALYSIS_BYTES + 1),
+            Err(AnalysisError::TooLarge)
+        );
+    }
 }

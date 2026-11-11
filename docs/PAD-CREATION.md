@@ -1,5 +1,11 @@
 # Synth pad creation
 
+## Emulator result
+
+The empty-project synth regression passed with the SDK 0.4.0 development
+revision after correcting the native seed holder address. The test confirmed the
+created sample's active layer, audio geometry and pitch, with no app restart.
+
 ## Behavior
 
 Minimod renders the selected synth onto the currently selected pad, including
@@ -10,14 +16,13 @@ sample.
 
 After Extract assigns the sample, minimod enables the destination
 `InstrumentLayer` through `mpc_sample_sdk::platform::pads::set_layer_active`.
-The SDK helper is in remote tag `v0.1.10`; minimod pins that tag in
+The SDK helper is provided by the SDK revision referenced in
 [`rust/Cargo.toml`](../rust/Cargo.toml). The feature flow is in
 [`jobflow.rs`](../rust/crates/minimod/src/jobflow.rs).
 
-For an empty project, minimod temporarily borrows a real native seed as the
-source object Extract requires. It restores that layer afterward and removes
-only newly created provider copies, preserving pads that were populated before
-the render. Extract receives the rendered buffer, selected destination and
+The SDK temporarily borrows a real native seed immediately around Extract.
+It restores that layer afterward and removes only newly created provider copies,
+preserving pads that were populated before the render. Extract receives the rendered buffer, selected destination and
 rendered frame count.
 
 ## Why the pad was silent

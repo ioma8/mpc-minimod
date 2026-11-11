@@ -29,7 +29,7 @@ pub fn bump(current: i32, steps: i32) -> Option<(i32, String)> {
     let text = if next == 0 {
         "Pitch reset".to_string()
     } else {
-        format!("Pitch {:+} semitones", next * 8)
+        format!("Pitch {:+} semitones", next * SEMITONES_PER_STEP)
     };
     Some((next, text))
 }

@@ -17,8 +17,9 @@ The firmware mod, rewritten in Rust:
 
 The feature crate is safe Rust except for small, documented `unsafe` blocks at
 firmware boundaries (drawing, raw object access, Extract and the repaint pump),
-as required by the SDK's explicit safety contracts. The workspace pins
-`mpc-sample-sdk` tag `v0.2.1` for the explicit safety contracts.
+as required by the SDK's explicit safety contracts. The workspace depends on
+SDK 0.4.0 at the revision pinned in `Cargo.toml`, which carries the split audio hooks (`Mod::audio`) and
+the `Global::with` closures.
 
 The hands-on SDK guide is
 [`mpc-sample-sdk/docs/README.md`](https://github.com/ioma8/mpc-sample-sdk/blob/main/docs/README.md).

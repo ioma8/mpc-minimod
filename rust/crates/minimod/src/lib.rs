@@ -42,11 +42,11 @@ pub use mpc_sample_sdk::{
 /// call is made from `on_paint` with the app's live `Graphics` handle on the UI
 /// thread.
 pub(crate) mod paint {
-    pub(crate) use mpc_sample_sdk::draw::*;
     use mpc_sample_sdk::draw::{
         colour as sdk_colour, rect as sdk_rect, start_repaint_pump as sdk_start_repaint_pump,
         text as sdk_text,
     };
+    pub(crate) use mpc_sample_sdk::draw::{screen, show_toast, toast_text, toast_visible};
 
     /// Set the fill colour.
     pub(crate) fn colour(graphics: usize, value: u32) {
@@ -58,6 +58,56 @@ pub(crate) mod paint {
     pub(crate) fn rect(graphics: usize, x: i32, y: i32, width: i32, height: i32) {
         // SAFETY: called only from `on_paint` with the live app Graphics.
         unsafe { sdk_rect(graphics, x, y, width, height) }
+    }
+
+    /// A stack buffer for one formatted line.
+    ///
+    /// The menu and the looper repaint several lines per frame; formatting them
+    /// into `format!` strings would allocate on every frame for no reason.
+    struct Line {
+        bytes: [u8; 64],
+        len: usize,
+    }
+
+    impl Line {
+        const fn new() -> Self {
+            Self {
+                bytes: [0; 64],
+                len: 0,
+            }
+        }
+
+        fn as_str(&self) -> &str {
+            core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
+        }
+    }
+
+    impl core::fmt::Write for Line {
+        fn write_str(&mut self, text: &str) -> core::fmt::Result {
+            let room = self.bytes.len() - self.len;
+            let mut take = text.len().min(room);
+            while !text.is_char_boundary(take) {
+                take -= 1;
+            }
+            self.bytes[self.len..self.len + take].copy_from_slice(&text.as_bytes()[..take]);
+            self.len += take;
+            Ok(())
+        }
+    }
+
+    /// Draw one line of formatted text without allocating.
+    pub(crate) fn text_fmt(
+        graphics: usize,
+        args: core::fmt::Arguments<'_>,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        size: f32,
+    ) {
+        let mut line = Line::new();
+        let _ = core::fmt::write(&mut line, args);
+        text(graphics, line.as_str(), x, y, width, height, size);
     }
 
     /// Draw one line of text in the current colour.
@@ -79,24 +129,6 @@ pub(crate) mod paint {
         // SAFETY: `component` returns the paint hook's recorded component, or 0.
         unsafe { sdk_start_repaint_pump(component) }
     }
-}
-
-/// Read one UI-thread-only [`mpc_sample_sdk::state::Global`].
-pub(crate) fn ui_read<T>(value: &mpc_sample_sdk::state::Global<T>) -> &T {
-    // SAFETY: every feature `Global` is owned by the app's UI thread and no
-    // mutable borrow is held across a callback.
-    unsafe { value.get() }
-}
-
-/// Write one UI-thread-only [`mpc_sample_sdk::state::Global`].
-#[allow(
-    clippy::mut_from_ref,
-    reason = "Global is a single-threaded cell owned by the UI thread"
-)]
-pub(crate) fn ui_write<T>(value: &mpc_sample_sdk::state::Global<T>) -> &mut T {
-    // SAFETY: every feature `Global` is owned by the app's UI thread and this
-    // borrow is not held across a callback.
-    unsafe { value.get_mut() }
 }
 
 // The SDK's modules, under the names the feature code already uses.

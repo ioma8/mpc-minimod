@@ -5,22 +5,10 @@
 //! pure function of the event and the current state; the caller applies the
 //! result, because the state itself belongs to the caller.
 
-/// Key codes the mod cares about.
-pub const KEY_SHIFT: u32 = 0x31;
-/// ERASE.
-pub const KEY_ERASE: u32 = 0x09;
-/// The encoder.
-pub const KEY_DATA: u32 = 0x6f;
-/// SHIFT + B3: the trim cycle.
-pub const KEY_B3: u32 = 0x0e;
-/// PLUS / MINUS: the 16 Levels octave.
-pub const KEY_PLUS: u32 = 0x36;
-/// MINUS.
-pub const KEY_MINUS: u32 = 0x37;
-/// 16 LEVELS.
-pub const KEY_LEVELS: u32 = 0x28;
-/// A press can be reported as the full travel value.
-pub const PRESSED: u32 = 0x7f;
+pub use mpc_sample_sdk::event::button::{
+    B3 as KEY_B3, DATA as KEY_DATA, ERASE as KEY_ERASE, LEVELS as KEY_LEVELS, MINUS as KEY_MINUS,
+    PLUS as KEY_PLUS, PRESSED, SHIFT as KEY_SHIFT,
+};
 
 /// What the caller should do with the event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,7 +124,9 @@ pub fn dispatch(context: Context) -> Action {
         return Action::Consume;
     }
     // The release matters too: it is what lets the next press count again.
-    if context.code == KEY_B3 && context.held.shift {
+    // AutoTrim edits the pad the user pressed last, so it is only armed on the
+    // Sample page where that pad is the one being looked at.
+    if context.code == KEY_B3 && context.held.shift && context.page_visible {
         return Action::Autotrim;
     }
     if (context.code == KEY_PLUS || context.code == KEY_MINUS) && context.screens.levels {
@@ -361,5 +351,9 @@ mod tests {
         assert_eq!(dispatch(context), Action::Autotrim);
         context.down = 0;
         assert_eq!(dispatch(context), Action::Autotrim);
+        // Off the Sample page the pad the trim would edit is not the one on
+        // screen, so the key goes to the app.
+        context.page_visible = false;
+        assert_eq!(dispatch(context), Action::Forward);
     }
 }

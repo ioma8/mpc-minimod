@@ -323,19 +323,25 @@ bass keeps its short 0.75 s punch; the other characters use their own lengths
 **Implementation.** `rust/crates/dsp/src/bass.rs` is the Karplus-Strong bass
 (`StringVoice` + SVF subset) and the character table. `rust/crates/dsp/src/synth.rs`
 is the shared oscillator/envelope engine for the other seven characters. Both
-render centred stereo at the source rate and normalise to peak 0.86. The live
-preview is mixed into the real output call: the app writes interleaved S32_LE
+render centred stereo at the source rate and normalise to peak 0.86. The two
+live previews share one singleton and mixer (`rust/crates/dsp/src/preview.rs`),
+with a bass voice bank and an oscillator voice bank behind it. The live preview
+is mixed into the real output call: the app writes interleaved S32_LE
 (4 channels, 44.1 kHz) through `snd_pcm_writei`, and the exported tap
 (`backend/audio.rs`) adds the preview to channels 0/1. Four voices are mixed;
 pads are consumed at the control-surface event hook while the page is open, so
 the firmware never selects or switches the sample underneath. The saved render
-is named after the selected character (`Bass C2`, `Piano C2`, …). Extract
-initially leaves its new layer inactive, so minimod enables the live
+is named after the selected character (`Bass C2`, `Piano C2`, …). It goes to the
+last pad the user pressed when that pad is empty, otherwise to the first empty
+pad; a synth copy never overwrites an existing sample. Extract initially leaves
+its new layer inactive, so minimod enables the live
 `InstrumentLayer` with SDK `pads::set_layer_active`; the pad plays immediately
 and the active state persists in the project.
 
 **Evidence.** On a zero-sample project, Bass C2 rendered 33,075 stereo frames at
-44.1 kHz, RMS 0.09215 and a 69 Hz peak. After layer activation, A01 produced
+44.1 kHz, RMS 0.09215 and a 69 Hz peak. (Re-tested with SDK v0.3.1: the render
+still succeeds, but the zero-sample Extract path now reports `Synth: output
+failed`; see the known limitation in [PAD-CREATION.md](PAD-CREATION.md).) After layer activation, A01 produced
 PCM RMS 495.95 while held; after save/reload it remained active and produced
 PCM RMS 495.99. A05 produced PCM RMS 1634.62, confirming the destination index
 lookup. Both emulator runs had no app restart. Host tests render all eight

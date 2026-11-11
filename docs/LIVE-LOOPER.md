@@ -45,7 +45,7 @@ captured while recording, where playback is while playing.
 | `LOOP` | **sync pulse** on/off, with the length of the most recently recorded loop |
 | `SHIFT` + `LOOP` | **metronome click** on/off (off by default) |
 | `ERASE` + `LOOP` | clear all loops and the pulse |
-| `K1` | trim the record latency, 1 ms per step (shown as `LAT ±N ms`) |
+| `K1` | trim the record latency, 1 ms per step (shown as `TRIM ±N ms`) |
 | `SHIFT` + `DATA` | close the view and return to the previous page |
 | every other button | consumed while the view is open |
 

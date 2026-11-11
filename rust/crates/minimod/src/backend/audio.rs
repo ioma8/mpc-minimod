@@ -54,7 +54,11 @@ fn mix_preview(frames: &mut [i32], info: &OutputInfo) {
     if !active {
         if was {
             // An empty list mixes nothing and clears the voices.
-            minimod_dsp::bass::preview_mix_slices(&mut [], 0, info.rate);
+            // SAFETY: this is the single output audio callback, so it is the
+            // only caller of the process-wide preview mixer.
+            unsafe {
+                minimod_dsp::bass::preview_mix_slices(&mut [], 0, info.rate);
+            }
         }
         return;
     }
@@ -73,7 +77,11 @@ fn mix_preview(frames: &mut [i32], info: &OutputInfo) {
         left.fill(0.0);
         right.fill(0.0);
         let mut slices: [&mut [f32]; 2] = [left, right];
-        minimod_dsp::bass::preview_mix_slices(&mut slices[..count], length, info.rate);
+        // SAFETY: this is the single output audio callback, the only caller of
+        // the preview mixer; each slice holds `length` writable samples.
+        let _ = unsafe {
+            minimod_dsp::bass::preview_mix_slices(&mut slices[..count], length, info.rate)
+        };
         let planes: [&[f32]; 2] = [slices[0], slices[1]];
         let start = done * channels;
         let end = (done + length) * channels;
@@ -91,16 +99,4 @@ fn measure_latency(info: &OutputInfo) {
     let backlog = crate::backend::looper::looper_input_backlog();
     let (total, source) = info.latency(backlog, mpc_sample_sdk::audio::extra_latency());
     crate::backend::looper::looper_set_latency_ex(total, i8::try_from(source).unwrap_or(0x45));
-}
-
-/// The component the repaint pump should redraw, or zero when the view is shut.
-#[must_use]
-pub fn pump_component() -> usize {
-    if crate::backend::looper::looper_is_open() == 0 {
-        return 0;
-    }
-    match mpc_sample_sdk::draw::painted() {
-        0 => mpc_sample_sdk::platform::page::screen(),
-        painted => painted,
-    }
 }

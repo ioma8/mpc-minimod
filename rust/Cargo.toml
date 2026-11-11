@@ -11,8 +11,9 @@ repository = "https://github.com/jakubkolcar/sample-converter"
 
 [workspace.dependencies]
 minimod-dsp = { path = "crates/dsp" }
-mpc-sample-sdk = { git = "https://github.com/ioma8/mpc-sample-sdk", tag = "v0.2.1" }
+mpc-sample-sdk = { git = "https://github.com/ioma8/mpc-sample-sdk", rev = "dc77631d5a3fb7832bff54d02ff456d571884061" }
 libc = "0.2"
+
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -44,6 +45,3 @@ lto = "fat"
 codegen-units = 1
 debug = 0
 strip = "none"
-
-[profile.release.package."*"]
-opt-level = 3

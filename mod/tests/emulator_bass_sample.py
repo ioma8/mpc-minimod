@@ -71,7 +71,9 @@ def main():
     time.sleep(.3)
     binding = qword(screen + 0x178)
     state = qword(binding + 0x60)
-    sample = qword(qword(state + 0x22e8) + 0x4a8)
+    source_layer = qword(state + 0x22e8)
+    sample = qword(source_layer + 0x4a8)
+    source_layer_holder = qword(source_layer + 0x4b0)
     meta = qword(sample + 0x130)
     source_frames = int.from_bytes(read_mem(meta + 4, 4), 'little')
     source_channels = int.from_bytes(read_mem(meta, 2), 'little')
@@ -208,6 +210,8 @@ def main():
     sample_after = qword(qword(qword(screen + 0x178) + 0x60) + 0x22e8 + 0x4a8)
     assert sample_after != sample_before, \
         'Selected pad did not receive the rendered sample'
+    assert qword(source_layer + 0x4a8) == sample, 'source sample pointer was not restored'
+    assert qword(source_layer + 0x4b0) == source_layer_holder, 'source holder was not restored'
     assert int(ssh('pidof "MPC Sample"')) == pid, 'Firmware restarted'
     assert ssh('systemctl show ac50 -p NRestarts').decode().strip() == restarts
     print(f'PASS: {output_path}; C2 peak {pitch:.2f} Hz; {len(audio)} stereo frames @ '

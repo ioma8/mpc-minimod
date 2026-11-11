@@ -12,15 +12,10 @@ use crate::sample;
 use crate::trim;
 use crate::wav;
 
-/// The control op that sets the trim's start.
-const SET_START: i32 = 0x462;
-/// The control op that sets its end.
-const SET_END: i32 = 0x466;
 /// The pad the trim falls back to when nothing was pressed.
 const FALLBACK_PAD: i32 = 0;
 
 /// Everything the trim reads from the caller.
-#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Context {
     /// The page's surface.
@@ -45,12 +40,15 @@ const LABELS: [&str; 4] = [
 ];
 
 /// Run one press of the trim cycle.
+///
+/// Only the pad the user pressed last is touched: with no recent pad press there
+/// is no safe target, and trimming pad 0 would edit an unrelated sample.
 pub fn run(context: Context) {
-    let pad = if (0..128).contains(&context.last_pad) {
-        context.last_pad
-    } else {
-        FALLBACK_PAD
-    };
+    if !(0..128).contains(&context.last_pad) {
+        paint::show_toast("AutoTrim: press a pad");
+        return;
+    }
+    let pad = context.last_pad;
     let Some(sample) = pads::sample_for_pad(context.surface, pad) else {
         return;
     };
@@ -73,23 +71,19 @@ pub fn run(context: Context) {
     // The toast has to be armed first: the trim's own repaint is what paints the
     // page, so a toast set afterwards waits for an unrelated frame.
     paint::show_toast(LABELS[usize::try_from(context.step).unwrap_or(3).min(3)]);
+    // The app's control surface takes f32 frame indices, so a sample longer
+    // than 2^24 frames (about 6.3 minutes at 44.1 kHz) rounds the trim to the
+    // nearest frame.  That precision is the SDK's control API, not a choice
+    // here; the bound is exact for every shorter sample.
     // SAFETY: the control context and surface came from the app's control hook
     // in this UI callback; the pad and values are the trim fields the page owns.
     unsafe {
-        let _ = crate::control::apply(context.control, context.surface, pad, SET_START, 0.0);
-        let _ = crate::control::apply(
+        crate::control::set_trim(
             context.control,
             context.surface,
             pad,
-            SET_END,
-            last.saturating_add(1) as f32,
-        );
-        let _ = crate::control::apply(
-            context.control,
-            context.surface,
-            pad,
-            SET_START,
-            first as f32,
+            first,
+            last.saturating_add(1),
         );
     }
 }

@@ -26,12 +26,6 @@ pub fn u32_to_usize(value: u32) -> usize {
     value as usize
 }
 
-/// A `usize` as a `u32`, saturating.
-#[must_use]
-pub fn usize_to_u32(value: usize) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
-}
-
 /// A `usize` as an `i64`, saturating.
 #[must_use]
 pub fn usize_to_i64(value: usize) -> i64 {

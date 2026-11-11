@@ -13,6 +13,7 @@ pub mod filters;
 pub mod noise;
 pub mod string;
 pub mod string_voice;
+pub(crate) mod window;
 
 /// `PI` as the reference spells it: `3.1415927410125732421875f`.
 pub const PI_F: f32 = PI;

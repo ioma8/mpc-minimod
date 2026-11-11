@@ -19,7 +19,8 @@ port is merged; no C or C++ is compiled for the mod. Nothing at `HEAD` is tagged
   is the `LD_PRELOAD` library and only the features, built on the SDK through
   `impl Mod` and `export_mod!(Minimod)`.  `crates/dsp` is pure audio DSP over
   slices: looper, HPSS, onset detection, FFT, the Karplus-Strong bass synth, and
-  the S32↔f32 conversion.
+  the S32↔f32 conversion.  The workspace depends on SDK `v0.3.1`, which carries
+  the split audio hooks (`Mod::audio`) and the `Global::with` closures.
 - **The hook table has 16 sites.** `mpc_sample_sdk::sites` installs them and keeps
   every displaced original; `mpc_sample_sdk::loader` checks 36 words of the loaded
   image first, so a different firmware is refused rather than hooked at the wrong
@@ -32,18 +33,20 @@ port is merged; no C or C++ is compiled for the mod. Nothing at `HEAD` is tagged
 ## 2. What is verified, and what is not
 
 - `rust/check.sh` passes: fmt, clippy `all` + `pedantic` + `cargo` with
-  `-D warnings`, a rustdoc build with warnings denied, a guard that
-  `crates/minimod/src` contains no `unsafe` token, **39 minimod tests** and
-  **42 dsp tests** in this workspace (including the golden fixtures), and the
+  `-D warnings`, a rustdoc build with warnings denied, a guard that every
+  `unsafe` file in `crates/minimod/src` carries a `SAFETY` comment, **40 minimod tests** and
+  **46 dsp tests** in this workspace (including the golden fixtures), and the
   aarch64 release build. The standalone `mpc-sample-sdk` repo has its own
-  **59 SDK tests**.
+  **89 SDK tests**.
 - **Golden fixtures:** the DSP is compared with the original C where the
   arithmetic is deterministic: the looper trace and loop buffers are
   bit-identical, the bass render is bit-identical, HPSS stays under 1e-4, and the
   spectral onsets match exactly.
 - **Emulator, recorded green on the Rust-only build:** bass sample, looper, HPSS,
   MIDI chromatic, reverb, spectral. AutoTrim and the menu have their own scripts
-  (`mod/tests/emulator_autotrim.py`, `mod/tests/emulator_menu.py`); see
+  (`mod/tests/emulator_autotrim.py`, `mod/tests/emulator_menu.py`); the looper,
+  menu, bass, HPSS and reverb suites were re-run after the split audio dispatch
+  and the SDK v0.3.1 bump. See
   [`docs/FEATURES.md`](docs/FEATURES.md) for what each asserts.
 - Emulator-verified and hardware-verified are kept separate. Only the 16 Levels
   pitch shift and external MIDI chromatic playback were verified on real hardware.

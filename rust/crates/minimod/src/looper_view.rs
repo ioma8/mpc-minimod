@@ -63,9 +63,9 @@ fn cell(graphics: usize, area: Cell, pad: &PadView, index: usize, recording: boo
         paint::rect(graphics, x + 1, y + 1, width - 2, 1);
     }
     paint::colour(graphics, text);
-    paint::text(
+    paint::text_fmt(
         graphics,
-        &format!("{}", index + 1),
+        format_args!("{}", index + 1),
         x + 4,
         y + 2,
         18,
@@ -105,9 +105,9 @@ fn cell(graphics: usize, area: Cell, pad: &PadView, index: usize, recording: boo
     if !recording_state && pad.len_frames > 0 {
         let seconds = f64::from(pad.len_frames) / f64::from(RATE);
         paint::colour(graphics, 0xffb8_b8be);
-        paint::text(
+        paint::text_fmt(
             graphics,
-            &format!("{seconds:.1}s"),
+            format_args!("{seconds:.1}s"),
             x + 4,
             y + 15,
             width - 8,
@@ -137,13 +137,28 @@ fn pulse(graphics: usize, view: &View) {
         return;
     }
     let seconds = f64::from(view.sync_frames) / f64::from(RATE);
-    let line = if view.click != 0 {
-        format!("SYNC {seconds:.2}s +CLK")
-    } else {
-        format!("SYNC {seconds:.2}s")
-    };
     paint::colour(graphics, ACCENT);
-    paint::text(graphics, &line, 200, 4, 100, 16, 10.0);
+    if view.click != 0 {
+        paint::text_fmt(
+            graphics,
+            format_args!("SYNC {seconds:.2}s +CLK"),
+            200,
+            4,
+            100,
+            16,
+            10.0,
+        );
+    } else {
+        paint::text_fmt(
+            graphics,
+            format_args!("SYNC {seconds:.2}s"),
+            200,
+            4,
+            100,
+            16,
+            10.0,
+        );
+    }
     let beat = view.pulse_phase != u32::MAX && view.pulse_phase < view.sync_frames / 6;
     paint::colour(graphics, if beat { WHITE } else { ACCENT });
     paint::rect(graphics, 305, 8, 8, 8);
@@ -213,7 +228,7 @@ fn footer(graphics: usize, view: &View) {
         paint::colour(graphics, 0xff20_1408);
         paint::rect(graphics, 8, 202, 304, 12);
         paint::colour(graphics, ACCENT);
-        paint::text(graphics, &message, 12, 202, 296, 12, 10.0);
+        paint::text(graphics, message, 12, 202, 296, 12, 10.0);
     } else if view.lat_frames > 0 {
         let source = match view.lat_src {
             b'B' => "BUF",
@@ -224,9 +239,9 @@ fn footer(graphics: usize, view: &View) {
         paint::colour(graphics, 0xff5a_5a64);
         paint::rect(graphics, 8, 202, 304, 12);
         paint::colour(graphics, 0xffb8_b8be);
-        paint::text(
+        paint::text_fmt(
             graphics,
-            &format!("{source} {millis}ms"),
+            format_args!("{source} {millis}ms"),
             12,
             202,
             296,
@@ -275,14 +290,16 @@ fn snapshot() -> Option<View> {
     (ok != 0).then_some(view)
 }
 
-/// The engine's status line, as text.
-fn message_of(view: &View) -> String {
+/// The engine's status line, as text.  `notice` only writes ASCII, so an
+/// invalid line is treated as empty instead of allocating a lossy copy per
+/// painted frame.
+fn message_of(view: &View) -> &str {
     let end = view
         .message
         .iter()
         .position(|&byte| byte == 0)
         .unwrap_or(view.message.len());
-    String::from_utf8_lossy(&view.message[..end]).into_owned()
+    core::str::from_utf8(&view.message[..end]).unwrap_or("")
 }
 
 #[cfg(test)]

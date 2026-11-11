@@ -54,7 +54,6 @@ impl String {
             src_phase: 0.0,
             out_sample: [0.0; 2],
         };
-        string.set_frequency(440.0);
         string.reset();
         string.set_frequency(440.0);
         string.set_damping(0.8);
