@@ -18,7 +18,7 @@ The firmware mod, rewritten in Rust:
 The feature crate is safe Rust except for small, documented `unsafe` blocks at
 firmware boundaries (drawing, raw object access, Extract and the repaint pump),
 as required by the SDK's explicit safety contracts. The workspace pins
-`mpc-sample-sdk` tag `v0.2.0` for the explicit safety contracts.
+`mpc-sample-sdk` tag `v0.2.1` for the explicit safety contracts.
 
 The hands-on SDK guide is
 [`mpc-sample-sdk/docs/README.md`](https://github.com/ioma8/mpc-sample-sdk/blob/main/docs/README.md).
