@@ -21,7 +21,8 @@ only the latest changes.
 
 - **Rust implementation:** the preload library is a Rust `cdylib` built on the
   public memory-safe [`mpc-sample-sdk`](https://github.com/ioma8/mpc-sample-sdk);
-  no C or C++ is compiled, and the feature crate contains no `unsafe`.
+  no C or C++ is compiled. The feature code uses only small, documented `unsafe`
+  blocks at explicit SDK firmware boundaries.
 - **16 Levels:** shift the pad row by ±8 semitones with PLUS/MINUS; external
   MIDI plays the selected sample chromatically over the whole keyboard from the
   sample's own root note (C3 when it has none), with exact semitones and no
@@ -120,13 +121,14 @@ The release supports MPC Sample firmware **1.3.0.12** only.
   keeps feature code in `rust/crates/minimod` and host-testable DSP in
   `rust/crates/dsp`; the SDK owns firmware discovery, hooks, events, audio,
   drawing and typed platform objects.
-- No C or C++ is compiled. `minimod` contains no `unsafe` and no C ABI; the SDK
-  isolates the firmware boundary behind its safe API.
+- No C or C++ is compiled. `minimod` has no C ABI; the SDK isolates the firmware
+  boundary, and the feature code keeps only documented `unsafe` blocks where the
+  SDK requires a lifetime, thread-ownership or exclusivity contract.
 - One SDK build script (`build-mod.sh`) now performs the cross-build, symbol and
   glibc checks, stripping and the SD `autorun` package. minimod only vendors a
   thin wrapper.
 - The strict gate covers formatting, clippy (all + pedantic + cargo), rustdoc,
-  the no-`unsafe` guard, host tests and the aarch64 release build.
+  the feature-safety guard, host tests and the aarch64 release build.
 
 ### Synth characters
 

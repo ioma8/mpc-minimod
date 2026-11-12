@@ -74,8 +74,9 @@ restarts. Pressing a pad records, pressing it again plays, another press stops;
 `SHIFT`+pad overdubs and returns to playback; `ERASE`+pad clears one loop and
 `STOP` stops them all; `LOOP` starts a sync pulse from the last loop's length,
 after which new loops are quantized to whole pulse lengths (the metronome click
-is off by default, `SHIFT`+`LOOP` toggles it). Recording latency is the
-device's own `(periods - 1) * period_size` value; it has not been proven
+is off by default, `SHIFT`+`LOOP` toggles it). Recordings compensate the device's
+input latency (`buffer - period`, 896 frames at 44.1 kHz) and overdubs compensate
+input + output. There is no manual latency trim. The latency has not been proven
 sample-accurate for every physical input and output. The MAIN VOLUME is kept in
 `/data/minimod-looper.cfg`; the loops follow `MAIN VOLUME` like the rest of the
 app. Pads are blocked from the app while the view is open and
