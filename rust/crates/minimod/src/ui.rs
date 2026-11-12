@@ -35,6 +35,8 @@ pub struct State {
     pub minus_held: i32,
     /// The 16 Levels octave shift.
     pub octave: i32,
+    /// The synth preview shift, in eight-semitone steps.
+    pub synth_octave: i32,
     /// The last button event, replayed to put the chop mode back.
     pub event: [u8; 16],
     /// The screen `event` was captured on; a replay on another page would
@@ -56,6 +58,7 @@ impl State {
             plus_held: 0,
             minus_held: 0,
             octave: 0,
+            synth_octave: 0,
             event: [0; 16],
             event_screen: 0,
             event_valid: 0,
@@ -139,6 +142,7 @@ pub fn press(state: &mut State, event: &ButtonEvent, hooks: Hooks) -> Flow {
             },
             looper: looper::looper_is_open() != 0,
             levels: levels != 0,
+            bass_edit: crate::menu::state().bass_edit != 0,
         },
         page_visible: hooks.page_visible.is_some_and(|callback| callback()),
         trim_screen: trim_screen(),
@@ -255,6 +259,25 @@ fn apply(state: &mut State, event: &Event) {
             state.octave = 0;
             show_toast("Pitch reset");
         }
+        Action::BumpSynthOctave(steps) => {
+            if code == KEY_PLUS {
+                state.plus_held = i32::from(pressed);
+            } else {
+                state.minus_held = i32::from(pressed);
+            }
+            if let Some((next, text)) = crate::levels::bump(state.synth_octave, steps) {
+                state.synth_octave = next;
+                crate::backend::bass::preview_set_transpose(
+                    next * crate::levels::SEMITONES_PER_STEP,
+                );
+                show_toast(&text);
+            }
+        }
+        Action::ResetSynthPitch => {
+            state.synth_octave = 0;
+            crate::backend::bass::preview_set_transpose(0);
+            show_toast("Pitch reset");
+        }
         Action::ToggleLevels => {
             if let Some(toggle) = hooks.toggle_levels {
                 toggle();
@@ -301,6 +324,12 @@ fn remember(state: &mut State, bytes: [u8; 16]) {
 #[must_use]
 pub fn octave() -> i32 {
     state().octave
+}
+
+/// Reset the synth preview shift when its page opens.
+pub fn reset_synth_octave() {
+    with_state_mut(|state| state.synth_octave = 0);
+    crate::backend::bass::preview_set_transpose(0);
 }
 
 /// Whether SHIFT is held.
@@ -518,6 +547,8 @@ mod forwarding_tests {
         assert_eq!(flow(Action::Shift(true)), Flow::Forward);
         assert_eq!(flow(Action::ToggleLevels), Flow::Forward);
         assert_eq!(flow(Action::BumpOctave(1)), Flow::Consume);
+        assert_eq!(flow(Action::BumpSynthOctave(1)), Flow::Consume);
+        assert_eq!(flow(Action::ResetSynthPitch), Flow::Consume);
         assert_eq!(flow(Action::Autotrim), Flow::Consume);
     }
 }

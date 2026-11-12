@@ -31,6 +31,17 @@ pub fn preview_set_params(harmonics: f32, decay: f32, cutoff: f32) {
     bass::preview_set_params([harmonics, decay, cutoff]);
 }
 
+/// The last preview transpose, exported for the device tests.
+#[unsafe(no_mangle)]
+pub static mut g_bass_transpose: i32 = 0;
+
+/// Shift every preview pad by this many semitones.
+pub fn preview_set_transpose(semitones: i32) {
+    bass::set_transpose(semitones);
+    // SAFETY: the UI thread writes this test-visible mirror.
+    unsafe { g_bass_transpose = semitones };
+}
+
 /// Select the synth character shown on the control page.
 pub fn preview_set_kind(kind: Kind) {
     bass::preview_set_kind(kind);

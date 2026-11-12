@@ -6,7 +6,7 @@
 //! through [`with_preview`], and `mix_slices` is `unsafe` so that contract is
 //! visible at every call site.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use crate::bass::{BassBank, Kind, NOMINAL_RATE, PADS};
 use crate::dsp::{WhiteNoise, fclamp};
@@ -60,6 +60,8 @@ static RESET: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(false);
 /// The selected synth character, as a [`Kind::ALL`] index.
 static KIND: AtomicU32 = AtomicU32::new(0);
+/// Semitones added to every preview pad.
+static TRANSPOSE: AtomicI32 = AtomicI32::new(0);
 /// Brightness, decay and cutoff, as f32 bits.
 static PARAMS: [AtomicU32; 3] = [
     AtomicU32::new(0.52_f32.to_bits()),
@@ -99,6 +101,17 @@ pub fn set_kind(kind: Kind) {
 #[must_use]
 pub fn kind() -> Kind {
     Kind::from_index(i32::try_from(KIND.load(Ordering::Acquire)).unwrap_or(0))
+}
+
+/// Shift every preview pad by this many semitones.
+pub fn set_transpose(semitones: i32) {
+    TRANSPOSE.store(semitones, Ordering::Release);
+}
+
+/// The preview transpose in semitones.
+#[must_use]
+pub fn transpose() -> i32 {
+    TRANSPOSE.load(Ordering::Acquire)
 }
 
 /// Set the three knobs, each 0..1.
@@ -193,6 +206,7 @@ fn mix(channels: &mut [&mut [f32]], frames: usize, rate: u32) -> f32 {
             preview.synth = SynthBank::new(kind, rate, params);
         }
         preview.was_enabled = true;
+        let transpose = TRANSPOSE.load(Ordering::Acquire);
         for (pad, pending) in PENDING.iter().enumerate() {
             let bits = pending.swap(0, Ordering::AcqRel);
             if bits == 0 {
@@ -202,8 +216,8 @@ fn mix(channels: &mut [&mut [f32]], frames: usize, rate: u32) -> f32 {
             match kind {
                 Kind::Bass => preview
                     .bass
-                    .trigger(pad, velocity, params[0], params[1], params[2]),
-                _ => preview.synth.trigger(pad, velocity, params),
+                    .trigger(pad, velocity, params[0], params[1], params[2], transpose),
+                _ => preview.synth.trigger(pad, velocity, params, transpose),
             }
         }
         let mut peak = 0.0_f32;
@@ -219,4 +233,18 @@ fn mix(channels: &mut [&mut [f32]], frames: usize, rate: u32) -> f32 {
         }
         peak
     })
+}
+
+#[cfg(test)]
+mod transpose_tests {
+    use super::{set_transpose, transpose};
+
+    #[test]
+    fn the_preview_transpose_round_trips() {
+        set_transpose(8);
+        assert_eq!(transpose(), 8);
+        set_transpose(-8);
+        assert_eq!(transpose(), -8);
+        set_transpose(0);
+    }
 }

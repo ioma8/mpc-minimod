@@ -15,6 +15,11 @@ use core::f32::consts::TAU;
 const VOICES: usize = 4;
 /// C2, the render root.
 const NOTE_HZ: f32 = 65.406_39;
+
+/// The preview frequency of a pad, transposed in semitones.
+pub(crate) fn preview_hz(pad: usize, transpose: i32) -> f32 {
+    NOTE_HZ * 2.0_f32.powf((pad as f32 + transpose as f32) / 12.0)
+}
 /// Peak the rendered note is normalised to.
 const OUTPUT_PEAK: f32 = 0.86;
 
@@ -240,15 +245,14 @@ impl SynthBank {
     }
 
     /// Strike one pad on the next free voice.
-    pub(crate) fn trigger(&mut self, pad: usize, velocity: f32, params: [f32; 3]) {
+    pub(crate) fn trigger(&mut self, pad: usize, velocity: f32, params: [f32; 3], transpose: i32) {
         let rate_f = self.rate as f32;
         let index = self.cursor % VOICES;
         self.cursor = self.cursor.wrapping_add(1);
-        let semitones = pad as f32 / 12.0;
         self.voices[index] = Voice::new(
             self.kind,
             rate_f,
-            NOTE_HZ * 2.0_f32.powf(semitones),
+            preview_hz(pad, transpose),
             params,
             0.55 * fclamp(velocity, 0.0, 1.0),
         );
@@ -366,5 +370,17 @@ mod tests {
         assert_eq!(Kind::Organ.step(1), Kind::Bass);
         assert_eq!(Kind::Lead.name(), "LEAD");
         assert_eq!(Kind::Strings.knobs(), ["ATTACK", "BRIGHT", "WIDTH"]);
+    }
+}
+
+#[cfg(test)]
+mod transpose_tests {
+    use super::preview_hz;
+
+    #[test]
+    fn the_synth_preview_transpose_is_eight_semitones() {
+        let base = preview_hz(0, 0);
+        assert!((preview_hz(0, 8) / base - 2.0_f32.powf(8.0 / 12.0)).abs() < 1e-6);
+        assert!((preview_hz(0, 12) / base - 2.0).abs() < 1e-5);
     }
 }

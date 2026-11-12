@@ -304,8 +304,10 @@ native undo grouping not exercised.
 
 **Behavior.** The menu opens a synth parameter page. Pads 1–16 audition
 C2–D#3 chromatically and light in one purple hue: pad 1 is off, pad 16 is full
-brightness, and the fifteen steps between are linear. Closing the page restores
-the app's native pad colours. The **DATA encoder switches the character**, and `DATA`
+brightness, and the fifteen steps between are linear. `PLUS`/`MINUS` shift the
+pad row by 8 semitones per press (four steps each way, both keys reset), exactly
+like the 16 Levels shift. Closing the page restores the app's native pad
+colours. The **DATA encoder switches the character**, and `DATA`
 renders the selected character's C2 (MIDI 36) note to the selected pad through
 stock Extract. The destination is overwritten whether it already holds a sample
 or is empty, including when no pad has a sample; the generated audio is

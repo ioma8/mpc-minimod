@@ -142,6 +142,11 @@ const VOICES: usize = 4;
 /// The rendered pluck's root: C2, MIDI 36.  Written as bits because it has to be
 /// the reference's `65.4063913f` exactly: one ulp here detunes every sample.
 const NOTE_HZ: f32 = f32::from_bits(0x4282_d013);
+
+/// The preview frequency of a pad, transposed in semitones.
+pub(crate) fn preview_hz(pad: usize, transpose: i32) -> f32 {
+    NOTE_HZ * 2.0_f32.powf((pad as f32 + transpose as f32) / 12.0)
+}
 /// Where the rendered note starts its final decay, in seconds.
 const GATE: f32 = 0.15;
 /// Drive/excitation is a fixed character now that the second knob is DECAY.
@@ -357,16 +362,14 @@ impl BassBank {
         brightness: f32,
         decay: f32,
         cutoff: f32,
+        transpose: i32,
     ) {
         let rate_f = self.rate as f32;
         let index = self.cursor % VOICES;
         self.cursor = self.cursor.wrapping_add(1);
         let voice = &mut self.voices[index];
         voice.string.reset();
-        let semitones = pad as f32 / 12.0;
-        voice
-            .string
-            .set_frequency(NOTE_HZ * 2.0_f32.powf(semitones));
+        voice.string.set_frequency(preview_hz(pad, transpose));
         voice.string.set_accent(0.65 + DRIVE * 0.35);
         voice.string.set_structure(0.25 + DRIVE * 0.6);
         voice.string.set_brightness(0.05 + brightness * 0.9);
@@ -428,7 +431,7 @@ impl BassBank {
 pub use crate::preview::{
     enable as preview_enable, kind as preview_kind, mix_slices as preview_mix_slices,
     note as preview_note, reset as preview_reset, set_kind as preview_set_kind,
-    set_params as preview_set_params,
+    set_params as preview_set_params, set_transpose, transpose,
 };
 
 /// Clamp to 0..1, treating a non-finite value as zero.
@@ -608,5 +611,18 @@ mod tests {
         let silent =
             unsafe { preview_mix_slices(&mut [&mut left[..], &mut right[..]], frames, 44_100) };
         assert!(silent.abs() < f32::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod transpose_tests {
+    use super::preview_hz;
+
+    #[test]
+    fn the_preview_transpose_is_eight_semitones() {
+        let base = preview_hz(0, 0);
+        assert!((preview_hz(0, 8) / base - 2.0_f32.powf(8.0 / 12.0)).abs() < 1e-6);
+        assert!((preview_hz(0, 12) / base - 2.0).abs() < 1e-5);
+        assert!((preview_hz(0, -8) / base - 2.0_f32.powf(-8.0 / 12.0)).abs() < 1e-6);
     }
 }

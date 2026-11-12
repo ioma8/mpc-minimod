@@ -390,6 +390,7 @@ pub fn set_bass_knobs(knobs: [f32; 3]) {
 /// Show the bass control page and start its preview.
 pub fn bass_page(state: &mut State) {
     let knobs = bass_knobs();
+    crate::ui::reset_synth_octave();
     state.bass_edit = 1;
     crate::synth_lights::show();
     crate::backend::bass::preview_set_kind(bass_kind());

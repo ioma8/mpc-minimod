@@ -53,6 +53,10 @@ pub enum Action {
     BumpOctave(i32),
     /// PLUS and MINUS together.
     ResetPitch,
+    /// Move the synth preview by this many 8-semitone steps.
+    BumpSynthOctave(i32),
+    /// PLUS and MINUS together on the synth page.
+    ResetSynthPitch,
     /// Toggle 16 Levels.
     ToggleLevels,
     /// The encoder press was consumed by the menu.
@@ -84,6 +88,8 @@ pub struct Screens {
     pub looper: bool,
     /// The 16 Levels screen.
     pub levels: bool,
+    /// The synth control page.
+    pub bass_edit: bool,
 }
 
 /// The mod's modal screens.
@@ -138,6 +144,22 @@ pub fn dispatch(context: Context) -> Action {
     }
     if context.code == KEY_SHIFT {
         return Action::Shift(press);
+    }
+    // The synth page is modal too, but PLUS/MINUS shift its chromatic pads by
+    // the same eight-semitone steps as 16 Levels.
+    if (context.code == KEY_PLUS || context.code == KEY_MINUS) && context.screens.bass_edit {
+        let plus = context.code == KEY_PLUS;
+        if !press {
+            return Action::BumpSynthOctave(0);
+        }
+        if if plus {
+            context.octave.minus
+        } else {
+            context.octave.plus
+        } {
+            return Action::ResetSynthPitch;
+        }
+        return Action::BumpSynthOctave(if plus { 1 } else { -1 });
     }
     // A modal screen swallows the rest.
     if context.screens.modals.menu || context.screens.modals.spectral {
@@ -379,5 +401,30 @@ mod tests {
         context.page_visible = true;
         context.trim_screen = false;
         assert_eq!(dispatch(context), Action::Forward);
+    }
+
+    #[test]
+    fn the_synth_page_takes_plus_and_minus_in_eight_semitone_steps() {
+        let mut context = Context {
+            code: KEY_PLUS,
+            down: PRESSED,
+            screens: Screens {
+                modals: Modals {
+                    menu: true,
+                    ..Modals::default()
+                },
+                bass_edit: true,
+                ..Screens::default()
+            },
+            ..base()
+        };
+        assert_eq!(dispatch(context), Action::BumpSynthOctave(1));
+        context.code = KEY_MINUS;
+        assert_eq!(dispatch(context), Action::BumpSynthOctave(-1));
+        context.octave.plus = true;
+        assert_eq!(dispatch(context), Action::ResetSynthPitch);
+        context.octave.plus = false;
+        context.down = 0;
+        assert_eq!(dispatch(context), Action::BumpSynthOctave(0));
     }
 }
