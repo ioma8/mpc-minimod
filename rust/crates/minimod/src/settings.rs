@@ -8,8 +8,6 @@ use crate::cfg;
 /// One write handed to the settings thread.
 #[derive(Clone, Copy)]
 struct Request {
-    /// Latency trim in frames.
-    trim_frames: i32,
     /// MAIN VOLUME.
     master: u32,
 }
@@ -31,7 +29,6 @@ fn writer() -> Option<&'static Sender<Request>> {
                         let _ = cfg::save(
                             std::path::Path::new(cfg::PATH),
                             cfg::Settings {
-                                trim_frames: request.trim_frames,
                                 master: Some(request.master),
                             },
                         );
@@ -54,18 +51,14 @@ pub fn load() -> Option<cfg::Settings> {
 /// The value is written by the settings thread; if the thread could not be
 /// started (or has stopped), the write happens on the caller instead of being
 /// lost.
-pub fn save(trim_frames: i32, master: u32) {
-    let request = Request {
-        trim_frames,
-        master,
-    };
+pub fn save(master: u32) {
+    let request = Request { master };
     if writer().is_some_and(|sender| sender.send(request).is_ok()) {
         return;
     }
     let _ = cfg::save(
         std::path::Path::new(cfg::PATH),
         cfg::Settings {
-            trim_frames,
             master: Some(master),
         },
     );
@@ -76,7 +69,6 @@ pub fn load_into_mod() {
     let Some(settings) = load() else {
         return;
     };
-    mpc_sample_sdk::audio::set_extra_latency(settings.trim_frames);
     if let Some(master) = settings.master {
         crate::backend::looper::looper_set_master(master);
     }

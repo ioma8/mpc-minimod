@@ -5,11 +5,10 @@ page. It clears any loops left from an earlier run.
 
 What it proves, in order:
   * SAMPLE OPTIONS has a Live Looper entry and it opens a fullscreen view
-  * the record latency is the firmware's own ALSA ring geometry (one buffer
-    per direction), read from the device without any probe
+  * the record latency estimate uses ALSA buffer geometry, without a probe
   * the metronome click is off by default
   * a pad records from the selected input source and closes into playback,
-    with a measured latency compensation on the take
+    with the estimated latency compensation on the take
   * the recorded loop really is on the device output (440 Hz from the tone
     source, after the input is unplugged)
   * pressing the pad again stops it (output goes silent)
@@ -37,6 +36,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--lab', type=Path, required=True)
     parser.add_argument('--panel', default='http://127.0.0.1:8765')
+    parser.add_argument('--measure-loopback-latency', action='store_true',
+                        help='measure simulated loopback using the emulator click')
     args = parser.parse_args()
     sys.path.insert(0, str(args.lab))
     import lab
@@ -184,7 +185,8 @@ def main():
     buf_out = u32(symbol('g_buf_out'))
     buf_in = u32(symbol('g_buf_in'))
     assert buf_out > 0 and buf_in > 0, (buf_out, buf_in)
-    cal_frames = buf_out + buf_in
+    period_in = u32(symbol('g_period_in'))
+    cal_frames = buf_in - period_in
     route('tone')
     clear_all()
     time.sleep(0.3)
@@ -201,8 +203,7 @@ def main():
     state, length, rec, lat = snapshot()[0]
     assert length > 40000, (state, length, rec)
     assert abs(length - rec) < 4000, (length, rec)
-    assert lat == cal_frames + u32(symbol('g_lat_extra')), \
-        f'take latency {lat} != ring geometry {cal_frames} + trim'
+    assert lat == cal_frames, f'take latency {lat} != device input latency {cal_frames}'
 
     # --- MAIN VOLUME scales the loops like the rest of the app
     def master_now():
@@ -261,6 +262,13 @@ def main():
     assert u32(symbol('g_sync')) == 1, 'sync pulse did not start'
     pulse = u32(symbol('g_sync_frames'))
     assert abs(pulse - loop_length) < 2000, (pulse, loop_length)
+    # The pulse and reference loop must share a phase, not merely a period.
+    entries = subprocess.check_output(['nm', '-a', str(ROOT / 'build/minimod.elf')], text=True)
+    epoch_offset = next(int(fields[0], 16) for line in entries.splitlines()
+                        if len(fields := line.split()) == 3 and 'PULSE_EPOCH' in fields[2])
+    epoch = struct.unpack('<Q', read(epoch_offset, 8))[0]
+    origin = struct.unpack('<Q', read(symbol('g_pads') + 16, 8))[0]
+    assert (epoch - origin) % pulse == 0, (epoch, origin, pulse)
 
     # --- a short recording is quantized to one whole pulse
     route('tone')
@@ -275,10 +283,51 @@ def main():
     quant_len, quant_rec, take_lat = length, rec, lat
 
     # --- STOP stops everything that is playing
+    origins = [struct.unpack('<Q', read(symbol('g_pads') + i * stride + 16, 8))[0]
+               for i in range(2)]
     tap('STOP')
     time.sleep(0.3)
     assert all(p[0] != 2 and p[0] != 3 for p in snapshot()), snapshot()
     assert rms(loop_tail()) < 0.01, 'STOP should silence every loop'
+    tap('PAD 1')
+    tap('PAD 2')
+    restarted = [struct.unpack('<Q', read(symbol('g_pads') + i * stride + 16, 8))[0]
+                 for i in range(2)]
+    assert restarted == origins, (origins, restarted)
+    tap('STOP')
+
+    if args.measure_loopback_latency:
+        # Emulator-only probe: route the simulated output to the simulated input.
+        # The in-process loop buffer gives the phase without host PCM capture.
+        hold('SHIFT', 'LOOP')
+        route('loop')
+        time.sleep(0.5)
+        tap('PAD 3')
+        time.sleep(1.8)
+        tap('PAD 3')
+        wait_state(2, 2)
+        _, _, recorded, compensation = snapshot()[2]
+        origin3 = struct.unpack('<Q', read(symbol('g_pads') + 2 * stride + 16, 8))[0]
+        pool_offset = next(int(fields[0], 16) for line in entries.splitlines()
+                           if len(fields := line.split()) == 3 and '6looper4POOL' in fields[2])
+        pool = struct.unpack('<Q', read(pool_offset, 8))[0]
+        address = pool + 2 * 44100 * 8 * 4
+        raw = ssh(f'dd if=/proc/{pid}/mem bs=4 skip={address // 4} '
+                  f'count={recorded} 2>/dev/null', binary=True)
+        values = struct.unpack(f'<{recorded}f', raw)
+        expected = (epoch - origin3) % pulse
+        crossings = [i for i in range(1, len(values))
+                     if abs(values[i]) > 0.005 and abs(values[i - 1]) <= 0.005]
+        assert crossings, 'emulator loopback did not record the simulated click'
+        onsets = [crossings[0]] + [current for previous, current in zip(crossings, crossings[1:])
+                                  if current - previous > 420]
+        residuals = [((i - expected + pulse // 2) % pulse) - pulse // 2 for i in onsets]
+        residual = min(residuals, key=abs)
+        print(f'emulator loopback: estimate {compensation} frames, '
+              f'click residual {residual:+d} frames (first threshold crossing)')
+        tap('STOP')
+        hold('SHIFT', 'LOOP')
+        route('none')
 
     # --- ERASE + pad clears exactly that pad
     control('ERASE', 'press', 127)
@@ -295,21 +344,6 @@ def main():
     hold('SHIFT', 'LOOP')
     time.sleep(0.2)
     assert u32(symbol('g_click')) == 0, 'SHIFT + LOOP did not disable the click'
-
-    # --- K1 trims the record latency, 1 ms per step.  The trim is persisted, so
-    #     the check is a delta, and K1 always goes back to zero even when an
-    #     assertion fails: a half-turned knob would skew every later run.
-    control('K1', 'set', 0)
-    time.sleep(0.2)
-    trim0 = u32(symbol('g_lat_extra'))
-    try:
-        control('K1', 'set', 10)
-        time.sleep(0.2)
-        assert u32(symbol('g_lat_extra')) == trim0 + 440, u32(symbol('g_lat_extra'))
-    finally:
-        control('K1', 'set', 0)
-        time.sleep(0.2)
-    assert u32(symbol('g_lat_extra')) == trim0, u32(symbol('g_lat_extra'))
 
     # --- SHIFT + DATA closes; loops survive and the app does not restart
     close_looper()

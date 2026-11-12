@@ -10,6 +10,24 @@ pub use mpc_sample_sdk::event::button::{
     PLUS as KEY_PLUS, PRESSED, SHIFT as KEY_SHIFT,
 };
 
+/// The Sample screen.
+pub const KEY_SAMPLE: u32 = 0x06;
+/// The first soft key (the trim screen).
+pub const KEY_SCREEN1: u32 = 0x0c;
+/// The second soft key.
+pub const KEY_SCREEN2: u32 = 0x0d;
+/// The fourth soft key.
+pub const KEY_SCREEN4: u32 = 0x0f;
+
+/// Whether a key leaves the trim screen, so the trim flag must be cleared.
+///
+/// The first soft key is the trim screen. The third soft key is [`KEY_B3`],
+/// which the trim screen uses for the cycle; it is not a navigation key.
+#[must_use]
+pub const fn leaves_trim_screen(code: u32) -> bool {
+    matches!(code, KEY_SAMPLE | KEY_SCREEN2 | KEY_SCREEN4)
+}
+
 /// What the caller should do with the event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -92,6 +110,8 @@ pub struct Context {
     pub screens: Screens,
     /// Whether the Sample page is visible.
     pub page_visible: bool,
+    /// Whether the app's trim screen is showing (the B3 label is `Filter`).
+    pub trim_screen: bool,
 }
 
 /// Whether the event is a press.
@@ -126,7 +146,7 @@ pub fn dispatch(context: Context) -> Action {
     // The release matters too: it is what lets the next press count again.
     // AutoTrim edits the pad the user pressed last, so it is only armed on the
     // Sample page where that pad is the one being looked at.
-    if context.code == KEY_B3 && context.held.shift && context.page_visible {
+    if context.code == KEY_B3 && context.held.shift && context.page_visible && context.trim_screen {
         return Action::Autotrim;
     }
     if (context.code == KEY_PLUS || context.code == KEY_MINUS) && context.screens.levels {
@@ -192,6 +212,7 @@ mod tests {
             octave: OctaveKeys::default(),
             screens: Screens::default(),
             page_visible: true,
+            trim_screen: false,
         }
     }
 
@@ -347,13 +368,16 @@ mod tests {
             octave: OctaveKeys::default(),
             screens: Screens::default(),
             page_visible: true,
+            trim_screen: true,
         };
         assert_eq!(dispatch(context), Action::Autotrim);
         context.down = 0;
         assert_eq!(dispatch(context), Action::Autotrim);
-        // Off the Sample page the pad the trim would edit is not the one on
-        // screen, so the key goes to the app.
+        // Off the trim screen the key belongs to the app.
         context.page_visible = false;
+        assert_eq!(dispatch(context), Action::Forward);
+        context.page_visible = true;
+        context.trim_screen = false;
         assert_eq!(dispatch(context), Action::Forward);
     }
 }

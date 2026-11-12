@@ -1,25 +1,18 @@
 //! The looper's persisted settings.
 //!
-//! Two numbers survive a restart: the latency trim in milliseconds and the
-//! MAIN VOLUME.  The file is deliberately trivial - `"<trim_ms> <master>"` - but
-//! it is read at startup and rewritten whenever either changes, so a malformed
-//! or half-written file must never leave the looper in a strange state.
+//! The MAIN VOLUME survives a restart. The file is deliberately trivial -
+//! `"<master>"` - but it is read at startup and rewritten whenever it changes,
+//! so a malformed or half-written file must never leave the looper in a strange
+//! state.
 
 use std::io::Write;
 use std::path::Path;
 
 /// Where the settings live.
 pub const PATH: &str = "/data/minimod-looper.cfg";
-/// Frames per millisecond at the device's 44.1 kHz.
-pub const FRAMES_PER_MS: i32 = 44;
-/// The trim is bounded to this many milliseconds either way.
-pub const TRIM_LIMIT_MS: i32 = 400;
-
 /// What the file holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
-    /// Latency trim in frames.
-    pub trim_frames: i32,
     /// MAIN VOLUME when the file carried one.
     pub master: Option<u32>,
 }
@@ -29,14 +22,14 @@ pub struct Settings {
 pub fn load(path: &Path) -> Option<Settings> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut fields = text.split_whitespace();
-    let trim_ms: i32 = fields.next()?.parse().ok()?;
-    let master = fields
-        .next()
-        .and_then(|field| field.parse::<i32>().ok())
-        .map(|value| u32::try_from(value.clamp(0, 127)).unwrap_or(127));
+    let first: i32 = fields.next()?.parse().ok()?;
+    // Old files wrote "<trim_ms> <master>"; new files write only "<master>".
+    let master = match fields.next() {
+        Some(field) => field.parse::<i32>().ok()?,
+        None => first,
+    };
     Some(Settings {
-        trim_frames: trim_ms.clamp(-TRIM_LIMIT_MS, TRIM_LIMIT_MS) * FRAMES_PER_MS,
-        master,
+        master: Some(u32::try_from(master.clamp(0, 127)).unwrap_or(127)),
     })
 }
 
@@ -47,7 +40,7 @@ pub fn load(path: &Path) -> Option<Settings> {
 /// Returns the standard I/O error of the temporary create, write or rename.
 pub fn save(path: &Path, settings: Settings) -> std::io::Result<()> {
     let master = settings.master.unwrap_or(127).min(127);
-    let text = format!("{} {master}\n", settings.trim_frames / FRAMES_PER_MS);
+    let text = format!("{master}\n");
     // Write a sibling and rename it over the real file, so a crash or a full
     // disk leaves the previous settings intact instead of a truncated line.
     let temporary = path.with_extension("tmp");
@@ -68,7 +61,7 @@ pub fn save(path: &Path, settings: Settings) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FRAMES_PER_MS, Settings, load, save};
+    use super::{Settings, load, save};
 
     fn path(name: &str) -> std::path::PathBuf {
         let directory = std::env::temp_dir().join(format!("minimod-cfg-{name}"));
@@ -80,57 +73,26 @@ mod tests {
     #[test]
     fn a_saved_file_round_trips() {
         let path = path("round-trip");
-        save(
-            &path,
-            Settings {
-                trim_frames: -176,
-                master: Some(64),
-            },
-        )
-        .expect("save");
-        assert_eq!(
-            load(&path),
-            Some(Settings {
-                trim_frames: -176,
-                master: Some(64)
-            })
-        );
+        save(&path, Settings { master: Some(64) }).expect("save");
+        assert_eq!(load(&path), Some(Settings { master: Some(64) }));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]
-    fn the_values_are_clamped_on_the_way_in() {
+    fn an_old_trim_and_master_file_keeps_only_the_master() {
+        let path = path("old");
+        std::fs::write(&path, "12 64\n").expect("write");
+        assert_eq!(load(&path), Some(Settings { master: Some(64) }));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn the_master_is_clamped_on_the_way_in() {
         let path = path("clamp");
-        std::fs::write(&path, "99999 9999\n").expect("write");
-        assert_eq!(
-            load(&path),
-            Some(Settings {
-                trim_frames: 400 * FRAMES_PER_MS,
-                master: Some(127)
-            })
-        );
-        std::fs::write(&path, "-99999 -5\n").expect("write");
-        assert_eq!(
-            load(&path),
-            Some(Settings {
-                trim_frames: -400 * FRAMES_PER_MS,
-                master: Some(0)
-            })
-        );
-        std::fs::remove_dir_all(path.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn a_trim_without_a_volume_is_accepted() {
-        let path = path("partial");
-        std::fs::write(&path, "12\n").expect("write");
-        assert_eq!(
-            load(&path),
-            Some(Settings {
-                trim_frames: 12 * FRAMES_PER_MS,
-                master: None
-            })
-        );
+        std::fs::write(&path, "9999\n").expect("write");
+        assert_eq!(load(&path), Some(Settings { master: Some(127) }));
+        std::fs::write(&path, "-5\n").expect("write");
+        assert_eq!(load(&path), Some(Settings { master: Some(0) }));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

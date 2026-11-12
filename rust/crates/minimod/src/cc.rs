@@ -1,15 +1,12 @@
 //! What a control-change event does before it reaches the app.
 //!
 //! The routing decision is [`crate::routing`]'s; this acts on it: the master
-//! volume and the latency trim belong to the looper, the three knobs belong to
-//! the bass page, and everything else is either swallowed (a modal screen owns
-//! the controls) or handed to the app.
-
-use core::sync::atomic::{AtomicI32, Ordering};
+//! volume belongs to the looper, the three knobs belong to the bass page, and
+//! everything else is either swallowed (a modal screen owns the controls) or
+//! handed to the app.
 
 use crate::backend::bass::preview_set_params;
-use crate::backend::looper::{self, looper_notice};
-use crate::cfg;
+use crate::backend::looper;
 use crate::clock;
 use crate::routing;
 use mpc_sample_sdk::state::Global;
@@ -25,8 +22,6 @@ pub struct Hooks {
     pub repaint: Option<fn()>,
     /// Write the settings file.
     pub save: Option<fn()>,
-    /// Show a one-line notice.
-    pub notice: Option<fn(&str)>,
 }
 
 /// The state the routing reads.
@@ -46,8 +41,6 @@ pub struct Context {
     pub busy: i32,
     /// A spectral chop is running.
     pub spectral_active: i32,
-    /// The latency trim in frames.
-    pub trim_frames: i32,
     /// The three bass knob values.
     pub knobs: [f32; 3],
 }
@@ -57,10 +50,6 @@ pub struct Context {
 pub struct Outcome {
     /// 1 when the event must not reach the app.
     pub consumed: i32,
-    /// The new latency trim, in frames.
-    pub trim_frames: i32,
-    /// Whether `trim_frames` changed.
-    pub trim_changed: i32,
     /// The three knob values after this event.
     pub knobs: [f32; 3],
     /// Whether `knobs` changed.
@@ -69,17 +58,11 @@ pub struct Outcome {
 
 /// When the settings were last written.
 static SAVED_AT: Global<i64> = Global::new(0);
-/// The last knob-1 value seen, so the trim follows the knob's movement rather
-/// than its absolute position.
-static KNOB1_LAST: AtomicI32 = AtomicI32::new(-1);
-
 /// Handle one control-change event.
 #[must_use]
 pub fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
     let mut outcome = Outcome {
         consumed: 0,
-        trim_frames: context.trim_frames,
-        trim_changed: 0,
         knobs: context.knobs,
         knobs_changed: 0,
     };
@@ -108,27 +91,6 @@ pub fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
                 outcome.consumed = 1;
             }
         }
-        // The latency trim moves one millisecond per step; the knob-to-frames
-        // mapping and its clamp live here, so the routing ladder stays pure.
-        routing::Route::Trim(value) => {
-            let frames = trim_frames(value, context.trim_frames);
-            outcome.trim_frames = frames;
-            outcome.trim_changed = i32::from(frames != context.trim_frames);
-            if outcome.trim_changed != 0 {
-                save_throttled(hooks);
-                if let Some(notice) = hooks.notice {
-                    let millis = frames / cfg::FRAMES_PER_MS;
-                    let line = if millis >= 0 {
-                        format!("TRIM +{millis} ms")
-                    } else {
-                        format!("TRIM {millis} ms")
-                    };
-                    notice(&line);
-                }
-            }
-            outcome.consumed = 1;
-            return outcome;
-        }
         // The bass control page owns the three knobs.
         routing::Route::Bass(index, amount) => {
             let index = index.min(2);
@@ -154,32 +116,6 @@ pub fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
     outcome
 }
 
-/// The trim the knob's movement asks for, clamped to the same range the
-/// settings file allows.
-fn trim_frames(value: u32, current: i32) -> i32 {
-    let Ok(value) = i32::try_from(value) else {
-        return current;
-    };
-    let last = KNOB1_LAST.load(Ordering::Acquire);
-    if last < 0 {
-        KNOB1_LAST.store(value, Ordering::Release);
-        return current;
-    }
-    if value == last {
-        return current;
-    }
-    KNOB1_LAST.store(value, Ordering::Release);
-    let frames = (value - last) * cfg::FRAMES_PER_MS;
-    let limit = cfg::TRIM_LIMIT_MS * cfg::FRAMES_PER_MS;
-    current.saturating_add(frames).clamp(-limit, limit)
-}
-
-/// Forget the knob position when a looper session starts or ends, so the first
-/// move of a new session cannot apply the delta from the previous one.
-pub fn reset_trim_tracking() {
-    KNOB1_LAST.store(-1, Ordering::Release);
-}
-
 /// Write the settings, at most once every few seconds.
 fn save_throttled(hooks: Hooks) {
     let now = clock::now_ms();
@@ -195,12 +131,11 @@ fn save_throttled(hooks: Hooks) {
     }
 }
 
-// The feature owns the screens, the key flags and the trim value; it builds the
-// context and applies what comes back.
-/// What the routing needs to know about the mod's screens and trim, right now.
+// The feature owns the screens and the key flags; it builds the context and
+// applies what comes back.
+/// What the routing needs to know about the mod's screens, right now.
 fn context() -> Context {
     let menu = crate::menu::state();
-    let trim = i32::try_from(mpc_sample_sdk::audio::extra_latency()).unwrap_or(0);
     let knobs = crate::menu::bass_knobs();
     Context {
         value: 0,
@@ -210,16 +145,13 @@ fn context() -> Context {
         bass_edit: menu.bass_edit,
         busy: menu.busy,
         spectral_active: i32::from(crate::spectral::is_active()),
-        trim_frames: trim,
         knobs,
     }
 }
 
-/// Write the latency trim and the master level to the settings file.
-fn save() {
-    // plain word, written by the UI thread.
-    let trim = i32::try_from(mpc_sample_sdk::audio::extra_latency()).unwrap_or(0);
-    crate::settings::save(trim, looper::looper_master());
+/// Write the master level to the settings file.
+pub(crate) fn save() {
+    crate::settings::save(looper::looper_master());
 }
 
 /// A control change: run the routing ladder and tell the SDK whether to forward.
@@ -230,12 +162,8 @@ pub fn control(event: CcEvent) -> CcFlow {
     let hooks = Hooks {
         repaint: Some(crate::ui::minimod_repaint_screen),
         save: Some(save),
-        notice: Some(looper_notice),
     };
     let outcome = handle(context, event.control, hooks);
-    if outcome.trim_changed != 0 {
-        mpc_sample_sdk::audio::set_extra_latency(outcome.trim_frames);
-    }
     if outcome.knobs_changed != 0 {
         crate::menu::set_bass_knobs(outcome.knobs);
         preview_set_params(outcome.knobs[0], outcome.knobs[1], outcome.knobs[2]);
@@ -249,30 +177,7 @@ pub fn control(event: CcEvent) -> CcFlow {
 
 #[cfg(test)]
 mod tests {
-    use super::{Context, Hooks, handle, reset_trim_tracking, trim_frames};
-    use crate::cfg;
-    use std::sync::Mutex;
-
-    /// The knob tracker is a process static, so its tests take turns.
-    static TRIM_TEST: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn the_trim_follows_the_knob_movement_and_stays_in_range() {
-        let _serial = TRIM_TEST
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_trim_tracking();
-        // The first event only records the position.
-        assert_eq!(trim_frames(10, 0), 0);
-        assert_eq!(trim_frames(11, 0), cfg::FRAMES_PER_MS);
-        assert_eq!(trim_frames(10, 0), -cfg::FRAMES_PER_MS);
-        // The limit is the same one the settings file accepts.
-        let limit = cfg::TRIM_LIMIT_MS * cfg::FRAMES_PER_MS;
-        reset_trim_tracking();
-        assert_eq!(trim_frames(0, 0), 0);
-        assert_eq!(trim_frames(127, limit), limit);
-        reset_trim_tracking();
-    }
+    use super::{Context, Hooks, handle};
 
     fn context() -> Context {
         Context {
@@ -283,7 +188,6 @@ mod tests {
             bass_edit: 0,
             busy: 0,
             spectral_active: 0,
-            trim_frames: 0,
             knobs: [0.5, 0.5, 0.5],
         }
     }
@@ -292,7 +196,6 @@ mod tests {
         Hooks {
             repaint: None,
             save: None,
-            notice: None,
         }
     }
 

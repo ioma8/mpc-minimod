@@ -45,7 +45,6 @@ captured while recording, where playback is while playing.
 | `LOOP` | **sync pulse** on/off, with the length of the most recently recorded loop |
 | `SHIFT` + `LOOP` | **metronome click** on/off (off by default) |
 | `ERASE` + `LOOP` | clear all loops and the pulse |
-| `K1` | trim the record latency, 1 ms per step (shown as `TRIM ±N ms`) |
 | `SHIFT` + `DATA` | close the view and return to the previous page |
 | every other button | consumed while the view is open |
 
@@ -63,8 +62,9 @@ looper before this was fixed.
   clamp at full scale.
 * **Overdub** keeps the loop length and adds the input into the existing buffer,
   so the material already there stays and the new pass layers on top.
-* **Sync pulse** uses the length of the last recorded loop as its period. While
-  it is on:
+* **Sync pulse** uses the length and origin of the most recently started loop
+  as its period and phase. Restarting a stopped loop while sync is on preserves
+  that loop's original transport phase. While sync is on:
   * the header dot, the pulse bar and the sync message show the beat; the
     **click is off by default** (`SHIFT`+`LOOP` turns the audible 1 kHz click on,
     the header then reads `SYNC … +CLK`);
@@ -129,32 +129,39 @@ Mixing there instead of in the planar writer hook means the loops land on the
 device no matter which device object rendered the app's own sound, and it is the
 same block a hardware jack would receive.
 
-### Latency: the firmware's own ring geometry
+### Latency from the device's own period geometry
 
-The firmware opens its capture and playback streams as one linked duplex device
-on the same clock, so what it has buffered is exactly the recording latency: one
-full ring of input that was captured but not yet consumed, plus one full ring of
-output that has been written but not yet played. That is the number the sampler
-itself works with, and the looper reads it straight from ALSA with
-`snd_pcm_hw_params_get_buffer_size` on both of the firmware's handles — no probe,
-no return path, so **headphones, USB audio and a silent instrument input all get
-the right value**. The sizes are read on the stream's own audio thread the first
-time the view opens (and again on every reopen), never from another thread.
+The firmware's native audio engine reports the ALSA ring's period geometry:
+`+0x68` is the 1,024-frame buffer and `+0x70` the 128-frame period. Its own
+resampler uses `buffer - period` as the device latency, i.e. one fewer period
+than the ring: `(periods - 1) * period_size = 896` frames per direction. The
+SDK reads the same period size with `snd_pcm_hw_params_get_period_size` and
+exposes `input_latency()` / `output_latency()`; the old capacity sum (2,048) was
+not the device latency.
 
-In the lab the firmware uses 1024 frames per ring, so the looper applies
-`2048` frames (46 ms); a click recorded through the loop cable lands **69 frames
-(1.6 ms)** from the expected pulse grid. The strip shows `BUF 46ms`.
+Recording uses the **input** latency (896): the captured block is that old, so
+dropping `input_latency` frames aligns the first captured frame with the press.
+An overdub uses **input + output** (1,792): the loop being heard is
+`output_latency` late, and the new input is `input_latency` old. Synced loops
+share the output latency, so their phase is preserved. The input and output
+latencies are the device's own values; there is no manual latency trim.
 
-The sizes are read with `snd_pcm_hw_params_current` **on the stream's own audio
-thread** (the first write/read after the view opens) and the channel count used
-for mixing comes from the same query; if the device cannot be queried, or the
+The emulator-only digital loopback now records its click 757–858 frames late with
+the 896-frame input estimate. That probe measures the output→input path, so the
+missing 896 frames are the output latency, not a record error; the old
+2,048-frame capacity sum put the same click 388 frames early. Neither emulator
+number is a physical-device calibration.
+
+The sizes and period are read with `snd_pcm_hw_params_current` and
+`snd_pcm_hw_params_get_period_size` **on the stream's own audio thread** (the
+first write/read after the view opens) and the channel count used for mixing
+comes from the same query; if the device cannot be queried, or the
 stream is not `S32_LE`, the mod leaves the buffer alone instead of guessing.
 Touching the app's pcm from the repaint thread is exactly the kind of thing that
 can wedge ALSA and take the whole app down when the view closes.
 
-`K1` adds a trim of ±400 ms on top for the room or personal preference, stored in
-`/data/minimod-looper.cfg` and reused at the next start (the strip then shows
-`BUF` with the trimmed total). If the firmware ever reports no buffer geometry,
+The device latency is used directly; there is no manual trim. The MAIN VOLUME
+is stored in `/data/minimod-looper.cfg` and reused at the next start. If the firmware ever reports no buffer geometry,
 the mod falls back to `snd_pcm_delay` + `snd_pcm_avail` (`EST`), and
 `MINIMOD_LOOP_LAT=<frames>` forces a fixed value for experiments.
 
@@ -162,7 +169,8 @@ The compensation is snapshotted when a take starts and used for the whole take:
 a new recording drops its first `lat` frames (they belong before the loop start),
 and when the take is closed it keeps capturing for `lat` frames more, so the last
 moments before the closing press are written to the end of the loop instead of
-being lost. Overdubs write `lat` frames earlier, wrapping inside the loop.
+being lost. Overdubs write `input + output` frames earlier, wrapping inside the
+loop.
 
 ### Clock and threads
 
@@ -194,8 +202,8 @@ The test drives the panel and reads the mod's own state and output tap from
 Last run on the release build:
 
 ```
-live looper: loop 51712 frames (1.17s), 0.150 rms at 435 Hz, ring 2048 frames,
-take latency 2048 frames, sync 51712, quantized 27648 -> 51712
+live looper: loop 51840 frames (1.18s), 0.150 rms at 441 Hz, ring 896 frames,
+take latency 896 frames, sync 51840, quantized 27520 -> 51840
 ```
 
 What that covers, in order: opening the view reads the firmware's ring geometry
@@ -224,9 +232,9 @@ in-process tap is.
 
 * Mono loops, 8 s maximum, no undo. The 44.1 kHz constant is only used for the
   seconds readout; looping itself is frame-based.
-* The ring geometry is a property of the device's audio path, so it applies to
-  every source. `K1` covers acoustic round trips outside the firmware (a room
-  mic, an external converter) and is remembered in `/data/minimod-looper.cfg`.
+* Input/output timing and external converter or acoustic delays have not been
+  proven sample-accurate on physical hardware. The device latency is used
+  directly; only the MAIN VOLUME is persisted in `/data/minimod-looper.cfg`.
 * **The app's hidden page selection still follows the last pad press.** Pad
   events are dispatched to the app's observer listeners upstream of the note
   handler, and the pad-grid selection is one of those siblings. Blocking the

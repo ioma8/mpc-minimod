@@ -233,6 +233,7 @@ fn footer(graphics: usize, view: &View) {
         let source = match view.lat_src {
             b'B' => "BUF",
             b'F' => "FIX",
+            b'J' => "DEV",
             _ => "EST",
         };
         let millis = u64::from(view.lat_frames) * 1000 / u64::from(RATE);

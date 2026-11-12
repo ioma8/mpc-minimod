@@ -141,6 +141,7 @@ pub fn press(state: &mut State, event: &ButtonEvent, hooks: Hooks) -> Flow {
             levels: levels != 0,
         },
         page_visible: hooks.page_visible.is_some_and(|callback| callback()),
+        trim_screen: trim_screen(),
     };
     let action = buttons::dispatch(context);
     if context.screens.looper {
@@ -158,7 +159,7 @@ pub fn press(state: &mut State, event: &ButtonEvent, hooks: Hooks) -> Flow {
                 if was && looper::looper_is_open() == 0 {
                     state.shift = 0;
                     state.erase = 0;
-                    crate::cc::reset_trim_tracking();
+                    crate::cc::save();
                     if let Some(release) = hooks.release_held {
                         release();
                     }
@@ -308,8 +309,16 @@ pub fn shift() -> i32 {
     state().shift
 }
 
+/// Whether the app is showing the trim screen.
+#[must_use]
+pub fn trim_screen() -> bool {
+    TRIM_SCREEN.load(Ordering::Acquire)
+}
+
 /// The state itself.
 static STATE: Global<State> = Global::new(State::new());
+/// Whether the app is showing the trim screen (its B3 label is `Filter`).
+static TRIM_SCREEN: AtomicBool = AtomicBool::new(false);
 
 /// A copy of the state, for the feature code.
 #[must_use]
@@ -450,6 +459,15 @@ pub fn hooks() -> Hooks {
 /// The button entry: run the ladder and tell the SDK whether to forward.
 #[must_use]
 pub fn button(event: ButtonEvent) -> ButtonFlow {
+    // The first soft key enters the trim screen; SAMPLE and the other screen
+    // soft keys leave it. The label `Filter` can also arm the flag.
+    if event.value == buttons::PRESSED {
+        if event.code == buttons::KEY_SCREEN1 {
+            TRIM_SCREEN.store(true, Ordering::Release);
+        } else if buttons::leaves_trim_screen(event.code) {
+            TRIM_SCREEN.store(false, Ordering::Release);
+        }
+    }
     let hooks = hooks();
     if event.surface != 0 {
         crate::input::set_data_target(mpc_sample_sdk::event::data_target(event.surface));
@@ -465,6 +483,9 @@ pub fn button(event: ButtonEvent) -> ButtonFlow {
 /// The soft key's label: rename `Filter` to `AutoTrim` while SHIFT is held.
 #[must_use]
 pub fn label(label: &core::ffi::CStr) -> Option<&'static core::ffi::CStr> {
+    if label.to_bytes() == b"Filter" {
+        TRIM_SCREEN.store(true, Ordering::Release);
+    }
     if label.to_bytes() == b"Filter" && shift() != 0 {
         Some(c"AutoTrim")
     } else {

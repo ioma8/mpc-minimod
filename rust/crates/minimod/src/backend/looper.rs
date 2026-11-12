@@ -46,9 +46,13 @@ pub fn looper_master() -> u32 {
 }
 
 /// Set the record latency in frames and where it came from.
-pub fn looper_set_latency_ex(frames: u32, source: i8) {
-    let code = u8::try_from(source).unwrap_or(b'E');
-    Engine::set_latency(frames, LatencySource::from_code(code));
+pub fn looper_set_latency_ex(frames: u32, source: u8) {
+    Engine::set_latency(frames, LatencySource::from_code(source));
+}
+
+/// Set the output-side device latency used to place overdubs.
+pub fn looper_set_output_latency(frames: u32) {
+    Engine::set_output_latency(frames);
 }
 
 /// Frames captured but not yet consumed by playback.

@@ -153,6 +153,19 @@ def main():
     print(f'PASS clear: {start}..{end}')
 
     assert int(ssh('pidof "MPC Sample"').split()[0]) == pid, 'App restarted'
+    # On another Sample screen the shortcut must not be armed, so B3 reaches
+    # the app instead of consuming and trimming.
+    press('SCREEN 2')
+    time.sleep(.6)
+    before = bounds()
+    control('SHIFT', 'press', 127)
+    time.sleep(.2)
+    press_trim()
+    control('SHIFT', 'release')
+    time.sleep(.5)
+    after = bounds()
+    assert after == before, f'B3 trimmed off the trim screen: {before} -> {after}'
+
     print('PASS: cycle, tightening, clear, start mirror, no restart')
 
 

@@ -18,8 +18,6 @@ pub enum Route {
     Pass,
     /// Drive the loops' master, then pass the event on.
     Master,
-    /// The knob-1 value, for the trim; the caller owns the frame scale.
-    Trim(u32),
     /// Set this bass knob (0..2) to this value.
     Bass(usize, f32),
     /// Swallow the event.
@@ -68,10 +66,8 @@ pub fn route(context: Context) -> Route {
         return Route::Master;
     }
     if context.screens.looper {
-        if context.control == CC_KNOB1 {
-            return Route::Trim(context.value);
-        }
-        // The looper owns the other controls while it is open.
+        // The looper owns the controls while it is open; its latency is the
+        // device's own value.
         return Route::Consume;
     }
     if context.screens.menu && context.screens.bass_edit && !context.jobs.busy {

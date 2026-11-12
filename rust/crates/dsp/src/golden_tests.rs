@@ -180,12 +180,16 @@ fn replay_looper_script(input: &[i32]) -> (Vec<i32>, View) {
 
     /* Stop everything, then play both loops at half master volume. */
     assert!(Engine::button(0x51, true, false, false));
+    // The historical fixture restarts stopped loops from frame zero. Exercise
+    // that unsynced behavior; synced restarts now preserve transport phase.
+    assert!(Engine::button(0x4a, true, false, false));
     render(1024, &mut position, &mut output);
     Engine::set_master(64);
     assert!(Engine::pad(0, false, false));
     render(4096, &mut position, &mut output);
     assert!(Engine::pad(1, false, false));
     render(4096, &mut position, &mut output);
+    assert!(Engine::button(0x4a, true, false, false));
 
     /* Clear the unused pad, snapshot while the view is still open, then close. */
     assert!(Engine::pad(2, false, true));

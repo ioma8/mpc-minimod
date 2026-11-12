@@ -94,9 +94,16 @@ fn mix_preview(frames: &mut [i32], info: &OutputInfo) {
     }
 }
 
-/// Hand the looper the device's measured latency.
+/// Hand the looper the device's own input and output latency.
 fn measure_latency(info: &OutputInfo) {
     let backlog = crate::backend::looper::looper_input_backlog();
-    let (total, source) = info.latency(backlog, mpc_sample_sdk::audio::extra_latency());
-    crate::backend::looper::looper_set_latency_ex(total, i8::try_from(source).unwrap_or(0x45));
+    let (fallback, source) = info.latency(backlog, 0);
+    let input = if info.buffer_in > 0 {
+        info.input_latency()
+    } else {
+        fallback
+    };
+    let output = info.output_latency();
+    crate::backend::looper::looper_set_latency_ex(input, source);
+    crate::backend::looper::looper_set_output_latency(output);
 }

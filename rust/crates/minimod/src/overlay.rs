@@ -80,7 +80,7 @@ pub fn paint(graphics: Graphics, event: mpc_sample_sdk::PaintEvent) {
         menu(handle);
         return;
     }
-    if crate::ui::shift() == 0 || event.chop_mode {
+    if crate::ui::shift() == 0 || event.chop_mode || !crate::ui::trim_screen() {
         return;
     }
     paint::colour(handle, 0xff00_0000);

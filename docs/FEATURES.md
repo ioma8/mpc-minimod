@@ -42,12 +42,15 @@ path; a separate firmware branch in the renderer is not hooked.
 
 ## AutoTrim
 
-**Behavior.** `SHIFT`+`B3` trims the selected pad's sample to its silent edges.
+**Behavior.** On the trim screen, `SHIFT`+`B3` trims the selected pad's sample
+to its silent edges. The shortcut is not armed on the other Sample screens; there
+`B3` reaches the app unchanged.
 While `SHIFT` stays held the presses cycle **3 % → 6 % → 9 % of the file peak →
 clear**; releasing `SHIFT` resets the cycle. The threshold has a 90-count
 absolute floor; `MINIMOD_TRIM_DB` overrides the relative part for the first
 step (default 3 % ≈ −30.46 dB). Each step shows a one-second toast
-(`Trim 3% of peak`, …). AutoTrim is disabled in Chop mode so `SHIFT`+`B3` keeps
+(`Trim 3% of peak`, …). AutoTrim is disabled in Chop mode and outside the trim
+screen so `SHIFT`+`B3` keeps
 its stock Split meaning, and the soft-key caption is hidden there too.
 
 **Implementation.** On the B3 press edge (the button repeats while held) the mod

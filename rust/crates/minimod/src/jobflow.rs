@@ -641,7 +641,6 @@ fn start_looper() -> i32 {
     if opened != 0 {
         mpc_sample_sdk::audio::mark_buffers_stale();
         crate::backend::bass::preview_set_active(false);
-        crate::cc::reset_trim_tracking();
         // The pump started in `on_start` keeps the looper view animating; ask
         // for the frame that draws it for the first time.
         crate::ui::request_repaint();

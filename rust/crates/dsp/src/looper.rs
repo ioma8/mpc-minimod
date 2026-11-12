@@ -22,12 +22,10 @@
 //!
 //! # Latency
 //!
-//! The firmware keeps a full ALSA ring in each direction, so an input frame read
-//! now was captured one input ring ago and an output frame written now is heard
-//! one output ring later.  A take therefore drops the first frames (they belong
-//! before the loop start) and keeps capturing for one more latency ring after
-//! the closing press ([`State::Drain`]), so neither end of the performance is
-//! lost.
+//! A take uses the latency estimate supplied by the SDK. It drops the initial
+//! estimated latency and captures a tail after the closing press
+//! ([`State::Drain`]); overdubs use the same estimate to shift input into the
+//! loop. Buffer geometry alone does not prove sample-accurate device latency.
 
 use core::fmt::Write as _;
 use core::mem::size_of;
@@ -113,7 +111,7 @@ impl State {
 /// Where the record latency came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LatencySource {
-    /// Measured from the device's own ALSA ring geometry (the normal case).
+    /// Estimated from the device's ALSA ring capacities (the normal case).
     Geometry,
     /// An estimate, used while the geometry was not known yet.
     Estimate,
@@ -121,6 +119,8 @@ pub enum LatencySource {
     Fixed,
     /// Seeded from a previous run.
     Seeded,
+    /// Reported by the app's JUCE audio device at the callback boundary.
+    Device,
 }
 
 impl LatencySource {
@@ -132,6 +132,7 @@ impl LatencySource {
             Self::Estimate => b'E',
             Self::Fixed => b'F',
             Self::Seeded => b'S',
+            Self::Device => b'J',
         }
     }
 
@@ -142,6 +143,7 @@ impl LatencySource {
             b'B' => Self::Geometry,
             b'F' => Self::Fixed,
             b'S' => Self::Seeded,
+            b'J' => Self::Device,
             _ => Self::Estimate,
         }
     }
@@ -285,6 +287,9 @@ static GENERATION: AtomicU32 = AtomicU32::new(0);
 static LATENCY: AtomicU32 = AtomicU32::new(0);
 /// Source of [`LATENCY`].
 static LATENCY_SOURCE: AtomicU32 = AtomicU32::new(b'E' as u32);
+/// Output-side device latency, in frames.  An overdub is shifted by the input
+/// latency plus this, because the loop being played is this much ahead.
+static LATENCY_OUT: AtomicU32 = AtomicU32::new(0);
 /// Latency snapshotted for the last take.
 static LATENCY_USED: AtomicU32 = AtomicU32::new(0);
 /// Frames kept by the loop-only probe.
@@ -472,9 +477,13 @@ impl Engine {
             State::Rec | State::Dub => finish_pad(entry),
             State::Play => entry.set_state(State::Stop),
             State::Stop => {
-                entry
-                    .origin
-                    .store(TRANSPORT.load(Ordering::Acquire), Ordering::Release);
+                // Synced loops keep their phase on the common transport when
+                // restarted; unsynced loops start again at their first frame.
+                if SYNC.load(Ordering::Acquire) == 0 {
+                    entry
+                        .origin
+                        .store(TRANSPORT.load(Ordering::Acquire), Ordering::Release);
+                }
                 entry.set_state(State::Play);
             }
             // The take is already closing; nothing to do.
@@ -536,6 +545,11 @@ impl Engine {
     pub fn set_latency(frames: u32, source: LatencySource) {
         LATENCY.store(frames.min(LAT_MAX), Ordering::Release);
         LATENCY_SOURCE.store(u32::from(source.code()), Ordering::Release);
+    }
+
+    /// Set the output-side device latency used to place overdubs.
+    pub fn set_output_latency(frames: u32) {
+        LATENCY_OUT.store(frames.min(LAT_MAX), Ordering::Release);
     }
 
     /// Frames captured by the input hook but not consumed by playback yet.
@@ -667,7 +681,10 @@ impl Engine {
                 let touched = pad.touched.load(Ordering::Acquire) != 0;
                 if state == State::Dub || (state == State::Drain && touched) {
                     let latency = if len != 0 {
-                        pad.lat.load(Ordering::Acquire) % len
+                        pad.lat
+                            .load(Ordering::Acquire)
+                            .saturating_add(LATENCY_OUT.load(Ordering::Acquire))
+                            % len
                     } else {
                         0
                     };
@@ -860,7 +877,7 @@ impl Engine {
             return;
         }
         SYNC_FRAMES.store(best, Ordering::Release);
-        PULSE_EPOCH.store(TRANSPORT.load(Ordering::Acquire), Ordering::Release);
+        PULSE_EPOCH.store(newest, Ordering::Release);
         SYNC.store(1, Ordering::Release);
         let millis = u64::from(best) * 1000 / u64::from(RATE);
         let mut text = TextLine::new();
@@ -1238,6 +1255,7 @@ pub fn reset_for_tests() {
     PULSE_EPOCH.store(0, Ordering::Release);
     TRANSPORT.store(0, Ordering::Release);
     LATENCY.store(0, Ordering::Release);
+    LATENCY_OUT.store(0, Ordering::Release);
     LATENCY_USED.store(0, Ordering::Release);
     MASTER.store(127, Ordering::Release);
     RING_WRITE.store(0, Ordering::Release);

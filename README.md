@@ -37,7 +37,7 @@ level of the SD card and power on; see [Install](#install).
 
 | what | how |
 | --- | --- |
-| **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim | `SHIFT` + `B3` |
+| **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim; only on the trim screen | `SHIFT` + `B3` |
 | **Octave shift** of pads in 16 Levels mode — by half the grid | `PLUS` / `MINUS` keys (both = reset) |
 | **External MIDI chromatic playback** of the selected sample while in 16 Levels, in the sample's own key (C3 when it has no root note) | Enable **Pad MIDI In** in MIDI Config, then play a MIDI keyboard |
 | **HPSS** — splits the selected sample into harmonic and percussive copies on two empty pads; the source sample is left untouched | `SHIFT` + `DATA`, choose **HPSS**, `DATA` |
@@ -45,7 +45,7 @@ level of the SD card and power on; see [Install](#install).
 | **Add Reverb** — adds the firmware's stereo reverb and a rendered tail to a new pad copy | `SHIFT` + `DATA`, choose **Add Reverb**, `DATA` |
 | **Vinyl / Lo-Fi** — applies the firmware's Vinyl or Decimator effect to a new pad copy | `SHIFT` + `DATA`, choose **Vinyl** or **Lo-Fi**, `DATA` |
 | **Synth** — eight characters (bass, piano, pads, lead, bells, strings, voice, organ); previews C2–D#3 from pads 1–16 and saves the selected character's C2 note to a new pad | `SHIFT` + `DATA`, choose **Synth**; turn `DATA` to switch character, K1/K2/K3 shape it |
-| **Live Looper** — a fullscreen 16-pad looper: each pad records a loop from the selected input source and plays it back; overdub, per-pad clear, stop-all, sync pulse with loop-length quantization and self-calibrated latency | `SHIFT` + `DATA`, choose **Live Looper**; pads record/play/stop, `SHIFT`+pad overdubs, `ERASE`+pad clears, `STOP` stops all, `LOOP` syncs, `K1` trims latency, `SHIFT`+`DATA` exits |
+| **Live Looper** — a fullscreen 16-pad looper: each pad records a loop from the selected input source and plays it back; overdub, per-pad clear, stop-all, sync pulse with loop-length quantization and latency compensation | `SHIFT` + `DATA`, choose **Live Looper**; pads record/play/stop, `SHIFT`+pad overdubs, `ERASE`+pad clears, `STOP` stops all, `LOOP` syncs, `SHIFT`+`DATA` exits |
 
 The trim and pitch changes confirm themselves on screen for a second. HPSS,
 Spectral Chop, Add Reverb, Vinyl, Lo-Fi and Synth are in the small
@@ -74,11 +74,11 @@ restarts. Pressing a pad records, pressing it again plays, another press stops;
 `SHIFT`+pad overdubs and returns to playback; `ERASE`+pad clears one loop and
 `STOP` stops them all; `LOOP` starts a sync pulse from the last loop's length,
 after which new loops are quantized to whole pulse lengths (the metronome click
-is off by default, `SHIFT`+`LOOP` toggles it). Recording latency comes from the
-firmware's own ALSA ring geometry (one buffer per direction, read from the
-device), so overdubs line up with headphones, USB audio or an instrument input;
-`K1` trims it and the value is kept in `/data/minimod-looper.cfg`; the loops
-follow `MAIN VOLUME` like the rest of the app. Pads are blocked from the app while the view is open and
+is off by default, `SHIFT`+`LOOP` toggles it). Recording latency is the
+device's own `(periods - 1) * period_size` value; it has not been proven
+sample-accurate for every physical input and output. The MAIN VOLUME is kept in
+`/data/minimod-looper.cfg`; the loops follow `MAIN VOLUME` like the rest of the
+app. Pads are blocked from the app while the view is open and
 `SHIFT`+`DATA` closes it. Details: [`docs/LIVE-LOOPER.md`](docs/LIVE-LOOPER.md).
 
 External MIDI plays the selected sample chromatically over the whole keyboard
