@@ -9,6 +9,7 @@ use crate::pads;
 use crate::paint;
 use crate::paths;
 use crate::sample;
+use crate::selection;
 use crate::trim;
 use crate::wav;
 
@@ -24,7 +25,8 @@ pub struct Context {
     pub control: usize,
     /// Which press of the cycle this is, 0..=3.
     pub step: i32,
-    /// The pad the user pressed last, or -1.
+    /// The pad the user pressed last, or -1; only a fallback when the page has
+    /// no selected sample.
     pub last_pad: i32,
 }
 
@@ -39,16 +41,40 @@ const LABELS: [&str; 4] = [
     "Trim cleared",
 ];
 
+/// Resolve the pad the page currently shows, not the last physical press.
+///
+/// The page binding holds the selected instrument state at `+0x60`. That is
+/// the same object as one entry in the surface's pad table, so matching it
+/// returns the selected pad even when the last pad press was another pad or
+/// happened before a project/screen change. The selected sample is the fallback
+/// when the page state is temporary.
+fn selected_pad(surface: usize, last_pad: i32) -> Option<i32> {
+    let screen = paint::screen();
+    // SAFETY: `screen` is the component the paint hook recorded on this UI
+    // thread; `current` validates its Sample-page vtable.
+    if let Some(current) = unsafe { selection::current(screen) } {
+        if let Some(pad) = pads::pad_for_state(surface, current.state()) {
+            return Some(pad);
+        }
+        if let Some(pad) = pads::pad_for_sample(surface, current.sample()) {
+            return Some(pad);
+        }
+        // A selected sample that is not addressable as a pad has no safe trim
+        // target; never fall back to a stale physical press.
+        return None;
+    }
+    (0..128).contains(&last_pad).then_some(last_pad)
+}
+
 /// Run one press of the trim cycle.
 ///
-/// Only the pad the user pressed last is touched: with no recent pad press there
-/// is no safe target, and trimming pad 0 would edit an unrelated sample.
+/// The target is the page's selected pad. A physical pad press is only the
+/// fallback when the page has no selected sample at all.
 pub fn run(context: Context) {
-    if !(0..128).contains(&context.last_pad) {
-        paint::show_toast("AutoTrim: press a pad");
+    let Some(pad) = selected_pad(context.surface, context.last_pad) else {
+        paint::show_toast("AutoTrim: select a pad");
         return;
-    }
-    let pad = context.last_pad;
+    };
     let Some(sample) = pads::sample_for_pad(context.surface, pad) else {
         return;
     };

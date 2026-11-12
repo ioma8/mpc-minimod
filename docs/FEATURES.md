@@ -53,7 +53,10 @@ step (default 3 % ≈ −30.46 dB). Each step shows a one-second toast
 screen so `SHIFT`+`B3` keeps
 its stock Split meaning, and the soft-key caption is hidden there too.
 
-**Implementation.** On the B3 press edge (the button repeats while held) the mod
+**Implementation.** The trim target is the page's native selected instrument
+state, matched to the surface pad table; the last physical pad press is only a
+fallback when the page has no selected sample. On the B3 press edge (the button
+repeats while held) the mod
 resolves the pad's sample, reads its audio — the app's in-memory float32 buffer
 first, so it also works before a sample is saved, with the WAV as the fallback
 for streamed samples — computes the first/last frames above the threshold, and
