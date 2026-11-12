@@ -26,8 +26,9 @@ only the latest changes.
   MIDI plays the selected sample chromatically over the whole keyboard from the
   sample's own root note (C3 when it has none), with exact semitones and no
   wrapping (enable Pad MIDI In in MIDI Config).
-- **AutoTrim:** trim the selected sample's silent edges with SHIFT+B3; the
-  shifted Sample page shows the AutoTrim caption.
+- **AutoTrim:** on the trim screen, SHIFT+B3 trims the page-selected sample's
+  silent edges (3 %, 6 %, 9 %, then clear); the shifted Sample page shows the
+  AutoTrim caption. Off the trim screen B3 reaches the app.
 - **SAMPLE OPTIONS:** open with SHIFT+DATA, select with DATA, then press DATA
   to confirm.
   - **HPSS** splits a sample into harmonic and percussive layers on two free
@@ -39,10 +40,15 @@ only the latest changes.
     copy.
   - **Synth** has eight selectable characters — bass, piano, pads, lead, bells,
     strings, voice and organ. Turn `DATA` to switch; each character has its own
-    three knobs, and `DATA` saves a C2 note to a new pad.
+    three knobs. The pads light in a purple 1→16 brightness gradient while the
+    page is open, PLUS/MINUS shift by 8 semitones, the page shows the played
+    note, and `DATA` renders the last previewed pad's note to a new pad (C2 by
+    default).
   - **Live Looper** opens a fullscreen 16-pad looper: each pad records from the
     selected input source, plays, overdubs, clears with `ERASE`, and can be
-    synced to a pulse built from the last loop's length.
+    synced to a pulse built from the last loop's length. Device latency comes
+    from the firmware's own period geometry; recordings use the input latency
+    and overdubs use input + output. There is no manual trim.
 
 ## Install
 
@@ -52,6 +58,58 @@ only the latest changes.
    unload the mod.
 
 The release supports MPC Sample firmware **1.3.0.12** only.
+
+## Changes in v0.9.0
+
+### Synth page
+
+- Light all sixteen pads in one purple hue while the synth page is open: pad 1
+  is off, pad 16 is full brightness, and the steps between are linear. Every
+  close path restores the app's native pad colours, including cancellation and
+  the completion of a render.
+- PLUS/MINUS shift the chromatic pad row by 8 semitones per press (four steps
+  each way; both keys reset). The shift is reset when the page opens.
+- Show the current note on the page. DATA renders the last previewed pad's note
+  plus the current shift to a new pad; C2 is the default when no pad was played.
+  Rendered sample names include the note, for example `Bass D2`.
+
+### Live Looper
+
+- Read the device latency from the firmware's own period geometry
+  (`buffer - period`, 896 frames per direction) instead of adding the two ring
+  capacities. Recordings compensate the input latency; overdubs compensate
+  input + output; synced loops keep their phase across restarts.
+- Remove the K1 manual latency trim. The settings file stores only MAIN VOLUME;
+  an old `<trim> <master>` file keeps its master value.
+- Keep the signed restart-phase fix.
+
+### AutoTrim
+
+- Arm the shortcut only on the trim screen; on the other Sample screens B3
+  reaches the app unchanged.
+- Resolve the target from the page's native selected pad (matched through the
+  surface pad table, with sample identity as fallback), not from the last
+  physical pad press.
+- Restore the synth page's purple lights when a render closes the page.
+
+### SDK
+
+- Pin `mpc-sample-sdk` v0.5.3: directional device latency, per-pad AC50 RGB
+  overrides with brightness and native restore, and a dedicated
+  [pad lighting page](https://github.com/ioma8/mpc-sample-sdk/blob/main/docs/25-lighting.md).
+
+## Verification and compatibility
+
+- `rust/check.sh` passes formatting, strict clippy, rustdoc, feature safety,
+  43 minimod tests, 49 DSP tests and the aarch64 cross build.
+- SDK v0.5.3 passes 97 tests, including the lighting and directional-latency
+  units.
+- Emulator checks cover the synth gradient, cancel/render restoration,
+  PLUS/MINUS semitone steps, the full synth sample render, AutoTrim's trim-screen
+  and selected-pad paths, and the live looper suite.
+- Built for MPC Sample firmware **1.3.0.12** only. Physical input/output
+  latency still depends on the converters and is not calibrated by the
+  emulator.
 
 ## Changes in v0.8.0
 
