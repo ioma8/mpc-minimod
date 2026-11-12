@@ -15,6 +15,8 @@ use mpc_sample_sdk::{ButtonEvent, ButtonFlow};
 
 /// The app's CHOP key.
 pub use mpc_sample_sdk::event::button::CHOP as CHOP_KEY;
+/// The looper's STOP button; SHIFT+STOP copies the loops to pads and exits.
+const LOOPER_STOP: u32 = 0x51;
 /// A full press, as the app reports it.
 /// PLUS.
 use mpc_sample_sdk::event::button::PLUS as KEY_PLUS;
@@ -154,12 +156,18 @@ pub fn press(state: &mut State, event: &ButtonEvent, hooks: Hooks) -> Flow {
             Action::Erase(on) => state.erase = i32::from(on),
             Action::Looper => {
                 let was = looper::looper_is_open() != 0;
-                let _ = looper::looper_button(
-                    code,
-                    i32::try_from(down).unwrap_or(0),
-                    state.shift,
-                    state.erase,
-                );
+                if code == LOOPER_STOP && down != 0 && state.shift != 0 {
+                    // SHIFT+STOP bounces every closed loop to a free pad and
+                    // closes the view; a failed copy keeps it open.
+                    let _ = crate::looper_bounce::copy_all();
+                } else {
+                    let _ = looper::looper_button(
+                        code,
+                        i32::try_from(down).unwrap_or(0),
+                        state.shift,
+                        state.erase,
+                    );
+                }
                 if was && looper::looper_is_open() == 0 {
                     crate::looper_lights::hide();
                     state.shift = 0;

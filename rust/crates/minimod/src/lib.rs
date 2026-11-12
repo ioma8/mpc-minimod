@@ -20,6 +20,7 @@ pub mod cfg;
 pub mod input;
 pub mod jobflow;
 pub mod levels;
+pub mod looper_bounce;
 pub mod looper_lights;
 pub mod looper_view;
 pub mod menu;

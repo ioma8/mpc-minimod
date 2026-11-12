@@ -270,3 +270,11 @@ While the fullscreen view is open, the sixteen physical pads mirror the loops:
 The mapping is updated from each looper snapshot and uses the SDK's per-pad
 AC50 overrides. Closing the view clears the overrides and restores the app's
 saved native pad colours, so the normal selection and playback lighting returns.
+
+## Copy loops to pads
+
+`SHIFT` + `STOP` stops every loop, writes each closed loop to the next free
+sampler pad (named `Loop 1` through `Loop 16`), and closes the view. It is
+all-or-nothing: if there are not enough free pads, the looper stays open with a
+notice and nothing is written. The loops remain in the looper's RAM as well, so
+reopening the view still shows them.

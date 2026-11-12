@@ -530,6 +530,41 @@ impl Engine {
         true
     }
 
+    /// Closed length of one loop, in frames.
+    #[must_use]
+    pub fn loop_len(index: usize) -> u32 {
+        PADS_ARRAY
+            .get(index)
+            .map_or(0, |pad| pad.len.load(Ordering::Acquire))
+    }
+
+    /// Copy one closed loop into `out`; returns the frames copied.
+    ///
+    /// The caller stops the engine first, so the audio thread is no longer
+    /// writing the pad. The pool is never freed and each loop has its own
+    /// `MAX_FRAMES` slot.
+    pub fn copy_loop(index: usize, out: &mut [f32]) -> u32 {
+        let Some(pad) = PADS_ARRAY.get(index) else {
+            return 0;
+        };
+        let len = pad.len.load(Ordering::Acquire).min(MAX_FRAMES as u32);
+        let pool = POOL.load(Ordering::Acquire);
+        if len == 0 || pool.is_null() {
+            return 0;
+        }
+        let count = usize::try_from(len).unwrap_or(0).min(out.len());
+        if count == 0 {
+            return 0;
+        }
+        // SAFETY: the pool is a process-lifetime mapping with PADS slots of
+        // MAX_FRAMES f32 each; the engine is stopped, so this read does not
+        // race a writer, and `out` has room for `count` elements.
+        unsafe {
+            core::ptr::copy_nonoverlapping(pool.add(index * MAX_FRAMES), out.as_mut_ptr(), count);
+        }
+        u32::try_from(count).unwrap_or(0)
+    }
+
     /// MAIN VOLUME, 0..127.
     pub fn set_master(value: u32) {
         MASTER.store(value.min(127), Ordering::Release);

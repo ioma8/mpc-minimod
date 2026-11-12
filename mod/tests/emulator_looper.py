@@ -176,6 +176,8 @@ def main():
 
     # --- the record latency is the firmware's own ring geometry, read from the
     #     device: one full ALSA buffer per direction, no probe involved
+    tap('SAMPLE')
+    time.sleep(1.0)
     route('tone')
     if u32(symbol('g_open')):
         close_looper()          # a previous run may have left the view open

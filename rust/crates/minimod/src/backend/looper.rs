@@ -34,6 +34,27 @@ pub fn looper_button(code: u32, down: i32, shift: i32, erase: i32) -> i32 {
     i32::from(Engine::button(code, down != 0, shift != 0, erase != 0))
 }
 
+/// Stop every loop before copying it out.
+pub fn looper_stop_all() {
+    Engine::stop_all();
+}
+
+/// Closed length of one loop, in frames.
+#[must_use]
+pub fn looper_loop_len(index: usize) -> u32 {
+    Engine::loop_len(index)
+}
+
+/// Copy one closed loop into `out`.
+pub fn looper_copy_loop(index: usize, out: &mut [f32]) -> u32 {
+    Engine::copy_loop(index, out)
+}
+
+/// Close the fullscreen view, keeping the loops in RAM.
+pub fn looper_close() {
+    Engine::close();
+}
+
 /// Set MAIN VOLUME, 0..127.
 pub fn looper_set_master(value: u32) {
     Engine::set_master(value);

@@ -47,6 +47,8 @@ def main():
         got = pads()[pad]
         assert got == colour, f'{label}: pad {pad + 1} is {got}, want {colour}'
 
+    tap('SAMPLE')
+    time.sleep(1.0)
     before = pads()
 
     # SHIFT + DATA opens the menu; row 6 is Live Looper.

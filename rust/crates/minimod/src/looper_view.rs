@@ -262,7 +262,7 @@ fn footer(graphics: usize, view: &View) {
     );
     paint::text(
         graphics,
-        "STOP ALL  LOOP SYNC  SHIFT+LOOP CLICK  SHIFT+DATA EXIT",
+        "STOP ALL  LOOP SYNC  SHIFT+STOP COPY  SHIFT+DATA EXIT",
         8,
         224,
         304,
