@@ -547,10 +547,15 @@ pub fn busy() -> bool {
 
 /// Clear the menu and preview state after a terminal job.
 fn finish_state() {
+    let was_bass = crate::menu::state().bass_edit != 0;
     crate::menu::with_state_mut(|menu| {
         menu.busy = 0;
         menu.open = 0;
+        menu.bass_edit = 0;
     });
+    if was_bass {
+        crate::synth_lights::hide();
+    }
     crate::backend::bass::preview_set_active(false);
     crate::ui::minimod_repaint_screen();
 }

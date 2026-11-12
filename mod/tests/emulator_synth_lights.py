@@ -70,7 +70,25 @@ def main():
     for pad in range(PADS):
         assert after[pad] == before[pad], f'pad {pad + 1}: {before[pad]} -> {after[pad]}'
 
-    print('PASS: purple gradient, pad 1 off, pad 16 full, native colours restored')
+    # Reopen, then confirm the C2 render with DATA. The render closes the page
+    # on its own; the gradient must be gone after it finishes.
+    control('SHIFT', 'press', 127)
+    tap('DATA')
+    control('SHIFT', 'release')
+    time.sleep(.5)
+    for _ in range(5):
+        control('DATA', 'turn', 1)
+    tap('DATA')
+    time.sleep(1.0)
+    lit = pads()
+    assert lit[0] == [0, 0, 0], f'second open pad 1: {lit[0]}'
+    tap('DATA')
+    time.sleep(5.0)
+    rendered = pads()
+    assert rendered[0] != [0, 0, 0], f'pad 1 still off after render: {rendered[0]}'
+    assert rendered[PADS - 1] != [77, 24, 127],         f'pad 16 still full purple after render: {rendered[PADS - 1]}'
+
+    print('PASS: purple gradient, pad 1 off, pad 16 full, cancel and render restore')
 
 
 if __name__ == '__main__':
