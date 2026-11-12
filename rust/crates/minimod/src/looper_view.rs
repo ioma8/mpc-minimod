@@ -276,6 +276,7 @@ pub fn draw(graphics: usize) {
     let Some(view) = snapshot() else {
         return;
     };
+    crate::looper_lights::sync(&view);
     frame(graphics);
     pulse(graphics, &view);
     meter(graphics, &view);

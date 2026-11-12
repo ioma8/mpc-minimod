@@ -60,7 +60,7 @@ level of the SD card and power on; see [Install](#install).
 | **Add Reverb** — adds the firmware's stereo reverb and a rendered tail to a new pad copy | `SHIFT` + `DATA`, choose **Add Reverb**, `DATA` |
 | **Vinyl / Lo-Fi** — applies the firmware's Vinyl or Decimator effect to a new pad copy | `SHIFT` + `DATA`, choose **Vinyl** or **Lo-Fi**, `DATA` |
 | **Synth** — eight characters (bass, piano, pads, lead, bells, strings, voice, organ); previews C2–D#3 from pads 1–16 with a purple 1→16 brightness gradient, `PLUS`/`MINUS` shift the pads by 8 semitones, the page shows the played note, and `DATA` renders the last pressed pad's note to a new pad (C2 when none was played) | `SHIFT` + `DATA`, choose **Synth**; turn `DATA` to switch character, K1/K2/K3 shape it |
-| **Live Looper** — a fullscreen 16-pad looper: each pad records a loop from the selected input source and plays it back; overdub, per-pad clear, stop-all, sync pulse with loop-length quantization and latency compensation | `SHIFT` + `DATA`, choose **Live Looper**; pads record/play/stop, `SHIFT`+pad overdubs, `ERASE`+pad clears, `STOP` stops all, `LOOP` syncs, `SHIFT`+`DATA` exits |
+| **Live Looper** — a fullscreen 16-pad looper: each pad records a loop from the selected input source and plays it back; overdub, per-pad clear, stop-all, sync pulse with loop-length quantization and latency compensation; pads light by state (empty dim, recording red, overdub amber, playing green, stopped dim green) | `SHIFT` + `DATA`, choose **Live Looper**; pads record/play/stop, `SHIFT`+pad overdubs, `ERASE`+pad clears, `STOP` stops all, `LOOP` syncs, `SHIFT`+`DATA` exits |
 
 The trim and pitch changes confirm themselves on screen for a second. HPSS,
 Spectral Chop, Add Reverb, Vinyl, Lo-Fi and Synth are in the small
@@ -95,7 +95,7 @@ input + output. There is no manual latency trim. The latency has not been proven
 sample-accurate for every physical input and output. The MAIN VOLUME is kept in
 `/data/minimod-looper.cfg`; the loops follow `MAIN VOLUME` like the rest of the
 app. Pads are blocked from the app while the view is open and
-`SHIFT`+`DATA` closes it. Details: [`docs/LIVE-LOOPER.md`](docs/LIVE-LOOPER.md).
+`SHIFT`+`DATA` closes it. The physical pads follow the looper state: empty pads are dim, a recording pad is red, an overdub is amber, a playing loop is bright green and a stopped loop is dim green; closing the view restores the app's native pad colours. Details: [`docs/LIVE-LOOPER.md`](docs/LIVE-LOOPER.md).
 
 External MIDI plays the selected sample chromatically over the whole keyboard
 while 16 Levels is active, measured from the sample's own root note (C3 when it

@@ -671,6 +671,7 @@ fn start_bass(menu: &mut crate::menu::State) {
 fn start_looper() -> i32 {
     let opened = crate::backend::looper::looper_activate();
     if opened != 0 {
+        crate::looper_lights::show();
         mpc_sample_sdk::audio::mark_buffers_stale();
         crate::backend::bass::preview_set_active(false);
         // The pump started in `on_start` keeps the looper view animating; ask

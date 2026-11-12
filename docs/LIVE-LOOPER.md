@@ -254,3 +254,19 @@ in-process tap is.
 * [`MECHANISMS.md`](MECHANISMS.md) — the audio mechanisms this relies on.
 * [`mod/tests/emulator_looper.py`](../mod/tests/emulator_looper.py) — the
   acceptance test.
+
+## Pad lighting
+
+While the fullscreen view is open, the sixteen physical pads mirror the loops:
+
+| pad state | colour |
+|---|---|
+| empty | dim neutral |
+| recording | red |
+| overdubbing | amber / orange-yellow |
+| playing | bright green |
+| stopped / paused | dim green |
+
+The mapping is updated from each looper snapshot and uses the SDK's per-pad
+AC50 overrides. Closing the view clears the overrides and restores the app's
+saved native pad colours, so the normal selection and playback lighting returns.

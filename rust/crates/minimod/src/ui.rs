@@ -161,6 +161,7 @@ pub fn press(state: &mut State, event: &ButtonEvent, hooks: Hooks) -> Flow {
                     state.erase,
                 );
                 if was && looper::looper_is_open() == 0 {
+                    crate::looper_lights::hide();
                     state.shift = 0;
                     state.erase = 0;
                     crate::cc::save();
