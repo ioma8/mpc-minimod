@@ -88,6 +88,19 @@ has none): exact semitones, no wrapping. Enable **Pad MIDI In** in MIDI Config â
 it resets to Off on every start. Details:
 [`docs/FEATURES.md`](docs/FEATURES.md#external-midi-chromatic-playback).
 
+## Screens
+
+<table>
+<tr>
+<td align="center"><img src="docs/images/autotrim.png" width="300" alt="AutoTrim on the trim screen with the Trim 3% of peak toast"><br><sub>AutoTrim on the trim screen; the toast shows the current threshold.</sub></td>
+<td align="center"><img src="docs/images/menu.png" width="300" alt="SAMPLE OPTIONS custom menu"><br><sub>SAMPLE OPTIONS; turn DATA to select, press DATA to run.</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/images/synth.png" width="300" alt="Synth page with the current note"><br><sub>Synth page; NOTE follows the last previewed pad and DATA renders it.</sub></td>
+<td align="center"><img src="docs/images/looper.png" width="300" alt="Live Looper fullscreen view"><br><sub>Live Looper; every pad is a record/play/overdub slot.</sub></td>
+</tr>
+</table>
+
 ## Install
 
 1. Download **`minimod.zip`** from the
