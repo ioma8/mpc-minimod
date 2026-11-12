@@ -27,8 +27,10 @@ minimod is built on **[mpc-sample-sdk](https://github.com/ioma8/mpc-sample-sdk)*
 a memory-safe Rust SDK for the Akai MPC Sample made by the same author. The SDK
 owns the firmware finding and verification, the in-memory hooks, the event
 plumbing, audio/MIDI, drawing and typed access to the app's own objects, so
-custom mods can be written in **safe Rust** without raw pointers, C ABIs or
-`unsafe` in the feature code.
+custom mods can be written in **safe Rust** with typed SDK APIs. The feature code
+uses only small, documented `unsafe` blocks where an SDK API requires a lifetime,
+thread-ownership or exclusivity contract; see
+[the Rust port notes](docs/RUST-PORT.md).
 
 The SDK is public and documented for anyone who wants to build their own MPC
 Sample mod:
