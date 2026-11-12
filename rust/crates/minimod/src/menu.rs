@@ -238,6 +238,17 @@ fn draw_knobs(graphics: usize, area: (i32, i32, i32), status: &str, knobs: [f32;
         16,
         11.0,
     );
+    let note = crate::backend::bass::note_name(crate::backend::bass::last_note_semitones());
+    paint::colour(graphics, ACCENT);
+    paint::text_fmt(
+        graphics,
+        format_args!("NOTE {note}"),
+        x + 12,
+        y + 52,
+        w - 24,
+        16,
+        11.0,
+    );
     let columns = [x + 16, x + 108, x + 200];
     for (index, column) in columns.iter().enumerate() {
         paint::colour(graphics, ACCENT);

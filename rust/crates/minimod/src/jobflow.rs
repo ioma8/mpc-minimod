@@ -5,6 +5,7 @@
 //! `TASK` is the feature's only handle — it is not a result slot or a flag.
 
 use core::sync::atomic::{AtomicI32, Ordering};
+use std::ffi::CString;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::actions::Action;
@@ -35,6 +36,8 @@ static FAILURE: Mutex<Option<Failure>> = Mutex::new(None);
 const READ_FAILED: i32 = -1;
 /// The synth character of the running render, used for its pad name.
 static JOB_KIND: AtomicI32 = AtomicI32::new(0);
+/// The semitone offset of the running synth render.
+static JOB_NOTE: AtomicI32 = AtomicI32::new(0);
 /// The destination pad of a synth render.
 static JOB_PAD: AtomicI32 = AtomicI32::new(-1);
 /// One failure: what to put in the status line and what to toast.
@@ -146,6 +149,24 @@ fn synth_names() -> [&'static core::ffi::CStr; 8] {
     ]
 }
 
+/// The display names used when a non-C2 note is rendered.
+const SYNTH_LABELS: [&str; 8] = [
+    "Bass", "Piano", "Pads", "Lead", "Bells", "Strings", "Voice", "Organ",
+];
+
+/// The sample name for a character and semitone offset.
+fn synth_name(kind: Kind, note: i32) -> &'static core::ffi::CStr {
+    if note == 0 {
+        return synth_names()[kind.index()];
+    }
+    let text = format!(
+        "{} {}",
+        SYNTH_LABELS[kind.index()],
+        crate::backend::bass::note_name(note)
+    );
+    Box::leak(CString::new(text).unwrap_or_default().into_boxed_c_str())
+}
+
 /// Write one rendered buffer through the app's Extract command.
 fn extract_one(
     job: &RenderJob,
@@ -220,7 +241,7 @@ fn extract_take(job: &RenderJob) -> Result<(), Report> {
     let action = Action::from_code(job.kind).unwrap_or(Action::Split);
     let name = if action == Action::Bass {
         let kind = Kind::from_index(JOB_KIND.load(Ordering::Acquire));
-        synth_names()[kind.index()]
+        synth_name(kind, JOB_NOTE.load(Ordering::Acquire))
     } else {
         let Some(name) = effect_name(action) else {
             return Err(Report {
@@ -485,11 +506,17 @@ pub fn start(action: Action, screen: usize, menu: &mut crate::menu::State) -> bo
         source
     };
     let job = RenderJob::new(source, action.code(), Vec::new());
+    let synth_note = if action == Action::Bass {
+        crate::backend::bass::last_note_semitones()
+    } else {
+        0
+    };
     if action == Action::Bass {
         JOB_KIND.store(
             i32::try_from(crate::menu::bass_kind().index()).unwrap_or(0),
             Ordering::Release,
         );
+        JOB_NOTE.store(synth_note, Ordering::Release);
     }
     // Publish the busy state before the worker can finish: a fast result must
     // never be taken while the menu still looks idle.
@@ -517,7 +544,7 @@ pub fn start(action: Action, screen: usize, menu: &mut crate::menu::State) -> bo
                 }
             }
         }
-        let outcome = crate::actions::render(job, &knobs, kind);
+        let outcome = crate::actions::render(job, &knobs, kind, synth_note);
         // The worker's completion is the only event that will reach the UI when
         // the user is idle; the repaint pump turns this into a frame on the UI
         // thread, so no app call happens from here.
@@ -715,5 +742,18 @@ mod tests {
         assert_eq!(action_name(crate::actions::Action::Vinyl), "Vinyl");
         assert_eq!(action_name(crate::actions::Action::LoFi), "Lo-Fi");
         assert_eq!(action_name(crate::actions::Action::Bass), "Synth");
+    }
+}
+
+#[cfg(test)]
+mod note_name_tests {
+    use super::synth_name;
+    use crate::backend::bass::Kind;
+
+    #[test]
+    fn a_non_c2_render_names_its_note() {
+        assert_eq!(synth_name(Kind::Bass, 0).to_str().unwrap(), "Bass C2");
+        assert_eq!(synth_name(Kind::Bass, 8).to_str().unwrap(), "Bass G#2");
+        assert_eq!(synth_name(Kind::Pads, -8).to_str().unwrap(), "Pads E1");
     }
 }

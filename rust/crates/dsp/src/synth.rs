@@ -189,6 +189,20 @@ impl Voice {
 ///
 /// Returns [`BassError`] for an unsupported rate or a silent result.
 pub fn render(kind: Kind, rate: u32, params: [f32; 3]) -> Result<Pluck, BassError> {
+    render_transposed(kind, rate, params, 0)
+}
+
+/// Render one character at a semitone offset from C2.
+///
+/// # Errors
+///
+/// Returns [`BassError`] when the character cannot render.
+pub fn render_transposed(
+    kind: Kind,
+    rate: u32,
+    params: [f32; 3],
+    note: i32,
+) -> Result<Pluck, BassError> {
     if kind == Kind::Bass {
         return Err(BassError::UnsupportedKind);
     }
@@ -202,7 +216,7 @@ pub fn render(kind: Kind, rate: u32, params: [f32; 3]) -> Result<Pluck, BassErro
     ];
     let rate_f = rate as f32;
     let frames = f32_to_usize(rate_f * kind.duration());
-    let mut voice = Voice::new(kind, rate_f, NOTE_HZ, params, 0.9);
+    let mut voice = Voice::new(kind, rate_f, preview_hz(0, note), params, 0.9);
     let mut audio = vec![0.0_f32; frames * 2];
     let mut peak = 0.0_f32;
     for index in 0..frames {

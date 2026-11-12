@@ -306,10 +306,11 @@ native undo grouping not exercised.
 C2–D#3 chromatically and light in one purple hue: pad 1 is off, pad 16 is full
 brightness, and the fifteen steps between are linear. `PLUS`/`MINUS` shift the
 pad row by 8 semitones per press (four steps each way, both keys reset), exactly
-like the 16 Levels shift. Closing the page restores the app's native pad
-colours. The **DATA encoder switches the character**, and `DATA`
-renders the selected character's C2 (MIDI 36) note to the selected pad through
-stock Extract. The destination is overwritten whether it already holds a sample
+like the 16 Levels shift. The page shows the note the last pad plays. Closing the
+page restores the app's native pad colours. The **DATA encoder switches the
+character**, and `DATA` renders the last previewed pad's note to the selected pad
+through stock Extract; C2 (MIDI 36) is the default when no pad was played. The
+new sample's name includes the note, e.g. `Bass D2`. The destination is overwritten whether it already holds a sample
 or is empty, including when no pad has a sample; the generated audio is
 independent of that pad's old contents. Extract registers the result and writes
 a WAV. The page title shows
@@ -332,7 +333,9 @@ bass keeps its short 0.75 s punch; the other characters use their own lengths
 
 **Implementation.** `rust/crates/minimod/src/synth_lights.rs` sets the purple
 gradient through the SDK's AC50 lighting overrides and restores the native
-lights in every close path. `rust/crates/dsp/src/bass.rs` is the Karplus-Strong bass
+lights in every close path. The preview and render share the semitone mapping
+(`C2 + pad + transpose`); the page draws its note from the last preview pad and
+the current transpose. `rust/crates/dsp/src/bass.rs` is the Karplus-Strong bass
 (`StringVoice` + SVF subset) and the character table. `rust/crates/dsp/src/synth.rs`
 is the shared oscillator/envelope engine for the other seven characters. Both
 render centred stereo at the source rate and normalise to peak 0.86. The two

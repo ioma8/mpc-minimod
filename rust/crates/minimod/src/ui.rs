@@ -271,12 +271,14 @@ fn apply(state: &mut State, event: &Event) {
                     next * crate::levels::SEMITONES_PER_STEP,
                 );
                 show_toast(&text);
+                minimod_repaint_screen();
             }
         }
         Action::ResetSynthPitch => {
             state.synth_octave = 0;
             crate::backend::bass::preview_set_transpose(0);
             show_toast("Pitch reset");
+            minimod_repaint_screen();
         }
         Action::ToggleLevels => {
             if let Some(toggle) = hooks.toggle_levels {
@@ -329,7 +331,7 @@ pub fn octave() -> i32 {
 /// Reset the synth preview shift when its page opens.
 pub fn reset_synth_octave() {
     with_state_mut(|state| state.synth_octave = 0);
-    crate::backend::bass::preview_set_transpose(0);
+    crate::backend::bass::preview_reset_note();
 }
 
 /// Whether SHIFT is held.

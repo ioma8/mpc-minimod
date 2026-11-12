@@ -72,7 +72,7 @@ impl Action {
 /// # Errors
 ///
 /// Returns the action code when the backend cannot produce the expected output.
-pub fn render(job: &mut RenderJob, knobs: &[f32], kind: bass::Kind) -> Result<(), i32> {
+pub fn render(job: &mut RenderJob, knobs: &[f32], kind: bass::Kind, note: i32) -> Result<(), i32> {
     let action = Action::from_code(job.kind).ok_or(job.kind)?;
     let channels = usize::from(job.source.channels());
     let rate = job.source.rate();
@@ -97,7 +97,7 @@ pub fn render(job: &mut RenderJob, knobs: &[f32], kind: bass::Kind) -> Result<()
                 [a, b, c, ..] => [*a, *b, *c],
                 _ => [0.5, 0.25, 0.5],
             };
-            let Some((audio, frames)) = bass::render(kind, rate, params) else {
+            let Some((audio, frames)) = bass::render(kind, rate, params, note) else {
                 return Err(job.kind);
             };
             job.push_output(RenderOutput::with_frames(audio, frames, 2).ok_or(job.kind)?);
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn an_unknown_action_reaches_the_effect_path_and_fails_without_an_image() {
         let mut job = RenderJob::new(source(), 9, vec![0.0; 8]);
-        assert_eq!(render(&mut job, &[], bass::Kind::Bass), Err(9));
+        assert_eq!(render(&mut job, &[], bass::Kind::Bass, 0), Err(9));
         assert!(job.outputs.is_empty());
     }
 

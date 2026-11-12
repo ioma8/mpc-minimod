@@ -204,6 +204,28 @@ pub fn render(rate: u32, harmonics: f32, decay: f32, cutoff: f32) -> Result<Pluc
     render_with(rate, harmonics, decay, cutoff, &mut WhiteNoise::default())
 }
 
+/// Render the bass at a semitone offset from C2.
+///
+/// # Errors
+///
+/// Returns [`BassError`] for an unsupported rate or a silent result.
+pub fn render_transposed(
+    rate: u32,
+    harmonics: f32,
+    decay: f32,
+    cutoff: f32,
+    note: i32,
+) -> Result<Pluck, BassError> {
+    render_with_transposed(
+        rate,
+        harmonics,
+        decay,
+        cutoff,
+        &mut WhiteNoise::default(),
+        note,
+    )
+}
+
 /// Render one synth character.
 ///
 /// The bass keeps its dedicated string model; the other characters live in
@@ -213,10 +235,24 @@ pub fn render(rate: u32, harmonics: f32, decay: f32, cutoff: f32) -> Result<Pluc
 ///
 /// Returns [`BassError`] when the synth cannot render.
 pub fn render_kind(kind: Kind, rate: u32, params: [f32; 3]) -> Result<Pluck, BassError> {
+    render_kind_transposed(kind, rate, params, 0)
+}
+
+/// Render one synth character at a semitone offset from C2.
+///
+/// # Errors
+///
+/// Returns [`BassError`] when the synth cannot render.
+pub fn render_kind_transposed(
+    kind: Kind,
+    rate: u32,
+    params: [f32; 3],
+    note: i32,
+) -> Result<Pluck, BassError> {
     if kind == Kind::Bass {
-        render(rate, params[0], params[1], params[2])
+        render_transposed(rate, params[0], params[1], params[2], note)
     } else {
-        crate::synth::render(kind, rate, params)
+        crate::synth::render_transposed(kind, rate, params, note)
     }
 }
 
@@ -232,6 +268,22 @@ pub fn render_with(
     cutoff: f32,
     noise: &mut impl Noise,
 ) -> Result<Pluck, BassError> {
+    render_with_transposed(rate, harmonics, decay, cutoff, noise, 0)
+}
+
+/// Render the bass with an explicit noise source and semitone offset.
+///
+/// # Errors
+///
+/// Returns [`BassError`] for an unsupported rate or a silent result.
+pub fn render_with_transposed(
+    rate: u32,
+    harmonics: f32,
+    decay: f32,
+    cutoff: f32,
+    noise: &mut impl Noise,
+    note: i32,
+) -> Result<Pluck, BassError> {
     if !(8_000..=192_000).contains(&rate) {
         return Err(BassError::UnsupportedRate);
     }
@@ -243,7 +295,7 @@ pub fn render_with(
 
     let mut string = StringVoice::new(rate_f);
     string.set_sustain(false);
-    string.set_frequency(NOTE_HZ);
+    string.set_frequency(preview_hz(0, note));
     string.set_accent(0.65 + DRIVE * 0.35);
     string.set_structure(0.25 + DRIVE * 0.6);
     string.set_brightness(0.05 + harmonics * 0.9);

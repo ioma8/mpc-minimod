@@ -159,6 +159,7 @@ def main():
     sample_before = qword(qword(qword(screen + 0x178) + 0x60) + 0x22e8)
     tap('PAD 5')
     tap('PAD 9')
+    tap('PAD 1')  # C2 is the last preview note, and therefore the rendered note
     time.sleep(1)
     assert qword(qword(qword(screen + 0x178) + 0x60) + 0x22e8) == sample_before, \
         'a pad press on the Bass page switched the selected sample'

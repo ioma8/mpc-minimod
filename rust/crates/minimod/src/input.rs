@@ -208,6 +208,8 @@ fn bass_pad_event(event: SurfaceEvent) -> bool {
             u32::try_from(event.code).unwrap_or(0),
             f32::from(event.velocity) / 127.0,
         );
+        // The page shows the note the last pad selected.
+        crate::ui::minimod_repaint_screen();
     }
     true
 }
