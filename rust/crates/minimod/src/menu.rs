@@ -64,6 +64,9 @@ pub fn close(state: &mut State, hooks: Hooks) -> bool {
     if state.busy != 0 {
         return false;
     }
+    if state.bass_edit != 0 {
+        crate::synth_lights::hide();
+    }
     state.open = 0;
     state.bass_edit = 0;
     repaint(hooks);
@@ -117,6 +120,9 @@ pub fn activate(state: &mut State, event: &[u8; 16], hooks: Hooks) {
             if let Some(activate) = hooks.start_looper {
                 let opened = activate();
                 if opened != 0 {
+                    if state.bass_edit != 0 {
+                        crate::synth_lights::hide();
+                    }
                     state.open = 0;
                     state.bass_edit = 0;
                 }
@@ -385,6 +391,7 @@ pub fn set_bass_knobs(knobs: [f32; 3]) {
 pub fn bass_page(state: &mut State) {
     let knobs = bass_knobs();
     state.bass_edit = 1;
+    crate::synth_lights::show();
     crate::backend::bass::preview_set_kind(bass_kind());
     crate::backend::bass::preview_set_params(knobs[0], knobs[1], knobs[2]);
     crate::backend::bass::preview_set_active(true);
@@ -401,11 +408,15 @@ pub fn open_menu() {
     if !crate::ui::screen_visible() || state().busy != 0 {
         return;
     }
+    let was_bass = state().bass_edit != 0;
     with_state_mut(|menu| {
         menu.open = 1;
         menu.selection = 0;
         menu.bass_edit = 0;
     });
+    if was_bass {
+        crate::synth_lights::hide();
+    }
     crate::backend::bass::preview_set_active(false);
     crate::status::set_status("");
     crate::ui::minimod_repaint_screen();
@@ -416,10 +427,14 @@ pub fn close_menu() {
     if state().busy != 0 {
         return;
     }
+    let was_bass = state().bass_edit != 0;
     with_state_mut(|menu| {
         menu.open = 0;
         menu.bass_edit = 0;
     });
+    if was_bass {
+        crate::synth_lights::hide();
+    }
     crate::backend::bass::preview_set_active(false);
     crate::ui::minimod_repaint_screen();
 }

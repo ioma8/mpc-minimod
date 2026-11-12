@@ -29,6 +29,7 @@ pub mod routing;
 pub mod settings;
 pub mod spectral;
 pub mod spectral_machine;
+pub mod synth_lights;
 pub mod ui;
 
 pub use mpc_sample_sdk::{

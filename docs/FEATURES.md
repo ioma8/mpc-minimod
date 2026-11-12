@@ -303,7 +303,9 @@ native undo grouping not exercised.
 ## Synth characters
 
 **Behavior.** The menu opens a synth parameter page. Pads 1–16 audition
-C2–D#3 chromatically; the **DATA encoder switches the character**, and `DATA`
+C2–D#3 chromatically and light in one purple hue: pad 1 is off, pad 16 is full
+brightness, and the fifteen steps between are linear. Closing the page restores
+the app's native pad colours. The **DATA encoder switches the character**, and `DATA`
 renders the selected character's C2 (MIDI 36) note to the selected pad through
 stock Extract. The destination is overwritten whether it already holds a sample
 or is empty, including when no pad has a sample; the generated audio is
@@ -326,7 +328,9 @@ Switching character resets its three knobs to that character's defaults. The
 bass keeps its short 0.75 s punch; the other characters use their own lengths
 (0.8–1.5 s) so a piano or bell can ring while the bass stays tight.
 
-**Implementation.** `rust/crates/dsp/src/bass.rs` is the Karplus-Strong bass
+**Implementation.** `rust/crates/minimod/src/synth_lights.rs` sets the purple
+gradient through the SDK's AC50 lighting overrides and restores the native
+lights in every close path. `rust/crates/dsp/src/bass.rs` is the Karplus-Strong bass
 (`StringVoice` + SVF subset) and the character table. `rust/crates/dsp/src/synth.rs`
 is the shared oscillator/envelope engine for the other seven characters. Both
 render centred stereo at the source rate and normalise to peak 0.86. The two
