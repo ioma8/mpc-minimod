@@ -6,7 +6,7 @@
 //! through [`with_preview`], and `mix_slices` is `unsafe` so that contract is
 //! visible at every call site.
 
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use crate::bass::{BassBank, Kind, NOMINAL_RATE, PADS};
 use crate::dsp::{WhiteNoise, fclamp};
@@ -21,6 +21,8 @@ struct Preview {
     synth: SynthBank,
     noise: WhiteNoise,
     was_enabled: bool,
+    control_phase: u8,
+    epoch: u32,
 }
 
 impl Preview {
@@ -34,16 +36,15 @@ impl Preview {
             synth: SynthBank::new(Kind::Pads, NOMINAL_RATE, Kind::Pads.defaults()),
             noise: WhiteNoise::default(),
             was_enabled: false,
+            control_phase: 0,
+            epoch: 0,
         }
     }
 
-    /// Clear every voice and every strike that has not been picked up yet.
+    /// Clear active voices on the audio thread.
     fn stop(&mut self) {
         self.bass.stop();
         self.synth.stop();
-        for pending in &PENDING {
-            pending.store(0, Ordering::Release);
-        }
     }
 }
 
@@ -55,8 +56,8 @@ struct PreviewCell(core::cell::UnsafeCell<Option<Preview>>);
 unsafe impl Sync for PreviewCell {}
 
 static PREVIEW: PreviewCell = PreviewCell(core::cell::UnsafeCell::new(None));
-/// A reset the audio thread has not run yet.
-static RESET: AtomicBool = AtomicBool::new(false);
+/// Generation of pending pad strikes and audio-thread resets.
+static RESET_EPOCH: AtomicU32 = AtomicU32::new(0);
 static ENABLED: AtomicBool = AtomicBool::new(false);
 /// The selected synth character, as a [`Kind::ALL`] index.
 static KIND: AtomicU32 = AtomicU32::new(0);
@@ -68,8 +69,8 @@ static PARAMS: [AtomicU32; 3] = [
     AtomicU32::new(0.25_f32.to_bits()),
     AtomicU32::new(0.56_f32.to_bits()),
 ];
-/// Velocity per pad, as f32 bits; zero means "no strike pending".
-static PENDING: [AtomicU32; PADS] = [const { AtomicU32::new(0) }; PADS];
+/// Epoch and velocity bits per pad; zero velocity means no strike.
+static PENDING: [AtomicU64; PADS] = [const { AtomicU64::new(0) }; PADS];
 
 #[cfg(test)]
 pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -88,6 +89,9 @@ fn with_preview<R>(f: impl FnOnce(&mut Preview) -> R) -> R {
 /// Only the flag is written here: the voices belong to the audio thread, which
 /// silences every voice on its next block once the flag is off.
 pub fn enable(enabled: bool) {
+    if !enabled {
+        reset();
+    }
     ENABLED.store(enabled, Ordering::Release);
 }
 
@@ -127,14 +131,16 @@ pub fn note(pad: usize, velocity: f32) {
         return;
     }
     if let Some(slot) = PENDING.get(pad) {
-        slot.store(fclamp(velocity, 0.0, 1.0).to_bits(), Ordering::Release);
+        let epoch = u64::from(RESET_EPOCH.load(Ordering::Acquire));
+        let value = (epoch << 32) | u64::from(fclamp(velocity, 0.0, 1.0).to_bits());
+        slot.store(value, Ordering::Release);
     }
 }
 
 /// Ask the audio thread to silence every voice and drop pending strikes before
 /// its next block, so a page that just opened never plays a stale note.
 pub fn reset() {
-    RESET.store(true, Ordering::Release);
+    RESET_EPOCH.fetch_add(1, Ordering::AcqRel);
 }
 
 /// Mix the preview into up to two channel slices.
@@ -162,9 +168,13 @@ pub unsafe fn mix_slices(channels: &mut [&mut [f32]], frames: usize, rate: u32) 
 
 /// Mix the preview into the device's output slices and report its peak.
 fn mix(channels: &mut [&mut [f32]], frames: usize, rate: u32) -> f32 {
-    if RESET.swap(false, Ordering::AcqRel) {
-        with_preview(Preview::stop);
-    }
+    let epoch = RESET_EPOCH.load(Ordering::Acquire);
+    with_preview(|preview| {
+        if preview.epoch != epoch {
+            preview.stop();
+            preview.epoch = epoch;
+        }
+    });
     if !ENABLED.load(Ordering::Acquire)
         || channels.is_empty()
         || frames == 0
@@ -186,30 +196,37 @@ fn mix(channels: &mut [&mut [f32]], frames: usize, rate: u32) -> f32 {
         f32::from_bits(PARAMS[2].load(Ordering::Acquire)),
     ];
     with_preview(|preview| {
-        let params_changed = preview
-            .params
-            .iter()
-            .zip(params)
-            .any(|(old, new)| old.to_bits() != new.to_bits());
         let switched = preview.rate != rate || preview.kind != kind;
         preview.rate = rate;
         preview.kind = kind;
-        preview.params = params;
-        if kind == Kind::Bass {
-            if switched {
+        if switched {
+            preview.control_phase = 0;
+            preview.params = params;
+            if kind == Kind::Bass {
                 preview.bass = BassBank::new(rate);
             } else {
-                // The bass keeps its voices across a knob move.
-                preview.bass.configure(params[0], params[2]);
+                preview.synth = SynthBank::new(kind, rate, params);
             }
-        } else if switched || params_changed {
-            preview.synth = SynthBank::new(kind, rate, params);
         }
         preview.was_enabled = true;
         let transpose = TRANSPOSE.load(Ordering::Acquire);
         for (pad, pending) in PENDING.iter().enumerate() {
-            let bits = pending.swap(0, Ordering::AcqRel);
+            let value = pending.load(Ordering::Acquire);
+            let bits = value as u32;
             if bits == 0 {
+                continue;
+            }
+            if (value >> 32) as u32 != epoch {
+                // A strike from a future reset belongs to the next block.
+                if RESET_EPOCH.load(Ordering::Acquire) == epoch {
+                    let _ = pending.compare_exchange(value, 0, Ordering::AcqRel, Ordering::Acquire);
+                }
+                continue;
+            }
+            if pending
+                .compare_exchange(value, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
                 continue;
             }
             let velocity = f32::from_bits(bits);
@@ -222,6 +239,21 @@ fn mix(channels: &mut [&mut [f32]], frames: usize, rate: u32) -> f32 {
         }
         let mut peak = 0.0_f32;
         for frame in 0..frames {
+            // Ramp controls over roughly 20 ms, updating filters every 32 frames.
+            if preview.control_phase == 0 {
+                let amount = 1.0 - (-(32.0 / (rate as f32 * 0.02))).exp();
+                for (current, target) in preview.params.iter_mut().zip(params) {
+                    *current += (target - *current) * amount;
+                }
+                if kind == Kind::Bass {
+                    preview
+                        .bass
+                        .configure(preview.params[0], preview.params[1], preview.params[2]);
+                } else {
+                    preview.synth.configure(preview.params);
+                }
+            }
+            preview.control_phase = (preview.control_phase + 1) % 32;
             let sample = match kind {
                 Kind::Bass => preview.bass.frame(&mut preview.noise, rate),
                 _ => preview.synth.frame(&mut preview.noise, rate),
@@ -238,6 +270,66 @@ fn mix(channels: &mut [&mut [f32]], frames: usize, rate: u32) -> f32 {
 #[cfg(test)]
 mod transpose_tests {
     use super::{set_transpose, transpose};
+
+    #[test]
+    fn reset_discards_old_strikes_but_keeps_new_ones() {
+        use super::{Kind, TEST_LOCK, enable, mix, note, reset, set_kind, set_params};
+        let _serial = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        enable(false);
+        set_kind(Kind::Pads);
+        set_params(Kind::Pads.defaults());
+        note(0, 1.0);
+        reset();
+        note(1, 1.0);
+        enable(true);
+        let mut audio = [0.0; 4096];
+        let peak = mix(&mut [&mut audio], 4096, 44_100);
+        assert_eq!(
+            super::PENDING[0].load(super::Ordering::Acquire),
+            0,
+            "old strike survived reset"
+        );
+        enable(false);
+        set_kind(Kind::Bass);
+        set_params(Kind::Bass.defaults());
+        assert!(peak > 1e-4, "new strike was lost after reset");
+    }
+
+    #[test]
+    fn parameter_ramp_is_independent_of_block_size() {
+        use super::{Kind, TEST_LOCK, enable, mix, set_kind, set_params, with_preview};
+        fn run(chunks: &[usize]) -> [f32; 3] {
+            set_kind(Kind::Bass);
+            enable(true);
+            set_params([0.0; 3]);
+            let mut sample = [0.0; 1];
+            mix(&mut [&mut sample], 1, 44_100);
+            set_kind(Kind::Pads);
+            mix(&mut [&mut sample], 1, 44_100);
+            set_params([1.0; 3]);
+            for &size in chunks {
+                let mut buffer = vec![0.0; size];
+                mix(&mut [&mut buffer], size, 44_100);
+            }
+            with_preview(|preview| preview.params)
+        }
+        let _serial = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let regular = run(&[128]);
+        let irregular = run(&[1, 7, 13, 31, 3, 73]);
+        enable(false);
+        set_kind(Kind::Bass);
+        set_params(Kind::Bass.defaults());
+        assert!(
+            regular
+                .iter()
+                .zip(irregular)
+                .all(|(a, b)| (a - b).abs() < 1e-7)
+        );
+    }
 
     #[test]
     fn the_preview_transpose_round_trips() {

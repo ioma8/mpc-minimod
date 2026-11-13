@@ -63,69 +63,90 @@ struct Target {
     context: usize,
 }
 
-// Owned by the same input thread as g_midi.
-static TARGETS: mpc_sample_sdk::state::Global<[Option<Target>; 128]> =
-    mpc_sample_sdk::state::Global::new([None; 128]);
+/// A pending press, keyed by the source identity exposed by the SDK and note.
+#[derive(Clone, Copy)]
+struct HeldNote {
+    source: u64,
+    note: u8,
+    target: Target,
+}
+
+// Owned by the same input thread as g_midi. FIFO preserves overlapping presses
+// of the same source and note; the SDK does not expose MIDI channel identity.
+static TARGETS: mpc_sample_sdk::state::Global<Vec<HeldNote>> =
+    mpc_sample_sdk::state::Global::new(Vec::new());
+
+fn held_index(targets: &[HeldNote], source: u64, note: u8) -> Option<usize> {
+    targets
+        .iter()
+        .position(|held| held.source == source && held.note == note)
+}
 
 /// Handle one note event; the SDK forwards whatever this returns.
 pub fn note(event: &mut NoteEvent) -> NoteFlow {
-    // SAFETY: the MIDI record is owned by the app's input thread; the closure
-    // does not take another borrow of it.
+    // SAFETY: g_midi and TARGETS are owned by the app's input thread.
     unsafe {
         g_midi.with_mut(|state| {
-            let index = usize::from(event.note);
-            let held = state.replayed.get(index).copied().unwrap_or(0) != 0;
-            if state.on == 0 && !(event.external && event.note_off && held) {
-                return NoteFlow::Forward;
-            }
-            if !event.external {
-                state.pad_ctx = event.context;
-                if event.kind == PAD_EVENT && event.velocity > 0.0 {
-                    state.pad_tune_mode = i32::from(event.mask & 1 == 0);
-                    if event.mask & 1 != 0 {
-                        state.pad_prop_val = i32::from(event.property);
-                        state.pad_level_byte = u32::from(event.note);
-                        state.pad_prop_pending = 1;
+            TARGETS.with_mut(|targets| {
+                let index = usize::from(event.note);
+                let held = held_index(targets, event.source, event.note);
+                if state.on == 0 && !(event.external && event.note_off && held.is_some()) {
+                    return NoteFlow::Forward;
+                }
+                if !event.external {
+                    state.pad_ctx = event.context;
+                    if event.kind == PAD_EVENT && event.velocity > 0.0 {
+                        state.pad_tune_mode = i32::from(event.mask & 1 == 0);
+                        if event.mask & 1 != 0 {
+                            state.pad_prop_val = i32::from(event.property);
+                            state.pad_level_byte = u32::from(event.note);
+                            state.pad_prop_pending = 1;
+                        }
                     }
                 }
-            }
-            if (state.levels != 0 || (event.note_off && held))
-                && event.external
-                && event.note <= 127
-                && (event.kind == PAD_EVENT || event.note_off)
-                && (event.note_on || held)
-            {
-                // SAFETY: TARGETS has the same input-thread owner as g_midi.
-                let target = TARGETS.with(|targets| {
-                    if event.note_off && held {
-                        targets[index]
+                if (state.levels != 0 || (event.note_off && held.is_some()))
+                    && event.external
+                    && event.note <= 127
+                    && (event.kind == PAD_EVENT || event.note_off)
+                    && (event.note_on || held.is_some())
+                {
+                    let target = if event.note_off {
+                        held.map(|position| targets[position].target)
                     } else {
+                        if targets.try_reserve(1).is_err() {
+                            return NoteFlow::Consume;
+                        }
                         Some(Target {
                             pad: u8::try_from(state.pad_level_byte).unwrap_or(0),
                             row: i32::from(event.note)
                                 - crate::autotrim::pad_root(crate::input::last_pad()),
                             context: state.pad_ctx,
                         })
+                    };
+                    let Some(target) = target else {
+                        return NoteFlow::Forward;
+                    };
+                    if event.replay_as_pad(target.pad, target.row, target.context) {
+                        if event.note_on {
+                            targets.push(HeldNote {
+                                source: event.source,
+                                note: event.note,
+                                target,
+                            });
+                            state.chromatic_count = state.chromatic_count.wrapping_add(1);
+                            state.chromatic_note = i32::from(event.note);
+                            state.chromatic_delta = target.row;
+                        } else if let Some(position) = held {
+                            targets.remove(position);
+                        }
+                        if let Some(slot) = state.replayed.get_mut(index) {
+                            *slot = u8::from(targets.iter().any(|held| held.note == event.note));
+                        }
+                        return NoteFlow::Replayed;
                     }
-                });
-                let Some(target) = target else {
-                    return NoteFlow::Forward;
-                };
-                if event.replay_as_pad(target.pad, target.row, target.context) {
-                    // SAFETY: TARGETS is owned by the input thread.
-                    TARGETS.with_mut(|targets| targets[index] = event.note_on.then_some(target));
-                    if let Some(slot) = state.replayed.get_mut(index) {
-                        *slot = u8::from(event.note_on);
-                    }
-                    if event.note_on {
-                        state.chromatic_count = state.chromatic_count.wrapping_add(1);
-                        state.chromatic_note = i32::from(event.note);
-                        state.chromatic_delta = target.row;
-                    }
-                    return NoteFlow::Replayed;
                 }
-            }
-            NoteFlow::Forward
+                NoteFlow::Forward
+            })
         })
     }
 }
@@ -182,7 +203,40 @@ pub fn levels_active() -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::g_midi;
+    use super::{HeldNote, Target, g_midi, held_index};
+
+    #[test]
+    fn repeated_notes_keep_their_source_and_press_order() {
+        let target = |pad| Target {
+            pad,
+            row: 0,
+            context: 1,
+        };
+        let mut held = vec![
+            HeldNote {
+                source: 1,
+                note: 60,
+                target: target(2),
+            },
+            HeldNote {
+                source: 2,
+                note: 60,
+                target: target(3),
+            },
+            HeldNote {
+                source: 1,
+                note: 60,
+                target: target(4),
+            },
+        ];
+        let source_two = held_index(&held, 2, 60).expect("second source");
+        assert_eq!(held.remove(source_two).target.pad, 3);
+        let first = held_index(&held, 1, 60).expect("first press");
+        assert_eq!(held.remove(first).target.pad, 2);
+        let second = held_index(&held, 1, 60).expect("second press");
+        assert_eq!(held.remove(second).target.pad, 4);
+        assert!(held_index(&held, 1, 60).is_none());
+    }
 
     #[test]
     fn the_state_starts_without_a_mode() {

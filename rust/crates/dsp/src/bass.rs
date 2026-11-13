@@ -350,6 +350,9 @@ struct Voice {
     /// Time constant of the preview's exponential tail, in seconds.
     decay: f32,
     active: bool,
+    last_output: f32,
+    steal_tail: f32,
+    steal_left: u32,
 }
 
 impl Voice {
@@ -362,6 +365,9 @@ impl Voice {
             level: 0.0,
             decay: 0.6,
             active: false,
+            last_output: 0.0,
+            steal_tail: 0.0,
+            steal_left: 0,
         }
     }
 }
@@ -385,7 +391,7 @@ impl BassBank {
     }
 
     /// Apply the live brightness and cutoff to the voices already sounding.
-    pub(crate) fn configure(&mut self, brightness: f32, cutoff: f32) {
+    pub(crate) fn configure(&mut self, brightness: f32, decay: f32, cutoff: f32) {
         let rate_f = self.rate as f32;
         let cutoff_hz = 700.0 * 24.0_f32.powf(cutoff);
         let safe_cutoff = if cutoff_hz < rate_f * 0.45 {
@@ -397,6 +403,7 @@ impl BassBank {
             if !voice.active {
                 continue;
             }
+            voice.decay = 0.08 + decay * 0.30;
             voice.string.set_accent(0.65 + DRIVE * 0.35);
             voice.string.set_structure(0.25 + DRIVE * 0.6);
             voice.string.set_brightness(0.05 + brightness * 0.9);
@@ -420,6 +427,9 @@ impl BassBank {
         let index = self.cursor % VOICES;
         self.cursor = self.cursor.wrapping_add(1);
         let voice = &mut self.voices[index];
+        // A short tail avoids cutting the previous voice at a nonzero sample.
+        voice.steal_tail = if voice.active { voice.last_output } else { 0.0 };
+        voice.steal_left = (self.rate / 200).max(1);
         voice.string.reset();
         voice.string.set_frequency(preview_hz(pad, transpose));
         voice.string.set_accent(0.65 + DRIVE * 0.35);
@@ -455,7 +465,13 @@ impl BassBank {
             }
             voice.filter.process(voice.string.process(false, noise));
             let t = voice.age as f32 / rate_f;
-            let value = voice.filter.low_pass() * voice.level * (-t / voice.decay).exp();
+            let mut value = voice.filter.low_pass() * voice.level * (-t / voice.decay).exp();
+            if voice.steal_left != 0 {
+                value += voice.steal_tail;
+                voice.steal_tail -= voice.steal_tail / voice.steal_left as f32;
+                voice.steal_left -= 1;
+            }
+            voice.last_output = value;
             sample += value;
             if value.abs() < 1e-5 {
                 voice.quiet += 1;
@@ -600,6 +616,27 @@ mod tests {
     static PREVIEW_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
+    fn stolen_bass_voice_fades_from_its_last_sample() {
+        let mut bank = super::BassBank::new(44_100);
+        let mut noise = crate::dsp::WhiteNoise::default();
+        for pad in 0..4 {
+            bank.trigger(pad, 1.0, 0.5, 0.5, 0.5, 0);
+        }
+        for _ in 0..4096 {
+            bank.frame(&mut noise, 44_100);
+        }
+        let before = bank.voices[0].last_output;
+        assert!(before.abs() > 1e-7);
+        bank.trigger(4, 1.0, 0.5, 0.5, 0.5, 0);
+        bank.frame(&mut noise, 44_100);
+        assert!((bank.voices[0].last_output - before).abs() < 1e-4);
+        for _ in 0..221 {
+            bank.frame(&mut noise, 44_100);
+        }
+        assert_eq!(bank.voices[0].steal_left, 0);
+    }
+
+    #[test]
     fn a_preview_note_dies_within_its_envelope() {
         use super::preview_reset;
         let _serial = crate::preview::TEST_LOCK
@@ -608,8 +645,14 @@ mod tests {
         let _serial = PREVIEW_TEST
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::preview_set_kind(Kind::Bass);
+        super::preview_set_params(Kind::Bass.defaults());
         preview_enable(true);
         preview_reset();
+        // SAFETY: the shared preview lock is held and no output memory is borrowed.
+        unsafe {
+            preview_mix_slices(&mut [], 0, 44_100);
+        }
         preview_note(3, 1.0);
         let rate = 44_100;
         let mut peak_late = 0.0_f32;
@@ -642,6 +685,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _: Pluck = render(44_100, 0.5, 0.3, 0.6).expect("renders");
         assert_eq!(PADS, 16);
+        super::preview_set_kind(Kind::Bass);
+        super::preview_set_params(Kind::Bass.defaults());
         preview_enable(true);
         // Let the thread consume any reset left by a previous test before the
         // strike is queued.

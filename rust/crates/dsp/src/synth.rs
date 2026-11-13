@@ -34,6 +34,9 @@ struct Voice {
     filter: Svf,
     params: [f32; 3],
     velocity: f32,
+    last_output: f32,
+    steal_tail: f32,
+    steal_left: u32,
 }
 
 impl Voice {
@@ -47,6 +50,9 @@ impl Voice {
             filter: Svf::new(rate),
             params,
             velocity,
+            last_output: 0.0,
+            steal_tail: 0.0,
+            steal_left: 0,
         };
         voice.filter.set_resonance(0.08);
         voice.filter.set_drive(0.08);
@@ -258,11 +264,28 @@ impl SynthBank {
         }
     }
 
+    /// Update sounding voices without resetting their phases or envelopes.
+    pub(crate) fn configure(&mut self, params: [f32; 3]) {
+        for (voice, active) in self.voices.iter_mut().zip(self.active) {
+            if active {
+                voice.params = params;
+                voice.set_filter();
+            }
+        }
+    }
+
     /// Strike one pad on the next free voice.
     pub(crate) fn trigger(&mut self, pad: usize, velocity: f32, params: [f32; 3], transpose: i32) {
         let rate_f = self.rate as f32;
         let index = self.cursor % VOICES;
         self.cursor = self.cursor.wrapping_add(1);
+        // Fade the displaced voice's last sample over 5 ms without allocating
+        // another oscillator on the audio thread.
+        let tail = if self.active[index] {
+            self.voices[index].last_output
+        } else {
+            0.0
+        };
         self.voices[index] = Voice::new(
             self.kind,
             rate_f,
@@ -270,6 +293,8 @@ impl SynthBank {
             params,
             0.55 * fclamp(velocity, 0.0, 1.0),
         );
+        self.voices[index].steal_tail = tail;
+        self.voices[index].steal_left = (self.rate / 200).max(1);
         self.active[index] = true;
     }
 
@@ -285,7 +310,14 @@ impl SynthBank {
                 self.active[index] = false;
                 continue;
             }
-            sample += voice.process();
+            let mut value = voice.process();
+            if voice.steal_left != 0 {
+                value += voice.steal_tail;
+                voice.steal_tail -= voice.steal_tail / voice.steal_left as f32;
+                voice.steal_left -= 1;
+            }
+            voice.last_output = value;
+            sample += value;
         }
         fclamp(sample, -0.85, 0.85)
     }
@@ -349,6 +381,93 @@ mod tests {
         crate::bass::preview_reset();
         crate::bass::preview_set_kind(Kind::Bass);
         assert!(peak > 1e-4, "non-bass preview was silent: {peak}");
+    }
+
+    #[test]
+    fn changing_knobs_keeps_preview_voice_playing() {
+        let _serial = crate::preview::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::bass::preview_set_kind(Kind::Pads);
+        crate::bass::preview_enable(true);
+        crate::bass::preview_set_params(Kind::Pads.defaults());
+        // SAFETY: this test holds the preview lock and owns the buffer.
+        unsafe {
+            crate::bass::preview_mix_slices(&mut [], 0, 44_100);
+        }
+        crate::bass::preview_note(0, 1.0);
+        let mut audio = [0.0; 4096];
+        // SAFETY: this test holds the preview lock and owns the buffer.
+        unsafe {
+            crate::bass::preview_mix_slices(&mut [&mut audio], 4096, 44_100);
+        }
+        crate::bass::preview_set_params([0.9, 0.9, 0.9]);
+        audio.fill(0.0);
+        // SAFETY: this test holds the preview lock and owns the buffer.
+        let peak = unsafe { crate::bass::preview_mix_slices(&mut [&mut audio], 4096, 44_100) };
+        crate::bass::preview_enable(false);
+        crate::bass::preview_reset();
+        crate::bass::preview_set_kind(Kind::Bass);
+        crate::bass::preview_set_params(Kind::Bass.defaults());
+        assert!(peak > 0.001, "knob movement silenced the voice: {peak}");
+    }
+
+    #[test]
+    fn stolen_voice_fades_from_its_last_sample() {
+        use super::SynthBank;
+        use crate::dsp::WhiteNoise;
+        let mut bank = SynthBank::new(Kind::Organ, 44_100, Kind::Organ.defaults());
+        let mut noise = WhiteNoise::default();
+        for pad in 0..4 {
+            bank.trigger(pad, 1.0, Kind::Organ.defaults(), 0);
+        }
+        for _ in 0..4096 {
+            bank.frame(&mut noise, 44_100);
+        }
+        let before = bank.voices[0].last_output;
+        assert!(before.abs() > 1e-5);
+        bank.trigger(4, 1.0, Kind::Organ.defaults(), 0);
+        bank.frame(&mut noise, 44_100);
+        assert!((bank.voices[0].last_output - before).abs() < 1e-4);
+        for _ in 0..221 {
+            bank.frame(&mut noise, 44_100);
+        }
+        assert_eq!(bank.voices[0].steal_left, 0);
+    }
+
+    #[test]
+    fn every_knob_changes_a_sounding_voice() {
+        use super::SynthBank;
+        use crate::dsp::WhiteNoise;
+        for kind in Kind::ALL.into_iter().filter(|kind| *kind != Kind::Bass) {
+            for knob in 0..3 {
+                let initial = kind.defaults();
+                let mut changed = initial;
+                changed[knob] = if initial[knob] < 0.5 { 1.0 } else { 0.0 };
+                let mut reference = SynthBank::new(kind, 44_100, initial);
+                let mut edited = SynthBank::new(kind, 44_100, initial);
+                reference.trigger(0, 1.0, initial, 0);
+                edited.trigger(0, 1.0, initial, 0);
+                let mut noise = WhiteNoise::default();
+                for _ in 0..4096 {
+                    reference.frame(&mut noise, 44_100);
+                    edited.frame(&mut noise, 44_100);
+                }
+                edited.configure(changed);
+                let difference: f32 = (0..4096)
+                    .map(|_| {
+                        (reference.frame(&mut noise, 44_100) - edited.frame(&mut noise, 44_100))
+                            .abs()
+                    })
+                    .sum();
+                assert!(
+                    difference > 0.01,
+                    "{} K{} did not change the active voice",
+                    kind.name(),
+                    knob + 1
+                );
+            }
+        }
     }
 
     #[test]

@@ -13,7 +13,8 @@
 //!   played frame advances one transport counter, so a loop length is always an
 //!   exact number of played frames;
 //! * pad and button events call [`Engine::pad`]/[`Engine::button`], which change
-//!   state but never touch audio buffers while a take is in progress;
+//!   state but never touch audio buffers while a take is in progress. The caller
+//!   must serialize these control events, as the SDK does for UI callbacks;
 //! * the paint hook calls [`Engine::snapshot`], which only reads.
 //!
 //! No path allocates or locks.  The loop pool is mapped once when the view
@@ -319,9 +320,17 @@ static RING_WRITE: AtomicU32 = AtomicU32::new(0);
 static RING_READ: AtomicU32 = AtomicU32::new(0);
 /// Pads with a take in progress.
 static TAKE_COUNT: AtomicI32 = AtomicI32::new(0);
-/// Pads whose take a control thread asked for; the audio thread starts them, so
-/// it remains the only writer of a pad's samples.
-static START_REQUEST: [AtomicBool; PADS] = [const { AtomicBool::new(false) }; PADS];
+/// Per-pad start commands, claimed by the audio thread, which remains the
+/// only writer of a pad's samples.
+static START_REQUEST: [AtomicU8; PADS] = [const { AtomicU8::new(0) }; PADS];
+const START_RECORD: u8 = 1;
+const START_OVERDUB: u8 = 2;
+/// Input position at each overdub request, before capture resumes.
+static OVERDUB_CUT: [AtomicU32; PADS] = [const { AtomicU32::new(0) }; PADS];
+/// Keeps capture alive while the audio thread claims an overdub request.
+static CLAIMING_OVERDUB: AtomicBool = AtomicBool::new(false);
+// Internal claim while the audio thread clears a pad for recording.
+const STARTING: i32 = -1;
 /// Input level as raw f32 bits.
 static INPUT_LEVEL: AtomicU32 = AtomicU32::new(0);
 /// The loop pool, mapped on open.
@@ -417,14 +426,27 @@ impl Engine {
     /// not started yet.
     fn clear_start_requests() {
         for request in &START_REQUEST {
-            request.store(false, Ordering::Release);
+            request.store(0, Ordering::Release);
         }
     }
 
     /// Stop every loop, keeping the material.
     pub fn stop_all() {
         for (index, pad) in PADS_ARRAY.iter().enumerate() {
-            START_REQUEST[index].store(false, Ordering::Release);
+            START_REQUEST[index].store(0, Ordering::Release);
+            // Cancel an in-flight audio-thread buffer clear before it can
+            // publish Rec. A successful recording start instead falls through.
+            let cancelled = if pad.len.load(Ordering::Acquire) != 0 {
+                State::Stop
+            } else {
+                State::Idle
+            };
+            let _ = pad.state.compare_exchange(
+                STARTING,
+                cancelled.raw(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
             let state = pad.state();
             if state.is_take() {
                 if pad
@@ -445,7 +467,12 @@ impl Engine {
                     drop_take();
                 }
             } else if state == State::Play {
-                pad.set_state(State::Stop);
+                let _ = pad.state.compare_exchange(
+                    State::Play.raw(),
+                    State::Stop.raw(),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
             }
         }
     }
@@ -466,7 +493,7 @@ impl Engine {
         let state = entry.state();
         if shift {
             match state {
-                State::Play | State::Stop => start_overdub(entry),
+                State::Play | State::Stop => request_overdub(pad),
                 State::Dub | State::Rec | State::Drain => finish_pad(entry),
                 State::Idle => request_record(pad),
             }
@@ -693,6 +720,9 @@ impl Engine {
                         dub_add(samples, len, latency, pos, value);
                     }
                 } else if state == State::Rec || (state == State::Drain && !touched) {
+                    if state == State::Drain {
+                        pad.skip.store(0, Ordering::Release);
+                    }
                     record(pad, samples, &input[..count]);
                 }
                 if state == State::Drain {
@@ -773,7 +803,12 @@ impl Engine {
 
     /// Copy a mono block into the ring.
     fn input_block(mono: &[f32], peak: f32) {
-        if TAKE_COUNT.load(Ordering::Acquire) != 0 {
+        if TAKE_COUNT.load(Ordering::Acquire) != 0
+            || CLAIMING_OVERDUB.load(Ordering::Acquire)
+            || START_REQUEST
+                .iter()
+                .any(|request| request.load(Ordering::Acquire) == START_OVERDUB)
+        {
             let mut write = RING_WRITE.load(Ordering::Relaxed);
             for &value in mono {
                 let read = RING_READ.load(Ordering::Relaxed);
@@ -1029,6 +1064,14 @@ fn finish_pad(pad: &Pad) {
     } else {
         State::Play
     };
+    // Publish all drain metadata before the state. The audio thread only
+    // consumes these fields after it observes Drain with an acquire load.
+    if state == State::Rec {
+        close_length(pad);
+    }
+    pad.touched
+        .store(i32::from(state == State::Dub), Ordering::Release);
+    pad.drain.store(latency, Ordering::Release);
     if pad
         .state
         .compare_exchange(state.raw(), next.raw(), Ordering::AcqRel, Ordering::Acquire)
@@ -1036,13 +1079,6 @@ fn finish_pad(pad: &Pad) {
     {
         return;
     }
-    if state == State::Rec {
-        close_length(pad);
-    }
-    pad.touched
-        .store(i32::from(state == State::Dub), Ordering::Release);
-    pad.drain.store(latency, Ordering::Release);
-    pad.skip.store(0, Ordering::Release);
     if latency == 0 {
         drop_take();
     }
@@ -1062,23 +1098,14 @@ fn drop_take() {
 /// Clear one pad completely.
 fn clear_pad(pad: &Pad, index: usize) {
     if let Some(request) = START_REQUEST.get(index) {
-        request.store(false, Ordering::Release);
+        request.store(0, Ordering::Release);
     }
-    let state = pad.state();
-    if state.is_take()
-        && pad
-            .state
-            .compare_exchange(
-                state.raw(),
-                State::Idle.raw(),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-    {
+    // Claim whatever state is current. In particular, this cancels a start
+    // being prepared by the audio thread before it can publish a new take.
+    let previous = State::from_raw(pad.state.swap(State::Idle.raw(), Ordering::AcqRel));
+    if previous.is_take() {
         drop_take();
     }
-    pad.set_state(State::Idle);
     pad.len.store(0, Ordering::Release);
     pad.rec.store(0, Ordering::Release);
     pad.skip.store(0, Ordering::Release);
@@ -1094,30 +1121,51 @@ fn clear_pad(pad: &Pad, index: usize) {
 /// the state transition both happen in [`start_requested`], the single writer.
 fn request_record(index: usize) {
     if let Some(request) = START_REQUEST.get(index) {
-        request.store(true, Ordering::Release);
+        request.store(START_RECORD, Ordering::Release);
     }
 }
 
 /// Start every take a control thread requested, on the audio thread.
 fn start_requested(generation: u32, transport: u64) {
     for (index, request) in START_REQUEST.iter().enumerate() {
-        if !request.swap(false, Ordering::AcqRel) {
+        let requested = request.load(Ordering::Acquire);
+        if requested == 0 || requested & 0x80 != 0 {
             continue;
         }
-        // A close during this callback bumped the generation and cancelled the
-        // request; do not start a take on a closed engine.
+        // Capture remains enabled while an overdub is claimed by the audio thread.
+        CLAIMING_OVERDUB.store(requested == START_OVERDUB, Ordering::Release);
+        let claimed = requested | 0x80;
+        if request
+            .compare_exchange(requested, claimed, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            CLAIMING_OVERDUB.store(false, Ordering::Release);
+            continue;
+        }
         if GENERATION.load(Ordering::Acquire) != generation || !Engine::is_open() {
+            let _ = request.compare_exchange(claimed, 0, Ordering::AcqRel, Ordering::Acquire);
+            CLAIMING_OVERDUB.store(false, Ordering::Release);
             return;
         }
-        let Some(pad) = PADS_ARRAY.get(index) else {
-            continue;
-        };
-        if pad.state() != State::Idle {
+        let pad = &PADS_ARRAY[index];
+        if requested == START_OVERDUB {
+            start_overdub(
+                pad,
+                request,
+                claimed,
+                OVERDUB_CUT[index].load(Ordering::Acquire),
+            );
+            CLAIMING_OVERDUB.store(false, Ordering::Release);
             continue;
         }
+        CLAIMING_OVERDUB.store(false, Ordering::Release);
         let Some(pointer) = pad_ptr(index) else {
+            let _ = request.compare_exchange(claimed, 0, Ordering::AcqRel, Ordering::Acquire);
             continue;
         };
+        if !claim_start(pad, request, claimed, State::Idle) {
+            continue;
+        }
         // Silence the previous take before the new state is visible.  Doing it
         // here is what makes the clear race-free: this is the only thread that
         // ever writes a pad's samples.
@@ -1134,15 +1182,72 @@ fn start_requested(generation: u32, transport: u64) {
         pad.lat.store(latency, Ordering::Release);
         LATENCY_USED.store(latency, Ordering::Release);
         pad.skip.store(latency, Ordering::Release);
-        flush_input();
+        if TAKE_COUNT.load(Ordering::Acquire) == 0 {
+            flush_input();
+        }
         TAKE_COUNT.fetch_add(1, Ordering::AcqRel);
-        pad.set_state(State::Rec);
+        if pad
+            .state
+            .compare_exchange(
+                STARTING,
+                State::Rec.raw(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            drop_take();
+        }
     }
 }
 
-/// Start overdubbing an existing loop.
-fn start_overdub(pad: &Pad) {
-    if pad.len.load(Ordering::Acquire) == 0 {
+/// Ask the audio thread to start an overdub, keeping ring reads on one thread.
+fn request_overdub(index: usize) {
+    if let Some(request) = START_REQUEST.get(index) {
+        OVERDUB_CUT[index].store(RING_WRITE.load(Ordering::Acquire), Ordering::Release);
+        request.store(START_OVERDUB, Ordering::Release);
+    }
+}
+
+/// Claim a pad and its request together, so cancellation cannot be lost
+/// between the request being read and the pad entering STARTING.
+fn claim_start(pad: &Pad, request: &AtomicU8, claimed: u8, previous: State) -> bool {
+    if pad
+        .state
+        .compare_exchange(
+            previous.raw(),
+            STARTING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        let _ = request.compare_exchange(claimed, 0, Ordering::AcqRel, Ordering::Acquire);
+        return false;
+    }
+    if request
+        .compare_exchange(claimed, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        return true;
+    }
+    let _ = pad.state.compare_exchange(
+        STARTING,
+        previous.raw(),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+    false
+}
+
+/// Start an overdub on the audio thread.
+fn start_overdub(pad: &Pad, request: &AtomicU8, claimed: u8, cut: u32) {
+    let state = pad.state();
+    if !matches!(state, State::Play | State::Stop) || pad.len.load(Ordering::Acquire) == 0 {
+        let _ = request.compare_exchange(claimed, 0, Ordering::AcqRel, Ordering::Acquire);
+        return;
+    }
+    if !claim_start(pad, request, claimed, state) {
         return;
     }
     let latency = LATENCY.load(Ordering::Acquire).min(LAT_MAX);
@@ -1150,9 +1255,22 @@ fn start_overdub(pad: &Pad) {
     LATENCY_USED.store(latency, Ordering::Release);
     pad.drain.store(0, Ordering::Release);
     pad.skip.store(0, Ordering::Release);
-    flush_input();
+    if TAKE_COUNT.load(Ordering::Acquire) == 0 {
+        RING_READ.store(cut, Ordering::Release);
+    }
     TAKE_COUNT.fetch_add(1, Ordering::AcqRel);
-    pad.set_state(State::Dub);
+    if pad
+        .state
+        .compare_exchange(
+            STARTING,
+            State::Dub.raw(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        drop_take();
+    }
 }
 
 /// A new take starts from the newest input frame: anything older in the ring
@@ -1268,6 +1386,45 @@ pub fn reset_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::{MAX_FRAMES, QUANTIZE_SLACK, dub_add, pool_limit, quantize, snap};
+
+    #[test]
+    fn cancelled_start_cannot_claim_or_publish_a_pad() {
+        use super::{Pad, START_RECORD, STARTING, State, claim_start};
+        use core::sync::atomic::{AtomicU8, Ordering};
+        let pad = Pad::new();
+        let request = AtomicU8::new(0);
+        let claimed = START_RECORD | 0x80;
+        assert!(!claim_start(&pad, &request, claimed, State::Idle));
+        assert_eq!(pad.state(), State::Idle);
+        request.store(claimed, Ordering::Release);
+        assert!(claim_start(&pad, &request, claimed, State::Idle));
+        // STOP/ERASE cancels the claim before the audio thread can publish Rec.
+        pad.state.store(State::Idle.raw(), Ordering::Release);
+        assert!(
+            pad.state
+                .compare_exchange(
+                    STARTING,
+                    State::Rec.raw(),
+                    Ordering::AcqRel,
+                    Ordering::Acquire
+                )
+                .is_err()
+        );
+        assert_eq!(pad.state(), State::Idle);
+    }
+
+    #[test]
+    fn overdub_drain_publishes_its_metadata_with_the_state() {
+        use super::{Pad, State, finish_pad};
+        use core::sync::atomic::Ordering;
+        let pad = Pad::new();
+        pad.lat.store(321, Ordering::Release);
+        pad.set_state(State::Dub);
+        finish_pad(&pad);
+        assert_eq!(pad.state(), State::Drain);
+        assert_eq!(pad.touched.load(Ordering::Acquire), 1);
+        assert_eq!(pad.drain.load(Ordering::Acquire), 321);
+    }
 
     /// The original step-by-step rule, kept as the oracle for [`snap`].
     fn reference(frames: u32, pulse: u32, max: u32) -> u32 {

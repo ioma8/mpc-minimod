@@ -1,7 +1,8 @@
 //! The looper's persisted settings, as safe values.
 
+use std::path::Path;
 use std::sync::OnceLock;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::cfg;
 
@@ -25,19 +26,7 @@ fn writer() -> Option<&'static Sender<Request>> {
             std::thread::Builder::new()
                 .name("minimod-settings".to_string())
                 .spawn(move || {
-                    while let Ok(mut request) = receiver.recv() {
-                        while let Ok(next) =
-                            receiver.recv_timeout(std::time::Duration::from_secs(5))
-                        {
-                            request = next;
-                        }
-                        let _ = cfg::save(
-                            std::path::Path::new(cfg::PATH),
-                            cfg::Settings {
-                                master: Some(request.master),
-                            },
-                        );
-                    }
+                    write_requests(&receiver, Path::new(cfg::PATH));
                 })
                 .ok()
                 .map(|_| sender)
@@ -45,10 +34,25 @@ fn writer() -> Option<&'static Sender<Request>> {
         .as_ref()
 }
 
+/// Persist the latest queued value as soon as possible on the writer thread.
+fn write_requests(receiver: &Receiver<Request>, path: &Path) {
+    while let Ok(mut request) = receiver.recv() {
+        for next in receiver.try_iter() {
+            request = next;
+        }
+        let _ = cfg::save(
+            path,
+            cfg::Settings {
+                master: Some(request.master),
+            },
+        );
+    }
+}
+
 /// Read the settings file, or `None` when it is absent or unusable.
 #[must_use]
 pub fn load() -> Option<cfg::Settings> {
-    cfg::load(std::path::Path::new(cfg::PATH))
+    cfg::load(Path::new(cfg::PATH))
 }
 
 /// Queue the settings file write.
@@ -62,7 +66,7 @@ pub fn save(master: u32) {
         return;
     }
     let _ = cfg::save(
-        std::path::Path::new(cfg::PATH),
+        Path::new(cfg::PATH),
         cfg::Settings {
             master: Some(master),
         },
@@ -76,5 +80,35 @@ pub fn load_into_mod() {
     };
     if let Some(master) = settings.master {
         crate::backend::looper::looper_set_master(master);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Request, write_requests};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn settings_are_written_without_waiting_for_the_sender_to_close() {
+        let directory =
+            std::env::temp_dir().join(format!("minimod-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.cfg");
+        let (sender, receiver) = mpsc::channel();
+        let target = path.clone();
+        let writer = std::thread::spawn(move || write_requests(&receiver, &target));
+        sender.send(Request { master: 43 }).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while crate::cfg::load(&path).and_then(|value| value.master) != Some(43) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writer waited for more input"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(sender);
+        writer.join().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

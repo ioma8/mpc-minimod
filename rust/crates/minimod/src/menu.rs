@@ -147,9 +147,8 @@ const PANEL: u32 = 0xff10_1014;
 const ACCENT: u32 = 0xffff_b43c;
 const WHITE: u32 = 0xffff_ffff;
 const MUTED: u32 = 0xffb8_b8be;
-const DIM: u32 = 0xff48_484f;
 const SLOT: u32 = 0xff36_363d;
-const ROW: u32 = 0xff55_3a16;
+const ROW: u32 = 0xff30_2719;
 
 /// The rows, in the order the encoder walks them.
 const TITLES: [&str; MENU_ROWS] = [
@@ -182,9 +181,10 @@ pub fn draw(graphics: usize, state: &State, busy: bool, status: &str, knobs: [f3
     let (x, y, w, h) = (14, 8, 292, 224);
     paint::colour(graphics, PANEL);
     paint::rect(graphics, x, y, w, h);
-    paint::colour(graphics, ACCENT);
-    paint::rect(graphics, x, y, w, 2);
-    paint::rect(graphics, x, y + h - 2, w, 2);
+    paint::colour(graphics, SLOT);
+    let edge_height = 1;
+    paint::rect(graphics, x, y, w, edge_height);
+    paint::rect(graphics, x, y + h - edge_height, w, edge_height);
     if state.bass_edit == 0 {
         paint::colour(graphics, WHITE);
         paint::text(graphics, "SAMPLE OPTIONS", x + 10, y + 6, w - 20, 22, 18.0);
@@ -209,6 +209,8 @@ pub fn draw(graphics: usize, state: &State, busy: bool, status: &str, knobs: [f3
         if selected == index {
             paint::colour(graphics, ROW);
             paint::rect(graphics, x + 6, row, w - 12, 18);
+            paint::colour(graphics, ACCENT);
+            paint::rect(graphics, x + 6, row, 1, 18);
         }
         paint::colour(graphics, WHITE);
         paint::text(graphics, title, x + 12, row, w - 24, 18, 14.0);
@@ -244,7 +246,7 @@ fn draw_knobs(graphics: usize, area: (i32, i32, i32), status: &str, knobs: [f32;
     let (x, y, w) = area;
     let kind = bass_kind();
     let labels = kind.knobs();
-    paint::colour(graphics, ACCENT);
+    paint::colour(graphics, WHITE);
     paint::text_fmt(
         graphics,
         format_args!("SYNTH  {}", kind.name()),
@@ -254,72 +256,67 @@ fn draw_knobs(graphics: usize, area: (i32, i32, i32), status: &str, knobs: [f32;
         22,
         18.0,
     );
-    paint::colour(graphics, MUTED);
-    paint::text(
-        graphics,
-        "PADS C2-D#3  /  CHROMATIC",
-        x + 12,
-        y + 36,
-        w - 24,
-        16,
-        11.0,
-    );
     let note = crate::backend::bass::note_name(crate::backend::bass::last_note_semitones());
-    paint::colour(graphics, ACCENT);
+    paint::colour(graphics, MUTED);
     paint::text_fmt(
         graphics,
-        format_args!("NOTE {note}"),
+        format_args!("PADS: PLAY   SAVE NOTE: {note}"),
         x + 12,
-        y + 52,
+        y + 34,
         w - 24,
-        16,
-        11.0,
+        18,
+        12.0,
     );
     let columns = [x + 16, x + 108, x + 200];
     for (index, column) in columns.iter().enumerate() {
-        paint::colour(graphics, ACCENT);
+        paint::colour(graphics, MUTED);
         paint::text_fmt(
             graphics,
-            format_args!("K{}", index + 1),
+            format_args!("K{} {}", index + 1, labels[index]),
             *column,
             y + 72,
             76,
-            16,
-            11.0,
+            20,
+            13.0,
         );
-        paint::colour(graphics, WHITE);
-        paint::text(graphics, labels[index], *column, y + 90, 76, 18, 12.0);
         paint::colour(graphics, SLOT);
-        paint::rect(graphics, *column, y + 116, 76, 4);
+        paint::rect(graphics, *column, y + 106, 76, 3);
         paint::colour(graphics, ACCENT);
         let filled = (76.0 * knobs[index].clamp(0.0, 1.0) + 0.5) as i32;
-        paint::rect(graphics, *column, y + 116, filled, 4);
+        paint::rect(graphics, *column, y + 106, filled, 3);
         paint::colour(graphics, WHITE);
         paint::text_fmt(
             graphics,
             format_args!("{:.2}", knobs[index]),
             *column,
-            y + 128,
+            y + 118,
             76,
             20,
             14.0,
         );
     }
-    paint::colour(graphics, DIM);
-    paint::rect(graphics, x + 12, y + 164, w - 24, 1);
     if !status.is_empty() {
         paint::colour(graphics, 0xffe8_e8ec);
         paint::text(graphics, status, x + 12, y + 168, w - 24, 14, 10.0);
     }
-    paint::colour(graphics, ACCENT);
+    paint::colour(graphics, MUTED);
     paint::text(
         graphics,
-        "PADS: PLAY   DATA: SAVE   SHIFT+DATA: BACK",
+        "TURN DATA: SOUND    DATA: SAVE",
         x + 10,
-        y + 192,
+        y + 185,
         w - 20,
-        16,
-        10.0,
+        15,
+        11.0,
+    );
+    paint::text(
+        graphics,
+        "PLUS/MINUS: PITCH    SHIFT+DATA: EXIT",
+        x + 10,
+        y + 201,
+        w - 20,
+        15,
+        11.0,
     );
 }
 

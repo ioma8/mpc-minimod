@@ -16,13 +16,12 @@ fn toast(graphics: usize) {
     let (x, y, w, h) = (0, 194, 320, 46);
     paint::colour(graphics, 0xff15_151a);
     paint::rect(graphics, x, y, w, h);
-    paint::colour(graphics, 0xffff_b43c);
-    paint::rect(graphics, x, y, w, 2);
-    paint::rect(graphics, x, y + h - 2, w, 2);
+    paint::colour(graphics, 0xff8a_6740);
+    paint::rect(graphics, x, y, w, 1);
     paint::colour(graphics, 0xffff_ffff);
     let toast = paint::toast_text();
     let text = String::from_utf8_lossy(&toast);
-    paint::text(graphics, &text, x + 4, y + 6, w - 8, h - 12, 18.0);
+    paint::text(graphics, &text, x + 4, y + 6, w - 8, h - 12, 16.0);
 }
 
 /// Draw the effects menu over the page.
@@ -83,8 +82,8 @@ pub fn paint(graphics: Graphics, event: mpc_sample_sdk::PaintEvent) {
     if crate::ui::shift() == 0 || event.chop_mode || !crate::ui::trim_screen() {
         return;
     }
-    paint::colour(handle, 0xff00_0000);
+    paint::colour(handle, 0xff15_151a);
     paint::rect(handle, 213, 0, 107, 38);
     paint::colour(handle, 0xffff_ffff);
-    paint::text(handle, "AutoTrim", 215, 5, 103, 28, 18.0);
+    paint::text(handle, "AutoTrim", 215, 5, 103, 28, 16.0);
 }

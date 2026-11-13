@@ -118,6 +118,8 @@ pub struct Context {
     pub page_visible: bool,
     /// Whether the app's trim screen is showing (the B3 label is `Filter`).
     pub trim_screen: bool,
+    /// Whether the Sample page is in chop mode.
+    pub chop_mode: bool,
 }
 
 /// Whether the event is a press.
@@ -168,7 +170,12 @@ pub fn dispatch(context: Context) -> Action {
     // The release matters too: it is what lets the next press count again.
     // AutoTrim edits the pad the user pressed last, so it is only armed on the
     // Sample page where that pad is the one being looked at.
-    if context.code == KEY_B3 && context.held.shift && context.page_visible && context.trim_screen {
+    if context.code == KEY_B3
+        && context.held.shift
+        && context.page_visible
+        && context.trim_screen
+        && !context.chop_mode
+    {
         return Action::Autotrim;
     }
     if (context.code == KEY_PLUS || context.code == KEY_MINUS) && context.screens.levels {
@@ -235,6 +242,7 @@ mod tests {
             screens: Screens::default(),
             page_visible: true,
             trim_screen: false,
+            chop_mode: false,
         }
     }
 
@@ -391,10 +399,14 @@ mod tests {
             screens: Screens::default(),
             page_visible: true,
             trim_screen: true,
+            chop_mode: false,
         };
         assert_eq!(dispatch(context), Action::Autotrim);
         context.down = 0;
         assert_eq!(dispatch(context), Action::Autotrim);
+        context.chop_mode = true;
+        assert_eq!(dispatch(context), Action::Forward);
+        context.chop_mode = false;
         // Off the trim screen the key belongs to the app.
         context.page_visible = false;
         assert_eq!(dispatch(context), Action::Forward);

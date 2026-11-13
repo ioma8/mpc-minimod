@@ -31,18 +31,19 @@ struct Cell {
 }
 
 /// One pad's colours and label.
-fn palette(state: State) -> (u32, u32, u32, &'static str) {
+fn palette(state: State) -> (u32, &'static str) {
     match state {
-        State::Rec => (0xff3a_1010, 0xffff_4d4d, 0xffff_b0b0, "REC"),
-        State::Play => (0xff10_301a, METER_OK, 0xffc8_f5d0, "PLAY"),
-        State::Dub => (0xff35_2808, ACCENT, 0xffff_e0a8, "DUB"),
-        State::Stop => (0xff20_2028, 0xff6a_6a74, 0xffc0_c0c8, "STOP"),
-        _ => (0xff1a_1a20, 0xff33_333c, MUTED, "--"),
+        State::Rec => (METER_HOT, "REC"),
+        State::Drain => (METER_HOT, "REC"),
+        State::Play => (METER_OK, "PLAY"),
+        State::Dub => (ACCENT, "DUB"),
+        State::Stop => (MUTED, "STOP"),
+        _ => (MUTED, "--"),
     }
 }
 
 /// Draw one pad cell.
-fn cell(graphics: usize, area: Cell, pad: &PadView, index: usize, recording: bool) {
+fn cell(graphics: usize, area: Cell, pad: &PadView, index: usize) {
     let Cell {
         x,
         y,
@@ -50,19 +51,15 @@ fn cell(graphics: usize, area: Cell, pad: &PadView, index: usize, recording: boo
         height,
     } = area;
     let state = State::from_raw(i32::from(pad.state));
-    let (background, border, text, label) = palette(state);
-    paint::colour(graphics, background);
+    let (state_colour, label) = palette(state);
+    paint::colour(graphics, BAR);
     paint::rect(graphics, x, y, width, height);
-    paint::colour(graphics, border);
+    paint::colour(graphics, METER_BACK);
     paint::rect(graphics, x, y, width, 1);
     paint::rect(graphics, x, y + height - 1, width, 1);
     paint::rect(graphics, x, y, 1, height);
     paint::rect(graphics, x + width - 1, y, 1, height);
-    if recording {
-        paint::colour(graphics, WHITE);
-        paint::rect(graphics, x + 1, y + 1, width - 2, 1);
-    }
-    paint::colour(graphics, text);
+    paint::colour(graphics, state_colour);
     paint::text_fmt(
         graphics,
         format_args!("{}", index + 1),
@@ -92,14 +89,7 @@ fn cell(graphics: usize, area: Cell, pad: &PadView, index: usize, recording: boo
         let span = u64::from(u32::try_from(width - 8).unwrap_or(1));
         let filled = (u64::from(done) * span / u64::from(total)).min(span);
         let filled = i32::try_from(filled).unwrap_or(0);
-        paint::colour(
-            graphics,
-            if recording_state {
-                0xffff_6a6a
-            } else {
-                METER_OK
-            },
-        );
+        paint::colour(graphics, state_colour);
         paint::rect(graphics, x + 4, y + height - 9, filled, 4);
     }
     if !recording_state && pad.len_frames > 0 {
@@ -123,8 +113,8 @@ fn frame(graphics: usize) {
     paint::rect(graphics, 0, 0, WIDTH, HEIGHT);
     paint::colour(graphics, BAR);
     paint::rect(graphics, 0, 0, WIDTH, 24);
-    paint::colour(graphics, ACCENT);
-    paint::rect(graphics, 0, 24, WIDTH, 2);
+    paint::colour(graphics, METER_BACK);
+    paint::rect(graphics, 0, 24, WIDTH, 1);
     paint::colour(graphics, WHITE);
     paint::text(graphics, "LIVE LOOPER", 8, 2, 180, 20, 15.0);
 }
@@ -165,10 +155,10 @@ fn pulse(graphics: usize, view: &View) {
     let span = u64::from(view.sync_frames.max(1));
     let travelled = u64::from(view.pulse_phase.min(view.sync_frames)) * u64::from(WIDTH as u32);
     let filled = i32::try_from(travelled / span).unwrap_or(WIDTH);
-    paint::colour(graphics, 0xff3a_2a10);
-    paint::rect(graphics, 0, 236, WIDTH, 3);
+    paint::colour(graphics, METER_BACK);
+    paint::rect(graphics, 0, 239, WIDTH, 1);
     paint::colour(graphics, ACCENT);
-    paint::rect(graphics, 0, 236, filled.clamp(0, WIDTH), 3);
+    paint::rect(graphics, 0, 239, filled.clamp(0, WIDTH), 1);
 }
 
 /// The input meter.
@@ -198,25 +188,23 @@ fn grid_position(index: usize) -> (i32, i32) {
     // Pads run left-to-right and bottom-to-top: A1 is the bottom-left cell and
     // A16 is the top-right one, matching the hardware below the screen.
     let row = i32::try_from(PADS / 4 - 1 - index / 4).unwrap_or(0);
-    (8 + column * 78, 40 + row * 41)
+    (8 + column * 78, 40 + row * 37)
 }
 
 /// The 4x4 pad grid.
 fn grid(graphics: usize, view: &View) {
     for index in 0..PADS {
         let (x, y) = grid_position(index);
-        let recording = view.recording_pad == i32::try_from(index).unwrap_or(-1);
         cell(
             graphics,
             Cell {
                 x,
                 y,
                 width: 75,
-                height: 38,
+                height: 34,
             },
             &view.pads[index],
             index,
-            recording,
         );
     }
 }
@@ -225,10 +213,8 @@ fn grid(graphics: usize, view: &View) {
 fn footer(graphics: usize, view: &View) {
     let message = message_of(view);
     if !message.is_empty() {
-        paint::colour(graphics, 0xff20_1408);
-        paint::rect(graphics, 8, 202, 304, 12);
         paint::colour(graphics, ACCENT);
-        paint::text(graphics, message, 12, 202, 296, 12, 10.0);
+        paint::text(graphics, message, 12, 188, 296, 12, 10.0);
     } else if view.lat_frames > 0 {
         let source = match view.lat_src {
             b'B' => "BUF",
@@ -237,14 +223,12 @@ fn footer(graphics: usize, view: &View) {
             _ => "EST",
         };
         let millis = u64::from(view.lat_frames) * 1000 / u64::from(RATE);
-        paint::colour(graphics, 0xff5a_5a64);
-        paint::rect(graphics, 8, 202, 304, 12);
-        paint::colour(graphics, 0xffb8_b8be);
+        paint::colour(graphics, MUTED);
         paint::text_fmt(
             graphics,
             format_args!("{source} {millis}ms"),
             12,
-            202,
+            188,
             296,
             12,
             9.0,
@@ -253,21 +237,30 @@ fn footer(graphics: usize, view: &View) {
     paint::colour(graphics, 0xffb8_b8be);
     paint::text(
         graphics,
-        "PAD REC/PLAY/STOP    STOP ALL    ERASE CLEAR",
+        "PAD REC/PLAY/STOP   STOP ALL",
         8,
-        214,
+        201,
         304,
-        9,
-        7.0,
+        11,
+        9.0,
     );
     paint::text(
         graphics,
-        "SHIFT OVERDUB  LOOP SYNC  SHIFT+LOOP CLICK  SHIFT+DATA EXIT",
+        "SHIFT+PAD DUB   ERASE+PAD CLEAR",
         8,
-        224,
+        212,
         304,
-        9,
-        7.0,
+        11,
+        9.0,
+    );
+    paint::text(
+        graphics,
+        "LOOP SYNC   SHIFT+LOOP CLICK   SHIFT+DATA EXIT",
+        8,
+        223,
+        304,
+        11,
+        9.0,
     );
 }
 
@@ -332,9 +325,9 @@ mod layout_tests {
 
     #[test]
     fn pad_one_is_bottom_left_and_pad_sixteen_is_top_right() {
-        assert_eq!(grid_position(0), (8, 40 + 3 * 41));
+        assert_eq!(grid_position(0), (8, 40 + 3 * 37));
         assert_eq!(grid_position(15), (8 + 3 * 78, 40));
-        assert_eq!(grid_position(3), (8 + 3 * 78, 40 + 3 * 41));
+        assert_eq!(grid_position(3), (8 + 3 * 78, 40 + 3 * 37));
         assert_eq!(grid_position(12), (8, 40));
     }
 }

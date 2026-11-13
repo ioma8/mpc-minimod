@@ -125,6 +125,7 @@ pub fn press(state: &mut State, event: &ButtonEvent, hooks: Hooks) -> Flow {
     if let Some(sync) = hooks.midi_sync {
         sync(levels);
     }
+    let page_visible = hooks.page_visible.is_some_and(|callback| callback());
     let context = Context {
         code,
         down,
@@ -144,8 +145,9 @@ pub fn press(state: &mut State, event: &ButtonEvent, hooks: Hooks) -> Flow {
             levels: levels != 0,
             bass_edit: crate::menu::state().bass_edit != 0,
         },
-        page_visible: hooks.page_visible.is_some_and(|callback| callback()),
+        page_visible,
         trim_screen: trim_screen(),
+        chop_mode: page_visible && code == buttons::KEY_B3 && screen_chop_mode(),
     };
     let action = buttons::dispatch(context);
     if context.screens.looper {
@@ -235,13 +237,15 @@ fn apply(state: &mut State, event: &Event) {
         }
         Action::Autotrim => {
             if pressed && state.b3_down == 0 {
-                crate::autotrim::run(crate::autotrim::Context {
+                let trimmed = crate::autotrim::run(crate::autotrim::Context {
                     surface: crate::control::surface(),
                     control: crate::control::control(),
                     step: state.trim_step,
                     last_pad: crate::input::last_pad(),
                 });
-                state.trim_step = (state.trim_step + 1) % 4;
+                if trimmed {
+                    state.trim_step = (state.trim_step + 1) % 4;
+                }
             }
             state.b3_down = i32::from(pressed);
         }

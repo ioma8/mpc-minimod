@@ -69,22 +69,23 @@ fn selected_pad(surface: usize, last_pad: i32) -> Option<i32> {
 /// Run one press of the trim cycle.
 ///
 /// The target is the page's selected pad. A physical pad press is only the
-/// fallback when the page has no selected sample at all.
-pub fn run(context: Context) {
+/// fallback when the page has no selected sample at all. Returns whether the
+/// trim command was submitted.
+#[must_use]
+pub fn run(context: Context) -> bool {
     let Some(pad) = selected_pad(context.surface, context.last_pad) else {
-        paint::show_toast("AutoTrim: select a pad");
-        return;
+        return failure("AutoTrim: select a pad");
     };
     let Some(sample) = pads::sample_for_pad(context.surface, pad) else {
-        return;
+        return failure("AutoTrim: no sample on pad");
     };
     // the sample is the page's own object.
     let frames = sample::frames(sample);
     if frames == 0 {
-        return;
+        return failure("AutoTrim: sample is empty");
     }
     let Some((_, channels, rate)) = sample::geometry(sample) else {
-        return;
+        return failure("AutoTrim: cannot read sample");
     };
     let ratio = RATIOS[usize::try_from(context.step).unwrap_or(0).min(2)];
     let (first, last) = if context.step >= 3 {
@@ -92,7 +93,7 @@ pub fn run(context: Context) {
     } else if let Some(found) = bounds(sample, frames, channels, rate, ratio) {
         found
     } else {
-        return;
+        return failure("AutoTrim: no readable audio");
     };
     // The toast has to be armed first: the trim's own repaint is what paints the
     // page, so a toast set afterwards waits for an unrelated frame.
@@ -112,6 +113,13 @@ pub fn run(context: Context) {
             last.saturating_add(1),
         );
     }
+    true
+}
+
+fn failure(message: &str) -> bool {
+    paint::show_toast(message);
+    crate::ui::minimod_repaint_screen();
+    false
 }
 
 /// The note the selected pad's sample plays at its original speed, C3 when the

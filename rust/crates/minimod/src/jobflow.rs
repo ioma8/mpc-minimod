@@ -61,8 +61,14 @@ fn failure_slot() -> MutexGuard<'static, Option<Failure>> {
 }
 
 /// Cancel text for an action.
-const fn cancelled(effect: bool) -> Report {
-    if effect {
+fn cancelled(action: Action) -> Report {
+    if action == Action::Bass {
+        Report {
+            raw: false,
+            status: "cancelled",
+            toast: "Synth cancelled",
+        }
+    } else if action.is_effect() {
         Report {
             raw: false,
             status: "cancelled",
@@ -237,16 +243,24 @@ fn trim_reverb_tail(pad: i32, frames: usize) {
     unsafe { crate::control::set_trim_end(pad, end) };
 }
 
+fn write_failed(action: Action) -> Report {
+    Report {
+        raw: false,
+        status: "output failed",
+        toast: if action == Action::Bass {
+            "Synth: write failed"
+        } else {
+            "Effect: write failed"
+        },
+    }
+}
+
 /// Write an effect or synth take to a pad.
 fn extract_take(job: &RenderJob) -> Result<(), Report> {
-    let Some(output) = job.outputs.first() else {
-        return Err(Report {
-            raw: false,
-            status: "output failed",
-            toast: "Effect: write failed",
-        });
-    };
     let action = Action::from_code(job.kind).unwrap_or(Action::Split);
+    let Some(output) = job.outputs.first() else {
+        return Err(write_failed(action));
+    };
     let name = if action == Action::Bass {
         let kind = Kind::from_index(JOB_KIND.load(Ordering::Acquire));
         synth_name(kind, JOB_NOTE.load(Ordering::Acquire))
@@ -275,11 +289,7 @@ fn extract_take(job: &RenderJob) -> Result<(), Report> {
     };
     let destination = (action == Action::Bass).then(|| JOB_PAD.load(Ordering::Acquire));
     let Some(extracted) = extract_one(job, output, name, end, source_frames, destination) else {
-        return Err(Report {
-            raw: false,
-            status: "output failed",
-            toast: "Effect: write failed",
-        });
+        return Err(write_failed(action));
     };
     if action == Action::Bass {
         let destination = extracted.pad;
@@ -288,8 +298,8 @@ fn extract_take(job: &RenderJob) -> Result<(), Report> {
         if !unsafe { pads::set_layer_active(crate::control::surface(), destination, true) } {
             return Err(Report {
                 raw: false,
-                status: "layer not enabled",
-                toast: "Synth: could not enable pad",
+                status: "saved; pad not enabled",
+                toast: "Synth saved; pad off",
             });
         }
     }
@@ -343,7 +353,7 @@ fn success(job: &RenderJob) -> Report {
                 Action::Reverb => "Reverb done",
                 Action::Vinyl => "Vinyl done",
                 Action::LoFi => "Lo-Fi done",
-                _ => "Bass C2 done",
+                _ => "Synth saved",
             },
         }
     }
@@ -357,10 +367,10 @@ fn finalize(job: &RenderJob, screen: usize) -> Report {
         Err(Report {
             raw: false,
             status: "processing failed",
-            toast: if effect {
-                "Effect: processing failed"
-            } else {
-                "HPSS: processing failed"
+            toast: match action {
+                Action::Bass => "Synth: processing failed",
+                Action::Split => "HPSS: processing failed",
+                _ => "Effect: processing failed",
             },
         })
     } else if screen != job.source.screen()
@@ -369,7 +379,7 @@ fn finalize(job: &RenderJob, screen: usize) -> Report {
         || !unsafe { crate::page::visible(job.source.screen()) }
         || (action != Action::Bass && !job.source.is_current())
     {
-        Err(cancelled(effect))
+        Err(cancelled(action))
     } else {
         let room = if action == Action::Bass {
             Ok(())
@@ -434,6 +444,7 @@ fn fail(action: Action, report: Report) {
         status::set_prefixed(action_name(action), report.status);
     }
     show_toast(report.toast);
+    crate::ui::minimod_repaint_screen();
 }
 
 /// The pad a synth take may be written to: the last pad the user pressed when
@@ -622,10 +633,10 @@ pub fn finish(screen: usize) -> bool {
                 fail(failure.action, read_error(failure.action, failure.error));
             } else if let Some(action) = Action::from_code(code) {
                 status::set_prefixed(action_name(action), "processing failed");
-                show_toast(if action == Action::Split {
-                    "HPSS: processing failed"
-                } else {
-                    "Effect: processing failed"
+                show_toast(match action {
+                    Action::Bass => "Synth: processing failed",
+                    Action::Split => "HPSS: processing failed",
+                    _ => "Effect: processing failed",
                 });
             } else {
                 status::set_status("processing failed");
@@ -662,8 +673,11 @@ fn start_effect(action: Action, menu: &mut crate::menu::State) {
 /// Start a spectral chop.
 fn start_spectral(menu: &mut crate::menu::State, event: &[u8; 16]) {
     let busy = menu.busy != 0 || busy();
-    // `run_start` requests its own frame.
-    let _ = crate::spectral::run_start(busy, event);
+    if crate::spectral::run_start(busy, event) {
+        menu.busy = 1;
+        status::set_status("Analysing sample...");
+    }
+    crate::ui::minimod_repaint_screen();
 }
 
 /// Open the bass control page.
@@ -686,6 +700,8 @@ fn start_looper() -> i32 {
         // The pump started in `on_start` keeps the looper view animating; ask
         // for the frame that draws it for the first time.
         crate::ui::request_repaint();
+    } else {
+        status::set_status("Looper: not enough memory");
     }
     opened
 }
@@ -706,7 +722,7 @@ pub fn menu_activate(event: &[u8; 16]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{action_name, broken};
+    use super::{action_name, broken, cancelled, success, write_failed};
     use mpc_sample_sdk::platform::selection::Selection;
     use mpc_sample_sdk::render::{RenderJob, RenderOutput};
 
@@ -743,6 +759,17 @@ mod tests {
         empty.audio.clear();
         empty.frames = 0;
         assert!(broken(&job(vec![audio(), empty]), false));
+    }
+
+    #[test]
+    fn synth_reports_name_the_action_without_assuming_a_note() {
+        use crate::actions::Action;
+        let mut render = job(Vec::new());
+        render.kind = Action::Bass.code();
+        assert_eq!(success(&render).toast, "Synth saved");
+        assert_eq!(write_failed(Action::Bass).toast, "Synth: write failed");
+        assert_eq!(cancelled(Action::Bass).toast, "Synth cancelled");
+        assert_eq!(write_failed(Action::Reverb).toast, "Effect: write failed");
     }
 
     #[test]

@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-12T17:46:09.315568+00:00",
+  "title": "Design System: MINIMOD",
+  "extensions": {
+    "colorMeta": {
+      "amber": {
+        "role": "primary",
+        "displayName": "MPC amber",
+        "canonical": "#ffb43c"
+      },
+      "device-background": {
+        "role": "neutral",
+        "displayName": "Device near-black",
+        "canonical": "#0c0c10"
+      },
+      "promo-background": {
+        "role": "neutral",
+        "displayName": "Promo near-black",
+        "canonical": "#090b10"
+      }
+    },
+    "typographyMeta": {
+      "promo-display": {
+        "displayName": "Promo headline",
+        "purpose": "Short promotional headlines."
+      },
+      "promo-body": {
+        "displayName": "Promo supporting text",
+        "purpose": "Concise secondary copy."
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Selected device menu row",
+      "kind": "custom",
+      "description": "A visual example of the encoder-selected row on the device; navigation is hardware-controlled.",
+      "html": "<div class=\"ds-menu\" aria-label=\"Selected menu item\"><div class=\"ds-menu-row\">HPSS</div></div>",
+      "css": ".ds-menu { background:#101014; padding:6px; width:280px; color:#fff; font:12px monospace; } .ds-menu-row { background:#3a2a10; text-align:center; padding:3px 8px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Familiar instrument, clearer flow.",
+    "overview": "MINIMOD should look at home on the MPC Sample: dark, compact, direct, and focused on the sound. Promos use the same amber and near-black foundation, with a larger type scale and more space for a phone screen. The hardware and the work remain the heroes.",
+    "keyCharacteristics": [
+      "Familiar MPC Sample controls",
+      "Amber-on-dark foundation",
+      "Legible, restrained promotional layouts"
+    ],
+    "rules": [],
+    "dos": [
+      "Keep the original MPC Sample look and control language recognizable.",
+      "Verify feature behavior, shortcut names, and hardware/emulator claims against the current code and documentation.",
+      "Check exported frames at phone size and listen to the actual mix; test the device UI on its target screen or an accurate emulator.",
+      "Give labels and state changes enough contrast and distinguish status with words as well as color."
+    ],
+    "donts": [
+      "Do not crowd a small screen or a Short with multiple competing messages.",
+      "Do not imply a control action occurred if the footage only describes it.",
+      "Do not replace the actual interface or sound with a fabricated demonstration.",
+      "Do not use an octave claim for an eight-semitone shift; state the real increment."
+    ]
+  }
+}
