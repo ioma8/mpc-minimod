@@ -147,6 +147,14 @@ pub fn dispatch(context: Context) -> Action {
     if context.code == KEY_SHIFT {
         return Action::Shift(press);
     }
+    // A release belongs to the mod if its press was consumed, even if the
+    // user changed modes or started holding SHIFT in the meantime.
+    if !press
+        && ((context.code == KEY_PLUS && context.octave.plus)
+            || (context.code == KEY_MINUS && context.octave.minus))
+    {
+        return Action::BumpOctave(0);
+    }
     // The synth page is modal too, but PLUS/MINUS shift its chromatic pads by
     // the same eight-semitone steps as 16 Levels.
     if (context.code == KEY_PLUS || context.code == KEY_MINUS) && context.screens.bass_edit {
@@ -181,10 +189,10 @@ pub fn dispatch(context: Context) -> Action {
     if (context.code == KEY_PLUS || context.code == KEY_MINUS) && context.screens.levels {
         let plus = context.code == KEY_PLUS;
         if !press {
-            // Return through the bump action with no movement so `ui` clears
-            // the held flag; consuming here left it stuck and made the next
-            // MINUS look like a two-key reset.
-            return Action::BumpOctave(0);
+            return Action::Forward;
+        }
+        if context.held.shift {
+            return Action::Forward;
         }
         // Both keys together reset the row instead of moving it.
         if if plus {
@@ -196,7 +204,12 @@ pub fn dispatch(context: Context) -> Action {
         }
         return Action::BumpOctave(if plus { 1 } else { -1 });
     }
-    if context.code == KEY_LEVELS && press {
+    if context.code == KEY_LEVELS
+        && press
+        && !context.held.shift
+        && context.page_visible
+        && !context.chop_mode
+    {
         return Action::ToggleLevels;
     }
     Action::Forward
@@ -360,6 +373,10 @@ mod tests {
         let context = Context {
             code: KEY_PLUS,
             down: 0,
+            octave: OctaveKeys {
+                plus: true,
+                minus: false,
+            },
             screens: Screens {
                 levels: true,
                 ..Screens::default()
@@ -377,6 +394,46 @@ mod tests {
             ..base()
         };
         assert_eq!(dispatch(context), Action::BumpOctave(-1));
+    }
+
+    #[test]
+    fn shift_shortcuts_are_forwarded_without_changing_levels() {
+        let mut context = Context {
+            code: KEY_LEVELS,
+            down: PRESSED,
+            held: Held { shift: true },
+            ..base()
+        };
+        assert_eq!(dispatch(context), Action::Forward);
+        context.screens.levels = true;
+        for code in [KEY_PLUS, KEY_MINUS] {
+            context.code = code;
+            assert_eq!(dispatch(context), Action::Forward);
+            context.down = 0;
+            context.held.shift = false;
+            assert_eq!(dispatch(context), Action::Forward);
+            context.down = PRESSED;
+            context.held.shift = true;
+        }
+        // A press already owned by the mod must still have its release consumed
+        // if the user holds SHIFT or leaves 16 Levels before releasing it.
+        context.code = KEY_PLUS;
+        context.down = 0;
+        context.octave.plus = true;
+        context.screens.levels = false;
+        assert_eq!(dispatch(context), Action::BumpOctave(0));
+    }
+
+    #[test]
+    fn levels_press_does_not_change_mod_state_when_chop_is_open() {
+        let context = Context {
+            code: KEY_LEVELS,
+            down: PRESSED,
+            page_visible: true,
+            chop_mode: true,
+            ..base()
+        };
+        assert_eq!(dispatch(context), Action::Forward);
     }
 
     #[test]

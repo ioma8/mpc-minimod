@@ -70,7 +70,7 @@ released   : Trim        Tune        Filter
   pads; outputs are float32 WAVs on this firmware. Details:
   [`docs/FEATURES.md`](../docs/FEATURES.md#hpss).
 * **Spectral Chop** — from the same menu. Detects up to 16 spectral-flux onsets,
-  then slices the selected pad at those frame positions. It drives the
+  then slices the selected pad at those frame positions and leaves Chop open. It drives the
   firmware's slice API and binding callback, which owns allocation and observer
   updates. Each boundary is read back before success. It creates no samples,
   files or other pads. Detector and validation:

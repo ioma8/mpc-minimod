@@ -1,8 +1,8 @@
 //! The Spectral Chop state machine.
 //!
-//! Chopping the selected sample is a three-phase dance with the app: switch the
-//! page to chop mode, write the boundaries through the app's own slice calls,
-//! then verify what it kept. The page is a UI object that can change under us
+//! Chopping the selected sample uses the open Chop view to select Manual mode,
+//! write boundaries through the app's slice calls, and verify what it kept.
+//! The page is a UI object that can change under us
 //! between frames, so every phase re-reads the selection and gives up if it
 //! moved.
 
@@ -69,15 +69,9 @@ pub fn step(now: i64) -> Step {
     }
 }
 
-/// Begin a run: validate the boundaries the worker detected, open Manual chop
-/// and store the machine.
+/// Validate the selection and boundaries, select Manual, and store the machine.
 #[must_use]
-pub fn begin(
-    now: i64,
-    selected: &selection::Selection,
-    detected: &[u32],
-    press_chop: Option<(&[u8; 16], usize)>,
-) -> Step {
+pub fn begin(now: i64, selected: &selection::Selection, detected: &[u32]) -> Step {
     let count = detected.len().min(MAX_SLICES);
     // One boundary is still a meaningful two-region chop; only no boundary at
     // all is an error.
@@ -91,23 +85,8 @@ pub fn begin(
         }
         positions[index] = *position;
     }
-    // SAFETY: the selection is live and came from `selection::current`.
-    let manual = unsafe { page::chop_mode(selected.screen()) };
-    // SAFETY: the same live page the selection came from.
-    let visible = unsafe { page::visible(selected.screen()) };
-    if !manual
-        && visible
-        && let Some((event, screen)) = press_chop
-        && screen == selected.screen()
-    {
-        // The event was captured on this page and the page is still visible, so
-        // its context pointer is still the one the app handed the button hook.
-        // SAFETY: as above.
-        let _ = unsafe { mpc_sample_sdk::sites::replay_button(event, crate::ui::CHOP_KEY) };
-    }
-    // SAFETY: the page is the live Sample page behind the selection.
-    if !unsafe { chop::set_manual(selected.screen()) } {
-        return Step::Failed("cannot select Manual chop");
+    if !selected.is_current() {
+        return Step::Failed("sample changed; cancelled");
     }
     // SAFETY: `MACHINE` is owned by the app's UI thread and nothing else holds
     // a borrow of it here.
@@ -122,7 +101,7 @@ pub fn begin(
                 rate: selected.rate(),
                 count: u32::try_from(count).unwrap_or(0),
                 positions,
-                phase: 1,
+                phase: 0,
                 deadline: now + MARKER_DEADLINE_MS,
             });
         });
@@ -146,9 +125,24 @@ fn advance(now: i64, running: &mut Machine) -> Step {
     {
         return Step::Failed("sample changed; cancelled");
     }
-    let kind = chop::chop_kind(running.screen);
     // SAFETY: the page is the live Sample page this chop started on.
-    if !unsafe { page::chop_mode(running.screen) } || kind != 0 {
+    if !unsafe { page::chop_mode(running.screen) } {
+        return if now >= running.deadline {
+            Step::Failed("Manual chop did not open")
+        } else {
+            Step::Continue
+        };
+    }
+    if running.phase == 0 {
+        // SAFETY: the page and selection were just revalidated.
+        if !unsafe { chop::set_manual(running.screen) } {
+            return Step::Failed("cannot select Manual chop");
+        }
+        running.phase = 1;
+        running.deadline = now + MARKER_DEADLINE_MS;
+        return Step::Continue;
+    }
+    if chop::chop_kind(running.screen) != 0 {
         return if now >= running.deadline {
             Step::Failed("Manual chop did not open")
         } else {
@@ -195,18 +189,26 @@ mod tests {
 
     #[test]
     fn an_empty_detection_is_refused() {
-        assert_eq!(begin(0, &selection(), &[], None), Step::Failed("no onsets"));
+        assert_eq!(begin(0, &selection(), &[]), Step::Failed("no onsets"));
     }
 
     #[test]
     fn a_boundary_at_or_past_the_end_is_refused() {
         assert_eq!(
-            begin(0, &selection(), &[1_000], None),
+            begin(0, &selection(), &[1_000]),
             Step::Failed("invalid onsets")
         );
         assert_eq!(
-            begin(0, &selection(), &[10, 10], None),
+            begin(0, &selection(), &[10, 10]),
             Step::Failed("invalid onsets")
+        );
+    }
+
+    #[test]
+    fn a_changed_selection_is_rejected_before_chop_changes() {
+        assert_eq!(
+            begin(0, &selection(), &[100]),
+            Step::Failed("sample changed; cancelled")
         );
     }
 }

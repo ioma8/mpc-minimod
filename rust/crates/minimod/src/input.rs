@@ -16,15 +16,19 @@ pub const LOOPER_PADS: usize = crate::backend::looper::PADS;
 /// Pads the bass preview listens to, from the synth's own table.
 pub const PREVIEW_PADS: usize = crate::backend::bass::PADS;
 
-/// The state the input hooks keep.
+/// One pad press and the input path that owns its release.
 #[derive(Clone, Copy, Debug)]
+struct HeldPad {
+    pad: i32,
+    input: usize,
+    source: i32,
+    forwarded: bool,
+}
+
+/// The state the input hooks keep.
+#[derive(Clone, Debug)]
 pub struct State {
-    /// Pad ownership: 0 released, 1 forwarded to the app, 2 consumed by a modal.
-    pub held_on: [u8; PADS],
-    /// The input each held pad came from.
-    pub held_input: [usize; PADS],
-    /// The source each held pad came from.
-    pub held_src: [i32; PADS],
+    held: Vec<HeldPad>,
     /// The pad pressed last.
     pub last_pad: i32,
     /// The encoder's surface, as the button handler recorded it.
@@ -36,9 +40,7 @@ impl State {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            held_on: [0; PADS],
-            held_input: [0; PADS],
-            held_src: [0; PADS],
+            held: Vec::new(),
             last_pad: -1,
             data_target: 0,
         }
@@ -82,23 +84,33 @@ fn route_pad(state: &mut State, event: PadEvent, context: Context) -> PadFlow {
         || (context.menu_open != 0
             && context.bass_edit != 0
             && usize::try_from(event.pad).is_ok_and(|pad| pad < PREVIEW_PADS));
-    if let Some(index) = pad_index(event.pad) {
+    if pad_index(event.pad).is_some() {
         match event.action {
             PadAction::Press => {
-                state.held_on[index] = if modal { 2 } else { 1 };
+                if state.held.try_reserve(1).is_err() {
+                    return PadFlow::Consume;
+                }
+                state.held.push(HeldPad {
+                    pad: event.pad,
+                    input: event.input,
+                    source: event.source,
+                    forwarded: !modal,
+                });
                 if !modal {
-                    state.held_input[index] = event.input;
-                    state.held_src[index] = event.source;
                     state.last_pad = event.pad;
                 }
             }
             PadAction::Release => {
-                let owner = core::mem::take(&mut state.held_on[index]);
-                if owner == 1 {
-                    return PadFlow::Forward;
-                }
-                if owner == 2 {
-                    return PadFlow::Consume;
+                if let Some(index) = state.held.iter().position(|held| {
+                    held.pad == event.pad
+                        && held.input == event.input
+                        && held.source == event.source
+                }) {
+                    return if state.held.remove(index).forwarded {
+                        PadFlow::Forward
+                    } else {
+                        PadFlow::Consume
+                    };
                 }
             }
         }
@@ -222,28 +234,24 @@ fn bass_pad_event(event: SurfaceEvent) -> bool {
 
 /// Release every pad the app may think is held, through the app's own path.
 pub fn release_held() {
-    // Take the releases out under the borrow, then call the app with no borrow
-    // held: the note path may re-enter the mod, and a second borrow of the input
-    // state would alias.
-    let mut releases = [None; PADS];
-    // SAFETY: the input state is owned by the app's UI thread.
-    unsafe {
-        STATE.with_mut(|state| {
-            for (pad, release) in releases.iter_mut().enumerate() {
-                if core::mem::take(&mut state.held_on[pad]) == 1 {
-                    *release = Some((state.held_input[pad], state.held_src[pad]));
-                }
-            }
-        });
-    }
-    for (pad, release) in releases.into_iter().enumerate() {
-        let Some((input, source)) = release else {
-            continue;
+    loop {
+        // Remove one release before calling the app, so re-entry cannot alias
+        // the state; modal-owned presses remain tracked until their release.
+        // SAFETY: the input state is owned by the app's UI thread.
+        let held = unsafe {
+            STATE.with_mut(|state| {
+                state
+                    .held
+                    .iter()
+                    .position(|held| held.forwarded)
+                    .map(|index| state.held.remove(index))
+            })
         };
+        let Some(held) = held else { break };
         // SAFETY: the input object and source were captured from the app's own
         // note event for this held pad; this is the matching release.
         unsafe {
-            mpc_sample_sdk::sites::send_note_off(input, source, i32::try_from(pad).unwrap_or(0));
+            mpc_sample_sdk::sites::send_note_off(held.input, held.source, held.pad);
         }
     }
 }
@@ -288,7 +296,99 @@ mod tests {
     fn a_fresh_state_remembers_nothing() {
         let state = State::new();
         assert_eq!(state.last_pad, -1);
-        assert!(state.held_on.iter().all(|&held| held == 0));
+        assert!(state.held.is_empty());
         assert_eq!(crate::menu::MENU_ROWS, 8);
+    }
+
+    #[test]
+    fn overlapping_sources_keep_each_press_owner_across_a_modal() {
+        let mut state = State::new();
+        let mut context = Context {
+            looper_open: 0,
+            spectral_active: 0,
+            menu_open: 0,
+            bass_edit: 0,
+            busy: 0,
+            shift: 0,
+            erase: 0,
+        };
+        let mut event = PadEvent {
+            action: PadAction::Press,
+            input: 1,
+            source: 1,
+            pad: 0,
+            properties: 0,
+            velocity: 1.0,
+        };
+        assert_eq!(route_pad(&mut state, event, context), PadFlow::Forward);
+        context.looper_open = 1;
+        event.source = 2;
+        assert_eq!(route_pad(&mut state, event, context), PadFlow::Consume);
+        event.action = PadAction::Release;
+        event.source = 1;
+        assert_eq!(route_pad(&mut state, event, context), PadFlow::Forward);
+        context.looper_open = 0;
+        event.source = 2;
+        assert_eq!(route_pad(&mut state, event, context), PadFlow::Consume);
+        assert!(state.held.is_empty());
+    }
+
+    #[test]
+    fn repeated_presses_from_one_source_keep_fifo_ownership() {
+        let mut state = State::new();
+        let mut context = Context {
+            looper_open: 0,
+            spectral_active: 0,
+            menu_open: 0,
+            bass_edit: 0,
+            busy: 0,
+            shift: 0,
+            erase: 0,
+        };
+        let mut event = PadEvent {
+            action: PadAction::Press,
+            input: 1,
+            source: 1,
+            pad: 0,
+            properties: 0,
+            velocity: 1.0,
+        };
+        assert_eq!(route_pad(&mut state, event, context), PadFlow::Forward);
+        context.looper_open = 1;
+        assert_eq!(route_pad(&mut state, event, context), PadFlow::Consume);
+        event.action = PadAction::Release;
+        assert_eq!(route_pad(&mut state, event, context), PadFlow::Forward);
+        context.looper_open = 0;
+        assert_eq!(route_pad(&mut state, event, context), PadFlow::Consume);
+    }
+
+    #[test]
+    fn a_modal_press_released_first_does_not_steal_an_earlier_press() {
+        let mut state = State::new();
+        let mut context = Context {
+            looper_open: 0,
+            spectral_active: 0,
+            menu_open: 0,
+            bass_edit: 0,
+            busy: 0,
+            shift: 0,
+            erase: 0,
+        };
+        let mut event = PadEvent {
+            action: PadAction::Press,
+            input: 1,
+            source: 1,
+            pad: 0,
+            properties: 0,
+            velocity: 1.0,
+        };
+        assert_eq!(route_pad(&mut state, event, context), PadFlow::Forward);
+        context.looper_open = 1;
+        event.source = 2;
+        assert_eq!(route_pad(&mut state, event, context), PadFlow::Consume);
+        event.action = PadAction::Release;
+        assert_eq!(route_pad(&mut state, event, context), PadFlow::Consume);
+        event.source = 1;
+        assert_eq!(route_pad(&mut state, event, context), PadFlow::Forward);
     }
 }

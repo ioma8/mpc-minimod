@@ -37,13 +37,8 @@ pub struct State {
     pub octave: i32,
     /// The synth preview shift, in eight-semitone steps.
     pub synth_octave: i32,
-    /// The last button event, replayed to put the chop mode back.
+    /// The current button event, passed to menu actions.
     pub event: [u8; 16],
-    /// The screen `event` was captured on; a replay on another page would
-    /// dereference an app object that is no longer the one in the event.
-    pub event_screen: usize,
-    /// Whether `event` holds a real press.
-    pub event_valid: i32,
 }
 
 impl State {
@@ -60,8 +55,6 @@ impl State {
             octave: 0,
             synth_octave: 0,
             event: [0; 16],
-            event_screen: 0,
-            event_valid: 0,
         }
     }
 }
@@ -106,8 +99,6 @@ pub struct Hooks {
     pub busy_state: Option<fn() -> bool>,
     /// Whether a spectral chop is running.
     pub spectral_state: Option<fn() -> bool>,
-    /// Put the chop mode back.
-    pub restore_chop: Option<fn(&State)>,
     /// Redraw the menu.
     pub repaint: Option<fn()>,
     /// Release every pad the app may think is held.
@@ -147,7 +138,9 @@ pub fn press(state: &mut State, event: &ButtonEvent, hooks: Hooks) -> Flow {
         },
         page_visible,
         trim_screen: trim_screen(),
-        chop_mode: page_visible && code == buttons::KEY_B3 && screen_chop_mode(),
+        chop_mode: page_visible
+            && matches!(code, buttons::KEY_B3 | buttons::KEY_LEVELS)
+            && screen_chop_mode(),
     };
     let action = buttons::dispatch(context);
     if context.screens.looper {
@@ -179,8 +172,7 @@ pub fn press(state: &mut State, event: &ButtonEvent, hooks: Hooks) -> Flow {
         }
         return Flow::Consume;
     }
-    // Remember the event: the chop mode is put back by replaying it, and the
-    // encoder's surface is reachable through the context it points at.
+    // Menu actions may need the current button event.
     remember(state, event.bytes);
     apply(
         state,
@@ -227,9 +219,6 @@ fn apply(state: &mut State, event: &Event) {
             if !pressed {
                 state.trim_step = 0;
                 state.b3_down = 0;
-                if let Some(restore) = hooks.restore_chop {
-                    restore(state);
-                }
             }
             if let Some(text) = hooks.filter_text {
                 text();
@@ -261,6 +250,11 @@ fn apply(state: &mut State, event: &Event) {
             }
         }
         Action::ResetPitch => {
+            if code == KEY_PLUS {
+                state.plus_held = i32::from(pressed);
+            } else {
+                state.minus_held = i32::from(pressed);
+            }
             state.octave = 0;
             show_toast("Pitch reset");
         }
@@ -280,6 +274,11 @@ fn apply(state: &mut State, event: &Event) {
             }
         }
         Action::ResetSynthPitch => {
+            if code == KEY_PLUS {
+                state.plus_held = i32::from(pressed);
+            } else {
+                state.minus_held = i32::from(pressed);
+            }
             state.synth_octave = 0;
             crate::backend::bass::preview_set_transpose(0);
             show_toast("Pitch reset");
@@ -320,11 +319,9 @@ fn menu(action: Action, event: &[u8; 16], hooks: Hooks) {
     }
 }
 
-/// Store the event and derive what the encoder hook needs from it.
+/// Store the current button event for menu actions.
 fn remember(state: &mut State, bytes: [u8; 16]) {
     state.event = bytes;
-    state.event_screen = paint::screen();
-    state.event_valid = 1;
 }
 
 /// The 16 Levels octave shift.
@@ -371,44 +368,41 @@ pub fn with_state_mut<R>(f: impl FnOnce(&mut State) -> R) -> R {
     unsafe { STATE.with_mut(f) }
 }
 
-/// The chop mode the page was in before the mod armed an extraction.
-static CHOP_BEFORE: Global<i32> = Global::new(0);
+/// A changed chop view may only be restored with a fresh, unshifted button event.
+static CHOP_RESTORE: Global<Option<(usize, bool)>> = Global::new(None);
 
-/// Record the page's chop mode before a job changes it.
-pub fn set_chop_before(mode: i32) {
-    // SAFETY: `CHOP_BEFORE` is owned by the app's UI thread.
-    unsafe { CHOP_BEFORE.with_mut(|before| *before = mode) };
+/// Remember a chop view changed by an extraction until the next user input.
+pub fn queue_chop_restore(screen: usize, before: bool, after: bool) {
+    // SAFETY: the pending restoration belongs to the UI thread.
+    unsafe {
+        CHOP_RESTORE.with_mut(|pending| *pending = (before != after).then_some((screen, before)));
+    };
 }
 
-/// The chop mode before the last extraction.
-#[must_use]
-pub fn chop_before() -> i32 {
-    // SAFETY: `CHOP_BEFORE` is owned by the app's UI thread.
-    unsafe { CHOP_BEFORE.with(|before| *before) }
+/// Discard a pending restoration when the user takes control of the page.
+pub fn cancel_chop_restore() {
+    // SAFETY: input callbacks and the restoration run on the UI thread.
+    unsafe { CHOP_RESTORE.with_mut(|pending| *pending = None) };
 }
 
-/// Put the chop mode back by replaying a CHOP press, when that is safe.
-///
-/// The replay uses the first bytes of a captured button event, which the app
-/// dispatcher treats as a context pointer, so it is only done when the same page
-/// is still visible and the event was captured on it.  If the page is gone there
-/// is nothing to restore and the stale event is dropped.
-pub fn minimod_restore_chop(state: &State) {
-    let screen = paint::screen();
-    // SAFETY: `screen` is the live component recorded by the paint hook on this
-    // UI thread.
-    let visible = unsafe { page::visible(screen) };
-    if !visible || state.event_screen != screen || state.event_valid == 0 || state.shift != 0 {
+fn restore_pending_chop(event: &ButtonEvent) {
+    // SAFETY: the pending restoration belongs to the UI thread.
+    let pending = unsafe { CHOP_RESTORE.with_mut(Option::take) };
+    let Some((screen, before)) = pending else {
+        return;
+    };
+    if !may_restore_chop(event.shift, event.code, screen, paint::screen()) {
         return;
     }
-    // SAFETY: the same live page as above.
-    let mode = unsafe { page::chop_mode(screen) };
-    if i32::from(mode) == chop_before() {
-        return;
+    // SAFETY: the current callback and page supply live native objects.
+    if unsafe { page::visible(screen) && page::chop_mode(screen) != before } {
+        // SAFETY: these bytes belong to the current button callback.
+        let _ = unsafe { mpc_sample_sdk::sites::replay_button(&event.bytes, CHOP_KEY) };
     }
-    // SAFETY: `state.event` was captured on this page and the page is still
-    // visible on its owning UI thread; the event is at most one UI callback old.
-    let _ = unsafe { mpc_sample_sdk::sites::replay_button(&state.event, CHOP_KEY) };
+}
+
+fn may_restore_chop(shift: bool, code: u32, original_screen: usize, screen: usize) -> bool {
+    !shift && code != buttons::KEY_SHIFT && code != u32::from(CHOP_KEY) && screen == original_screen
 }
 
 /// Repaint the component the page last painted.
@@ -486,7 +480,6 @@ pub fn hooks() -> Hooks {
         menu_open_state: Some(crate::menu::is_open),
         busy_state: Some(crate::menu::is_busy),
         spectral_state: Some(spectral_state),
-        restore_chop: Some(minimod_restore_chop),
         repaint: Some(minimod_repaint_screen),
         release_held: Some(crate::input::release_held),
     }
@@ -495,6 +488,7 @@ pub fn hooks() -> Hooks {
 /// The button entry: run the ladder and tell the SDK whether to forward.
 #[must_use]
 pub fn button(event: ButtonEvent) -> ButtonFlow {
+    restore_pending_chop(&event);
     // The first soft key enters the trim screen; SAMPLE and the other screen
     // soft keys leave it. The label `Filter` can also arm the flag.
     if event.value == buttons::PRESSED {
@@ -531,7 +525,9 @@ pub fn label(label: &core::ffi::CStr) -> Option<&'static core::ffi::CStr> {
 
 #[cfg(test)]
 mod tests {
-    use super::State;
+    use super::{
+        CHOP_KEY, CHOP_RESTORE, State, cancel_chop_restore, may_restore_chop, queue_chop_restore,
+    };
 
     #[test]
     fn a_fresh_state_holds_nothing() {
@@ -540,7 +536,30 @@ mod tests {
         assert_eq!(state.erase, 0);
         assert_eq!(state.trim_step, 0);
         assert_eq!(state.event.len(), 16);
-        assert_eq!(state.event_screen, 0);
+    }
+
+    #[test]
+    fn chop_restore_is_scoped_to_a_changed_extraction_and_safe_input() {
+        queue_chop_restore(123, false, false);
+        // SAFETY: this test is the only test accessing the pending restoration.
+        assert_eq!(unsafe { CHOP_RESTORE.with(|pending| *pending) }, None);
+        queue_chop_restore(123, false, true);
+        // SAFETY: this test exclusively accesses the pending restoration.
+        let pending = unsafe { CHOP_RESTORE.with(|pending| *pending) };
+        assert_eq!(pending, Some((123, false)));
+        assert!(!may_restore_chop(true, 42, 123, 123));
+        assert!(!may_restore_chop(
+            false,
+            super::buttons::KEY_SHIFT,
+            123,
+            123
+        ));
+        assert!(!may_restore_chop(false, u32::from(CHOP_KEY), 123, 123));
+        assert!(!may_restore_chop(false, 42, 123, 456));
+        assert!(may_restore_chop(false, 42, 123, 123));
+        cancel_chop_restore();
+        // SAFETY: this test exclusively accesses the pending restoration.
+        assert_eq!(unsafe { CHOP_RESTORE.with(|pending| *pending) }, None);
     }
 }
 

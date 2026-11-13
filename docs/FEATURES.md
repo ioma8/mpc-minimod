@@ -209,6 +209,8 @@ while the worker runs; the stock writer emits float32.
 chord, a new phrase, a different drum — and rewrites that pad's chop in place at
 up to 16 detected frames. It creates no samples, uses no free pads, writes no
 file, and kills the previous chop (stock slice edits are not undoable either).
+The action opens Chop automatically if needed and leaves it open after the
+slices have been written.
 The menu reports `Spectral: n slices on this pad`, or the reason it refused
 (`no sample on this pad`, `cannot read sample audio`, `no onsets`, `cannot
 select Manual chop`, `native marker write failed`). Input is the sample's
@@ -226,9 +228,9 @@ the fallback for streamed samples.
 | position | steepest 1 ms step within ±15 ms, backed off to 15 % of the transient peak |
 | limits | no cut in the last 120 ms; 16 slices; time order; trailing zero-padded frames ignored |
 
-**Write recipe.** All model work happens on the UI thread, one phase per paint
-pass; the input hook only publishes a request. Enter the stock Chop view if
-needed; select **Manual** through the chop binding's own model callback
+**Write recipe.** Analysis runs on a worker; model work happens on the UI thread.
+Use the initiating button event to open Chop if necessary, then revalidate the
+selection; select **Manual** through the chop binding's callback
 (`screen+0x168`, `+0x9c == 0`); then `reset` → one `insert-at-frame` per detected
 frame → `reconcile` ends and tail → select slice 0; read every boundary back and
 only then report success. Because the native API allocates, links listeners and

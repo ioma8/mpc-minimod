@@ -387,12 +387,16 @@ fn finalize(job: &RenderJob, screen: usize) -> Report {
             room_for_pads(job, effect)
         };
         room.and_then(|()| {
+            // SAFETY: the source page was validated above and is on the UI thread.
+            let chop_before = unsafe { crate::page::chop_mode(screen) };
             let wrote = if action == Action::Split {
                 extract_split(job)
             } else {
                 extract_take(job)
             };
-            crate::ui::minimod_restore_chop(&crate::ui::state());
+            // SAFETY: extraction has returned and the validated page is still live.
+            let chop_after = unsafe { crate::page::chop_mode(screen) };
+            crate::ui::queue_chop_restore(screen, chop_before, chop_after);
             wrote
         })
         .map(|()| success(job))
@@ -571,9 +575,6 @@ pub fn start(action: Action, screen: usize, menu: &mut crate::menu::State) -> bo
         outcome
     });
     *task_slot() = Some(task);
-    // Record the mode before the job arms chop mode, so the restore puts back
-    // what the user had instead of always turning chop mode off.
-    crate::ui::set_chop_before(i32::from(crate::ui::screen_chop_mode()));
     crate::ui::minimod_repaint_screen();
     status::set_status(&format!("Processing {}...", action_name(action)));
     true

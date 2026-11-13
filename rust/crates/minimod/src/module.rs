@@ -27,6 +27,7 @@ impl Mod for Minimod {
     fn on_pad(&mut self, event: PadEvent) -> PadFlow {
         // Finish a job or a chop that no paint will reach.
         crate::overlay::poll_offpage();
+        crate::ui::cancel_chop_restore();
         crate::input::pad(event)
     }
 
@@ -35,15 +36,18 @@ impl Mod for Minimod {
     }
 
     fn on_encoder(&mut self, event: EncoderEvent) -> EncoderFlow {
+        crate::ui::cancel_chop_restore();
         crate::input::encoder(event)
     }
 
     fn on_button(&mut self, event: ButtonEvent) -> ButtonFlow {
         crate::overlay::poll_offpage();
+        crate::spectral::on_button(&event);
         crate::ui::button(event)
     }
 
     fn on_cc(&mut self, event: CcEvent) -> CcFlow {
+        crate::ui::cancel_chop_restore();
         crate::cc::control(event)
     }
 

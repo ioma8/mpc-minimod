@@ -30,9 +30,9 @@ def main():
     symbols = {}
     for line in args.mapfile.read_text().splitlines():
         fields = line.split()
-        if fields and fields[-1] == 'g_screen':
-            symbols['g_screen'] = int(fields[0], 16)
-    assert 'g_screen' in symbols, 'Missing g_screen in linker map'
+        if fields and fields[-1] in ('g_screen', 'g_hpss_status', 'g_menu', 'g_midi'):
+            symbols[fields[-1]] = int(fields[0], 16)
+    assert {'g_screen', 'g_hpss_status', 'g_menu', 'g_midi'} <= symbols.keys(), 'Missing symbols in linker map'
     spec = importlib.util.spec_from_file_location('lab', args.lab / 'lab.py')
     lab = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(lab)
@@ -59,7 +59,15 @@ def main():
         control('SHIFT', 'release')
         control('DATA', 'turn', 1)
         tap('DATA')
-        time.sleep(.8)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            status = memory(base + symbols['g_hpss_status'], 96).split(b'\0', 1)[0]
+            busy = struct.unpack('<i', memory(base + symbols['g_menu'] + 4, 4))[0]
+            if status.startswith(b'Spectral: ') and not busy:
+                assert b' on this pad' in status, status
+                return
+            time.sleep(.1)
+        raise AssertionError(f'Spectral Chop did not finish: {status!r}, busy={busy}')
     expected = [264, 14187, 30059, 45419, 54635]
     expected_pairs = list(zip(expected, expected[1:] + [62259]))
     for boot in range(args.boots):
@@ -121,17 +129,27 @@ def main():
         tap('PAD 13')
         time.sleep(.3)
         source = model()[0]
-        for case in ['first from Trim', 'repeat', 'repeat again', 'regions', 'threshold', 'after pad playback']:
-            if case in ('regions', 'threshold'):
-                control('K3', 'set', 64 if case == 'regions' else 0)
+        for case in ['first from Trim', 'repeat', 'repeat again', 'K3 middle', 'K3 low', 'after pad playback', 'from 16 Levels']:
+            if case in ('K3 middle', 'K3 low'):
+                control('K3', 'set', 64 if case == 'K3 middle' else 0)
                 time.sleep(.9)
                 print(f'boot {boot + 1}: {case} initial type={model()[1]}', flush=True)
             if case == 'after pad playback':
                 for pad in (1, 5, 10, 16):
                     tap('PAD ' + str(pad))
+            if case == 'from 16 Levels':
+                tap('CHOP')
+                tap('PAD 13')
+                tap('16 LEVELS')
+                levels = struct.unpack('<i', memory(base + symbols['g_midi'] + 4, 4))[0]
+                assert levels == 1, '16 Levels did not activate'
             run_chop()
             actual = model()
             assert actual == (source, 0, expected_pairs), (case, actual)
+            assert chop_mode(), f'{case}: Chop did not stay open'
+            if case == 'from 16 Levels':
+                levels = struct.unpack('<i', memory(base + symbols['g_midi'] + 4, 4))[0]
+                assert levels == 0, '16 Levels did not exit before Chop'
             assert int(ssh('pidof "MPC Sample"')) == pid, 'Firmware restarted'
             assert ssh('systemctl show ac50 -p NRestarts') == baseline_restarts
             print(f'PASS boot {boot + 1}: {case}; exact 5 boundaries, Manual, pid={pid}', flush=True)

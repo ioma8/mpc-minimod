@@ -33,12 +33,11 @@ struct Cell {
 /// One pad's colours and label.
 fn palette(state: State) -> (u32, &'static str) {
     match state {
-        State::Rec => (METER_HOT, "REC"),
-        State::Drain => (METER_HOT, "REC"),
+        State::Rec | State::Drain => (METER_HOT, "REC"),
         State::Play => (METER_OK, "PLAY"),
         State::Dub => (ACCENT, "DUB"),
         State::Stop => (MUTED, "STOP"),
-        _ => (MUTED, "--"),
+        State::Idle => (MUTED, "--"),
     }
 }
 
