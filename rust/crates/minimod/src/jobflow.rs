@@ -156,6 +156,8 @@ const SYNTH_LABELS: [&str; 8] = [
 
 /// The sample name for a character and semitone offset.
 fn synth_name(kind: Kind, note: i32) -> &'static core::ffi::CStr {
+    // The SDK retains names for the life of the process; reuse each name.
+    static NAMES: Mutex<Vec<&'static core::ffi::CStr>> = Mutex::new(Vec::new());
     if note == 0 {
         return synth_names()[kind.index()];
     }
@@ -164,7 +166,13 @@ fn synth_name(kind: Kind, note: i32) -> &'static core::ffi::CStr {
         SYNTH_LABELS[kind.index()],
         crate::backend::bass::note_name(note)
     );
-    Box::leak(CString::new(text).unwrap_or_default().into_boxed_c_str())
+    let mut names = NAMES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(name) = names.iter().find(|name| name.to_bytes() == text.as_bytes()) {
+        return name;
+    }
+    let name = Box::leak(CString::new(text).unwrap_or_default().into_boxed_c_str());
+    names.push(name);
+    name
 }
 
 /// Write one rendered buffer through the app's Extract command.
@@ -596,6 +604,7 @@ pub fn finish(screen: usize) -> bool {
     match task.take() {
         Err(TaskError::Running) => {
             *task_slot() = Some(task);
+            crate::ui::request_repaint();
             false
         }
         Err(TaskError::AlreadyTaken) => {

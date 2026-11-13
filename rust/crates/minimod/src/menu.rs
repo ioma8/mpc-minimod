@@ -149,7 +149,7 @@ const WHITE: u32 = 0xffff_ffff;
 const MUTED: u32 = 0xffb8_b8be;
 const DIM: u32 = 0xff48_484f;
 const SLOT: u32 = 0xff36_363d;
-const ROW: u32 = 0xff3a_2a10;
+const ROW: u32 = 0xff55_3a16;
 
 /// The rows, in the order the encoder walks them.
 const TITLES: [&str; MENU_ROWS] = [
@@ -161,6 +161,17 @@ const TITLES: [&str; MENU_ROWS] = [
     "Synth",
     "Live Looper",
     "Close",
+];
+
+const DESCRIPTIONS: [&str; MENU_ROWS] = [
+    "Harmonic + percussion: 2 free pads",
+    "Replaces existing chop on this pad",
+    "Reverb copy on an empty pad",
+    "Vinyl effect copy on an empty pad",
+    "Lo-fi copy on an empty pad",
+    "Play and save a synth sound",
+    "Open the live looper",
+    "Return to the sample screen",
 ];
 
 /// Draw the menu.
@@ -179,7 +190,8 @@ pub fn draw(graphics: usize, state: &State, busy: bool, status: &str, knobs: [f3
         paint::text(graphics, "SAMPLE OPTIONS", x + 10, y + 6, w - 20, 22, 18.0);
     }
     if busy {
-        paint::text(graphics, "Processing...", x + 10, y + 70, w - 20, 24, 16.0);
+        paint::colour(graphics, WHITE);
+        paint::text(graphics, "PLEASE WAIT", x + 10, y + 70, w - 20, 24, 16.0);
         if !status.is_empty() {
             paint::text(graphics, status, x + 10, y + 98, w - 20, 20, 12.0);
         }
@@ -189,27 +201,41 @@ pub fn draw(graphics: usize, state: &State, busy: bool, status: &str, knobs: [f3
         draw_knobs(graphics, (x, y, w), status, knobs);
         return;
     }
+    let selected = usize::try_from(state.selection)
+        .unwrap_or(0)
+        .min(MENU_ROWS - 1);
     for (index, title) in TITLES.iter().enumerate() {
-        let row = y + 26 + i32::try_from(index).unwrap_or(0) * 20;
-        if state.selection == i32::try_from(index).unwrap_or(-1) {
+        let row = y + 30 + i32::try_from(index).unwrap_or(0) * 19;
+        if selected == index {
             paint::colour(graphics, ROW);
-            paint::rect(graphics, x + 6, row, w - 12, 19);
-            paint::colour(graphics, WHITE);
+            paint::rect(graphics, x + 6, row, w - 12, 18);
         }
-        paint::text(graphics, title, x + 12, row + 1, w - 24, 17, 12.0);
+        paint::colour(graphics, WHITE);
+        paint::text(graphics, title, x + 12, row, w - 24, 18, 14.0);
     }
-    if !status.is_empty() {
-        paint::text(graphics, status, x + 10, y + 200, w - 20, 14, 10.0);
-    }
+    paint::colour(graphics, if status.is_empty() { MUTED } else { ACCENT });
+    paint::text(
+        graphics,
+        if status.is_empty() {
+            DESCRIPTIONS[selected]
+        } else {
+            status
+        },
+        x + 10,
+        y + 184,
+        w - 20,
+        17,
+        12.0,
+    );
     paint::colour(graphics, 0xffb0_b0b0);
     paint::text(
         graphics,
         "TURN: select    DATA: confirm",
         x + 10,
-        y + h - 17,
+        y + h - 20,
         w - 20,
-        14,
-        10.0,
+        17,
+        12.0,
     );
 }
 

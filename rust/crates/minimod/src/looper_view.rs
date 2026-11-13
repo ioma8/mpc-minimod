@@ -253,7 +253,7 @@ fn footer(graphics: usize, view: &View) {
     paint::colour(graphics, 0xffb8_b8be);
     paint::text(
         graphics,
-        "PAD REC/PLAY/STOP  SHIFT OVERDUB  ERASE CLEAR",
+        "PAD REC/PLAY/STOP    STOP ALL    ERASE CLEAR",
         8,
         214,
         304,
@@ -262,7 +262,7 @@ fn footer(graphics: usize, view: &View) {
     );
     paint::text(
         graphics,
-        "STOP ALL  LOOP SYNC  SHIFT+LOOP CLICK  SHIFT+DATA EXIT",
+        "SHIFT OVERDUB  LOOP SYNC  SHIFT+LOOP CLICK  SHIFT+DATA EXIT",
         8,
         224,
         304,

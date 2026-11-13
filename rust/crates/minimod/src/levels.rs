@@ -34,10 +34,22 @@ pub fn bump(current: i32, steps: i32) -> Option<(i32, String)> {
     Some((next, text))
 }
 
+/// Number of times the firmware pitch hook has run (device test probe).
+#[unsafe(no_mangle)]
+pub static g_levels_pitch_calls: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+/// Most recent value the firmware pitch hook returned (device test probe).
+#[unsafe(no_mangle)]
+pub static g_levels_pitch_result: core::sync::atomic::AtomicI32 =
+    core::sync::atomic::AtomicI32::new(0);
+
 /// Apply the 16 Levels octave shift to an offset the app computed.
 #[must_use]
 pub fn apply(applied: i32) -> i32 {
-    pitch_offset(applied, crate::ui::octave())
+    let result = pitch_offset(applied, crate::ui::octave());
+    g_levels_pitch_calls.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    g_levels_pitch_result.store(result, core::sync::atomic::Ordering::Relaxed);
+    result
 }
 
 #[cfg(test)]

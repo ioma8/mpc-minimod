@@ -7,13 +7,8 @@
 
 use crate::backend::bass::preview_set_params;
 use crate::backend::looper;
-use crate::clock;
 use crate::routing;
-use mpc_sample_sdk::state::Global;
 use mpc_sample_sdk::{CcEvent, CcFlow};
-
-/// How often the settings file may be written, in milliseconds.
-const SAVE_EVERY_MS: i64 = 5_000;
 
 /// The feature callbacks the routing uses.
 #[derive(Clone, Copy)]
@@ -56,8 +51,6 @@ pub struct Outcome {
     pub knobs_changed: i32,
 }
 
-/// When the settings were last written.
-static SAVED_AT: Global<i64> = Global::new(0);
 /// Handle one control-change event.
 #[must_use]
 pub fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
@@ -84,7 +77,9 @@ pub fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
         // The master volume drives the loops, then the app's own mix.
         routing::Route::Master => {
             looper::looper_set_master(context.value);
-            save_throttled(hooks);
+            if let Some(save) = hooks.save {
+                save();
+            }
             // A modal screen still swallows the event after the master update;
             // the old fallback did this for every non-DATA control.
             if context.menu_open != 0 || context.spectral_active != 0 {
@@ -114,21 +109,6 @@ pub fn handle(context: Context, control: u32, hooks: Hooks) -> Outcome {
         routing::Route::Pass => {}
     }
     outcome
-}
-
-/// Write the settings, at most once every few seconds.
-fn save_throttled(hooks: Hooks) {
-    let now = clock::now_ms();
-    // SAFETY: `SAVED_AT` is owned by the app's UI thread.
-    let saved = unsafe { SAVED_AT.with(|saved| *saved) };
-    if now <= saved + SAVE_EVERY_MS {
-        return;
-    }
-    // SAFETY: `SAVED_AT` is owned by the app's UI thread.
-    unsafe { SAVED_AT.with_mut(|saved| *saved = now) };
-    if let Some(save) = hooks.save {
-        save();
-    }
 }
 
 // The feature owns the screens and the key flags; it builds the context and

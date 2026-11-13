@@ -55,13 +55,27 @@ g_midi: mpc_sample_sdk::state::Global<MidiState> = mpc_sample_sdk::state::Global
     chromatic_delta: 0,
 }));
 
+/// Replay target captured when each external note starts.
+#[derive(Clone, Copy)]
+struct Target {
+    pad: u8,
+    row: i32,
+    context: usize,
+}
+
+// Owned by the same input thread as g_midi.
+static TARGETS: mpc_sample_sdk::state::Global<[Option<Target>; 128]> =
+    mpc_sample_sdk::state::Global::new([None; 128]);
+
 /// Handle one note event; the SDK forwards whatever this returns.
 pub fn note(event: &mut NoteEvent) -> NoteFlow {
     // SAFETY: the MIDI record is owned by the app's input thread; the closure
     // does not take another borrow of it.
     unsafe {
         g_midi.with_mut(|state| {
-            if state.on == 0 {
+            let index = usize::from(event.note);
+            let held = state.replayed.get(index).copied().unwrap_or(0) != 0;
+            if state.on == 0 && !(event.external && event.note_off && held) {
                 return NoteFlow::Forward;
             }
             if !event.external {
@@ -75,27 +89,38 @@ pub fn note(event: &mut NoteEvent) -> NoteFlow {
                     }
                 }
             }
-            let index = usize::from(event.note);
-            let held = state.replayed.get(index).copied().unwrap_or(0) != 0;
-            if state.levels != 0
+            if (state.levels != 0 || (event.note_off && held))
                 && event.external
                 && event.note <= 127
                 && (event.kind == PAD_EVENT || event.note_off)
                 && (event.note_on || held)
             {
-                // A chromatic note is measured from the sample's own root note.
-                let row =
-                    i32::from(event.note) - crate::autotrim::pad_root(crate::input::last_pad());
-                let pad = u8::try_from(state.pad_level_byte).unwrap_or(0);
-                let context = state.pad_ctx;
-                if event.replay_as_pad(pad, row, context) {
+                // SAFETY: TARGETS has the same input-thread owner as g_midi.
+                let target = TARGETS.with(|targets| {
+                    if event.note_off && held {
+                        targets[index]
+                    } else {
+                        Some(Target {
+                            pad: u8::try_from(state.pad_level_byte).unwrap_or(0),
+                            row: i32::from(event.note)
+                                - crate::autotrim::pad_root(crate::input::last_pad()),
+                            context: state.pad_ctx,
+                        })
+                    }
+                });
+                let Some(target) = target else {
+                    return NoteFlow::Forward;
+                };
+                if event.replay_as_pad(target.pad, target.row, target.context) {
+                    // SAFETY: TARGETS is owned by the input thread.
+                    TARGETS.with_mut(|targets| targets[index] = event.note_on.then_some(target));
                     if let Some(slot) = state.replayed.get_mut(index) {
                         *slot = u8::from(event.note_on);
                     }
                     if event.note_on {
                         state.chromatic_count = state.chromatic_count.wrapping_add(1);
                         state.chromatic_note = i32::from(event.note);
-                        state.chromatic_delta = row;
+                        state.chromatic_delta = target.row;
                     }
                     return NoteFlow::Replayed;
                 }

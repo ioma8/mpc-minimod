@@ -25,7 +25,12 @@ fn writer() -> Option<&'static Sender<Request>> {
             std::thread::Builder::new()
                 .name("minimod-settings".to_string())
                 .spawn(move || {
-                    while let Ok(request) = receiver.recv() {
+                    while let Ok(mut request) = receiver.recv() {
+                        while let Ok(next) =
+                            receiver.recv_timeout(std::time::Duration::from_secs(5))
+                        {
+                            request = next;
+                        }
                         let _ = cfg::save(
                             std::path::Path::new(cfg::PATH),
                             cfg::Settings {

@@ -244,6 +244,7 @@ fn poll_detection(state: &mut State, menu_state: &mut menu::State, hooks: Hooks)
     match task.take() {
         Err(TaskError::Running) => {
             *detection_slot() = Some(task);
+            crate::ui::request_repaint();
         }
         Err(TaskError::AlreadyTaken | TaskError::Panicked | TaskError::Render(_)) => {
             finish(state, menu_state, hooks, Some("processing failed"));
