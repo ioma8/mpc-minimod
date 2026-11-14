@@ -177,8 +177,14 @@ loop.
 The output frames are the clock. Recording consumes input frames from a
 lock-free SPSC ring (0.74 s) at the rate the output block advances, so a loop is
 always an exact count of played frames even though input and output are separate
-audio streams. If the input runs ahead the oldest frames are dropped; if it runs
-short the missing frames are recorded as silence.
+audio streams. If the input runs ahead the oldest frames are dropped.
+
+A closing take keeps draining until its latency tail has been captured. If the
+capture callback is scheduled after the output callback, the block that belongs
+to the take has not arrived yet; the drain then waits for it instead of padding
+the gap with silence, and places an overdub tail on the transport position it
+was actually played at. The wait is bounded at one second of output frames, so a
+disconnected input cannot leave a take stuck in `DRAIN`.
 
 | thread | what it does |
 |---|---|
@@ -187,9 +193,9 @@ short the missing frames are recorded as silence.
 | control surface (`buttons`, `note_on`) | pad state changes only, no model access |
 | UI (paint hook) | reads an atomic snapshot and draws; never blocks the audio threads |
 
-Nothing allocates or locks on an audio thread: the loop pool (16 × 8 s mono
-float = 22.6 MB) is `mmap`ed once when the view opens and touched from the
-control thread before a take starts.
+Nothing allocates or locks on an audio thread. The loop pool (16 × 8 s mono
+float = 22.6 MB) is `mmap`ed and prefaulted once when the view opens; starting a
+take then only clears the one pad it records into.
 
 ## Verification (emulator)
 

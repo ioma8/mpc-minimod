@@ -1,9 +1,9 @@
 //! The spectral chop's place in the frame.
 //!
-//! Reading and analysing the sample is slow, so it runs on the SDK's worker
-//! (`Task`) exactly like a render job.  The UI thread only polls the result and
-//! then advances the three-phase marker machine one step per frame.
+//! Sample audio is captured on the UI thread; analysis runs on an SDK worker.
+//! The UI then advances the marker machine one step per frame.
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use mpc_sample_sdk::state::Global;
@@ -11,11 +11,9 @@ use mpc_sample_sdk::task::{Task, TaskError};
 
 use crate::menu;
 use crate::paint;
-use crate::paths;
-use crate::sample;
 use crate::selection::{self, Selection};
 use crate::spectral_machine::{self, MAX_SLICES};
-use crate::{status, wav};
+use crate::status;
 
 /// How long the marker phases may take before the run gives up.
 const DEADLINE_MS: i64 = 3_000;
@@ -64,6 +62,8 @@ struct Detection {
     selection: Selection,
     /// The boundaries, when the analysis succeeded.
     positions: Option<Vec<u32>>,
+    /// Owned audio captured while the selected sample is live.
+    audio: Option<Vec<f32>>,
     /// Why it failed, when it did.
     error: Option<&'static str>,
 }
@@ -80,9 +80,11 @@ fn detection_slot() -> MutexGuard<'static, Option<Task<Detection>>> {
 /// Claim a run and start its worker.  False when one is already going, a job is
 /// busy, or the page has no sample.
 pub fn start(state: &mut State, selected: Selection, busy: bool, open_pending: bool) -> bool {
-    if busy || state.active != 0 || detection_slot().is_some() {
+    if !can_start(state, busy, detection_slot().is_some()) {
         return false;
     }
+    // SAFETY: called on the owning UI thread with the live selected page.
+    let audio = unsafe { selected.read_current() }.ok();
     state.active = 1;
     state.phase = 0;
     state.open_pending = open_pending;
@@ -99,6 +101,7 @@ pub fn start(state: &mut State, selected: Selection, busy: bool, open_pending: b
         Detection {
             selection: selected,
             positions: None,
+            audio,
             error: None,
         },
         |job| {
@@ -111,6 +114,10 @@ pub fn start(state: &mut State, selected: Selection, busy: bool, open_pending: b
     );
     *detection_slot() = Some(task);
     true
+}
+
+fn can_start(state: &State, busy: bool, detection_running: bool) -> bool {
+    !busy && state.active == 0 && !detection_running
 }
 
 /// Read the sample and detect its boundaries, on the worker.
@@ -127,7 +134,7 @@ fn analyse(job: &mut Detection) {
         job.error = Some("cannot read sample WAV");
         return;
     };
-    let Some(samples) = read_samples(&selected) else {
+    let Some(samples) = job.audio.take() else {
         job.error = Some("cannot read sample audio");
         return;
     };
@@ -146,31 +153,6 @@ fn analyse(job: &mut Detection) {
     }
 }
 
-/// The sample's audio: the in-memory buffer first, then the exact WAV.
-fn read_samples(selected: &Selection) -> Option<Vec<f32>> {
-    sample::memory(selected.sample())
-        .filter(|memory| {
-            memory.frames == selected.frames()
-                && memory.channels == selected.channels()
-                && memory.rate == selected.rate()
-        })
-        .and_then(|memory| memory.read())
-        .or_else(|| {
-            let path = paths::for_sample(
-                selected.sample(),
-                selected.frames(),
-                selected.channels(),
-                selected.rate(),
-            )?;
-            wav::read_f32(
-                &path,
-                selected.frames(),
-                selected.channels(),
-                selected.rate(),
-            )
-        })
-}
-
 /// Abandon a run and put the flags back.
 pub fn finish(state: &mut State, menu_state: &mut menu::State, hooks: Hooks, error: Option<&str>) {
     let message = if let Some(error) = error {
@@ -182,6 +164,7 @@ pub fn finish(state: &mut State, menu_state: &mut menu::State, hooks: Hooks, err
     state.phase = 0;
     state.open_pending = false;
     state.active = 0;
+    LIVE_ACTIVE.store(false, Ordering::Release);
     *detection_slot() = None;
     *READY.lock().unwrap_or_else(PoisonError::into_inner) = None;
     menu_state.busy = 0;
@@ -331,6 +314,15 @@ pub fn cancel_if_page_gone() {
     }
 }
 
+/// Published ownership for live pad events.
+static LIVE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Whether live input must be consumed during a chop.
+#[must_use]
+pub(crate) fn live_active() -> bool {
+    LIVE_ACTIVE.load(Ordering::Acquire)
+}
+
 /// The spectral run.
 static G_SPECTRAL: Global<State> = Global::new(State {
     active: 0,
@@ -363,7 +355,7 @@ pub fn frame() {
 
 /// Start analysing the selected sample.
 #[must_use]
-pub fn run_start(busy: bool, event: &[u8; 16]) -> bool {
+pub fn run_start(busy: bool, event: &[u8; 16], last_pad: i32) -> bool {
     let screen = paint::screen();
     // SAFETY: `screen` is the live Sample page recorded by the paint hook in
     // this UI callback.
@@ -388,7 +380,7 @@ pub fn run_start(busy: bool, event: &[u8; 16]) -> bool {
             // The firmware will not open Chop while 16 Levels is active.
             // SAFETY: `event` belongs to the current button callback.
             if !unsafe {
-                mpc_sample_sdk::sites::replay_button(
+                mpc_sample_sdk::event::replay_button(
                     event,
                     u8::try_from(crate::buttons::KEY_LEVELS).unwrap_or(0),
                 )
@@ -396,22 +388,26 @@ pub fn run_start(busy: bool, event: &[u8; 16]) -> bool {
                 status::set_status("Spectral: cannot exit 16 Levels");
                 return false;
             }
-            crate::midi::toggle_levels();
+            crate::midi::toggle_levels(last_pad);
             // Let the firmware finish leaving 16 Levels before opening Chop.
             // DATA's release provides a fresh event without another user press.
             open_pending = true;
         }
         if !open_pending {
             // SAFETY: `event` belongs to the current button callback.
-            if !unsafe { mpc_sample_sdk::sites::replay_button(event, crate::ui::CHOP_KEY) } {
+            if !unsafe { mpc_sample_sdk::event::replay_button(event, crate::ui::CHOP_KEY) } {
                 status::set_status("Spectral: cannot open Chop");
                 return false;
             }
         }
     }
+    LIVE_ACTIVE.store(true, Ordering::Release);
     // SAFETY: `G_SPECTRAL` is owned by the app's UI thread.
     let started =
         unsafe { G_SPECTRAL.with_mut(|state| start(state, selected, busy, open_pending)) };
+    if !started {
+        LIVE_ACTIVE.store(false, Ordering::Release);
+    }
     if started {
         crate::ui::minimod_repaint_screen();
     }
@@ -435,7 +431,7 @@ pub fn on_button(event: &mpc_sample_sdk::ButtonEvent) {
     // SAFETY: the state belongs to this UI callback; no borrow crosses replay.
     unsafe { G_SPECTRAL.with_mut(|state| state.open_pending = false) };
     // SAFETY: these bytes came from this live button callback.
-    if unsafe { mpc_sample_sdk::sites::replay_button(&event.bytes, crate::ui::CHOP_KEY) } {
+    if unsafe { mpc_sample_sdk::event::replay_button(&event.bytes, crate::ui::CHOP_KEY) } {
         crate::ui::request_repaint();
     } else {
         fail_pending("cannot open Chop");
@@ -464,25 +460,20 @@ pub fn is_active() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Hooks, State, finish, start};
+    use super::{Hooks, State, can_start, finish};
     use crate::menu;
-    use crate::selection::Selection;
-
-    fn selection() -> Selection {
-        // SAFETY: the value is never dereferenced; the guards below return
-        // before a worker is spawned.
-        unsafe { Selection::from_parts(1, 2, 3, 4, 2, 44_100) }
-    }
 
     #[test]
     fn a_run_cannot_start_twice() {
-        let mut state = State::default();
-        assert!(!start(&mut state, selection(), true, false), "job busy");
-        state.active = 1;
-        assert!(
-            !start(&mut state, selection(), false, false),
-            "already running"
-        );
+        let state = State::default();
+        assert!(!can_start(&state, true, false), "job busy");
+        assert!(can_start(&state, false, false));
+        let state = State {
+            active: 1,
+            ..State::default()
+        };
+        assert!(!can_start(&state, false, false), "already running");
+        assert!(!can_start(&State::default(), false, true), "worker exists");
     }
 
     #[test]

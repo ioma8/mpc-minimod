@@ -14,10 +14,9 @@
 pub mod actions;
 pub mod autotrim;
 pub mod backend;
-pub mod buttons;
-pub mod cc;
+pub(crate) mod buttons;
 pub mod cfg;
-pub mod input;
+pub(crate) mod input;
 pub mod jobflow;
 pub mod levels;
 pub mod looper_lights;
@@ -26,7 +25,8 @@ pub mod menu;
 pub mod midi;
 pub mod module;
 pub mod overlay;
-pub mod routing;
+mod pad_ledger;
+pub(crate) mod routing;
 pub mod settings;
 pub mod spectral;
 pub mod spectral_machine;
@@ -34,8 +34,8 @@ pub mod synth_lights;
 pub mod ui;
 
 pub use mpc_sample_sdk::{
-    ButtonEvent, ButtonFlow, CcEvent, CcFlow, EncoderEvent, EncoderFlow, Mod, NoteEvent, NoteFlow,
-    PadAction, PadEvent, PadFlow, PaintEvent, SurfaceEvent, SurfaceFlow,
+    ButtonEvent, CcEvent, EncoderEvent, Flow, Mod, NoteEvent, PadAction, PadEvent, PaintEvent,
+    SurfaceEvent,
 };
 
 /// The SDK's draw surface with the firmware calls wrapped for the mod.

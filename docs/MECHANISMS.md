@@ -191,6 +191,14 @@ file. The app may re-serialise and re-dither that working copy (measured: `JUNK`
 chunk shrinks a few bytes, PCM re-dithered by up to ±2 LSB), so **never write
 to it** and never assume its layout is stable. [rt]
 
+That writer also leaves the RIFF size short: it appends `atem`, `slic` and
+`meta` after the audio but keeps the size it computed before them, so the
+`data` chunk runs past the declared end in every app-written file (measured:
+A01 `data` ends at 91 444 while the header says 90 920). The SDK's WAV reader
+therefore bounds the chunk walk by the file, not by the RIFF field; a reader
+that trusts the field rejects every app-written WAV, and streamed samples then
+fail as "no exact WAV file". [rt]
+
 ---
 
 ## 5. The slice container and a Slice
@@ -355,6 +363,43 @@ made the first menu implementation drop turns.
 
 `event` is a compact struct: `+8` type/controller, `+9` down, `+0x10` velocity,
 `+0x14` property mask (u16), `+0x16` property 0, `+0x30` pad/slot byte.
+
+In the MINIMOD Rust crate, the SDK decodes each native control event and calls
+the corresponding `Minimod` hook. `Minimod` owns the small cross-event input
+history; `input.rs` makes one ownership decision for buttons, pad edges, DATA
+turns, surface notes and CCs, then returns feature actions for `module.rs` to
+apply. Feature modes remain with their owning modules. Pad press ownership is
+remembered through release even if a modal screen changes in between. The
+firmware reports a physical pad's press and its release with **different source
+ids** (`0` then `1`, measured), so a release pairs by pad and input first and
+only prefers an equal source when one exists; keying the pair on the source
+alone swallows every release and leaves the app's note on, which silences the
+pad once the stale voice is reused.
+
+Time-critical input does not take the UI module lock. The SDK exposes an
+optional independent `InputHooks` set (`pad` + `pad_complete`, `surface`,
+`note`), copied out once at install; MINIMOD installs all four. Pads are tracked
+by `pad_ledger.rs`, a fixed-capacity atomic ledger that records a press's owner
+before the firmware sees it and matches the release to that owner even when a
+modal screen opens or closes in between. External MIDI notes run through the
+same kind of ledger in `midi.rs`, so a replayed pad note can never lose its
+release to a busy callback; the ledger refuses a new press when the note is at
+capacity and keeps the releases of notes that are already held. Buttons, the
+DATA encoder and CC events still go through `&mut Minimod`, because their
+actions repaint, write firmware state and can run jobs.
+
+The physical-pad path and the control-surface note path stay distinct because
+the Bass preview consumes and plays surface notes without changing the sample
+pad.
+
+The app's Extract command switches the Sample page into Chop mode as part of its
+own UI flow, and that can happen after the native call returns. Every extraction
+therefore records the page mode it started in and, when the job completes on the
+UI thread, replays the CHOP key through the app's own dispatcher if the page is
+now in Chop mode. The replay uses the last button event captured on that page and
+the SDK checks the event's context is still a live app object first. If the switch
+has not happened yet, the restore stays armed and the next unshifted button event
+applies it.
 
 ---
 

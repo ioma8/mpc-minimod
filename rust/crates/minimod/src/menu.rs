@@ -7,6 +7,7 @@
 use crate::actions::Action;
 use crate::backend::bass::Kind;
 use crate::paint;
+use core::sync::atomic::{AtomicBool, Ordering};
 use mpc_sample_sdk::export_static;
 use mpc_sample_sdk::state::Global;
 
@@ -46,13 +47,13 @@ pub struct Hooks {
     /// Redraw the screen.
     pub repaint: Option<fn()>,
     /// Render the split.
-    pub start_split: Option<fn(&mut State)>,
+    pub start_split: Option<fn(&mut State, i32)>,
     /// Render one effect.
-    pub start_effect: Option<fn(Action, &mut State)>,
+    pub start_effect: Option<fn(Action, &mut State, i32)>,
     /// Start the spectral chop, with the event that asked for it.
-    pub start_spectral: Option<fn(&mut State, &[u8; 16])>,
+    pub start_spectral: Option<fn(&mut State, &[u8; 16], i32)>,
     /// Start the bass synth with its source backup.
-    pub start_bass: Option<fn(&mut State)>,
+    pub start_bass: Option<fn(&mut State, i32)>,
     /// Show the bass control page.
     pub start_bass_page: Option<fn(&mut State)>,
     /// Open the live looper.
@@ -74,40 +75,40 @@ pub fn close(state: &mut State, hooks: Hooks) -> bool {
 }
 
 /// Run the selected row.
-pub fn activate(state: &mut State, event: &[u8; 16], hooks: Hooks) {
+pub fn activate(state: &mut State, event: &[u8; 16], hooks: Hooks, last_pad: i32) {
     if state.busy != 0 {
         return;
     }
     if state.bass_edit != 0 {
         if let Some(start) = hooks.start_bass {
-            start(state);
+            start(state, last_pad);
         }
         return;
     }
     match state.selection {
         ROW_HPSS => {
             if let Some(start) = hooks.start_split {
-                start(state);
+                start(state, last_pad);
             }
         }
         ROW_SPECTRAL => {
             if let Some(start) = hooks.start_spectral {
-                start(state, event);
+                start(state, event, last_pad);
             }
         }
         ROW_REVERB => {
             if let Some(start) = hooks.start_effect {
-                start(Action::Reverb, state);
+                start(Action::Reverb, state, last_pad);
             }
         }
         ROW_VINYL => {
             if let Some(start) = hooks.start_effect {
-                start(Action::Vinyl, state);
+                start(Action::Vinyl, state, last_pad);
             }
         }
         ROW_LOFI => {
             if let Some(start) = hooks.start_effect {
-                start(Action::LoFi, state);
+                start(Action::LoFi, state, last_pad);
             }
         }
         ROW_BASS => {
@@ -356,11 +357,26 @@ pub fn state() -> State {
     unsafe { g_menu.with(|menu| *menu) }
 }
 
+/// Published synth page ownership for the live surface callback.
+static LIVE_BASS_PAGE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the synth page owns surface pad events.
+#[must_use]
+pub(crate) fn live_bass_page() -> bool {
+    LIVE_BASS_PAGE.load(Ordering::Acquire)
+}
+
 /// Run `f` with the menu's state, to change it.
 pub fn with_state_mut<R>(f: impl FnOnce(&mut State) -> R) -> R {
     // SAFETY: `g_menu` is owned by the app's UI thread and the closure must not
     // take another borrow of it.
-    unsafe { g_menu.with_mut(f) }
+    unsafe {
+        g_menu.with_mut(|menu| {
+            let result = f(menu);
+            LIVE_BASS_PAGE.store(menu.open != 0 && menu.bass_edit != 0, Ordering::Release);
+            result
+        })
+    }
 }
 
 export_static!(#[doc = "The bass page's three knobs, read by the device tests."]

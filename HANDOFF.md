@@ -13,7 +13,7 @@ port is merged; no C or C++ is compiled for the mod. Nothing at `HEAD` is tagged
   `build-mod.sh`, which builds the `minimod` crate as a `cdylib`, cross-links
   it, and fails on unresolved non-glibc symbols and glibc newer than 2.39.
 - **The crates.** The public [`mpc-sample-sdk`](https://github.com/ioma8/mpc-sample-sdk) is the universal SDK: firmware image and
-  the 36-word check, the hook engine and all 16 sites, the `Mod` trait and event
+  the 36-word check, the hook engine and all 22 sites, the `Mod` trait and event
   decoding, the ALSA taps, drawing, and typed access to the app's page, sample,
   pad, slice, WAV, control-surface, effect and Extract objects.  `crates/minimod`
   is the `LD_PRELOAD` library and only the features, built on the SDK through
@@ -21,11 +21,11 @@ port is merged; no C or C++ is compiled for the mod. Nothing at `HEAD` is tagged
   slices: looper, HPSS, onset detection, FFT, the Karplus-Strong bass synth, and
   the S32↔f32 conversion.  The workspace depends on SDK `v0.3.1`, which carries
   the split audio hooks (`Mod::audio`) and the `Global::with` closures.
-- **The hook table has 16 sites.** `mpc_sample_sdk::sites` installs them and keeps
+- **The hook table has 22 sites.** `mpc_sample_sdk::sites` installs them and keeps
   every displaced original; `mpc_sample_sdk::loader` checks 36 words of the loaded
   image first, so a different firmware is refused rather than hooked at the wrong
   offsets.
-- **Exports:** the cdylib exports 24 symbols: the 4 ALSA taps and 20 `g_*` statics
+- **Exports:** the cdylib exports 30 symbols: the 4 ALSA taps and 26 `g_*` statics
   the device tests read.
 - **Docs:** `docs/` is main's consolidated set, plus `RUST-PORT.md`,
   `LIVE-LOOPER.md`, and the Rust notes in the other docs.
@@ -34,10 +34,10 @@ port is merged; no C or C++ is compiled for the mod. Nothing at `HEAD` is tagged
 
 - `rust/check.sh` passes: fmt, clippy `all` + `pedantic` + `cargo` with
   `-D warnings`, a rustdoc build with warnings denied, a guard that every
-  `unsafe` file in `crates/minimod/src` carries a `SAFETY` comment, **40 minimod tests** and
-  **46 dsp tests** in this workspace (including the golden fixtures), and the
+  `unsafe` file in `crates/minimod/src` carries a `SAFETY` comment, **72 minimod tests** and
+  **63 dsp tests** in this workspace (including the golden fixtures), and the
   aarch64 release build. The standalone `mpc-sample-sdk` repo has its own
-  **89 SDK tests**.
+  **119 SDK tests**.
 - **Golden fixtures:** the DSP is compared with the original C where the
   arithmetic is deterministic: the looper trace and loop buffers are
   bit-identical, the bass render is bit-identical, HPSS stays under 1e-4, and the

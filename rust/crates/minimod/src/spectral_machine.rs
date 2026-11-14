@@ -72,20 +72,12 @@ pub fn step(now: i64) -> Step {
 /// Validate the selection and boundaries, select Manual, and store the machine.
 #[must_use]
 pub fn begin(now: i64, selected: &selection::Selection, detected: &[u32]) -> Step {
-    let count = detected.len().min(MAX_SLICES);
-    // One boundary is still a meaningful two-region chop; only no boundary at
-    // all is an error.
-    if count == 0 {
-        return Step::Failed("no onsets");
-    }
-    let mut positions = [0_u32; MAX_SLICES];
-    for (index, position) in detected.iter().take(count).enumerate() {
-        if *position >= selected.frames() || (index > 0 && *position <= positions[index - 1]) {
-            return Step::Failed("invalid onsets");
-        }
-        positions[index] = *position;
-    }
-    if !selected.is_current() {
+    let (count, positions) = match validate_onsets(selected.frames(), detected) {
+        Ok(validated) => validated,
+        Err(error) => return error,
+    };
+    // SAFETY: begin runs on the live Sample page's UI thread.
+    if !unsafe { selected.is_current() } {
         return Step::Failed("sample changed; cancelled");
     }
     // SAFETY: `MACHINE` is owned by the app's UI thread and nothing else holds
@@ -99,7 +91,7 @@ pub fn begin(now: i64, selected: &selection::Selection, detected: &[u32]) -> Ste
                 frames: selected.frames(),
                 channels: selected.channels(),
                 rate: selected.rate(),
-                count: u32::try_from(count).unwrap_or(0),
+                count,
                 positions,
                 phase: 0,
                 deadline: now + MARKER_DEADLINE_MS,
@@ -107,6 +99,23 @@ pub fn begin(now: i64, selected: &selection::Selection, detected: &[u32]) -> Ste
         });
     }
     Step::Started
+}
+
+fn validate_onsets(frames: u32, detected: &[u32]) -> Result<(u32, [u32; MAX_SLICES]), Step> {
+    let count = detected.len().min(MAX_SLICES);
+    // One boundary is still a meaningful two-region chop; only no boundary at
+    // all is an error.
+    if count == 0 {
+        return Err(Step::Failed("no onsets"));
+    }
+    let mut positions = [0_u32; MAX_SLICES];
+    for (index, position) in detected.iter().take(count).enumerate() {
+        if *position >= frames || (index > 0 && *position <= positions[index - 1]) {
+            return Err(Step::Failed("invalid onsets"));
+        }
+        positions[index] = *position;
+    }
+    Ok((u32::try_from(count).unwrap_or(0), positions))
 }
 
 /// Phases 1 and 2: wait for Manual chop, write the boundaries, verify them.
@@ -179,36 +188,22 @@ fn advance(now: i64, running: &mut Machine) -> Step {
 
 #[cfg(test)]
 mod tests {
-    use super::{Step, begin};
-    use crate::selection::Selection;
-
-    fn selection() -> Selection {
-        // SAFETY: the value is only read for its geometry.
-        unsafe { Selection::from_parts(1, 2, 3, 1_000, 2, 44_100) }
-    }
+    use super::{Step, validate_onsets};
 
     #[test]
     fn an_empty_detection_is_refused() {
-        assert_eq!(begin(0, &selection(), &[]), Step::Failed("no onsets"));
+        assert_eq!(validate_onsets(1_000, &[]), Err(Step::Failed("no onsets")));
     }
 
     #[test]
     fn a_boundary_at_or_past_the_end_is_refused() {
         assert_eq!(
-            begin(0, &selection(), &[1_000]),
-            Step::Failed("invalid onsets")
+            validate_onsets(1_000, &[1_000]),
+            Err(Step::Failed("invalid onsets"))
         );
         assert_eq!(
-            begin(0, &selection(), &[10, 10]),
-            Step::Failed("invalid onsets")
-        );
-    }
-
-    #[test]
-    fn a_changed_selection_is_rejected_before_chop_changes() {
-        assert_eq!(
-            begin(0, &selection(), &[100]),
-            Step::Failed("sample changed; cancelled")
+            validate_onsets(1_000, &[10, 10]),
+            Err(Step::Failed("invalid onsets"))
         );
     }
 }

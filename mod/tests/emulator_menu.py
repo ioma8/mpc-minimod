@@ -28,10 +28,10 @@ def main():
     def tap(name):
         control(name, 'press', 100)
         control(name, 'release')
-    ROW0 = 43          # centre of the first SAMPLE OPTIONS row
-    ROW_STEP = 20      # rows are 20 px apart (draw code: y + 26 + i * 20)
+    ROW0 = 51          # centre of the first SAMPLE OPTIONS row
+    ROW_STEP = 19      # current menu row spacing
     ROWS = 8           # HPSS, Spectral, Reverb, Vinyl, Lo-Fi, Bass, Looper, Close
-    HIGHLIGHT = (58, 42, 16)
+    HIGHLIGHT = (48, 39, 25)
 
     def selected():
         with urllib.request.urlopen(args.panel + '/screen.png', timeout=5) as response:

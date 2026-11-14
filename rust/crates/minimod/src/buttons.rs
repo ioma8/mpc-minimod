@@ -5,32 +5,33 @@
 //! pure function of the event and the current state; the caller applies the
 //! result, because the state itself belongs to the caller.
 
-pub use mpc_sample_sdk::event::button::{
+pub(crate) use mpc_sample_sdk::event::button::{
     B3 as KEY_B3, DATA as KEY_DATA, ERASE as KEY_ERASE, LEVELS as KEY_LEVELS, MINUS as KEY_MINUS,
     PLUS as KEY_PLUS, PRESSED, SHIFT as KEY_SHIFT,
 };
 
-/// The Sample screen.
-pub const KEY_SAMPLE: u32 = 0x06;
 /// The first soft key (the trim screen).
-pub const KEY_SCREEN1: u32 = 0x0c;
+pub(crate) const KEY_SCREEN1: u32 = 0x0c;
 /// The second soft key.
-pub const KEY_SCREEN2: u32 = 0x0d;
+pub(crate) const KEY_SCREEN2: u32 = 0x0d;
 /// The fourth soft key.
-pub const KEY_SCREEN4: u32 = 0x0f;
+pub(crate) const KEY_SCREEN4: u32 = 0x0f;
 
 /// Whether a key leaves the trim screen, so the trim flag must be cleared.
 ///
 /// The first soft key is the trim screen. The third soft key is [`KEY_B3`],
 /// which the trim screen uses for the cycle; it is not a navigation key.
 #[must_use]
-pub const fn leaves_trim_screen(code: u32) -> bool {
-    matches!(code, KEY_SAMPLE | KEY_SCREEN2 | KEY_SCREEN4)
+pub(crate) const fn leaves_trim_screen(code: u32) -> bool {
+    // SAMPLE only brings the Sample page forward; it keeps the selected knob
+    // page. B3 (the Filter tab) is handled by the caller because SHIFT+B3 is
+    // AutoTrim and stays on the trim page.
+    matches!(code, KEY_SCREEN2 | KEY_SCREEN4)
 }
 
 /// What the caller should do with the event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
+pub(crate) enum Action {
     /// Nothing for the mod: hand the event to the app.
     Forward,
     /// Swallowed.
@@ -65,73 +66,81 @@ pub enum Action {
 
 /// The keys the user is holding.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Held {
+pub(crate) struct Held {
     /// SHIFT.
-    pub shift: bool,
+    pub(crate) shift: bool,
 }
 
 /// The 16 Levels octave keys, held.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct OctaveKeys {
+pub(crate) struct OctaveKeys {
     /// PLUS.
-    pub plus: bool,
+    pub(crate) plus: bool,
     /// MINUS.
-    pub minus: bool,
+    pub(crate) minus: bool,
 }
 
 /// The screens that are up.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Screens {
+pub(crate) struct Screens {
     /// The mod's own screens.
-    pub modals: Modals,
+    pub(crate) modals: Modals,
     /// The looper view.
-    pub looper: bool,
+    pub(crate) looper: bool,
     /// The 16 Levels screen.
-    pub levels: bool,
+    pub(crate) levels: bool,
     /// The synth control page.
-    pub bass_edit: bool,
+    pub(crate) bass_edit: bool,
 }
 
 /// The mod's modal screens.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Modals {
+pub(crate) struct Modals {
     /// The effects menu.
-    pub menu: bool,
+    pub(crate) menu: bool,
     /// A spectral chop is running.
-    pub spectral: bool,
+    pub(crate) spectral: bool,
 }
 
 /// Everything the decision reads.
 #[derive(Clone, Copy, Debug)]
-pub struct Context {
+pub(crate) struct Context {
     /// The key.
-    pub code: u32,
+    pub(crate) code: u32,
     /// The value: `PRESSED` is a press.
-    pub down: u32,
+    pub(crate) down: u32,
     /// The keys being held.
-    pub held: Held,
+    pub(crate) held: Held,
     /// The octave keys being held.
-    pub octave: OctaveKeys,
+    pub(crate) octave: OctaveKeys,
     /// The screens that are up.
-    pub screens: Screens,
+    pub(crate) screens: Screens,
     /// Whether the Sample page is visible.
-    pub page_visible: bool,
+    pub(crate) page_visible: bool,
     /// Whether the app's trim screen is showing (the B3 label is `Filter`).
-    pub trim_screen: bool,
+    pub(crate) trim_screen: bool,
     /// Whether the Sample page is in chop mode.
-    pub chop_mode: bool,
+    pub(crate) chop_mode: bool,
 }
 
 /// Whether the event is a press.
 #[must_use]
-pub const fn pressed(down: u32) -> bool {
+pub(crate) const fn pressed(down: u32) -> bool {
     down == PRESSED
 }
 
 /// Decide what to do with one button event.
 #[must_use]
-pub fn dispatch(context: Context) -> Action {
+pub(crate) fn dispatch(context: Context) -> Action {
     let press = pressed(context.down);
+    // A release belongs to the mod if its press was consumed, even if the
+    // user changed modes or started holding SHIFT in the meantime.
+    if !press
+        && ((context.code == KEY_PLUS && context.octave.plus)
+            || (context.code == KEY_MINUS && context.octave.minus))
+    {
+        return Action::BumpOctave(0);
+    }
     // The looper owns every key but SHIFT and ERASE, which it tracks itself.
     if context.screens.looper {
         return match context.code {
@@ -146,14 +155,6 @@ pub fn dispatch(context: Context) -> Action {
     }
     if context.code == KEY_SHIFT {
         return Action::Shift(press);
-    }
-    // A release belongs to the mod if its press was consumed, even if the
-    // user changed modes or started holding SHIFT in the meantime.
-    if !press
-        && ((context.code == KEY_PLUS && context.octave.plus)
-            || (context.code == KEY_MINUS && context.octave.minus))
-    {
-        return Action::BumpOctave(0);
     }
     // The synth page is modal too, but PLUS/MINUS shift its chromatic pads by
     // the same eight-semitone steps as 16 Levels.
@@ -242,9 +243,12 @@ const fn encoder(context: Context, press: bool) -> Action {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, Context, Held, KEY_B3, KEY_DATA, KEY_LEVELS, KEY_MINUS, KEY_PLUS, KEY_SHIFT,
-        Modals, OctaveKeys, PRESSED, Screens, dispatch,
+        Action, Context, Held, KEY_B3, KEY_DATA, KEY_LEVELS, KEY_MINUS, KEY_PLUS, KEY_SCREEN2,
+        KEY_SHIFT, Modals, OctaveKeys, PRESSED, Screens, dispatch, leaves_trim_screen,
     };
+
+    /// The app's SAMPLE button; the mod no longer branches on it.
+    const KEY_SAMPLE: u32 = 0x06;
 
     fn base() -> Context {
         Context {
@@ -281,6 +285,14 @@ mod tests {
             ..base()
         };
         assert_eq!(dispatch(context), Action::Looper);
+    }
+
+    #[test]
+    fn sample_is_not_a_page_departure_and_b3_is_special() {
+        assert!(!leaves_trim_screen(KEY_SAMPLE));
+        // SHIFT+B3 is AutoTrim, so the caller decides whether B3 leaves.
+        assert!(!leaves_trim_screen(KEY_B3));
+        assert!(leaves_trim_screen(KEY_SCREEN2));
     }
 
     #[test]

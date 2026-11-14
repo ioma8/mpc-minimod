@@ -21,9 +21,14 @@ echo '== feature safety =='
 # that); this guard also rejects a file that mentions `unsafe` without one, so a
 # block cannot be added to a feature-policy module unnoticed.
 for file in $(grep -rl 'unsafe' crates/minimod/src); do
-    if ! grep -q 'SAFETY' "$file"; then
-        echo "unsafe without a SAFETY comment: $file" >&2
-        exit 1
+    # `#[unsafe(...)]` attributes (no_mangle, export_name, link_section) are not
+    # unsafe blocks; only code still mentioning `unsafe` after dropping them needs
+    # the contract comment.
+    if sed -E 's/#\[unsafe\(/#[attribute(/' "$file" | grep -Eq 'unsafe([[:space:]]*\{|[[:space:]]+fn)'; then
+        if ! grep -q 'SAFETY' "$file"; then
+            echo "unsafe without a SAFETY comment: $file" >&2
+            exit 1
+        fi
     fi
 done
 

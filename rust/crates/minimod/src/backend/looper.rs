@@ -66,11 +66,9 @@ pub fn looper_notice(text: &str) {
     Engine::notice(text);
 }
 
-/// Feed the first planar capture channel.
+/// Feed planar capture, mixing the first two channels.
 pub fn looper_input_s32(channels: &[&[i32]]) {
-    if let Some(first) = channels.first() {
-        Engine::input_s32(first);
-    }
+    Engine::input_s32_planar(channels);
 }
 
 /// Feed interleaved S32 capture frames.

@@ -42,6 +42,7 @@ pub fn finalize() {
     if crate::jobflow::finish(paint::screen()) {
         crate::backend::bass::preview_set_active(false);
     }
+    crate::ui::restore_chop_now();
 }
 
 /// Finish a completed job or a running spectral chop without waiting for the
@@ -70,6 +71,9 @@ pub fn paint(graphics: Graphics, event: mpc_sample_sdk::PaintEvent) {
     let handle = graphics.handle();
     crate::spectral::frame();
     let _ = crate::jobflow::finish(component);
+    // An extraction can switch the page to chop mode; put it back now instead
+    // of waiting for the next button.
+    crate::ui::restore_chop_now();
     toast(handle);
     if crate::backend::looper::looper_is_open() != 0 {
         crate::looper_view::draw(handle);

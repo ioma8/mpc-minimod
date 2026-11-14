@@ -4,13 +4,66 @@
 //! opaque `kind`.  This module maps each code to the backend that fills the
 //! job's outputs.
 
-use mpc_sample_sdk::render::{RenderJob, RenderOutput};
+use mpc_sample_sdk::platform::selection::Selection;
+use mpc_sample_sdk::render::RenderOutput;
 
 use crate::backend::{bass, hpss};
 
+/// The work MINIMOD schedules. A selected-sample action retains its validated
+/// SDK selection; generated synth audio needs only the Sample page identity.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Job {
+    pub(crate) source: Option<Selection>,
+    pub(crate) screen: usize,
+    pub(crate) program: Option<usize>,
+    pub(crate) destination: Option<i32>,
+    pub(crate) frames: u32,
+    pub(crate) channels: u16,
+    pub(crate) rate: u32,
+    pub(crate) kind: i32,
+    pub(crate) input: Vec<f32>,
+    pub(crate) outputs: Vec<RenderOutput>,
+}
+
+impl Job {
+    pub(crate) fn selected(source: Selection, kind: i32) -> Self {
+        Self {
+            screen: source.screen(),
+            program: None,
+            destination: None,
+            frames: source.frames(),
+            channels: source.channels(),
+            rate: source.rate(),
+            source: Some(source),
+            kind,
+            input: Vec::new(),
+            outputs: Vec::new(),
+        }
+    }
+
+    pub(crate) fn generated(screen: usize, kind: i32) -> Self {
+        Self {
+            source: None,
+            screen,
+            program: None,
+            destination: None,
+            frames: 0,
+            channels: 2,
+            rate: 44_100,
+            kind,
+            input: Vec::new(),
+            outputs: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push_output(&mut self, output: RenderOutput) {
+        self.outputs.push(output);
+    }
+}
+
 /// One render the SAMPLE OPTIONS menu can start.
 ///
-/// The SDK carries the code as an opaque `i32` in [`RenderJob::kind`]; this is
+/// MINIMOD carries the code as an opaque `i32` in its `Job::kind`; this is
 /// the only place that mapping exists, so an unknown code is an error instead of
 /// silently becoming an effect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,7 +91,7 @@ impl Action {
         Self::Bass,
     ];
 
-    /// The code a [`RenderJob`] carries.
+    /// The code a job carries.
     #[must_use]
     pub const fn code(self) -> i32 {
         self as i32
@@ -72,17 +125,17 @@ impl Action {
 /// # Errors
 ///
 /// Returns the action code when the backend cannot produce the expected output.
-pub fn render(job: &mut RenderJob, knobs: &[f32], kind: bass::Kind, note: i32) -> Result<(), i32> {
+pub(crate) fn render(job: &mut Job, knobs: &[f32], kind: bass::Kind, note: i32) -> Result<(), i32> {
     let action = Action::from_code(job.kind).ok_or(job.kind)?;
-    let channels = usize::from(job.source.channels());
-    let rate = job.source.rate();
+    let channels = usize::from(job.channels);
+    let rate = job.rate;
     match action {
         Action::Split => {
             let Some((harmonic, percussive)) = hpss::split(&job.input, channels, rate) else {
                 return Err(job.kind);
             };
-            let frames = usize::try_from(job.source.frames()).unwrap_or(0);
-            let channels = job.source.channels();
+            let frames = usize::try_from(job.frames).unwrap_or(0);
+            let channels = job.channels;
             job.push_output(
                 RenderOutput::with_frames(harmonic, frames, u32::from(channels)).ok_or(job.kind)?,
             );
@@ -113,15 +166,13 @@ pub fn render(job: &mut RenderJob, knobs: &[f32], kind: bass::Kind, note: i32) -
             let Some(audio) = mpc_sample_sdk::platform::effect::render_code(
                 action.code() - 1,
                 &job.input,
-                job.source.channels().into(),
+                u32::from(job.channels),
                 rate,
                 parameters,
             ) else {
                 return Err(job.kind);
             };
-            job.push_output(
-                RenderOutput::new(audio, u32::from(job.source.channels())).ok_or(job.kind)?,
-            );
+            job.push_output(RenderOutput::new(audio, u32::from(job.channels)).ok_or(job.kind)?);
             Ok(())
         }
     }
@@ -129,20 +180,12 @@ pub fn render(job: &mut RenderJob, knobs: &[f32], kind: bass::Kind, note: i32) -
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, render};
+    use super::{Action, Job, render};
     use crate::backend::bass;
-    use mpc_sample_sdk::platform::selection::Selection;
-    use mpc_sample_sdk::render::RenderJob;
-
-    fn source() -> Selection {
-        // SAFETY: the test only carries geometry; `render` never reaches the
-        // firmware because the effect path is uninstalled on the host.
-        unsafe { Selection::from_parts(1, 2, 3, 4, 2, 44_100) }
-    }
 
     #[test]
     fn an_unknown_action_reaches_the_effect_path_and_fails_without_an_image() {
-        let mut job = RenderJob::new(source(), 9, vec![0.0; 8]);
+        let mut job = Job::generated(1, 9);
         assert_eq!(render(&mut job, &[], bass::Kind::Bass, 0), Err(9));
         assert!(job.outputs.is_empty());
     }

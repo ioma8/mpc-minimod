@@ -169,6 +169,8 @@ pub struct Pad {
     touched: AtomicI32,
     /// Frames still to capture after the closing press.
     drain: AtomicU32,
+    /// Output frames spent waiting for delayed capture during drain.
+    drain_wait: AtomicU32,
 }
 
 impl Pad {
@@ -182,6 +184,7 @@ impl Pad {
             skip: AtomicU32::new(0),
             touched: AtomicI32::new(0),
             drain: AtomicU32::new(0),
+            drain_wait: AtomicU32::new(0),
         }
     }
 
@@ -379,6 +382,10 @@ impl Engine {
             if pool == libc::MAP_FAILED {
                 return false;
             }
+            // Prefault the mapping on the UI thread so starting the first take
+            // does not fault in an entire pad from the audio callback.
+            // SAFETY: the new mapping is private, writable and `bytes` long.
+            unsafe { core::ptr::write_bytes(pool.cast::<u8>(), 0, bytes) };
             POOL.store(pool.cast::<f32>(), Ordering::Release);
         }
         for pad in &PADS_ARRAY {
@@ -621,6 +628,36 @@ impl Engine {
         }
     }
 
+    /// Feed planar S32 capture, mixing the first two channels to mono.
+    pub fn input_s32_planar(channels: &[&[i32]]) {
+        let Some(left) = channels.first() else { return };
+        let Some(right) = channels.get(1) else {
+            Self::input_s32(left);
+            return;
+        };
+        if !Self::is_open() {
+            return;
+        }
+        let generation = GENERATION.load(Ordering::Acquire);
+        let mut block = [0.0_f32; BLOCK];
+        let frames = left.len().min(right.len());
+        let mut done = 0;
+        while done < frames {
+            if GENERATION.load(Ordering::Acquire) != generation {
+                return;
+            }
+            let count = (frames - done).min(BLOCK);
+            let mut peak = 0.0_f32;
+            for (i, slot) in block.iter_mut().enumerate().take(count) {
+                let value = planar_sample(left, right, done + i);
+                peak = peak.max(value.abs());
+                *slot = value;
+            }
+            Self::input_block(&block[..count], peak);
+            done += count;
+        }
+    }
+
     /// Feed interleaved S32 capture; the first two channels carry the source.
     pub fn input_s32_interleaved(buffer: &[i32], channels: usize) {
         if !Self::is_open() || channels == 0 || buffer.is_empty() {
@@ -666,8 +703,7 @@ impl Engine {
         let mut input = [0.0_f32; BLOCK];
         let mut add = [0.0_f32; BLOCK];
         while done < frames {
-            // An open or close while this callback runs makes the reset state
-            // meaningless; stop at the next block boundary.
+            // Stop at the next block boundary after an open or close.
             if GENERATION.load(Ordering::Acquire) != generation {
                 return;
             }
@@ -705,48 +741,7 @@ impl Engine {
                         *slot = samples[at].mul_add(GAIN, *slot);
                     }
                 }
-                let touched = pad.touched.load(Ordering::Acquire) != 0;
-                if state == State::Dub || (state == State::Drain && touched) {
-                    let latency = if len != 0 {
-                        pad.lat
-                            .load(Ordering::Acquire)
-                            .saturating_add(LATENCY_OUT.load(Ordering::Acquire))
-                            % len
-                    } else {
-                        0
-                    };
-                    for (i, &value) in input.iter().enumerate().take(count) {
-                        let pos = transport.wrapping_add(i as u64).wrapping_sub(origin);
-                        dub_add(samples, len, latency, pos, value);
-                    }
-                } else if state == State::Rec || (state == State::Drain && !touched) {
-                    if state == State::Drain {
-                        pad.skip.store(0, Ordering::Release);
-                    }
-                    record(pad, samples, &input[..count]);
-                }
-                if state == State::Drain {
-                    let drain = pad.drain.load(Ordering::Acquire);
-                    let left = drain.saturating_sub(count as u32);
-                    pad.drain.store(left, Ordering::Release);
-                    // Only the take that is still draining may become playback:
-                    // an erase or STOP in the meantime moved the state first, and
-                    // resurrecting it here would leave a `Play` pad with no loop.
-                    if left == 0
-                        && pad
-                            .state
-                            .compare_exchange(
-                                State::Drain.raw(),
-                                State::Play.raw(),
-                                Ordering::AcqRel,
-                                Ordering::Acquire,
-                            )
-                            .is_ok()
-                    {
-                        pad.skip.store(0, Ordering::Release);
-                        drop_take();
-                    }
-                }
+                process_take(pad, state, samples, &input[..count], got, transport);
             }
             if SYNC.load(Ordering::Acquire) != 0 && CLICK.load(Ordering::Acquire) != 0 {
                 mix_click(&mut add[..count], transport);
@@ -1023,9 +1018,7 @@ fn quantize(frames: u32) -> u32 {
 /// when that drops at most an eighth of one, then reduce it to a length that
 /// fits `max`.
 ///
-/// The reduction steps down from the unrounded multiple, exactly like the
-/// reference: a take that was rounded *up* over the pool loses that extra pulse
-/// before it loses a whole one.
+/// If rounding exceeds the pool, use the largest multiple that fits.
 fn snap(frames: u32, pulse: u32, max: u32) -> u32 {
     let pulse = pulse.max(1);
     let mut multiple = frames.saturating_add(pulse / 2) / pulse;
@@ -1042,13 +1035,87 @@ fn snap(frames: u32, pulse: u32, max: u32) -> u32 {
     }
     if target > max64 {
         let floor = (max64 / pulse64) * pulse64;
-        target = if multiple > 1 && target > base && base <= max64 {
-            base - pulse64
-        } else {
-            floor
-        };
+        target = floor;
     }
     u32::try_from(target).unwrap_or(0)
+}
+
+/// Apply capture to one active take, including any delayed tail.
+fn process_take(
+    pad: &Pad,
+    state: State,
+    samples: &mut [f32],
+    input: &[f32],
+    got: usize,
+    transport: u64,
+) {
+    let count = input.len();
+    let len = pad.len.load(Ordering::Acquire);
+    let origin = pad.origin.load(Ordering::Acquire);
+    let touched = pad.touched.load(Ordering::Acquire) != 0;
+    let drain = pad.drain.load(Ordering::Acquire);
+    let waited = pad.drain_wait.load(Ordering::Acquire);
+    let available = if state == State::Drain && waited < RATE {
+        got
+    } else {
+        count
+    };
+    let input_count = drain_input_count(state, drain, available);
+    if state == State::Dub || (state == State::Drain && touched) {
+        let latency = if len != 0 {
+            pad.lat
+                .load(Ordering::Acquire)
+                .saturating_add(LATENCY_OUT.load(Ordering::Acquire))
+                % len
+        } else {
+            0
+        };
+        for (i, &value) in input.iter().enumerate().take(input_count) {
+            let pos = transport
+                .wrapping_add(i as u64)
+                .wrapping_sub(origin)
+                .wrapping_sub(u64::from(if state == State::Drain { waited } else { 0 }));
+            dub_add(samples, len, latency, pos, value);
+        }
+    } else if state == State::Rec || (state == State::Drain && !touched) {
+        if state == State::Drain {
+            pad.skip.store(0, Ordering::Release);
+        }
+        record(pad, samples, &input[..input_count]);
+    }
+    if state == State::Drain {
+        if waited < RATE {
+            pad.drain_wait.store(
+                waited.saturating_add((count - got) as u32),
+                Ordering::Release,
+            );
+        }
+        let left = drain.saturating_sub(input_count as u32);
+        pad.drain.store(left, Ordering::Release);
+        // Do not resurrect a take cancelled by erase or STOP.
+        if left == 0
+            && pad
+                .state
+                .compare_exchange(
+                    State::Drain.raw(),
+                    State::Play.raw(),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        {
+            pad.skip.store(0, Ordering::Release);
+            drop_take();
+        }
+    }
+}
+
+fn drain_input_count(state: State, remaining: u32, count: usize) -> usize {
+    if state == State::Drain {
+        count.min(remaining as usize)
+    } else {
+        count
+    }
 }
 
 /// One thread wins the transition out of `Rec`/`Dub`; the loser returns without
@@ -1071,6 +1138,7 @@ fn finish_pad(pad: &Pad) {
     }
     pad.touched
         .store(i32::from(state == State::Dub), Ordering::Release);
+    pad.drain_wait.store(0, Ordering::Release);
     pad.drain.store(latency, Ordering::Release);
     if pad
         .state
@@ -1322,6 +1390,11 @@ fn dub_add(samples: &mut [f32], len: u32, latency: u32, pos: u64, value: f32) {
     *slot = (*slot + value).clamp(-1.0, 1.0);
 }
 
+/// Mix a stereo planar frame with the same rule as interleaved input.
+fn planar_sample(left: &[i32], right: &[i32], index: usize) -> f32 {
+    s32_pair_to_f32(left[index], right[index])
+}
+
 /// One metronome click sample.
 fn click_sample(phase: u64) -> f32 {
     if phase >= CLICK_FRAMES {
@@ -1414,6 +1487,59 @@ mod tests {
     }
 
     #[test]
+    fn drain_waits_for_delayed_capture() {
+        use core::sync::atomic::Ordering;
+        super::reset_for_tests();
+        assert!(super::Engine::open());
+        let pad = &super::PADS_ARRAY[0];
+        pad.len.store(16, Ordering::Release);
+        pad.drain.store(4, Ordering::Release);
+        pad.set_state(super::State::Drain);
+        super::TAKE_COUNT.store(1, Ordering::Release);
+        super::Engine::render_s32(&mut [0; 8], 1);
+        assert_eq!(pad.state(), super::State::Drain);
+        assert_eq!(pad.drain.load(Ordering::Acquire), 4);
+        super::Engine::input_s32(&[1; 4]);
+        super::Engine::render_s32(&mut [0; 8], 1);
+        assert_eq!(pad.state(), super::State::Play);
+        super::reset_for_tests();
+    }
+
+    #[test]
+    fn overdub_places_delayed_capture_on_its_original_transport_position() {
+        use core::sync::atomic::Ordering;
+        let pad = super::Pad::new();
+        pad.len.store(16, Ordering::Release);
+        pad.touched.store(1, Ordering::Release);
+        pad.drain.store(5, Ordering::Release);
+        pad.set_state(super::State::Drain);
+        let mut samples = [0.0; 16];
+        super::process_take(&pad, super::State::Drain, &mut samples, &[0.0; 8], 0, 0);
+        super::process_take(&pad, super::State::Drain, &mut samples, &[0.5; 8], 4, 8);
+        assert_eq!(samples[0].to_bits(), 0.5_f32.to_bits());
+        assert_eq!(samples[3].to_bits(), 0.5_f32.to_bits());
+        assert_eq!(samples[4].to_bits(), 0.0_f32.to_bits());
+    }
+
+    #[test]
+    fn drain_times_out_if_capture_never_resumes() {
+        use core::sync::atomic::Ordering;
+        let pad = super::Pad::new();
+        pad.drain.store(20, Ordering::Release);
+        pad.drain_wait.store(super::RATE, Ordering::Release);
+        pad.set_state(super::State::Drain);
+        let mut samples = [0.0; 16];
+        super::process_take(&pad, super::State::Drain, &mut samples, &[0.0; 8], 0, 0);
+        assert_eq!(pad.drain.load(Ordering::Acquire), 12);
+    }
+
+    #[test]
+    fn drain_processes_only_the_remaining_tail() {
+        assert_eq!(super::drain_input_count(super::State::Drain, 10, 256), 10);
+        assert_eq!(super::drain_input_count(super::State::Dub, 10, 256), 256);
+    }
+
+    #[test]
     fn overdub_drain_publishes_its_metadata_with_the_state() {
         use super::{Pad, State, finish_pad};
         use core::sync::atomic::Ordering;
@@ -1426,7 +1552,7 @@ mod tests {
         assert_eq!(pad.drain.load(Ordering::Acquire), 321);
     }
 
-    /// The original step-by-step rule, kept as the oracle for [`snap`].
+    /// The step-by-step rule, kept as the oracle for [`snap`].
     fn reference(frames: u32, pulse: u32, max: u32) -> u32 {
         let max = u64::from(max);
         let mut multiple = frames.saturating_add(pulse / 2) / pulse;
@@ -1440,7 +1566,7 @@ mod tests {
         }
         while target > max && multiple > 1 {
             multiple -= 1;
-            target = u64::from(multiple) * u64::from(pulse);
+            target = target.saturating_sub(u64::from(pulse));
         }
         if target > max {
             target = (max / u64::from(pulse)) * u64::from(pulse);
@@ -1464,6 +1590,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn planar_stereo_keeps_right_channel_using_interleaved_mix() {
+        let left = [0];
+        let right = [i32::MAX];
+        assert_eq!(
+            super::planar_sample(&left, &right, 0).to_bits(),
+            super::s32_pair_to_f32(0, i32::MAX).to_bits()
+        );
+        assert!(super::planar_sample(&left, &right, 0) > 0.0);
+    }
+
+    #[test]
+    fn rounding_past_capacity_keeps_the_largest_fitting_pulse() {
+        assert_eq!(snap(349_000, 100_000, 352_800), 300_000);
     }
 
     #[test]

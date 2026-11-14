@@ -28,3 +28,6 @@ ztmp/
 *.so
 *.elf
 *.dylib
+
+# Local Codex runtime home (auth tokens); never committed
+codex-home/

@@ -14,12 +14,12 @@ static WAS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// The output tap: mix the preview and the loops into the block about to play.
 pub fn output(frames: &mut [i32], info: &OutputInfo) {
-    if frames.is_empty() || info.channels == 0 || info.block_frames == 0 {
+    if frames.is_empty() || info.channels() == 0 || info.block_frames() == 0 {
         return;
     }
     mix_preview(frames, info);
     if crate::backend::looper::looper_is_open() != 0 {
-        crate::backend::looper::looper_render_s32(frames, info.channels);
+        crate::backend::looper::looper_render_s32(frames, info.channels());
         measure_latency(info);
     }
 }
@@ -57,20 +57,20 @@ fn mix_preview(frames: &mut [i32], info: &OutputInfo) {
             // SAFETY: this is the single output audio callback, so it is the
             // only caller of the process-wide preview mixer.
             unsafe {
-                minimod_dsp::bass::preview_mix_slices(&mut [], 0, info.rate);
+                minimod_dsp::bass::preview_mix_slices(&mut [], 0, info.rate());
             }
         }
         return;
     }
-    let channels = info.channels;
+    let channels = info.channels();
     let count = channels.min(2);
-    if !(1..=8).contains(&channels) || info.block_frames * channels > frames.len() {
+    if !(1..=8).contains(&channels) || info.block_frames() * channels > frames.len() {
         return;
     }
     let mut planes = [0.0_f32; PREVIEW_CHUNK * 2];
     let mut done = 0;
-    while done < info.block_frames {
-        let length = (info.block_frames - done).min(PREVIEW_CHUNK);
+    while done < info.block_frames() {
+        let length = (info.block_frames() - done).min(PREVIEW_CHUNK);
         let (left, right) = planes.split_at_mut(PREVIEW_CHUNK);
         let left = &mut left[..length];
         let right = &mut right[..length];
@@ -80,7 +80,7 @@ fn mix_preview(frames: &mut [i32], info: &OutputInfo) {
         // SAFETY: this is the single output audio callback, the only caller of
         // the preview mixer; each slice holds `length` writable samples.
         let _ = unsafe {
-            minimod_dsp::bass::preview_mix_slices(&mut slices[..count], length, info.rate)
+            minimod_dsp::bass::preview_mix_slices(&mut slices[..count], length, info.rate())
         };
         let planes: [&[f32]; 2] = [slices[0], slices[1]];
         let start = done * channels;
@@ -98,7 +98,7 @@ fn mix_preview(frames: &mut [i32], info: &OutputInfo) {
 fn measure_latency(info: &OutputInfo) {
     let backlog = crate::backend::looper::looper_input_backlog();
     let (fallback, source) = info.latency(backlog, 0);
-    let input = if info.buffer_in > 0 {
+    let input = if info.buffer_in() > 0 {
         info.input_latency()
     } else {
         fallback

@@ -7,13 +7,13 @@
 //!
 //! The ladder is pure; the caller applies what it decides.
 
-pub use mpc_sample_sdk::event::cc::{
+pub(crate) use mpc_sample_sdk::event::cc::{
     DATA as CC_DATA, KNOB1 as CC_KNOB1, KNOB2 as CC_KNOB2, KNOB3 as CC_KNOB3, MASTER as CC_MASTER,
 };
 
 /// What the caller should do with the event.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Route {
+pub(crate) enum Route {
     /// Nothing for the mod: hand the event to the app.
     Pass,
     /// Drive the loops' master, then pass the event on.
@@ -26,42 +26,42 @@ pub enum Route {
 
 /// Which of the mod's screens are up.
 #[derive(Clone, Copy, Debug)]
-pub struct Screens {
+pub(crate) struct Screens {
     /// The looper view.
-    pub looper: bool,
+    pub(crate) looper: bool,
     /// The effects menu.
-    pub menu: bool,
+    pub(crate) menu: bool,
     /// The bass control page.
-    pub bass_edit: bool,
+    pub(crate) bass_edit: bool,
 }
 
 /// What the mod is busy with.
 #[derive(Clone, Copy, Debug)]
-pub struct Jobs {
+pub(crate) struct Jobs {
     /// A render or extract is running.
-    pub busy: bool,
+    pub(crate) busy: bool,
     /// A spectral chop is running.
-    pub spectral: bool,
+    pub(crate) spectral: bool,
 }
 
 /// Everything the ladder looks at.
 #[derive(Clone, Copy, Debug)]
-pub struct Context {
+pub(crate) struct Context {
     /// The controller number.
-    pub control: u16,
+    pub(crate) control: u16,
     /// The raw value.
-    pub value: u32,
+    pub(crate) value: u32,
     /// The knob's range, for controllers that report one.
-    pub range: f32,
+    pub(crate) range: f32,
     /// The screens that are up.
-    pub screens: Screens,
+    pub(crate) screens: Screens,
     /// What is running.
-    pub jobs: Jobs,
+    pub(crate) jobs: Jobs,
 }
 
 /// Decide what to do with one control-change event.
 #[must_use]
-pub fn route(context: Context) -> Route {
+pub(crate) fn route(context: Context) -> Route {
     if context.control == CC_MASTER {
         return Route::Master;
     }

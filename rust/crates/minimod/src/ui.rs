@@ -6,39 +6,26 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::backend::looper;
-use crate::buttons::{self, Action, Context, Held, Modals, OctaveKeys, Screens};
+use crate::buttons::{self, Action};
 use crate::page;
 use crate::paint;
 use crate::paint::show_toast;
+use mpc_sample_sdk::ButtonEvent;
 use mpc_sample_sdk::state::Global;
-use mpc_sample_sdk::{ButtonEvent, ButtonFlow};
 
 /// The app's CHOP key.
 pub use mpc_sample_sdk::event::button::CHOP as CHOP_KEY;
 /// A full press, as the app reports it.
 /// PLUS.
-use mpc_sample_sdk::event::button::PLUS as KEY_PLUS;
 /// The state the button entry point keeps.
 #[derive(Clone, Copy, Debug)]
 pub struct State {
-    /// SHIFT, tracked while the looper owns the pads.
-    pub shift: i32,
-    /// ERASE, likewise.
-    pub erase: i32,
     /// Which press of the trim cycle this is.
     pub trim_step: i32,
-    /// Whether the trim key went down already.
-    pub b3_down: i32,
-    /// PLUS held.
-    pub plus_held: i32,
-    /// MINUS held.
-    pub minus_held: i32,
     /// The 16 Levels octave shift.
     pub octave: i32,
     /// The synth preview shift, in eight-semitone steps.
     pub synth_octave: i32,
-    /// The current button event, passed to menu actions.
-    pub event: [u8; 16],
 }
 
 impl State {
@@ -46,15 +33,9 @@ impl State {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            shift: 0,
-            erase: 0,
             trim_step: 0,
-            b3_down: 0,
-            plus_held: 0,
-            minus_held: 0,
             octave: 0,
             synth_octave: 0,
-            event: [0; 16],
         }
     }
 }
@@ -65,263 +46,86 @@ impl Default for State {
     }
 }
 
-/// What the SDK should do with a button event.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Flow {
-    /// Hand the event to the app.
-    Forward,
-    /// Swallowed by the mod.
-    Consume,
-}
-
-/// The feature callbacks the button ladder uses.
-#[derive(Clone, Copy)]
-pub struct Hooks {
-    /// Toggle 16 Levels and keep the MIDI dispatcher in step.
-    pub toggle_levels: Option<fn()>,
-    /// Open the effects menu.
-    pub menu_open: Option<fn()>,
-    /// Close it.
-    pub menu_close: Option<fn()>,
-    /// Run the selected row, with the event that asked for it.
-    pub menu_activate: Option<fn(&[u8; 16])>,
-    /// Rename the soft key.
-    pub filter_text: Option<fn()>,
-    /// Keep the MIDI dispatcher in step with the visible mode.
-    pub midi_sync: Option<fn(i32)>,
-    /// Whether the 16 Levels screen is up.
-    pub levels_active: Option<fn() -> i32>,
-    /// Whether the Sample page is visible.
-    pub page_visible: Option<fn() -> bool>,
-    /// Whether the effects menu is open.
-    pub menu_open_state: Option<fn() -> bool>,
-    /// Whether a job is running.
-    pub busy_state: Option<fn() -> bool>,
-    /// Whether a spectral chop is running.
-    pub spectral_state: Option<fn() -> bool>,
-    /// Redraw the menu.
-    pub repaint: Option<fn()>,
-    /// Release every pad the app may think is held.
-    pub release_held: Option<fn()>,
-}
-
-/// One button event, handled.
-pub fn press(state: &mut State, event: &ButtonEvent, hooks: Hooks) -> Flow {
-    state.shift = i32::from(event.shift);
-    state.erase = i32::from(event.erase);
-    let code = event.code;
-    let down = event.value;
-    let pressed = event.pressed;
-    let levels = hooks.levels_active.map_or(0, |callback| callback());
-    if let Some(sync) = hooks.midi_sync {
-        sync(levels);
-    }
-    let page_visible = hooks.page_visible.is_some_and(|callback| callback());
-    let context = Context {
-        code,
-        down,
-        held: Held {
-            shift: state.shift != 0,
-        },
-        octave: OctaveKeys {
-            plus: state.plus_held != 0,
-            minus: state.minus_held != 0,
-        },
-        screens: Screens {
-            modals: Modals {
-                menu: hooks.menu_open_state.is_some_and(|callback| callback()),
-                spectral: hooks.spectral_state.is_some_and(|callback| callback()),
-            },
-            looper: looper::looper_is_open() != 0,
-            levels: levels != 0,
-            bass_edit: crate::menu::state().bass_edit != 0,
-        },
-        page_visible,
-        trim_screen: trim_screen(),
-        chop_mode: page_visible
-            && matches!(code, buttons::KEY_B3 | buttons::KEY_LEVELS)
-            && screen_chop_mode(),
-    };
-    let action = buttons::dispatch(context);
-    if context.screens.looper {
-        match action {
-            Action::Shift(on) => state.shift = i32::from(on),
-            Action::Erase(on) => state.erase = i32::from(on),
-            Action::Looper => {
+/// Apply the feature action selected by the input policy.
+///
+/// Returns true when closing the Live Looper also requires releasing app-owned
+/// pads. The caller performs those releases after this state borrow ends.
+pub(crate) fn apply_action(action: Action, event: ButtonEvent, last_pad: i32) -> bool {
+    let mut release_pads = false;
+    with_state_mut(|state| {
+        if looper::looper_is_open() != 0 {
+            if let Action::Looper = action {
                 let was = looper::looper_is_open() != 0;
                 let _ = looper::looper_button(
-                    code,
-                    i32::try_from(down).unwrap_or(0),
-                    state.shift,
-                    state.erase,
+                    event.code,
+                    i32::try_from(event.value).unwrap_or(0),
+                    i32::from(event.shift),
+                    i32::from(event.erase),
                 );
                 if was && looper::looper_is_open() == 0 {
                     crate::looper_lights::hide();
-                    state.shift = 0;
-                    state.erase = 0;
-                    crate::cc::save();
-                    if let Some(release) = hooks.release_held {
-                        release();
-                    }
-                    if let Some(repaint) = hooks.repaint {
-                        repaint();
-                    }
+                    crate::settings::save(looper::looper_master());
+                    minimod_repaint_screen();
+                    release_pads = true;
                 }
             }
-            _ => {}
+            return;
         }
-        return Flow::Consume;
-    }
-    // Menu actions may need the current button event.
-    remember(state, event.bytes);
-    apply(
-        state,
-        &Event {
-            code,
-            pressed,
-            action,
-            hooks,
-        },
-    );
-    flow(action)
-}
-
-/// Whether an action must also reach the app.
-const fn flow(action: Action) -> Flow {
-    match action {
-        Action::Forward | Action::Shift(_) | Action::ToggleLevels => Flow::Forward,
-        _ => Flow::Consume,
-    }
-}
-
-/// One event, as the decision saw it.
-#[derive(Clone, Copy)]
-struct Event {
-    code: u32,
-    pressed: bool,
-    action: Action,
-    hooks: Hooks,
-}
-
-/// Apply one decided action.
-fn apply(state: &mut State, event: &Event) {
-    let Event {
-        code,
-        pressed,
-        action,
-        hooks,
-    } = *event;
-    let bytes = state.event;
-    match action {
-        Action::MenuOpen | Action::MenuClose | Action::MenuActivate => menu(action, &bytes, hooks),
-        Action::Shift(on) => {
-            state.shift = i32::from(on);
-            if !pressed {
-                state.trim_step = 0;
-                state.b3_down = 0;
+        match action {
+            Action::MenuOpen => crate::menu::open_menu(),
+            Action::MenuClose => crate::menu::close_menu(),
+            Action::MenuActivate => crate::jobflow::menu_activate(&event.bytes, last_pad),
+            Action::Shift(on) => {
+                if !on {
+                    state.trim_step = 0;
+                }
+                crate::menu::filter_text();
             }
-            if let Some(text) = hooks.filter_text {
-                text();
-            }
-        }
-        Action::Autotrim => {
-            if pressed && state.b3_down == 0 {
-                let trimmed = crate::autotrim::run(crate::autotrim::Context {
+            Action::Autotrim => {
+                if crate::autotrim::run(crate::autotrim::Context {
                     surface: crate::control::surface(),
                     control: crate::control::control(),
                     step: state.trim_step,
-                    last_pad: crate::input::last_pad(),
-                });
-                if trimmed {
+                    last_pad,
+                }) {
                     state.trim_step = (state.trim_step + 1) % 4;
                 }
             }
-            state.b3_down = i32::from(pressed);
-        }
-        Action::BumpOctave(steps) => {
-            if code == KEY_PLUS {
-                state.plus_held = i32::from(pressed);
-            } else {
-                state.minus_held = i32::from(pressed);
+            Action::BumpOctave(steps) => {
+                if let Some((next, text)) = crate::levels::bump(state.octave, steps) {
+                    state.octave = next;
+                    show_toast(&text);
+                }
             }
-            if let Some((next, text)) = crate::levels::bump(state.octave, steps) {
-                state.octave = next;
-                show_toast(&text);
+            Action::ResetPitch => {
+                state.octave = 0;
+                show_toast("Pitch reset");
             }
-        }
-        Action::ResetPitch => {
-            if code == KEY_PLUS {
-                state.plus_held = i32::from(pressed);
-            } else {
-                state.minus_held = i32::from(pressed);
+            Action::BumpSynthOctave(steps) => {
+                if let Some((next, text)) = crate::levels::bump(state.synth_octave, steps) {
+                    state.synth_octave = next;
+                    crate::backend::bass::preview_set_transpose(
+                        next * crate::levels::SEMITONES_PER_STEP,
+                    );
+                    show_toast(&text);
+                    minimod_repaint_screen();
+                }
             }
-            state.octave = 0;
-            show_toast("Pitch reset");
-        }
-        Action::BumpSynthOctave(steps) => {
-            if code == KEY_PLUS {
-                state.plus_held = i32::from(pressed);
-            } else {
-                state.minus_held = i32::from(pressed);
-            }
-            if let Some((next, text)) = crate::levels::bump(state.synth_octave, steps) {
-                state.synth_octave = next;
-                crate::backend::bass::preview_set_transpose(
-                    next * crate::levels::SEMITONES_PER_STEP,
-                );
-                show_toast(&text);
+            Action::ResetSynthPitch => {
+                state.synth_octave = 0;
+                crate::backend::bass::preview_set_transpose(0);
+                show_toast("Pitch reset");
                 minimod_repaint_screen();
             }
+            Action::ToggleLevels => crate::midi::toggle_levels(last_pad),
+            Action::Forward
+            | Action::Consume
+            | Action::MenuEncoder
+            | Action::Erase(_)
+            | Action::Looper => {}
         }
-        Action::ResetSynthPitch => {
-            if code == KEY_PLUS {
-                state.plus_held = i32::from(pressed);
-            } else {
-                state.minus_held = i32::from(pressed);
-            }
-            state.synth_octave = 0;
-            crate::backend::bass::preview_set_transpose(0);
-            show_toast("Pitch reset");
-            minimod_repaint_screen();
-        }
-        Action::ToggleLevels => {
-            if let Some(toggle) = hooks.toggle_levels {
-                toggle();
-            }
-        }
-        Action::Forward
-        | Action::Consume
-        | Action::MenuEncoder
-        | Action::Erase(_)
-        | Action::Looper => {}
-    }
-}
-
-/// Run the selected menu row.
-fn menu(action: Action, event: &[u8; 16], hooks: Hooks) {
-    match action {
-        Action::MenuOpen => {
-            if let Some(callback) = hooks.menu_open {
-                callback();
-            }
-        }
-        Action::MenuClose => {
-            if let Some(callback) = hooks.menu_close {
-                callback();
-            }
-        }
-        Action::MenuActivate => {
-            if let Some(callback) = hooks.menu_activate {
-                callback(event);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Store the current button event for menu actions.
-fn remember(state: &mut State, bytes: [u8; 16]) {
-    state.event = bytes;
+    });
+    release_pads
 }
 
 /// The 16 Levels octave shift.
@@ -339,7 +143,12 @@ pub fn reset_synth_octave() {
 /// Whether SHIFT is held.
 #[must_use]
 pub fn shift() -> i32 {
-    state().shift
+    i32::from(mpc_sample_sdk::shift())
+}
+
+/// Track navigation to or from the trim page before classifying a button.
+pub fn set_trim_screen(trim: bool) {
+    TRIM_SCREEN.store(trim, Ordering::Release);
 }
 
 /// Whether the app is showing the trim screen.
@@ -351,7 +160,11 @@ pub fn trim_screen() -> bool {
 /// The state itself.
 static STATE: Global<State> = Global::new(State::new());
 /// Whether the app is showing the trim screen (its B3 label is `Filter`).
-static TRIM_SCREEN: AtomicBool = AtomicBool::new(false);
+///
+/// The app opens on the trim page, so this starts true; only the page keys move
+/// it. Guessing from a label callback alone left the shortcut dead after the
+/// app returned to the trim page on its own.
+static TRIM_SCREEN: AtomicBool = AtomicBool::new(true);
 
 /// A copy of the state, for the feature code.
 #[must_use]
@@ -368,14 +181,26 @@ pub fn with_state_mut<R>(f: impl FnOnce(&mut State) -> R) -> R {
     unsafe { STATE.with_mut(f) }
 }
 
-/// A changed chop view may only be restored with a fresh, unshifted button event.
+/// A changed chop view is restored on the completion, or by a fresh unshifted
+/// button event when the switch had not happened yet.
 static CHOP_RESTORE: Global<Option<(usize, bool)>> = Global::new(None);
-
-/// Remember a chop view changed by an extraction until the next user input.
-pub fn queue_chop_restore(screen: usize, before: bool, after: bool) {
+/// The most recent button event, kept for restoring a page mode after a job.
+///
+/// The app's button context is a long-lived object; [`restore_chop_now`]
+/// re-checks it is still live before replaying, and only on the page the event
+/// came from.
+static LAST_BUTTON: Global<([u8; 16], usize)> = Global::new(([0; 16], 0));
+/// Arm a chop restore for an extraction that started in full mode.
+///
+/// The app switches the page to chop mode on some extractions. That can happen
+/// while the native command runs or just after it returns, so the switch is not
+/// sampled here: the restore is armed from the mode the job *started* in, and
+/// the live mode is checked again when a safe button event arrives. A job that
+/// started in chop mode (the spectral chop) is left alone.
+pub fn queue_chop_restore(screen: usize, before: bool) {
     // SAFETY: the pending restoration belongs to the UI thread.
     unsafe {
-        CHOP_RESTORE.with_mut(|pending| *pending = (before != after).then_some((screen, before)));
+        CHOP_RESTORE.with_mut(|pending| *pending = (!before).then_some((screen, before)));
     };
 }
 
@@ -385,7 +210,17 @@ pub fn cancel_chop_restore() {
     unsafe { CHOP_RESTORE.with_mut(|pending| *pending = None) };
 }
 
-fn restore_pending_chop(event: &ButtonEvent) {
+/// Remember this button event for a later page-mode restore.
+pub fn note_button(event: &ButtonEvent) {
+    // SAFETY: the event and the page recorded by the paint hook are UI-thread
+    // state, and this callback owns them.
+    unsafe {
+        LAST_BUTTON.with_mut(|last| *last = (event.bytes, paint::screen()));
+    }
+}
+
+/// Restore the previous chop mode with this live, unshifted button event.
+pub fn restore_pending_chop(event: &ButtonEvent) {
     // SAFETY: the pending restoration belongs to the UI thread.
     let pending = unsafe { CHOP_RESTORE.with_mut(Option::take) };
     let Some((screen, before)) = pending else {
@@ -397,8 +232,44 @@ fn restore_pending_chop(event: &ButtonEvent) {
     // SAFETY: the current callback and page supply live native objects.
     if unsafe { page::visible(screen) && page::chop_mode(screen) != before } {
         // SAFETY: these bytes belong to the current button callback.
-        let _ = unsafe { mpc_sample_sdk::sites::replay_button(&event.bytes, CHOP_KEY) };
+        let _ = unsafe { mpc_sample_sdk::event::replay_button(&event.bytes, CHOP_KEY) };
     }
+}
+
+/// Put the chop mode back right after a finished job, without waiting for the
+/// next button.
+///
+/// Runs from the job's completion on the UI thread. The event bytes come from
+/// the last button press on this page; the SDK re-checks that their context is
+/// still a live app object before replaying, and the page and mode are checked
+/// again here.
+pub fn restore_chop_now() {
+    // SAFETY: the pending restoration is UI-thread state, written only here and
+    // in the arming call on the same thread.
+    let pending = unsafe { CHOP_RESTORE.with(|pending| *pending) };
+    let Some((screen, before)) = pending else {
+        return;
+    };
+    // SAFETY: `screen` is the page the job ran on and this is its UI thread.
+    if paint::screen() != screen || !unsafe { page::visible(screen) } {
+        return;
+    }
+    // SAFETY: the page is live on this thread.
+    if unsafe { page::chop_mode(screen) } == before {
+        // The app has not switched (yet); keep the restore for the next input.
+        return;
+    }
+    // SAFETY: the recorded event is UI-thread state.
+    let (bytes, event_screen) = unsafe { LAST_BUTTON.with(|last| *last) };
+    if event_screen != screen {
+        return;
+    }
+    // SAFETY: the same UI-thread state, and this is the only consumer.
+    let taken = unsafe { CHOP_RESTORE.with_mut(Option::take) };
+    debug_assert!(taken.is_some());
+    // SAFETY: the bytes came from this page and the SDK proves the event's
+    // context is still a live app object before calling the dispatcher.
+    let _ = unsafe { mpc_sample_sdk::event::replay_button_live(&bytes, CHOP_KEY) };
 }
 
 fn may_restore_chop(shift: bool, code: u32, original_screen: usize, screen: usize) -> bool {
@@ -428,6 +299,12 @@ pub fn request_repaint() {
 #[must_use]
 pub fn pump_component() -> usize {
     if looper::looper_is_open() != 0 {
+        return current_component();
+    }
+    // A running job is finalized from the paint hook only, and the worker's one
+    // request can be dropped or coalesced by the app while it is busy; keep
+    // asking for frames so the menu cannot wait for a frame that never comes.
+    if crate::jobflow::running() {
         return current_component();
     }
     if REPAINT_REQUESTED.swap(false, Ordering::AcqRel) {
@@ -460,56 +337,6 @@ pub fn screen_chop_mode() -> bool {
     unsafe { page::chop_mode(paint::screen()) }
 }
 
-/// Whether a spectral chop is running.
-#[must_use]
-pub fn spectral_state() -> bool {
-    crate::spectral::is_active()
-}
-
-/// The feature callbacks the button ladder uses.
-pub fn hooks() -> Hooks {
-    Hooks {
-        toggle_levels: Some(crate::midi::toggle_levels),
-        menu_open: Some(crate::menu::open_menu),
-        menu_close: Some(crate::menu::close_menu),
-        menu_activate: Some(crate::jobflow::menu_activate),
-        filter_text: Some(crate::menu::filter_text),
-        midi_sync: Some(crate::midi::set_on),
-        levels_active: Some(crate::midi::levels_active),
-        page_visible: Some(screen_visible),
-        menu_open_state: Some(crate::menu::is_open),
-        busy_state: Some(crate::menu::is_busy),
-        spectral_state: Some(spectral_state),
-        repaint: Some(minimod_repaint_screen),
-        release_held: Some(crate::input::release_held),
-    }
-}
-
-/// The button entry: run the ladder and tell the SDK whether to forward.
-#[must_use]
-pub fn button(event: ButtonEvent) -> ButtonFlow {
-    restore_pending_chop(&event);
-    // The first soft key enters the trim screen; SAMPLE and the other screen
-    // soft keys leave it. The label `Filter` can also arm the flag.
-    if event.value == buttons::PRESSED {
-        if event.code == buttons::KEY_SCREEN1 {
-            TRIM_SCREEN.store(true, Ordering::Release);
-        } else if buttons::leaves_trim_screen(event.code) {
-            TRIM_SCREEN.store(false, Ordering::Release);
-        }
-    }
-    let hooks = hooks();
-    if event.surface != 0 {
-        crate::input::set_data_target(mpc_sample_sdk::event::data_target(event.surface));
-    }
-    // SHIFT and 16 LEVELS are the app's own keys: the mod tracks the mode, but
-    // the app must still see the press and release or it never toggles its UI.
-    with_state_mut(|state| match press(state, &event, hooks) {
-        Flow::Forward => ButtonFlow::Forward,
-        Flow::Consume => ButtonFlow::Consume,
-    })
-}
-
 /// The soft key's label: rename `Filter` to `AutoTrim` while SHIFT is held.
 #[must_use]
 pub fn label(label: &core::ffi::CStr) -> Option<&'static core::ffi::CStr> {
@@ -532,18 +359,27 @@ mod tests {
     #[test]
     fn a_fresh_state_holds_nothing() {
         let state = State::new();
-        assert_eq!(state.shift, 0);
-        assert_eq!(state.erase, 0);
         assert_eq!(state.trim_step, 0);
-        assert_eq!(state.event.len(), 16);
+        assert_eq!(state.octave, 0);
+        assert_eq!(state.synth_octave, 0);
     }
 
     #[test]
-    fn chop_restore_is_scoped_to_a_changed_extraction_and_safe_input() {
-        queue_chop_restore(123, false, false);
-        // SAFETY: this test is the only test accessing the pending restoration.
-        assert_eq!(unsafe { CHOP_RESTORE.with(|pending| *pending) }, None);
-        queue_chop_restore(123, false, true);
+    fn a_job_that_started_in_full_mode_is_restored_without_sampling_the_switch() {
+        // An extraction can switch the page after the native call returns, so
+        // arming must not depend on observing the change here.
+        queue_chop_restore(123, false);
+        // SAFETY: this test exclusively accesses the pending restoration.
+        let armed = unsafe { CHOP_RESTORE.with(|pending| *pending) };
+        assert_eq!(armed, Some((123, false)));
+        queue_chop_restore(123, true);
+        // SAFETY: this test exclusively accesses the pending restoration.
+        let inside_chop = unsafe { CHOP_RESTORE.with(|pending| *pending) };
+        assert_eq!(
+            inside_chop, None,
+            "a job started inside chop mode must not toggle it off"
+        );
+        queue_chop_restore(123, false);
         // SAFETY: this test exclusively accesses the pending restoration.
         let pending = unsafe { CHOP_RESTORE.with(|pending| *pending) };
         assert_eq!(pending, Some((123, false)));
@@ -559,22 +395,7 @@ mod tests {
         assert!(may_restore_chop(false, 42, 123, 123));
         cancel_chop_restore();
         // SAFETY: this test exclusively accesses the pending restoration.
-        assert_eq!(unsafe { CHOP_RESTORE.with(|pending| *pending) }, None);
-    }
-}
-
-#[cfg(test)]
-mod forwarding_tests {
-    use super::{Action, Flow, flow};
-
-    #[test]
-    fn the_app_keeps_shift_and_16_levels() {
-        assert_eq!(flow(Action::Forward), Flow::Forward);
-        assert_eq!(flow(Action::Shift(true)), Flow::Forward);
-        assert_eq!(flow(Action::ToggleLevels), Flow::Forward);
-        assert_eq!(flow(Action::BumpOctave(1)), Flow::Consume);
-        assert_eq!(flow(Action::BumpSynthOctave(1)), Flow::Consume);
-        assert_eq!(flow(Action::ResetSynthPitch), Flow::Consume);
-        assert_eq!(flow(Action::Autotrim), Flow::Consume);
+        let cleared = unsafe { CHOP_RESTORE.with(|pending| *pending) };
+        assert_eq!(cleared, None);
     }
 }
