@@ -27,6 +27,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--lab', type=Path, required=True)
     parser.add_argument('--boots', type=int, default=1)
+    parser.add_argument('--ready', action='store_true', help='use the already initialized app for the first run')
     parser.add_argument('--library', type=Path, default=ROOT / 'build/minimod.so')
     parser.add_argument('--mapfile', type=Path, default=ROOT / 'build/minimod.map')
     args = parser.parse_args()
@@ -49,7 +50,7 @@ def main():
                                      headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=5) as response:
             assert json.load(response)['ok']
-        time.sleep(.02)
+        time.sleep(.04)
     def tap(name):
         control(name, 'press', 100)
         control(name, 'release')
@@ -74,7 +75,8 @@ def main():
     expected = [264, 14187, 30059, 45419, 54635]
     expected_pairs = list(zip(expected, expected[1:] + [62259]))
     for boot in range(args.boots):
-        ssh('systemctl restart ac50')
+        if boot or not args.ready:
+            ssh('systemctl restart ac50')
         # The app needs about half a minute to come up; wait for it to map the mod.
         deadline = time.monotonic() + 90
         while True:

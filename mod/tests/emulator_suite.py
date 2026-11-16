@@ -61,7 +61,7 @@ def cases_for(lab_path, panel):
     cases = [
         ('menu', 'populated', 'emulator_menu.py', ['--panel', panel]),
         ('autotrim', 'populated', 'emulator_autotrim.py', ['--lab', str(lab_path), '--pad', '1']),
-        ('spectral', 'populated', 'emulator_spectral.py', ['--lab', str(lab_path), '--boots', '1']),
+        ('spectral', 'populated', 'emulator_spectral.py', ['--lab', str(lab_path), '--ready']),
         ('hpss', 'populated', 'emulator_hpss.py', ['--lab', str(lab_path), '--panel',
                                      panel]),
         ('reverb', 'populated', 'emulator_reverb.py', ['--lab', str(lab_path), '--panel',
@@ -258,8 +258,7 @@ def main():
         stop_app()
         ssh(f'mkdir -p /data/TempProjects && cp -a {shlex.quote(source + "/Temp-Project.xpj")} {shlex.quote(PROJECT)} && '
             f'rm -rf {shlex.quote(PROJECT_DATA)} && '
-            f'cp -a {shlex.quote(source + "/Temp-Project_[ProjectData]")} {shlex.quote(PROJECT_DATA)} && '
-            "sync")
+            f'cp -a {shlex.quote(source + "/Temp-Project_[ProjectData]")} {shlex.quote(PROJECT_DATA)}')
         start_and_wait()
 
     def configure_midi_input():
@@ -342,7 +341,7 @@ def main():
             case_start = time.monotonic()
             try:
                 install_startup_project(startup_project)
-                # Let the Sample page finish painting before panel keys are sent.
+                # The screen pointer is ready before the panel accepts input.
                 time.sleep(.6)
                 if name == 'midi_chromatic' or (Path(script).is_absolute() and case_settings(Path(script)).get('MIDI_INPUT', False)):
                     configure_midi_input()

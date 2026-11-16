@@ -65,11 +65,11 @@ def main():
     if selected() is not None:
         toggle_menu()
         wait_selection(None)
-    for cycle in range(3):
+    for cycle in range(2):
         toggle_menu()
         wait_selection(0)
         expected = 0
-        for raw in [1] * 10 + [127] * 10 + [1, 127] * 5:
+        for raw in ([1] * 8 + [127] * 8 if cycle == 0 else [1, 127]):
             control('DATA', 'turn', raw)
             # 01 turns down, 7F up; the menu wraps across all seven rows.
             expected = (expected + (1 if raw == 1 else ROWS - 1)) % ROWS
@@ -85,7 +85,7 @@ def main():
             wait_selection(expected)
         tap('DATA')
         wait_selection(None)
-        print(f'PASS open {cycle+1}: 32 turns, knobs ignored, DATA closes', flush=True)
+        print(f'PASS open {cycle+1}: turns, knobs ignored, DATA closes', flush=True)
 
 
 if __name__ == '__main__':

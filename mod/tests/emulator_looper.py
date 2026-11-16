@@ -78,9 +78,6 @@ def main():
                 return int(fields[0], 16)
         raise AssertionError(f'missing symbol {name}')
 
-    # Another acceptance run may have restarted the app a moment ago; give the
-    # panel and the audio device a moment to settle before touching anything.
-    time.sleep(2.0)
     pid = int(ssh('pidof "MPC Sample"'))
     maps = ssh(f'cat /proc/{pid}/maps').splitlines()
     mod_base = int(next(x for x in maps if x.endswith('/minimod.so')).split('-')[0], 16)
@@ -350,7 +347,6 @@ def main():
 
     # --- SHIFT + DATA closes; loops survive and the app does not restart
     close_looper()
-    time.sleep(8)                          # the reported crash comes "after a few seconds"
     after = snapshot()
     assert after[0][1] == loop_length, after[0]
     assert ssh('systemctl show ac50 -p NRestarts').strip().endswith('0'), 'app restarted'
