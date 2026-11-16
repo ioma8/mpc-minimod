@@ -1,3 +1,6 @@
+# /// script
+# requires-python = ">=3.10"
+# ///
 """Render a Bass C2 on a zero-sample project already open in the emulator.
 
 Start the mod with Sample Mode visible and an empty project loaded. The test
@@ -38,7 +41,7 @@ def main():
             headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(request, timeout=5) as response:
             assert json.load(response)['ok']
-        time.sleep(.15)
+        time.sleep(.04 if action in ('press', 'release') else .02)
 
     def tap(name):
         control(name, 'press', 100)
@@ -63,19 +66,28 @@ def main():
     def qword(address):
         return int.from_bytes(read(address, 8), 'little')
 
+    def qwords(addresses):
+        if not addresses:
+            return []
+        reads = '; '.join(
+            f'dd if=/proc/{pid}/mem bs=1 skip={address} count=8 2>/dev/null'
+            for address in addresses)
+        data = ssh(reads)
+        assert len(data) == 8 * len(addresses), 'firmware exited or memory read failed'
+        return struct.unpack('<' + 'Q' * len(addresses), data)
+
     surface = qword(base + symbols['g_surface'])
     first, end = qword(surface + 0x2808), qword(surface + 0x2810)
     assert first and end - first >= 128 * 8, 'pad table unavailable'
 
     def populated():
-        result = []
-        for pad in range(128):
-            state = qword(first + 8 * pad)
-            if state:
-                layers = qword(state + 0x22e8)
-                if layers and qword(layers + 0x4a8):
-                    result.append(pad)
-        return result
+        states = struct.unpack('<128Q', read(first, 128 * 8))
+        active = [(pad, state) for pad, state in enumerate(states) if state]
+        layers = qwords([state + 0x22e8 for _, state in active])
+        samples = qwords([layer + 0x4a8 for layer in layers if layer])
+        sample_index = iter(samples)
+        return [pad for (pad, _), layer in zip(active, layers)
+                if layer and next(sample_index)]
 
     assert not populated(), 'test requires all pads empty'
     tap(f'PAD {args.pad}')
@@ -93,9 +105,9 @@ def main():
         status = read(status_address, 96).split(b'\0', 1)[0].decode()
         if status == 'Synth: copy created':
             break
-        time.sleep(.2)
+        time.sleep(.05)
     assert status == 'Synth: copy created', status
-    time.sleep(1.5)  # Let the menu close and the Sample page repaint.
+    time.sleep(.2)  # Let the menu close and the Sample page repaint.
     panel_screen.assert_no_modal(args.panel, 'Synth')
     screen = qword(base + symbols['g_screen'])
     state = qword(qword(screen + 0x178) + 0x60)

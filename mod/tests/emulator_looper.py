@@ -1,3 +1,6 @@
+# /// script
+# requires-python = ">=3.10"
+# ///
 """Live looper acceptance: record from the selected input, play, overdub, sync.
 
 Requires the virtual MPC lab with a build of this mod preloaded, on the Sample
@@ -53,7 +56,7 @@ def main():
                                          headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(request, timeout=5) as response:
             assert json.load(response)['ok']
-        time.sleep(0.08)
+        time.sleep(0.02)
 
     def tap(name):
         control(name, 'press', 100)
@@ -65,7 +68,7 @@ def main():
                                          headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(request, timeout=5) as response:
             response.read()
-        time.sleep(0.15)
+        time.sleep(0.05)
 
     def symbol(name):
         for line in subprocess.check_output(['nm', '-a', str(ROOT / 'build/minimod.elf')],

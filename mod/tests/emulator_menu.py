@@ -1,3 +1,7 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["pillow"]
+# ///
 """Check every DATA turn through the real panel, including repeated menu opens.
 
 The SAMPLE OPTIONS menu has seven rows; row geometry is measured from the
@@ -24,7 +28,10 @@ def main():
             headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=5) as response:
             assert json.load(response)['ok']
-        time.sleep(.04)
+        # Keep button press/release pairs long enough for the firmware loop;
+        # encoder turns are confirmed by the selected-row poll below.
+        delay = .08 if action == 'turn' else .04 if action in ('press', 'release') else .02
+        time.sleep(delay)
     def tap(name):
         control(name, 'press', 100)
         control(name, 'release')
@@ -49,7 +56,7 @@ def main():
             value = selected()
             if value == want:
                 return
-            time.sleep(.03)
+            time.sleep(.01)
         raise AssertionError(f'Expected menu item {want}, observed {value}')
     def toggle_menu():
         control('SHIFT', 'press', 127)
@@ -61,8 +68,6 @@ def main():
     for cycle in range(3):
         toggle_menu()
         wait_selection(0)
-        # Let unrelated property updates run before the first detent.
-        time.sleep(.5)
         expected = 0
         for raw in [1] * 10 + [127] * 10 + [1, 127] * 5:
             control('DATA', 'turn', raw)
@@ -71,7 +76,7 @@ def main():
             wait_selection(expected)
         for knob in ('K1', 'K2', 'K3', 'FADER'):
             control(knob, 'set', 64)
-            time.sleep(.1)
+            time.sleep(.02)
             assert selected() == expected, f'{knob} moved the menu'
         # Close through DATA to exercise button ownership as well as rotation.
         while expected != ROWS - 1:      # Close is the last row

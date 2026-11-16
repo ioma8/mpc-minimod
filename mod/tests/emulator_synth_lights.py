@@ -1,3 +1,6 @@
+# /// script
+# requires-python = ">=3.10"
+# ///
 """Check the synth page's purple chromatic pad gradient in the emulator.
 
 Pad 1 is off, pad 16 is full brightness, and every pad shares the same purple
@@ -14,17 +17,15 @@ PADS = 16
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--lab', default='/Users/jakubkolcar/projects/customs/virtual-mpc-sample')
     parser.add_argument('--panel', default='http://127.0.0.1:8765')
     args = parser.parse_args()
-    del args.lab
 
     def control(name, action, value=0):
         body = json.dumps({'name': name, 'action': action, 'value': value}).encode()
         request = urllib.request.Request(args.panel + '/control', data=body,
                                          headers={'Content-Type': 'application/json'})
         urllib.request.urlopen(request, timeout=5).read()
-        time.sleep(.12)
+        time.sleep(.04 if action in ('press', 'release') else .02)
 
     def tap(name):
         control(name, 'press', 100)
@@ -34,6 +35,15 @@ def main():
         with urllib.request.urlopen(args.panel + '/state', timeout=5) as reply:
             state = json.load(reply)
         return {int(k): v for k, v in state['pads'].items()}
+
+    def wait_for_pads(predicate, description, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            current = pads()
+            if predicate(current):
+                return current
+            time.sleep(.05)
+        raise AssertionError(f'{description} did not appear on the panel')
 
     tap('SAMPLE')
     time.sleep(.6)
@@ -83,8 +93,10 @@ def main():
     lit = pads()
     assert lit[0] == [0, 0, 0], f'second open pad 1: {lit[0]}'
     tap('DATA')
-    time.sleep(5.0)
-    rendered = pads()
+    rendered = wait_for_pads(
+        lambda state: state[0] != [0, 0, 0]
+        and state[PADS - 1] != [77, 24, 127],
+        'rendered pad lighting')
     assert rendered[0] != [0, 0, 0], f'pad 1 still off after render: {rendered[0]}'
     assert rendered[PADS - 1] != [77, 24, 127],         f'pad 16 still full purple after render: {rendered[PADS - 1]}'
 

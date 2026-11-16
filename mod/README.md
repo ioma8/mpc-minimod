@@ -132,9 +132,9 @@ To unload: reboot, or delete `autorun` from the card.
 
 ```sh
 cd ~/projects/customs/virtual-mpc-sample
-MPCLAB_PORT_OFFSET=100 python3 lab.py run            # HVF, panel on :8865
-MPCLAB_PORT_OFFSET=100 python3 lab.py preload /path/to/mod/build/minimod.so
-MPCLAB_PORT_OFFSET=100 python3 lab.py ssh 'tail -f /run/minimod.log'
+MPCLAB_PORT_OFFSET=100 uv run --script lab.py run            # HVF, panel on :8865
+MPCLAB_PORT_OFFSET=100 uv run --script lab.py preload /path/to/mod/build/minimod.so
+MPCLAB_PORT_OFFSET=100 uv run --script lab.py ssh 'tail -f /run/minimod.log'
 ```
 
 Release builds run the fixed hook set and honour **no** environment switch except

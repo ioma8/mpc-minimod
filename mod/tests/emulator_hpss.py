@@ -1,3 +1,6 @@
+# /// script
+# requires-python = ">=3.10"
+# ///
 """Run the HPSS split from SAMPLE OPTIONS and check both pads were created.
 
 Requires the virtual MPC lab, the mod preloaded, and a sample loaded on the
@@ -51,7 +54,6 @@ def main():
                 return int(fields[0], 16)
         raise AssertionError(f'missing symbol {name}')
 
-    time.sleep(2.0)
     pid = int(ssh('pidof "MPC Sample"'))
     maps = ssh(f'cat /proc/{pid}/maps').decode()
     base = int(next(line for line in maps.splitlines()
@@ -84,13 +86,13 @@ def main():
     while time.monotonic() < deadline:
         if status() and not busy():
             break
-        time.sleep(.5)
+        time.sleep(.1)
     result = status()
     # The mod sets this string only after *both* extracts reported an assigned
     # pad, so it is the action's own end-to-end assertion.
     assert result == 'HPSS: harmonic + percussive created', f'unexpected result: {result!r}'
     # The status string is the mod's own; the app reports its own failures on screen.
-    time.sleep(1.5)
+    time.sleep(.2)
     panel_screen.assert_no_modal(args.panel, 'HPSS')
     assert int(ssh('pidof "MPC Sample"')) == pid, 'firmware restarted'
     assert ssh('systemctl show ac50 -p NRestarts').decode().strip() == restarts

@@ -17,6 +17,8 @@ pub const MAX_SLICES: usize = 16;
 const MARKER_DEADLINE_MS: i64 = 3_000;
 /// How long the app may take to show Manual chop before verification.
 const VERIFY_DELAY_MS: i64 = 150;
+/// Native mode changes rebuild the slice model asynchronously.
+const MANUAL_SETTLE_MS: i64 = 300;
 
 /// What the caller should do after a step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,9 +47,11 @@ struct Machine {
     count: u32,
     positions: [u32; MAX_SLICES],
     previous: chop::Snapshot,
+    observed: chop::Snapshot,
     previous_kind: i32,
     phase: u8,
     deadline: i64,
+    settle_at: i64,
 }
 
 /// The run in flight.
@@ -98,10 +102,12 @@ pub fn begin(now: i64, selected: &selection::Selection, detected: &[u32]) -> Ste
                 rate: selected.rate(),
                 count,
                 positions,
+                observed: previous.clone(),
                 previous,
                 previous_kind: chop::chop_kind(selected.screen()),
                 phase: 0,
                 deadline: now + MARKER_DEADLINE_MS,
+                settle_at: 0,
             });
         });
     }
@@ -155,10 +161,12 @@ fn advance(now: i64, running: &mut Machine) -> Step {
             return Step::Failed("cannot select Manual chop");
         }
         running.phase = 1;
+        running.settle_at = now + MANUAL_SETTLE_MS;
         running.deadline = now + MARKER_DEADLINE_MS;
         return Step::Continue;
     }
     if chop::chop_kind(running.screen) != 0 {
+        running.settle_at = now + MANUAL_SETTLE_MS;
         return if now >= running.deadline {
             Step::Failed("Manual chop did not open")
         } else {
@@ -166,6 +174,20 @@ fn advance(now: i64, running: &mut Machine) -> Step {
         };
     }
     if running.phase == 1 {
+        if now >= running.deadline {
+            return Step::Failed("slice model did not settle");
+        }
+        let Some(current) = chop::Snapshot::read(running.sample) else {
+            running.settle_at = now + MANUAL_SETTLE_MS;
+            return Step::Continue;
+        };
+        if current != running.observed {
+            running.observed = current;
+            running.settle_at = now + MANUAL_SETTLE_MS;
+        }
+        if now < running.settle_at {
+            return Step::Continue;
+        }
         // SAFETY: the sample and page are the live objects captured when the
         // chop started, on this UI thread.
         if !unsafe {

@@ -1,3 +1,6 @@
+# /// script
+# requires-python = ">=3.10"
+# ///
 """Check the synth page's PLUS/MINUS eight-semitone shift.
 
 The page starts at 0, PLUS adds 8 semitones, MINUS subtracts 8, the shift
@@ -16,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--lab', default='/Users/jakubkolcar/projects/customs/virtual-mpc-sample')
+    parser.add_argument('--lab', required=True)
     parser.add_argument('--panel', default='http://127.0.0.1:8765')
     args = parser.parse_args()
     import sys
@@ -72,7 +75,7 @@ def main():
         request = urllib.request.Request(args.panel + '/control', data=body,
                                          headers={'Content-Type': 'application/json'})
         urllib.request.urlopen(request, timeout=5).read()
-        time.sleep(.12)
+        time.sleep(.04 if action in ('press', 'release') else .02)
 
     def tap(name):
         control(name, 'press', 100)

@@ -1,3 +1,6 @@
+# /// script
+# requires-python = ">=3.10"
+# ///
 """Verify native sample effects through SAMPLE OPTIONS and native Extract.
 
 Requires a running virtual-mpc-sample lab with the Sample page visible and the
@@ -45,7 +48,7 @@ def main():
             assert json.load(response)['ok']
         # Give the firmware event loop time to consume each MIDI event. The
         # control endpoint acknowledges transport delivery, not UI handling.
-        time.sleep(.2)
+        time.sleep(.04 if action in ('press', 'release') else .02)
 
     def tap(name):
         control(name, 'press', 100)
@@ -96,7 +99,7 @@ def main():
     screen = qword(mod_base + symbol('g_screen'))
     assert qword(screen) == app_base + 0x6e212a0, 'Sample page must be visible'
     tap('PAD 1')          # the action runs on the selected pad; select before modelling
-    time.sleep(.4)
+    time.sleep(.15)
     binding = qword(screen + 0x178)
     state = qword(binding + 0x60)
     sample = qword(qword(state + 0x22e8) + 0x4a8)
@@ -134,7 +137,7 @@ def main():
     busy_addr = mod_base + symbol('g_menu') + 4  # busy is the second i32
     status = ''
     for _ in range(20):
-        time.sleep(.25)
+        time.sleep(.1)
         status = memory(status_addr, 96).split(b'\0', 1)[0].decode(errors='replace')
         busy = int.from_bytes(memory(busy_addr, 4), 'little', signed=True)
         if status == f'{title}: copy created' and not busy:
@@ -142,7 +145,7 @@ def main():
         if status.startswith(title + ':') and not status.startswith('Processing ') and not busy:
             raise AssertionError(status)
     assert status == f'{title}: copy created', f'Unexpected result: {status}'
-    time.sleep(1.5)
+    time.sleep(.2)
     panel_screen.assert_no_modal(args.panel, title)
 
     current = output_hashes()

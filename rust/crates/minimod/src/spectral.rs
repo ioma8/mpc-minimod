@@ -19,6 +19,10 @@ use crate::status;
 const DEADLINE_MS: i64 = 3_000;
 /// How long the worker may take to read and analyse the sample.
 const DETECT_TIMEOUT_MS: i64 = 30_000;
+/// Native Chop transitions schedule model updates after the view appears.
+const CHOP_SETTLE_MS: i64 = 300;
+/// Let the firmware complete the 16 Levels exit before opening Chop.
+const LEVELS_EXIT_MS: i64 = 150;
 
 /// What the chop is doing.
 #[derive(Clone, Copy, Debug, Default)]
@@ -29,10 +33,16 @@ pub struct State {
     pub phase: i32,
     /// Waiting for the initiating DATA release before opening Chop.
     pub open_pending: bool,
+    /// Button release retained while 16 Levels closes.
+    pub pending_button: [u8; 16],
+    /// Earliest time to replay the saved button.
+    pub open_after: i64,
     /// How many slices the pad ended up with.
     pub slices: i32,
     /// When the current phase gives up, in milliseconds.
     pub deadline: i64,
+    /// Earliest time the native Chop view may be used.
+    pub settle_at: i64,
     /// The screen it started on.
     pub screen: usize,
     /// The page state it started with.
@@ -91,6 +101,9 @@ pub fn start(state: &mut State, selected: Selection, busy: bool, open_pending: b
     state.active = 1;
     state.phase = 0;
     state.open_pending = open_pending;
+    state.pending_button = [0; 16];
+    state.open_after = 0;
+    state.settle_at = 0;
     state.slices = 0;
     state.deadline = crate::clock::now_ms() + DETECT_TIMEOUT_MS;
     state.screen = selected.screen();
@@ -215,6 +228,22 @@ pub fn tick(state: &mut State, menu_state: &mut menu::State, hooks: Hooks) {
     if state.active != 1 {
         return;
     }
+    if state.open_after != 0 {
+        if crate::clock::now_ms() < state.open_after {
+            crate::ui::request_repaint();
+            return;
+        }
+        state.open_after = 0;
+        // SAFETY: the saved event belongs to the active Sample page; the SDK
+        // checks that its context is still a live native object.
+        if !unsafe {
+            mpc_sample_sdk::event::replay_button_live(&state.pending_button, crate::ui::CHOP_KEY)
+        } {
+            finish(state, menu_state, hooks, Some("cannot open Chop"));
+            return;
+        }
+        state.open_pending = false;
+    }
     if state.phase == 0 {
         poll_detection(state, menu_state, hooks);
         return;
@@ -282,11 +311,19 @@ fn start_ready(state: &mut State, menu_state: &mut menu::State, hooks: Hooks) {
     }
     // SAFETY: the active run keeps the Sample page on its UI thread.
     if !unsafe { crate::page::chop_mode(state.screen) } {
+        state.settle_at = 0;
         if now > state.deadline {
             finish(state, menu_state, hooks, Some("Chop did not open"));
         } else {
             crate::ui::request_repaint();
         }
+        return;
+    }
+    if state.settle_at == 0 {
+        state.settle_at = now + CHOP_SETTLE_MS;
+    }
+    if now < state.settle_at {
+        crate::ui::request_repaint();
         return;
     }
     let ready = READY.lock().unwrap_or_else(PoisonError::into_inner).take();
@@ -346,8 +383,11 @@ static G_SPECTRAL: Global<State> = Global::new(State {
     active: 0,
     phase: 0,
     open_pending: false,
+    pending_button: [0; 16],
+    open_after: 0,
     slices: 0,
     deadline: 0,
+    settle_at: 0,
     screen: 0,
     page_state: 0,
     sample: 0,
@@ -419,13 +459,10 @@ pub fn run_start(busy: bool, event: &[u8; 16], last_pad: i32) -> bool {
             }
         }
     }
-    LIVE_ACTIVE.store(true, Ordering::Release);
     // SAFETY: `G_SPECTRAL` is owned by the app's UI thread.
     let started =
         unsafe { G_SPECTRAL.with_mut(|state| start(state, selected, busy, open_pending)) };
-    if !started {
-        LIVE_ACTIVE.store(false, Ordering::Release);
-    }
+    LIVE_ACTIVE.store(started, Ordering::Release);
     if started {
         crate::ui::minimod_repaint_screen();
     }
@@ -446,14 +483,16 @@ pub fn on_button(event: &mpc_sample_sdk::ButtonEvent) {
         fail_pending("release SHIFT; retry");
         return;
     }
-    // SAFETY: the state belongs to this UI callback; no borrow crosses replay.
-    unsafe { G_SPECTRAL.with_mut(|state| state.open_pending = false) };
-    // SAFETY: these bytes came from this live button callback.
-    if unsafe { mpc_sample_sdk::event::replay_button(&event.bytes, crate::ui::CHOP_KEY) } {
-        crate::ui::request_repaint();
-    } else {
-        fail_pending("cannot open Chop");
+    // The press that closed 16 Levels can return before its view has exited.
+    // Save the release and replay it after the transition on the UI thread.
+    // SAFETY: this state belongs to the current UI callback.
+    unsafe {
+        G_SPECTRAL.with_mut(|state| {
+            state.pending_button = event.bytes;
+            state.open_after = crate::clock::now_ms() + LEVELS_EXIT_MS;
+        });
     }
+    crate::ui::request_repaint();
 }
 
 fn fail_pending(message: &str) {

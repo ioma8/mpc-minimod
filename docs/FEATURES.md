@@ -384,20 +384,15 @@ cd mod
 cd ../rust && ./check.sh         # fmt, clippy, rustdoc, unit tests, golden DSP fixtures, aarch64 build
 ```
 
-Emulator scenarios need the sibling `virtual-mpc-sample` checkout and a preloaded
-library (`lab.py preload <repo>/mod/build/minimod.so`). Run each from a fresh
-`systemctl restart ac50` in the guest: while SAMPLE OPTIONS is open the mod owns
-the panel, so a leftover menu swallows the next test's keys.
+The emulator suite builds minimod, prepares an isolated startup project for each
+case, and restores the original project and preload. With the lab running:
 
 ```sh
-python3 mod/tests/emulator_menu.py --panel http://127.0.0.1:8765
-python3 mod/tests/emulator_autotrim.py --lab ../virtual-mpc-sample --pad 1
-python3 mod/tests/emulator_spectral.py --lab ../virtual-mpc-sample --boots 1
-python3 mod/tests/emulator_reverb.py --lab ../virtual-mpc-sample --effect reverb
-python3 mod/tests/emulator_bass_sample.py --lab ../virtual-mpc-sample
-python3 mod/tests/emulator_synth_empty.py --lab ../virtual-mpc-sample --pad 1
-python3 mod/tests/emulator_midi_chromatic.py --lab ../virtual-mpc-sample  # Pad MIDI In on, Port = External
+uv run --script mod/tests/emulator_suite.py
 ```
+
+See the [emulator test guide](../mod/tests/README.md) for one-time lab setup,
+selecting cases, and writing a new test.
 
 `emulator_autotrim` reads the trim bounds from the live model, so it works with
 the release build. `emulator_spectral` and `emulator_reverb` pin a demo fixture

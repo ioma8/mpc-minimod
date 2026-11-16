@@ -1,3 +1,6 @@
+# /// script
+# requires-python = ">=3.10"
+# ///
 """Check the Live Looper's per-pad lighting.
 
 Empty pads are dim, recording is red, overdubbing amber, playing bright green
@@ -26,7 +29,7 @@ def main():
         request = urllib.request.Request(args.panel + '/control', data=body,
                                          headers={'Content-Type': 'application/json'})
         urllib.request.urlopen(request, timeout=5).read()
-        time.sleep(.10)
+        time.sleep(.1)
 
     def tap(name):
         control(name, 'press', 100)
@@ -44,8 +47,13 @@ def main():
                 if int(key) < PADS}
 
     def expect(pad, colour, label):
-        got = pads()[pad]
-        assert got == colour, f'{label}: pad {pad + 1} is {got}, want {colour}'
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            got = pads()[pad]
+            if got == colour:
+                return
+            time.sleep(.05)
+        raise AssertionError(f'{label}: pad {pad + 1} is {got}, want {colour}')
 
     before = pads()
 
@@ -63,12 +71,10 @@ def main():
     control('ERASE', 'press', 127)
     tap('LOOP')
     control('ERASE', 'release')
-    time.sleep(.5)
     for pad in range(PADS):
         expect(pad, EMPTY, 'empty')
 
     tap('PAD 1')
-    time.sleep(.4)
     expect(0, REC, 'recording')
     time.sleep(.5)
     tap('PAD 1')
@@ -76,21 +82,22 @@ def main():
     expect(0, PLAY, 'playing')
 
     hold('SHIFT', 'PAD 1')
-    time.sleep(.4)
     expect(0, DUB, 'overdubbing')
     hold('SHIFT', 'PAD 1')
-    time.sleep(.4)
     expect(0, PLAY, 'back to playing')
 
     tap('PAD 1')
-    time.sleep(.4)
     expect(0, STOP, 'stopped')
 
     control('SHIFT', 'press', 127)
     tap('DATA')
     control('SHIFT', 'release')
-    time.sleep(.7)
-    after = pads()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        after = pads()
+        if after == before:
+            break
+        time.sleep(.05)
     for pad in range(PADS):
         assert after[pad] == before[pad], \
             f'pad {pad + 1}: native {before[pad]} became {after[pad]}'

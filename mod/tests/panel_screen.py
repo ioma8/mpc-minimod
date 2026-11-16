@@ -4,6 +4,7 @@ The device suites read the mod's own status string, which says "created" even
 when the app itself reported "Command failed" on screen. This looks at the screen.
 """
 import struct
+import time
 import urllib.request
 import zlib
 
@@ -67,5 +68,11 @@ def screen_png(panel):
 
 
 def assert_no_modal(panel, what):
-    assert not modal_showing(screen_png(panel)), \
-        f'{what}: the app is showing a dialog (e.g. "Command failed") on the panel'
+    # Successful Extract displays a short-lived native "Extracted to Pad …"
+    # notification using the same frame shape as a blocking error dialog.
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline:
+        if not modal_showing(screen_png(panel)):
+            return
+        time.sleep(.1)
+    raise AssertionError(f'{what}: a blocking dialog remains on the panel')

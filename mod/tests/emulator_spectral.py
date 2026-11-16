@@ -1,3 +1,6 @@
+# /// script
+# requires-python = ">=3.10"
+# ///
 """Exercise the actual menu and independently read back the release chop model.
 
 Requires the lab's demo project with GuitPh-Grove3 E85 91V on A13 (62259
@@ -46,7 +49,7 @@ def main():
                                      headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=5) as response:
             assert json.load(response)['ok']
-        time.sleep(.08)
+        time.sleep(.02)
     def tap(name):
         control(name, 'press', 100)
         control(name, 'release')
@@ -59,7 +62,7 @@ def main():
         control('SHIFT', 'release')
         control('DATA', 'turn', 1)
         tap('DATA')
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 35
         while time.monotonic() < deadline:
             status = memory(base + symbols['g_hpss_status'], 96).split(b'\0', 1)[0]
             busy = struct.unpack('<i', memory(base + symbols['g_menu'] + 4, 4))[0]
@@ -75,7 +78,6 @@ def main():
         # The app needs about half a minute to come up; wait for it to map the mod.
         deadline = time.monotonic() + 90
         while True:
-            time.sleep(3)
             try:
                 pid = int(ssh('pidof "MPC Sample"'))
                 if ssh(f'grep -c {args.library.name} /proc/{pid}/maps').strip() != b'0':
@@ -83,27 +85,48 @@ def main():
             except subprocess.CalledProcessError:
                 pass
             assert time.monotonic() < deadline, 'App did not come back after restart'
-        time.sleep(5)
+            time.sleep(.25)
         baseline_restarts = ssh('systemctl show ac50 -p NRestarts')
         maps = ssh(f'cat /proc/{pid}/maps').decode().splitlines()
         mapping = next((x for x in maps if x.endswith('/' + args.library.name)), None)
         assert mapping is not None, (
             f'{args.library.name} is not mapped into the app; preload it first with '
-            '`python3 lab.py preload <repo>/mod/build/minimod.so`')
+            '`uv run --script lab.py preload <repo>/mod/build/minimod.so`')
         base = int(mapping.split('-')[0], 16)
         remote = mapping.split()[-1]
         digest = ssh('sha256sum ' + shlex.quote(remote)).decode().split()[0]
         assert digest == hashlib.sha256(args.library.read_bytes()).hexdigest()
         def memory(address, size):
-            data = ssh(f'dd if=/proc/{pid}/mem bs=1 skip={address} count={size} 2>/dev/null')
+            try:
+                data = ssh(f'dd if=/proc/{pid}/mem bs=1 skip={address} count={size} 2>/dev/null')
+            except subprocess.CalledProcessError as error:
+                try:
+                    current = ssh('pidof "MPC Sample"').decode().strip()
+                except subprocess.CalledProcessError:
+                    current = '<exited>'
+                maps = ssh(f'cat /proc/{pid}/maps').decode().splitlines() if current == str(pid) else []
+                raise AssertionError(
+                    f'memory read failed at {address:#x}; original pid={pid}, current pid={current}; '
+                    f'mapped library ranges={[line for line in maps if "minimod.so" in line]}') from error
             assert len(data) == size, 'App died or model address became invalid'
             return data
         def qword(address):
             return struct.unpack('<Q', memory(address, 8))[0]
+        expected_screen = int(next(
+            x.split('-')[0] for x in maps if x.endswith('/MPC Sample')), 16) + 0x6e212a0
+        # A library mapping appears before the app has necessarily built its
+        # Sample screen. Gate on the screen vtable instead of sleeping 5 s.
+        ready_deadline = time.monotonic() + 30
+        while time.monotonic() < ready_deadline:
+            screen = qword(base + symbols['g_screen'])
+            if screen and qword(screen) == expected_screen:
+                break
+            time.sleep(.1)
+        else:
+            raise AssertionError('Sample screen did not become ready after app restart')
         def model():
             screen = qword(base + symbols['g_screen'])
-            stock = int(next(x.split('-')[0] for x in maps if x.endswith('/MPC Sample')), 16)
-            assert qword(screen) == stock + 0x6e212a0, 'Wrong map or Sample screen unavailable'
+            assert qword(screen) == expected_screen, 'Wrong map or Sample screen unavailable'
             binding = qword(screen + 0x178)
             state = qword(binding + 0x60)
             sample = qword(qword(state + 0x22e8) + 0x4a8)
@@ -122,7 +145,7 @@ def main():
             kind = struct.unpack('<i', memory(qword(screen + 0x168) + 0x9c, 4))[0]
             return sample, kind, pairs
         tap('SAMPLE')
-        time.sleep(1.5)
+        time.sleep(.2)
         if chop_mode():
             tap('CHOP')
             time.sleep(.3)
@@ -157,7 +180,7 @@ def main():
         tap('CHOP')
         time.sleep(.3)
         tap('CHOP')
-        time.sleep(.5)
+        time.sleep(.2)
         assert model() == (source, 0, expected_pairs), 'Re-entering Chop lost the markers'
         urllib.request.urlretrieve(panel + '/screen.png', f'/tmp/spectral-boot-{boot + 1}.png')
     print('PASS: menu, model, repeat, modes, playback, re-entry and restart checks')

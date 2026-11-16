@@ -9,17 +9,13 @@ import json
 from pathlib import Path
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('source', type=Path)
-    parser.add_argument('output', type=Path)
-    args = parser.parse_args()
-    if args.source.resolve() == args.output.resolve():
-        parser.error('source and output must be different files')
-    raw = gzip.decompress(args.source.read_bytes())
+def make_empty_project(source: Path, output: Path):
+    if source.resolve() == output.resolve():
+        raise ValueError('source and output must be different files')
+    raw = gzip.decompress(source.read_bytes())
     header = raw.split(b'\n', 5)
     if len(header) != 6 or header[0] != b'ACVS':
-        parser.error('source is not an ACVS project')
+            raise ValueError(f'{source} is not an ACVS project')
     document = json.loads(header[5])
     data = document['data']
     data['samples'] = []
@@ -32,7 +28,15 @@ def main():
                 layer['sampleFile'] = ''
                 layer['active'] = False
     content = b'\n'.join(header[:5]) + b'\n' + json.dumps(document).encode()
-    args.output.write_bytes(gzip.compress(content, mtime=0))
+    output.write_bytes(gzip.compress(content, mtime=0))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('source', type=Path)
+    parser.add_argument('output', type=Path)
+    args = parser.parse_args()
+    make_empty_project(args.source, args.output)
     print(f'Wrote empty project: {args.output}')
 
 

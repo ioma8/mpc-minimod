@@ -1,4 +1,8 @@
+# /// script
+# requires-python = ">=3.10"
+# ///
 """Verify PLUS shifts a physical 16 Levels pad by eight semitones."""
+import argparse
 import json
 import struct
 import subprocess
@@ -7,12 +11,14 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-LAB = Path('/Users/jakubkolcar/projects/customs/virtual-mpc-sample')
 
 
 def main():
     import sys
-    sys.path.insert(0, str(LAB))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--lab', type=Path, default=Path(__file__).resolve().parents[3] / 'virtual-mpc-sample')
+    args = parser.parse_args()
+    sys.path.insert(0, str(args.lab))
     import lab
 
     pid = int(lab.guest('pidof "MPC Sample"').decode().split()[0])
@@ -38,7 +44,7 @@ def main():
                 {'Content-Type': 'application/json'},
             )
             urllib.request.urlopen(request, timeout=5).read()
-            time.sleep(.2)
+            time.sleep(.02)
 
     tap('SAMPLE')
     tap('PAD 1')

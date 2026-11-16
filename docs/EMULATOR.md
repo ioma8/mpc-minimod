@@ -12,7 +12,7 @@ runs from `~/projects/customs/virtual-mpc-sample` (upstream:
 
 ```sh
 cd ~/projects/customs/virtual-mpc-sample
-python3 lab.py run
+uv run --script lab.py run
 ```
 
 Then open **<http://127.0.0.1:8765/>** and click once for sound.
@@ -22,7 +22,7 @@ First boot takes ~30 s to reach the app.
 ## Stop
 
 ```sh
-python3 lab.py stop
+uv run --script lab.py stop
 ```
 
 ## What is already set up
@@ -49,13 +49,13 @@ Only needed if the source or firmware changes. Docker (colima) is required.
 
 ```sh
 colima start --cpu 4 --memory 8
-python3 lab.py build          # kernel ~15 min, then bridge and images
+uv run --script lab.py build          # kernel ~15 min, then bridge and images
 ```
 
 ## Checking it is alive
 
 ```sh
-python3 lab.py status          # cs / console / qmp / audio sockets
+uv run --script lab.py status          # cs / console / qmp / audio sockets
 curl -s http://127.0.0.1:8765/state | head -c 300
 ```
 

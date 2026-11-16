@@ -1,3 +1,6 @@
+# /// script
+# requires-python = ">=3.10"
+# ///
 """Render one plucked C2 bass sample through SAMPLE OPTIONS and Extract.
 
 Requires the virtual MPC lab, the current mod preloaded, and Sample Mode open
@@ -39,7 +42,7 @@ def main():
                                      headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=5) as response:
             assert json.load(response)['ok']
-        time.sleep(.15)
+        time.sleep(.04 if action in ('press', 'release') else .02)
 
     def tap(name):
         control(name, 'press', 100)
@@ -163,7 +166,7 @@ def main():
     time.sleep(1)
     assert qword(qword(qword(screen + 0x178) + 0x60) + 0x22e8) == sample_before, \
         'a pad press on the Bass page switched the selected sample'
-    time.sleep(1.5)
+    time.sleep(.2)
     tap('DATA')
 
     deadline = time.monotonic() + 12
@@ -177,7 +180,7 @@ def main():
             raise AssertionError(status)
         time.sleep(.2)
     assert status == 'Synth: copy created', f'Unexpected result: {status}'
-    time.sleep(1.5)
+    time.sleep(.2)
     panel_screen.assert_no_modal(args.panel, 'Synth')
     current = bass_outputs()
     changed = [path for path, digest in current.items() if before.get(path) != digest]

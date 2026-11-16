@@ -139,6 +139,25 @@ host tests including the golden DSP fixtures, and the aarch64 cross build. Layou
 Release description format and the complete feature overview are in
 [`RELEASE-NOTES.md`](RELEASE-NOTES.md).
 
+## Emulator tests
+
+The emulator suite exercises the real firmware through the virtual panel and
+checks features including AutoTrim, Spectral Chop, effects, MIDI, the synth and
+the looper. Each case starts from an isolated populated or empty project; the
+runner restores the lab's project, preload and app state afterward.
+
+With the [virtual MPC Sample lab](https://github.com/orrpunk-art/virtual-mpc-sample)
+running, build minimod and run the suite from the repository root:
+
+```sh
+uv run --script mod/tests/emulator_suite.py
+uv run --script mod/tests/emulator_suite.py --list      # discover cases
+uv run --script mod/tests/emulator_suite.py spectral   # run one case
+```
+
+The [test guide](mod/tests/README.md) covers one-time lab setup and adding a
+new automatically discovered scenario.
+
 ## Docs
 
 - [`docs/README.md`](docs/README.md) — index, reading order and conventions

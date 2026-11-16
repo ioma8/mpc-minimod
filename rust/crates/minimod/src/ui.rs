@@ -303,10 +303,9 @@ pub fn pump_component() -> usize {
     if looper::looper_is_open() != 0 {
         return current_component();
     }
-    // A running job is finalized from the paint hook only, and the worker's one
-    // request can be dropped or coalesced by the app while it is busy; keep
-    // asking for frames so the menu cannot wait for a frame that never comes.
-    if crate::jobflow::running() {
+    // Jobs and Spectral advance from paint callbacks. Retry while either is
+    // active because the app can drop or coalesce a repaint request.
+    if crate::jobflow::running() || crate::spectral::live_active() {
         return current_component();
     }
     if REPAINT_REQUESTED.swap(false, Ordering::AcqRel) {

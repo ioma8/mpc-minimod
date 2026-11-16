@@ -91,6 +91,20 @@ impl Default for MidiState {
     }
 }
 
+#[repr(C)]
+struct MidiEventDebug {
+    source: AtomicU64,
+    fields: AtomicU32,
+    count: AtomicU32,
+}
+
+mpc_sample_sdk::export_static!(#[doc = "Temporary note-hook diagnostic state."]
+g_midi_debug: MidiEventDebug = MidiEventDebug {
+    source: AtomicU64::new(0),
+    fields: AtomicU32::new(0),
+    count: AtomicU32::new(0),
+});
+
 mpc_sample_sdk::export_static!(#[doc = "The MIDI state, read by the device tests."]
 g_midi: MidiState = MidiState::new());
 
@@ -319,6 +333,16 @@ enum Decision {
 
 /// Handle one note event; the SDK forwards whatever this returns.
 pub fn note(event: &mut NoteEvent<'_>, last_pad: i32) -> Flow {
+    g_midi_debug.source.store(event.source, Ordering::Relaxed);
+    g_midi_debug.fields.store(
+        u32::from(event.kind)
+            | (u32::from(event.note) << 8)
+            | (u32::from(event.external) << 16)
+            | (u32::from(event.note_on) << 17)
+            | (u32::from(event.note_off) << 18),
+        Ordering::Relaxed,
+    );
+    g_midi_debug.count.fetch_add(1, Ordering::Relaxed);
     let facts = NoteFacts {
         kind: event.kind,
         number: event.note,
@@ -343,9 +367,15 @@ pub fn note(event: &mut NoteEvent<'_>, last_pad: i32) -> Flow {
 
 /// Decide one note against the published mode and the owned ledger.
 fn decide(state: &MidiState, targets: &NoteLedger, facts: NoteFacts, last_pad: i32) -> Decision {
-    // Learn the selected pad's context even while the mod is off, so entering
-    // 16 Levels after selecting a pad can still replay its notes.
-    if !facts.external && facts.kind == PAD_EVENT && facts.context != 0 {
+    // Physical pad notes seed the context before the mode is entered. External
+    // MIDI may be the first note event after launch, so use its live context
+    // while 16 Levels is active when no physical note has seeded it yet.
+    if facts.context != 0
+        && ((!facts.external && facts.kind == PAD_EVENT)
+            || (facts.external
+                && state.levels.load(Ordering::Acquire) != 0
+                && state.pad_ctx.load(Ordering::Acquire) == 0))
+    {
         state.pad_ctx.store(facts.context, Ordering::Release);
     }
     if state.on.load(Ordering::Acquire) == 0 && !facts.external {
@@ -388,11 +418,15 @@ fn decide(state: &MidiState, targets: &NoteLedger, facts: NoteFacts, last_pad: i
     if !facts.on {
         return Decision::Forward;
     }
-    let context = state.pad_ctx.load(Ordering::Acquire);
-    if state.on.load(Ordering::Acquire) == 0
-        || state.levels.load(Ordering::Acquire) == 0
-        || context == 0
-    {
+    let saved_context = state.pad_ctx.load(Ordering::Acquire);
+    // Zero is a valid native MIDI context. If a physical pad has not supplied
+    // one, use the current external event's context, including zero.
+    let context = if saved_context == 0 {
+        facts.context
+    } else {
+        saved_context
+    };
+    if state.on.load(Ordering::Acquire) == 0 || state.levels.load(Ordering::Acquire) == 0 {
         targets.native[usize::from(facts.number)].fetch_add(1, Ordering::AcqRel);
         return Decision::Forward;
     }
@@ -725,6 +759,37 @@ mod tests {
         event.context = 0x3000;
         assert_eq!(decide(&state, &targets, event, 4), Decision::Forward);
         assert_eq!(state.pad_ctx.load(Ordering::Acquire), 0x3000);
+    }
+
+    #[test]
+    fn first_external_note_seeds_context_for_16_levels_replay() {
+        let state = MidiState::new();
+        let targets = NoteLedger::new();
+        state.on.store(1, Ordering::Release);
+        state.levels.store(1, Ordering::Release);
+        state.pad_level_byte.store(4, Ordering::Release);
+        let mut event = note(7, 64, true);
+        event.context = 0x3000;
+
+        let target = replayed(decide(&state, &targets, event, 4));
+
+        assert_eq!(target.pad, 4);
+        assert_eq!(target.context, 0x3000);
+        assert_eq!(target.row, 4);
+    }
+
+    #[test]
+    fn first_external_note_with_zero_context_is_replayed() {
+        let state = MidiState::new();
+        let targets = NoteLedger::new();
+        state.on.store(1, Ordering::Release);
+        state.levels.store(1, Ordering::Release);
+        let mut event = note(7, 64, true);
+        event.context = 0;
+
+        let target = replayed(decide(&state, &targets, event, 4));
+
+        assert_eq!(target.context, 0);
     }
 
     #[test]

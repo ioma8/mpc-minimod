@@ -1,3 +1,6 @@
+# /// script
+# requires-python = ">=3.10"
+# ///
 """Check AutoTrim against the live model in the running MPC emulator.
 
 AutoTrim is SHIFT+B3 on the Sample page. The mod calls the app's own control
@@ -90,14 +93,14 @@ def main():
 
     # Put the Sample page in front, in Full (not Chop) mode, on the target pad.
     press('SAMPLE')
-    time.sleep(1.2)
+    time.sleep(.25)
     press('SCREEN 1')
-    time.sleep(.5)
+    time.sleep(.2)
     if leds().get('75', 0) == 2:
         press('CHOP')
-        time.sleep(.5)
+        time.sleep(.2)
     press(f'PAD {args.pad}')
-    time.sleep(.6)
+    time.sleep(.2)
 
     screen = qword(libbase + symbols['g_screen'])
     assert qword(screen) == stock + 0x6e212a0, 'SampleModeScreen not found'
@@ -115,7 +118,8 @@ def main():
         # The cycle lives only while SHIFT stays held: releasing it resets the
         # step counter, so a whole cycle is one hold and N B3 presses.
         press('SCREEN 3')
-        time.sleep(.9)
+        # Give the firmware time to finish its audio scan and update the model.
+        time.sleep(.3)
 
     print(f'pad {args.pad}: {frames} frames, pid {pid}')
 
@@ -124,7 +128,7 @@ def main():
     for _ in range(4):
         press_trim()
     control('SHIFT', 'release')
-    time.sleep(.4)
+    time.sleep(.15)
     start, end, mirror = bounds()
     assert (start, end) == (0, frames - 1), \
         f'Clearing should restore 0..{frames - 1}, got {start}..{end}'
@@ -156,13 +160,13 @@ def main():
     # On another Sample screen the shortcut must not be armed, so B3 reaches
     # the app instead of consuming and trimming.
     press('SCREEN 2')
-    time.sleep(.6)
+    time.sleep(.2)
     before = bounds()
     control('SHIFT', 'press', 127)
-    time.sleep(.2)
+    time.sleep(.05)
     press_trim()
     control('SHIFT', 'release')
-    time.sleep(.5)
+    time.sleep(.15)
     after = bounds()
     assert after == before, f'B3 trimmed off the trim screen: {before} -> {after}'
 

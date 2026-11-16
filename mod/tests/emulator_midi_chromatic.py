@@ -1,3 +1,6 @@
+# /// script
+# requires-python = ">=3.10"
+# ///
 """Check the external MIDI chromatic hook in the running MPC emulator.
 
 Preconditions: the mod is preloaded; MIDI Config has MIDI Port=External and
@@ -41,7 +44,7 @@ def main():
             {'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=5) as response:
             assert json.load(response)['ok']
-        time.sleep(.15)
+        time.sleep(.04 if action in ('press', 'release') else .02)
 
     def tap(name):
         control(name, 'press', 127)
@@ -53,7 +56,7 @@ def main():
             {'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=5) as response:
             assert json.load(response)['ok']
-        time.sleep(.12)
+        time.sleep(.02)
 
     pid = int(ssh('pidof "MPC Sample"'))
     maps = ssh(f'cat /proc/{pid}/maps').decode().splitlines()
@@ -103,12 +106,36 @@ def main():
     tap('PAD 1'); time.sleep(.3)
     assert chromatic(0) == before_pads, \
         'a pad press was treated as external MIDI'
+    pad_debug = read(mod_base + symbols['g_midi_debug'], 16)
+    print(f'DIAG pad_source={int.from_bytes(pad_debug[:8], "little"):#x}; '
+          f'pad_fields={int.from_bytes(pad_debug[8:12], "little"):#x}', flush=True)
 
     before = chromatic(0)
     for message in ('90 3c 64', '80 3c 00', '90 3d 64', '80 3d 00',
                     '90 43 64', '80 43 00'):
         midi(message)
-    after = chromatic(0)
+    deadline = time.monotonic() + 3
+    while True:
+        after = chromatic(0)
+        if after - before >= 3 or time.monotonic() >= deadline:
+            break
+        time.sleep(.05)
+    if after - before != 3:
+        midi_state = read(mod_base + symbols['g_midi'], 24)
+        midi_state_words = [int.from_bytes(midi_state[i:i + 4], 'little')
+                            for i in range(0, 24, 4)]
+        debug = read(mod_base + symbols['g_midi_debug'], 16)
+        debug_source = int.from_bytes(debug[:8], 'little')
+        debug_fields = int.from_bytes(debug[8:12], 'little')
+        debug_count = int.from_bytes(debug[12:16], 'little')
+        with urllib.request.urlopen(args.panel + '/state?since=0', timeout=5) as response:
+            panel_state = json.load(response)['midi']
+        print(f'DIAG midi_state={midi_state_words}; last_event=(source={debug_source:#x}, '
+              f'kind={debug_fields & 255}, note={(debug_fields >> 8) & 255}, '
+              f'external={(debug_fields >> 16) & 1}, count={debug_count}); '
+              f'panel_counts={panel_state["counts"]}; '
+              f'last_input={[event[3] for event in panel_state["log"] if event[2] == "in"][-6:]}',
+              flush=True)
     assert after - before == 3, (
         f'Expected three transformed note-ons, got {after - before}; '
         'check that Pad MIDI In is On and MIDI Port is External')
