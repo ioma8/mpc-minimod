@@ -276,9 +276,11 @@ fn may_restore_chop(shift: bool, code: u32, original_screen: usize, screen: usiz
     !shift && code != buttons::KEY_SHIFT && code != u32::from(CHOP_KEY) && screen == original_screen
 }
 
-/// Repaint the component the page last painted.
+/// Repaint from a native UI callback while the last-painted component is live.
 pub fn minimod_repaint_screen() {
-    mpc_sample_sdk::draw::repaint_painted();
+    // SAFETY: every caller runs in the app's UI event or paint callback; the
+    // currently painted Sample component stays live for the callback.
+    unsafe { mpc_sample_sdk::draw::repaint_painted() };
 }
 
 /// Set from any thread to ask the repaint pump for one frame.

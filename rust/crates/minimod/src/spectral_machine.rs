@@ -34,7 +34,7 @@ pub enum Step {
 }
 
 /// The machine's own state.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Machine {
     screen: usize,
     state: usize,
@@ -44,6 +44,8 @@ struct Machine {
     rate: u32,
     count: u32,
     positions: [u32; MAX_SLICES],
+    previous: chop::Snapshot,
+    previous_kind: i32,
     phase: u8,
     deadline: i64,
 }
@@ -80,6 +82,9 @@ pub fn begin(now: i64, selected: &selection::Selection, detected: &[u32]) -> Ste
     if !unsafe { selected.is_current() } {
         return Step::Failed("sample changed; cancelled");
     }
+    let Some(previous) = chop::Snapshot::read(selected.sample()) else {
+        return Step::Failed("cannot preserve existing slices");
+    };
     // SAFETY: `MACHINE` is owned by the app's UI thread and nothing else holds
     // a borrow of it here.
     unsafe {
@@ -93,6 +98,8 @@ pub fn begin(now: i64, selected: &selection::Selection, detected: &[u32]) -> Ste
                 rate: selected.rate(),
                 count,
                 positions,
+                previous,
+                previous_kind: chop::chop_kind(selected.screen()),
                 phase: 0,
                 deadline: now + MARKER_DEADLINE_MS,
             });
@@ -169,7 +176,7 @@ fn advance(now: i64, running: &mut Machine) -> Step {
                 running.screen,
             )
         } {
-            return Step::Failed("native marker write failed");
+            return restore(running, "native marker write failed");
         }
         running.phase = 2;
         running.deadline = now + VERIFY_DELAY_MS;
@@ -180,10 +187,22 @@ fn advance(now: i64, running: &mut Machine) -> Step {
         return if chop::verify(running.sample, &running.positions[..count], running.frames) {
             Step::Done(running.count)
         } else {
-            Step::Failed("marker verification failed")
+            restore(running, "marker verification failed")
         };
     }
     Step::Continue
+}
+
+fn restore(running: &Machine, error: &'static str) -> Step {
+    // SAFETY: the caller just revalidated the live sample on its UI thread.
+    if unsafe {
+        running.previous.restore(running.sample, running.frames)
+            && chop::set_kind(running.screen, running.previous_kind)
+    } {
+        Step::Failed(error)
+    } else {
+        Step::Failed("marker restore failed")
+    }
 }
 
 #[cfg(test)]

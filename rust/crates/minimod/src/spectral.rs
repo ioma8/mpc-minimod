@@ -80,6 +80,9 @@ fn detection_slot() -> MutexGuard<'static, Option<Task<Detection>>> {
 /// Claim a run and start its worker.  False when one is already going, a job is
 /// busy, or the page has no sample.
 pub fn start(state: &mut State, selected: Selection, busy: bool, open_pending: bool) -> bool {
+    if state.active == 0 {
+        reap_detection();
+    }
     if !can_start(state, busy, detection_slot().is_some()) {
         return false;
     }
@@ -114,6 +117,20 @@ pub fn start(state: &mut State, selected: Selection, busy: bool, open_pending: b
     );
     *detection_slot() = Some(task);
     true
+}
+
+/// Discard an abandoned result only once its worker has finished.
+fn reap_detection() {
+    let mut slot = detection_slot();
+    reap_task(&mut slot);
+}
+
+fn reap_task<T>(slot: &mut Option<Task<T>>) {
+    if let Some(task) = slot.as_mut()
+        && !matches!(task.take(), Err(TaskError::Running))
+    {
+        *slot = None;
+    }
 }
 
 fn can_start(state: &State, busy: bool, detection_running: bool) -> bool {
@@ -165,7 +182,8 @@ pub fn finish(state: &mut State, menu_state: &mut menu::State, hooks: Hooks, err
     state.open_pending = false;
     state.active = 0;
     LIVE_ACTIVE.store(false, Ordering::Release);
-    *detection_slot() = None;
+    // Dropping a Task does not stop its worker. Keep ownership until terminal.
+    reap_detection();
     *READY.lock().unwrap_or_else(PoisonError::into_inner) = None;
     menu_state.busy = 0;
     if error.is_some() {
@@ -462,6 +480,28 @@ pub fn is_active() -> bool {
 mod tests {
     use super::{Hooks, State, can_start, finish};
     use crate::menu;
+
+    #[test]
+    fn cancelled_worker_remains_owned_until_completion() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut slot = Some(mpc_sample_sdk::task::Task::spawn(0, (), move |()| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        }));
+        started_rx.recv().unwrap();
+        super::reap_task(&mut slot);
+        assert!(!can_start(&State::default(), false, slot.is_some()));
+        release_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while slot.is_some() {
+            super::reap_task(&mut slot);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(can_start(&State::default(), false, slot.is_some()));
+    }
 
     #[test]
     fn a_run_cannot_start_twice() {

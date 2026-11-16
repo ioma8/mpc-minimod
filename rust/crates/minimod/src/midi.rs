@@ -13,7 +13,7 @@ use mpc_sample_sdk::{Flow, NoteEvent};
 /// The event's type tag for a pad/note event.
 pub const PAD_EVENT: u8 = 3;
 
-/// How many sources may hold the same note before a new press is refused.
+/// How many presses of the same note can be replayed chromatically.
 const PER_NOTE: usize = 4;
 
 /// No press owns this slot.
@@ -137,11 +137,11 @@ enum Claim {
 /// Fixed-capacity ownership of replayed MIDI `(source, note)` pairs.
 ///
 /// Each note owns a few slots so overlapping sources keep their own targets.
-/// Presses never allocate or wait; a full note refuses the new press rather than
-/// dropping a release for a note that is already playing.
+/// Presses never allocate or wait; at capacity, new presses use native playback.
 struct NoteLedger {
     slots: [[NoteSlot; PER_NOTE]; 128],
     next: AtomicU64,
+    native: [AtomicU32; 128],
 }
 
 impl NoteLedger {
@@ -153,22 +153,27 @@ impl NoteLedger {
         Self {
             slots: [const { [const { NoteSlot::new() }; PER_NOTE] }; 128],
             next: AtomicU64::new(0),
+            native: [const { AtomicU32::new(0) }; 128],
         }
     }
 
     /// Remember one replayed press. False when the note is at capacity or a
     /// release arrived while it was publishing.
+    #[cfg(test)]
     fn hold(&self, source: u64, note: u8, target: Target) -> bool {
-        let Some(slots) = self.slots.get(usize::from(note)) else {
-            return false;
-        };
+        self.reserve(source, note, target).unwrap_or(false)
+    }
+
+    // None means capacity exhaustion; Some(false) means an early release.
+    fn reserve(&self, source: u64, note: u8, target: Target) -> Option<bool> {
+        let slots = self.slots.get(usize::from(note))?;
         let Ok(sequence) = self
             .next
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 (next < (u64::MAX >> 8)).then_some(next + 1)
             })
         else {
-            return false;
+            return None;
         };
         let writing = tagged(sequence, WRITING);
         for slot in slots {
@@ -193,7 +198,7 @@ impl NoteLedger {
                 )
                 .is_ok()
             {
-                return true;
+                return Some(true);
             }
             // A release aborted the press before it became visible; it also
             // consumed the release, so neither edge may be forwarded.
@@ -206,9 +211,9 @@ impl NoteLedger {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             );
-            return false;
+            return Some(false);
         }
-        false
+        None
     }
 
     /// Claim the oldest held press for `(source, note)`, or refuse a press that
@@ -255,12 +260,8 @@ impl NoteLedger {
             if state & STAGE_MASK != WRITING {
                 continue;
             }
-            // The source is written before the press is published; a different
-            // source means this slot belongs to another press, so leave it.
-            let stored = slot.source.load(Ordering::Relaxed);
-            if stored != 0 && stored != source {
-                continue;
-            }
+            // Metadata is not published while WRITING, including on reused
+            // slots. Conservatively cancel any overlapping unpublished press.
             if slot
                 .state
                 .compare_exchange(
@@ -347,7 +348,7 @@ fn decide(state: &MidiState, targets: &NoteLedger, facts: NoteFacts, last_pad: i
     if !facts.external && facts.kind == PAD_EVENT && facts.context != 0 {
         state.pad_ctx.store(facts.context, Ordering::Release);
     }
-    if state.on.load(Ordering::Acquire) == 0 && !(facts.external && facts.off) {
+    if state.on.load(Ordering::Acquire) == 0 && !facts.external {
         return Decision::Forward;
     }
     if !facts.external && facts.kind == PAD_EVENT && facts.velocity > 0.0 {
@@ -374,14 +375,32 @@ fn decide(state: &MidiState, targets: &NoteLedger, facts: NoteFacts, last_pad: i
                 Decision::Replay(target)
             }
             Claim::Consume => Decision::Consume,
-            Claim::Unmatched => Decision::Forward,
+            Claim::Unmatched => {
+                let _ = targets.native[usize::from(facts.number)].fetch_update(
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                    |count| count.checked_sub(1),
+                );
+                Decision::Forward
+            }
         };
     }
-    if !facts.on || state.levels.load(Ordering::Acquire) == 0 {
+    if !facts.on {
         return Decision::Forward;
     }
     let context = state.pad_ctx.load(Ordering::Acquire);
-    if context == 0 {
+    if state.on.load(Ordering::Acquire) == 0
+        || state.levels.load(Ordering::Acquire) == 0
+        || context == 0
+    {
+        targets.native[usize::from(facts.number)].fetch_add(1, Ordering::AcqRel);
+        return Decision::Forward;
+    }
+    // Do not accept a newer chromatic press ahead of an outstanding native
+    // overflow press: releases for repeated notes are paired FIFO.
+    let native = &targets.native[usize::from(facts.number)];
+    if native.load(Ordering::Acquire) != 0 {
+        native.fetch_add(1, Ordering::AcqRel);
         return Decision::Forward;
     }
     let target = Target {
@@ -389,10 +408,15 @@ fn decide(state: &MidiState, targets: &NoteLedger, facts: NoteFacts, last_pad: i
         row: i32::from(facts.number) - crate::autotrim::pad_root(last_pad),
         context,
     };
-    if !targets.hold(facts.source, facts.number, target) {
-        // Capacity or an overlapping release: keep the notes already playing
-        // and refuse this press instead of losing a release later.
-        return Decision::Consume;
+    match targets.reserve(facts.source, facts.number, target) {
+        Some(true) => {}
+        Some(false) => return Decision::Consume,
+        // Preserve the native press/release pair when chromatic ownership is
+        // full. Releases drain older chromatic presses first (FIFO).
+        None => {
+            native.fetch_add(1, Ordering::AcqRel);
+            return Decision::Forward;
+        }
     }
     state.chromatic_count.fetch_add(1, Ordering::Relaxed);
     state
@@ -548,6 +572,115 @@ mod tests {
             slot.state.load(Ordering::Acquire),
             super::tagged(9, super::ABORTED)
         );
+    }
+
+    #[test]
+    fn reused_slot_metadata_cannot_hide_an_early_release() {
+        let ledger = NoteLedger::new();
+        let slot = &ledger.slots[60][0];
+        slot.source.store(99, Ordering::Relaxed);
+        slot.state
+            .store(super::tagged(10, super::WRITING), Ordering::Release);
+        assert_eq!(ledger.release(7, 60), Claim::Consume);
+        assert_eq!(
+            slot.state.load(Ordering::Acquire),
+            super::tagged(10, super::ABORTED)
+        );
+    }
+
+    #[test]
+    fn capacity_overflow_forwards_both_native_edges() {
+        let state = MidiState::new();
+        let ledger = NoteLedger::new();
+        levels_on(&state);
+        for source in 0..super::PER_NOTE as u64 {
+            assert!(matches!(
+                decide(&state, &ledger, note(source, 60, true), 4),
+                Decision::Replay(_)
+            ));
+        }
+        assert_eq!(
+            decide(&state, &ledger, note(99, 60, true), 4),
+            Decision::Forward
+        );
+        assert_eq!(
+            decide(&state, &ledger, note(99, 60, false), 4),
+            Decision::Forward
+        );
+        for source in 0..super::PER_NOTE as u64 {
+            assert!(matches!(
+                decide(&state, &ledger, note(source, 60, false), 4),
+                Decision::Replay(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn newer_presses_stay_native_until_overflow_releases_drain() {
+        let state = MidiState::new();
+        let ledger = NoteLedger::new();
+        levels_on(&state);
+        for _ in 0..super::PER_NOTE {
+            assert!(matches!(
+                decide(&state, &ledger, note(1, 60, true), 4),
+                Decision::Replay(_)
+            ));
+        }
+        assert_eq!(
+            decide(&state, &ledger, note(1, 60, true), 4),
+            Decision::Forward
+        );
+        for _ in 0..super::PER_NOTE {
+            assert!(matches!(
+                decide(&state, &ledger, note(1, 60, false), 4),
+                Decision::Replay(_)
+            ));
+        }
+        assert_eq!(
+            decide(&state, &ledger, note(1, 60, true), 4),
+            Decision::Forward
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                decide(&state, &ledger, note(1, 60, false), 4),
+                Decision::Forward
+            );
+        }
+        assert!(matches!(
+            decide(&state, &ledger, note(1, 60, true), 4),
+            Decision::Replay(_)
+        ));
+    }
+
+    #[test]
+    fn native_notes_keep_their_releases_across_mode_changes() {
+        let state = MidiState::new();
+        let ledger = NoteLedger::new();
+        assert_eq!(
+            decide(&state, &ledger, note(1, 60, true), 4),
+            Decision::Forward
+        );
+        levels_on(&state);
+        assert_eq!(
+            decide(&state, &ledger, note(1, 60, true), 4),
+            Decision::Forward
+        );
+        state.on.store(0, Ordering::Release);
+        assert_eq!(
+            decide(&state, &ledger, note(1, 60, true), 4),
+            Decision::Forward
+        );
+        levels_on(&state);
+        for _ in 0..3 {
+            assert_eq!(
+                decide(&state, &ledger, note(1, 60, false), 4),
+                Decision::Forward
+            );
+        }
+        assert!(matches!(
+            decide(&state, &ledger, note(1, 60, true), 4),
+            Decision::Replay(_)
+        ));
     }
 
     #[test]

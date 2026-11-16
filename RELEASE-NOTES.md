@@ -60,6 +60,30 @@ only the latest changes.
 
 The release supports MPC Sample firmware **1.3.0.12** only.
 
+## Changes in v0.10.1
+
+- Pin the released `mpc-sample-sdk` v0.7.0, including exact slice snapshots,
+  restoration of custom slice ends, and restoration of the native chop mode.
+- Preserve existing slice data and chop mode when Spectral Chop cannot write or
+  verify its new markers. Keep a cancelled detection task owned until its worker
+  finishes, so another analysis cannot overlap it.
+- Keep MIDI note-on and note-off pairs native when chromatic replay reaches its
+  per-note capacity or when 16 Levels changes while a note is held.
+- Repaint the current Sample component directly only from UI callbacks; worker
+  completions continue to request a frame through the UI repaint pump.
+
+## Verification and compatibility
+
+- `rust/check.sh`: formatting, strict Clippy, rustdoc, the feature safety guard,
+  81 minimod tests, 63 DSP tests, and the AArch64 cross-build.
+- `mod/build.sh`: release `minimod.zip`, required exported symbols, unresolved
+  imports, and the MPC Sample glibc ceiling.
+- Emulator: three complete menu navigation/close cycles and the four-step
+  AutoTrim 3%/6%/9%/clear cycle, with no app restart. SDK v0.7.0 also passed
+  generated Extract, occupied destination, and full-program checks.
+
+Built for MPC Sample firmware **1.3.0.12** only.
+
 ## Changes in v0.9.0
 
 ### Synth page
@@ -98,19 +122,6 @@ The release supports MPC Sample firmware **1.3.0.12** only.
 - Pin `mpc-sample-sdk` v0.5.3: directional device latency, per-pad AC50 RGB
   overrides with brightness and native restore, and a dedicated
   [pad lighting page](https://github.com/ioma8/mpc-sample-sdk/blob/main/docs/25-lighting.md).
-
-## Verification and compatibility
-
-- `rust/check.sh` passes formatting, strict clippy, rustdoc, feature safety,
-  43 minimod tests, 49 DSP tests and the aarch64 cross build.
-- SDK v0.5.3 passes 97 tests, including the lighting and directional-latency
-  units.
-- Emulator checks cover the synth gradient, cancel/render restoration,
-  PLUS/MINUS semitone steps, the full synth sample render, AutoTrim's trim-screen
-  and selected-pad paths, and the live looper suite.
-- Built for MPC Sample firmware **1.3.0.12** only. Physical input/output
-  latency still depends on the converters and is not calibrated by the
-  emulator.
 
 ## Changes in v0.8.0
 
