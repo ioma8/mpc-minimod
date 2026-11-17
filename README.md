@@ -1,4 +1,7 @@
-# MPC Sample MINIMOD
+# MPC Sample MiniMod — written in Rust
+
+**A Rust `LD_PRELOAD` mod for the Akai MPC Sample, built on the open
+[mpc-sample-sdk](https://github.com/ioma8/mpc-sample-sdk).**
 
 I was annoyed by the complete reworks by other custom firmwares. I want the
 original MPC Sample experience, with just small fixes that enhance it for better flow. Thus I made this minimal MINIMOD for the **Akai MPC Sample** (firmware
@@ -21,16 +24,20 @@ original MPC Sample experience, with just small fixes that enhance it for better
 </tr>
 </table>
 
-## Built on the open Rust SDK
+## Written in Rust on the open SDK
 
-minimod is built on **[mpc-sample-sdk](https://github.com/ioma8/mpc-sample-sdk)**,
-a memory-safe Rust SDK for the Akai MPC Sample made by the same author. The SDK
+The MiniMod firmware mod is a Rust `cdylib`, built on
+**[mpc-sample-sdk](https://github.com/ioma8/mpc-sample-sdk)**, a memory-safe Rust
+SDK for the Akai MPC Sample made by the same author. The SDK
 owns the firmware finding and verification, the in-memory hooks, the event
 plumbing, audio/MIDI, drawing and typed access to the app's own objects, so
 custom mods can be written in **safe Rust** with typed SDK APIs. The feature code
 uses only small, documented `unsafe` blocks where an SDK API requires a lifetime,
 thread-ownership or exclusivity contract; see
 [the Rust port notes](docs/RUST-PORT.md).
+
+The optional dictation package also bundles a small C++ bridge to the
+Moonshine ARM64 runtime; the MiniMod itself and its firmware hooks remain Rust.
 
 The SDK is public and documented for anyone who wants to build their own MPC
 Sample mod:
