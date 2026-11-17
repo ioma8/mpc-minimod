@@ -89,7 +89,7 @@ chmod 755 build/pkg/autorun/autorun.sh
     cat build/pkg/autorun/autorun.json
     cat build/pkg/autorun/autorun.sh
     printf '%s' 'f7bed1c9-7e90-4731-9194-c996666b4331'
-} | shasum -a 256 | awk '{print $1}' > build/pkg/autorun/autorun.check
+} | shasum -a 256 | awk '{printf "%s", $1}' > build/pkg/autorun/autorun.check
 rm -f build/minimod-dictation.zip
 (cd build/pkg && zip -qr ../minimod-dictation.zip autorun)
 if [ -f build/minimod-standard.zip ]; then
