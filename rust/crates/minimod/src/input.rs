@@ -25,6 +25,7 @@ pub(crate) struct State {
     plus_held: bool,
     minus_held: bool,
     b3_down: bool,
+    button_owners: [u8; 256],
 }
 
 impl State {
@@ -35,6 +36,7 @@ impl State {
             plus_held: false,
             minus_held: false,
             b3_down: false,
+            button_owners: [0; 256],
         }
     }
 }
@@ -188,12 +190,27 @@ fn button_with_modes(
         true
     };
     track_owned_octave_key(state, event, action);
-    ButtonDecision {
-        flow: if modes.looper {
-            Flow::Consume
+    let mut flow = if modes.looper {
+        Flow::Consume
+    } else {
+        button_flow(action)
+    };
+    if let Some(owner) = usize::try_from(event.code)
+        .ok()
+        .and_then(|code| state.button_owners.get_mut(code))
+    {
+        if event.pressed {
+            *owner = if flow == Flow::Forward { 1 } else { 2 };
         } else {
-            button_flow(action)
-        },
+            match core::mem::take(owner) {
+                1 => flow = Flow::Forward,
+                2 => flow = Flow::Consume,
+                _ => {}
+            }
+        }
+    }
+    ButtonDecision {
+        flow,
         action: should_run.then_some(action),
         levels,
     }
@@ -263,7 +280,21 @@ pub(crate) fn pad(event: PadEvent) -> PadDecision {
         erase: mpc_sample_sdk::erase(),
         ..Modes::default()
     };
+    let event = physical_release(event, mpc_sample_sdk::event::current_surface_event());
     route_pad(&PAD_LEDGER, &LAST_PAD, event, live)
+}
+
+// In Chop mode the native release names the sample pad, while the enclosing
+// surface event still names the physical chop pad that reserved the ledger.
+fn physical_release(mut event: PadEvent, surface: Option<SurfaceEvent>) -> PadEvent {
+    if event.action == PadAction::Release
+        && let Some(surface) = surface
+        && (surface.kind == 0x80 || (surface.kind == 0x90 && surface.velocity == 0))
+        && (0..16).contains(&surface.code)
+    {
+        event.pad = surface.code;
+    }
+    event
 }
 
 fn route_pad(
@@ -524,6 +555,53 @@ mod tests {
     }
 
     #[test]
+    fn consumed_button_releases_stay_consumed_after_context_changes() {
+        let mut state = State::new();
+        let menu = Modes {
+            menu: true,
+            ..modes()
+        };
+        let data_down = event_button(buttons::KEY_DATA, PRESSED, false);
+        assert_eq!(
+            button_with_modes(&mut state, data_down, menu, false).flow,
+            Flow::Consume
+        );
+        let data_up = event_button(buttons::KEY_DATA, 0, false);
+        assert_eq!(
+            button_with_modes(&mut state, data_up, modes(), false).flow,
+            Flow::Consume
+        );
+
+        let mut state = State::new();
+        let b3_down = event_button(buttons::KEY_B3, PRESSED, true);
+        let trim = Modes {
+            trim_screen: true,
+            ..modes()
+        };
+        assert_eq!(
+            button_with_modes(&mut state, b3_down, trim, false).flow,
+            Flow::Consume
+        );
+        let b3_up = event_button(buttons::KEY_B3, 0, false);
+        assert_eq!(
+            button_with_modes(&mut state, b3_up, modes(), false).flow,
+            Flow::Consume
+        );
+
+        let mut state = State::new();
+        let native_down = event_button(buttons::KEY_DATA, PRESSED, false);
+        assert_eq!(
+            button_with_modes(&mut state, native_down, modes(), false).flow,
+            Flow::Forward
+        );
+        let native_up = event_button(buttons::KEY_DATA, 0, false);
+        assert_eq!(
+            button_with_modes(&mut state, native_up, menu, false).flow,
+            Flow::Forward
+        );
+    }
+
+    #[test]
     fn a_forwarded_pad_keeps_its_release_across_modal_changes_and_sources() {
         let ledger = super::PadLedger::new();
         let last = super::AtomicI32::new(-1);
@@ -546,6 +624,39 @@ mod tests {
             route_pad(&ledger, &last, pad(PadAction::Release, 1), modal).flow,
             Flow::Forward
         );
+    }
+
+    #[test]
+    fn chop_releases_match_the_physical_pad_across_repeated_hits() {
+        let ledger = super::PadLedger::new();
+        let last = super::AtomicI32::new(-1);
+        let mut press = pad(PadAction::Press, 0);
+        press.pad = 2;
+        let mut release = pad(PadAction::Release, 1);
+        release.pad = 0;
+        let surface = SurfaceEvent {
+            surface: 1,
+            code: 2,
+            payload: 0,
+            kind: 0x80,
+            note: 42,
+            velocity: 0,
+        };
+        for _ in 0..20 {
+            let decision = route_pad(&ledger, &last, press, modes());
+            assert_eq!(decision.flow, Flow::Forward);
+            assert!(!ledger.finish_press(2, decision.token, true));
+            let paired = super::physical_release(release, Some(surface));
+            assert_eq!(
+                route_pad(&ledger, &last, paired, modes()).flow,
+                Flow::Forward
+            );
+            assert_eq!(
+                release.pad, 0,
+                "the firmware's original release is unchanged"
+            );
+        }
+        assert_eq!(super::physical_release(release, None).pad, 0);
     }
 
     #[test]

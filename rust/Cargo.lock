@@ -25,8 +25,9 @@ dependencies = [
 
 [[package]]
 name = "mpc-sample-sdk"
-version = "0.7.2"
-source = "git+https://github.com/ioma8/mpc-sample-sdk?tag=v0.7.2#7de5c14d83d67b3e2919a40283b4b94ae394e0c4"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcb5fe7613f0522c965db8d0b2692a4488e9b7109666677502ae1845fa93c93f"
 dependencies = [
  "libc",
 ]

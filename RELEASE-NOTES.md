@@ -61,6 +61,23 @@ only the latest changes.
 3. Insert the card and power on the MPC Sample. Remove `autorun` and reboot to
    unload the mod.
 
+## Changes in v0.10.3
+
+- Fix repeated Chop playback: match physical chop-pad releases to their presses,
+  so ledger slots do not fill and later regions do not become silent.
+- Keep button releases with the recipient of their press when the SDK callback
+  is temporarily unavailable.
+- Update to `mpc-sample-sdk` v0.7.3 for scoped surface-event context and
+  press/release ownership across callback gaps.
+
+## Verification and compatibility
+
+- `rust/check.sh`: formatting, strict Clippy, rustdoc, 89 minimod tests, 63 DSP
+  tests, and AArch64 cross-build.
+- Emulator: menu, AutoTrim, pad octave, synth shift, 21 rounds of four-region
+  Chop playback, and Recent Samples; all six cases passed.
+- Supports MPC Sample firmware **1.3.0.12**.
+
 ## Changes in v0.10.2
 
 - Add **Recent Samples** to the native Load Sample browser. Only samples loaded
