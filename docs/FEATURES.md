@@ -15,6 +15,28 @@ measured, and what is still open. Mechanisms are catalogued in
 | Spectral Chop | menu → Spectral Chop | emulator-verified (exact boundaries) |
 | Add Reverb / Vinyl / Lo-Fi | menu → effect | emulator-verified |
 | Synth | menu → Synth | host + emulator-verified |
+| Recent Samples | Load Sample → External → Back | emulator-verified |
+
+## Recent Samples
+
+**Behavior.** The stock Load Sample browser shows a **Recent Samples** virtual
+folder at the SD-card mount root, one level above the browser's MPC-Sample
+directory. It contains up to 20 distinct audio files loaded onto pads during
+the current run from mounted external media or UserContent Samples, newest
+first in MiniMod's entry list. Selecting an entry resolves to its original file
+path; MiniMod creates no directory, alias, or audio copy. The firmware may
+still make its normal project working copy when loading a sample.
+
+**Implementation.** The SDK interposes the native POSIX directory listing and
+file-open calls. The folder appears in the real SD-card root listing, and its
+rows map to original source paths. MiniMod observes successful sample opens
+and updates the virtual folder in memory.
+
+**Evidence.** `mod/tests/cases/test_recent_samples.py` loads an SD sample through
+the native browser, opens it again through Recent Samples, verifies the loaded
+name, and confirms no physical Recent Samples directory exists.
+
+---
 
 The mod does not edit project files directly. When a feature uses stock Extract,
 the firmware writes the sample WAV into project data. Every action either

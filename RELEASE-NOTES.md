@@ -50,6 +50,9 @@ only the latest changes.
     synced to a pulse built from the last loop's length. Device latency comes
     from the firmware's own period geometry; recordings use the input latency
     and overdubs use input + output. There is no manual trim.
+- **Recent Samples:** the native Load Sample browser provides a virtual folder
+  at the SD-card root with the 20 most recent sounds loaded onto pads. Entries
+  open their original paths; MiniMod does not copy the sample files.
 
 ## Install
 
@@ -58,7 +61,23 @@ only the latest changes.
 3. Insert the card and power on the MPC Sample. Remove `autorun` and reboot to
    unload the mod.
 
-The release supports MPC Sample firmware **1.3.0.12** only.
+## Changes in v0.10.2
+
+- Add **Recent Samples** to the native Load Sample browser. Only samples loaded
+  onto pads appear; previews do not. The virtual folder lives at the SD-card
+  root and opens files from their original paths without copying them.
+- Update to `mpc-sample-sdk` v0.7.2 for native browser virtual-directory and
+  successful file-open observation APIs.
+- Fix emulator test navigation to select Recent Samples after all real root
+  entries.
+
+## Verification and compatibility
+
+- SDK v0.7.2: 124 unit tests, formatting, Clippy, rustdoc and crate packaging.
+- Minimod: strict Rust checks, AArch64 release package checks, and the complete
+  emulator suite including the Recent Samples load/no-copy scenario.
+
+Built for MPC Sample firmware **1.3.0.12** only.
 
 ## Changes in v0.10.1
 

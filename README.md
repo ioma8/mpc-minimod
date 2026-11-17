@@ -61,6 +61,7 @@ level of the SD card and power on; see [Install](#install).
 | **Vinyl / Lo-Fi** — applies the firmware's Vinyl or Decimator effect to a new pad copy | `SHIFT` + `DATA`, choose **Vinyl** or **Lo-Fi**, `DATA` |
 | **Synth** — eight characters (bass, piano, pads, lead, bells, strings, voice, organ); previews C2–D#3 from pads 1–16 with a purple 1→16 brightness gradient, `PLUS`/`MINUS` shift the pads by 8 semitones, the page shows the played note, and `DATA` renders the last pressed pad's note to a new pad (C2 when none was played) | `SHIFT` + `DATA`, choose **Synth**; turn `DATA` to switch character, K1/K2/K3 shape it |
 | **Live Looper** — a fullscreen 16-pad looper: each pad records a loop from the selected input source and plays it back; overdub, per-pad clear, stop-all, sync pulse with loop-length quantization and latency compensation; pads light by state (empty dim, recording red, overdub amber, playing green, stopped dim green) | `SHIFT` + `DATA`, choose **Live Looper**; pads record/play/stop, `SHIFT`+pad overdubs, `ERASE`+pad clears, `STOP` stops all, `LOOP` syncs, `SHIFT`+`DATA` exits |
+| **Recent Samples** — the native Load Sample browser includes a virtual folder at the SD-card root with up to 20 samples loaded onto pads during the current run; selecting one opens its original path, with no alias or audio files copied by MiniMod | `SAMPLE SELECT` → External → Back → **Recent Samples** |
 
 The trim and pitch changes confirm themselves on screen for a second. HPSS,
 Spectral Chop, Add Reverb, Vinyl, Lo-Fi and Synth are in the small

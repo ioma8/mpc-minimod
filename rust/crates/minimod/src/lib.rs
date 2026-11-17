@@ -26,6 +26,7 @@ pub mod midi;
 pub mod module;
 pub mod overlay;
 mod pad_ledger;
+pub(crate) mod recent;
 pub(crate) mod routing;
 pub mod settings;
 pub mod spectral;

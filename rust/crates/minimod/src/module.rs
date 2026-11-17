@@ -20,6 +20,7 @@ impl Mod for Minimod {
         // were installed.
         crate::backend::bass::set_available(mpc_sample_sdk::midi::notes_ready());
         crate::settings::load_into_mod();
+        crate::recent::start();
         // One pump for the life of the process: the looper's animation and the
         // single frame a finished worker asks for both go through it, so no
         // worker ever calls the app's UI from its own thread.
@@ -52,6 +53,7 @@ impl Mod for Minimod {
     }
 
     fn on_button(&mut self, event: ButtonEvent) -> Flow {
+        crate::recent::on_button(event);
         // Finish a job first: a completion that switched the page to chop mode
         // arms and applies its restore inside this callback.
         crate::ui::note_button(&event);
