@@ -23,7 +23,7 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 | 6 | SAMPLE OPTIONS → Add Reverb creates a reverbed copy with a tail on a free pad | `SHIFT` + `DATA`, choose Add Reverb, `DATA` | longer WAV and non-silent tail checked in emulator |
 | 7 | SAMPLE OPTIONS → Bass Synth auditions C2–D#3 on pads 1–16 and saves a plucked C2 sample to the next free pad; K1/K2/K3 shape brightness, excitation and filter live | `SHIFT` + `DATA`, choose Bass Synth, play pads or press `DATA` to save | live audio mix, output WAV, C2 pitch, source preservation and no restart checked in emulator |
 | 8 | external MIDI plays the selected pad chromatically over the whole keyboard (no wrapping, exact semitones) | MIDI keyboard, Pad MIDI In **On**, then 16 Levels | verified on device (emulator: 48→110.4, 60→220.7, 65→293.4 Hz on a 220 Hz sample) |
-| 9 | Whisper voice dictation inserts a name into the open Save Project field | On **Create name**, press `SAMPLE RECORD` to start and again to stop | emulator build ready; single-key overlay smoke test pending |
+| 9 | Moonshine Tiny English voice dictation inserts a name into the open Save Project field | On **Create name**, press `SAMPLE RECORD` to start and again to stop | verified on MPC hardware; runs on four A55 CPU cores |
 
 Chromatic external MIDI playback is available while 16 Levels is active; see
 [`docs/FEATURES.md`](../docs/FEATURES.md#external-midi-chromatic-playback) for

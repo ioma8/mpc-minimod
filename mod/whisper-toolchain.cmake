@@ -1,6 +1,0 @@
-get_filename_component(MINIMOD_MOD_DIR "${CMAKE_CURRENT_LIST_FILE}" DIRECTORY)
-set(CMAKE_SYSTEM_NAME Linux)
-set(CMAKE_SYSTEM_PROCESSOR aarch64)
-set(CMAKE_C_COMPILER "${MINIMOD_MOD_DIR}/whisper-cc.sh")
-set(CMAKE_CXX_COMPILER "${MINIMOD_MOD_DIR}/whisper-cxx.sh")
-set(CMAKE_ASM_COMPILER "${MINIMOD_MOD_DIR}/whisper-cc.sh")

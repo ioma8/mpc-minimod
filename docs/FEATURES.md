@@ -13,15 +13,18 @@ the name field is open, so it cannot start normal sample recording. No other
 key starts or stops dictation. A banner identifies recording and transcription,
 then clears on completion. MiniMod captures the firmware's active ALSA input
 stream through the SDK's successful `snd_pcm_readi` hook, with a 30-second
-recording limit. Whisper.cpp `tiny.en-q5_1` transcribes on a worker thread; the
+recording limit. Moonshine Tiny English transcribes on a persistent worker; the
 result is converted to an alphanumeric project name and inserted into the open
 native field. The normal save controls and project-writing path remain the
 firmware's.
 
-The model is downloaded and checksum-verified by `mod/build.sh`, then bundled
-in `mod/build/minimod.zip`; first-time builds need network access and about
-31 MB of extra download. Route the desired source to **AUDIO IN** in the MPC
-audio settings.
+Moonshine Tiny English runs locally on the MPC's four Cortex-A55 CPU cores.
+The quantized model and ARM64 runtime are downloaded with pinned checksums and
+bundled in `mod/build/minimod-dictation.zip`; the larger model files remain on
+the SD card while the executable and shared libraries are staged to `/run` at
+boot because the card is mounted `noexec`. First-time builds need network
+access and about 43 MB of model data. Route the desired source to **AUDIO IN**
+in the MPC audio settings. Verified on the physical MPC Sample.
 
 | feature | trigger | state |
 |---|---|---|

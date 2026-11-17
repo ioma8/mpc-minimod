@@ -21,7 +21,8 @@ only the latest changes.
 
 - **Rust implementation:** the preload library is a Rust `cdylib` built on the
   public memory-safe [`mpc-sample-sdk`](https://github.com/ioma8/mpc-sample-sdk);
-  no C or C++ is compiled. The feature code uses only small, documented `unsafe`
+  the optional dictation zip also includes a small C++ bridge for the ARM64
+  Moonshine runtime. The feature code uses only small, documented `unsafe`
   blocks at explicit SDK firmware boundaries.
 - **16 Levels:** shift the pad row by ±8 semitones with PLUS/MINUS; external
   MIDI plays the selected sample chromatically over the whole keyboard from the
@@ -53,13 +54,39 @@ only the latest changes.
 - **Recent Samples:** the native Load Sample browser provides a virtual folder
   at the SD-card root with the 20 most recent sounds loaded onto pads. Entries
   open their original paths; MiniMod does not copy the sample files.
+- **Voice project names:** dictate into the native Save Project name field
+  with `SAMPLE RECORD`; the optional package runs Moonshine Tiny English locally
+  on the four A55 CPU cores.
 
 ## Install
 
-1. Download `minimod.zip` from the release assets.
+1. Download `minimod.zip` for the standard mod or `minimod-dictation.zip` for
+   the optional voice naming feature.
 2. Unzip it and copy the `autorun` folder to the top level of an SD card.
 3. Insert the card and power on the MPC Sample. Remove `autorun` and reboot to
    unload the mod.
+
+## Changes in v0.11.0
+
+- Replace Whisper.cpp dictation with quantized Moonshine Tiny English, running
+  locally on the MPC Sample's four Cortex-A55 CPU cores.
+- Keep audio capture on the firmware's ALSA input and the single-key
+  `SAMPLE RECORD` control on the Create name screen; retain recording and
+  transcription feedback.
+- Keep dictation optional: the standard zip excludes the model and runtime;
+  the dictation zip includes the ~43 MB model and ARM64 runtime.
+- Stage the worker and shared libraries in `/run` at startup so the ExFAT
+  SD card's `noexec` mount does not prevent execution.
+- Validate the dictation package on an ARM64 smoke transcription and confirm
+  dictation works on a physical MPC Sample.
+
+## Verification and compatibility
+
+- `mod/build.sh dictation`: ARM64 worker and runtime package, Rust release build,
+  symbol/import and device glibc checks; both standard and dictation zips.
+- Physical MPC Sample: voice naming smoke test passed with Moonshine CPU
+  inference.
+- Supports MPC Sample firmware **1.3.0.12**.
 
 ## Changes in v0.10.3
 

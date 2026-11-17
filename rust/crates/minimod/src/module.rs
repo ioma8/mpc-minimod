@@ -53,7 +53,7 @@ impl Mod for Minimod {
     }
 
     fn on_button(&mut self, event: ButtonEvent) -> Flow {
-        #[cfg(feature = "dictation")]
+        #[cfg(any(feature = "dictation", feature = "dictation-rknn"))]
         if crate::speech::on_button(&event) {
             return Flow::Consume;
         }
@@ -120,15 +120,15 @@ impl Mod for Minimod {
         dest: usize,
         label: &core::ffi::CStr,
     ) -> Option<&'static core::ffi::CStr> {
-        #[cfg(feature = "dictation")]
+        #[cfg(any(feature = "dictation", feature = "dictation-rknn"))]
         crate::speech::observe_assignment(dest, label);
-        #[cfg(not(feature = "dictation"))]
+        #[cfg(not(any(feature = "dictation", feature = "dictation-rknn")))]
         let _ = dest;
         crate::ui::label(label)
     }
 
     fn on_repaint(&mut self, _component: usize) {
-        #[cfg(feature = "dictation")]
+        #[cfg(any(feature = "dictation", feature = "dictation-rknn"))]
         {
             crate::speech::observe_repaint(_component);
             crate::speech::on_repaint();
@@ -160,7 +160,7 @@ impl Mod for Minimod {
 
 fn audio_input_interleaved(samples: &[i32], channels: usize, rate: u32) {
     crate::backend::audio::input_interleaved(samples, channels, rate);
-    #[cfg(feature = "dictation")]
+    #[cfg(any(feature = "dictation", feature = "dictation-rknn"))]
     crate::speech::input_interleaved(samples, channels, rate);
 }
 

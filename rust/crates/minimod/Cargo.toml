@@ -14,12 +14,12 @@ readme = "../../README.md"
 crate-type = ["cdylib", "staticlib"]
 
 [features]
-dictation = ["dep:whisper-rs"]
+dictation = []
+dictation-rknn = []
 
 [dependencies]
 minimod-dsp.workspace = true
 mpc-sample-sdk.workspace = true
-whisper-rs = { workspace = true, optional = true }
 libc.workspace = true
 
 [lints]

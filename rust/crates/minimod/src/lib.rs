@@ -31,7 +31,9 @@ pub(crate) mod routing;
 pub mod settings;
 pub mod spectral;
 pub mod spectral_machine;
-#[cfg(feature = "dictation")]
+#[cfg(all(feature = "dictation", feature = "dictation-rknn"))]
+compile_error!("enable only one dictation backend");
+#[cfg(any(feature = "dictation", feature = "dictation-rknn"))]
 pub(crate) mod speech;
 pub mod synth_lights;
 pub mod ui;
