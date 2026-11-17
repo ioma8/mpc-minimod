@@ -37,8 +37,10 @@ Sample mod:
 **https://github.com/ioma8/mpc-sample-sdk** ·
 [hands-on guide](https://github.com/ioma8/mpc-sample-sdk/blob/main/docs/README.md).
 
-The SDK ships a ready-to-use **`build-mod.sh`**; minimod's `mod/build.sh` is only
-a thin wrapper around it. Build from the root:
+The SDK ships a ready-to-use **`build-mod.sh`**; minimod's `mod/build.sh` is a
+thin wrapper around it. Install `uv` and `zig` first. The optional dictation
+build downloads the 31 MB Whisper model once and bundles it in its autorun zip.
+First-time builds need network access. Build from the root:
 
 ```sh
 cd mod
@@ -62,6 +64,7 @@ level of the SD card and power on; see [Install](#install).
 | **Synth** — eight characters (bass, piano, pads, lead, bells, strings, voice, organ); previews C2–D#3 from pads 1–16 with a purple 1→16 brightness gradient, `PLUS`/`MINUS` shift the pads by 8 semitones, the page shows the played note, and `DATA` renders the last pressed pad's note to a new pad (C2 when none was played) | `SHIFT` + `DATA`, choose **Synth**; turn `DATA` to switch character, K1/K2/K3 shape it |
 | **Live Looper** — a fullscreen 16-pad looper: each pad records a loop from the selected input source and plays it back; overdub, per-pad clear, stop-all, sync pulse with loop-length quantization and latency compensation; pads light by state (empty dim, recording red, overdub amber, playing green, stopped dim green) | `SHIFT` + `DATA`, choose **Live Looper**; pads record/play/stop, `SHIFT`+pad overdubs, `ERASE`+pad clears, `STOP` stops all, `LOOP` syncs, `SHIFT`+`DATA` exits |
 | **Recent Samples** — the native Load Sample browser includes a virtual folder at the SD-card root with up to 20 samples loaded onto pads during the current run; selecting one opens its original path, with no alias or audio files copied by MiniMod | `SAMPLE SELECT` → External → Back → **Recent Samples** |
+| **Voice project names** — captures the active ALSA input, transcribes with Whisper.cpp `tiny.en-q5_1`, and inserts the recognized name into the open Save Project field; a banner shows recording or transcription and clears when finished | On **Create name**, press `SAMPLE RECORD` to start and press it again to finish |
 
 The trim and pitch changes confirm themselves on screen for a second. HPSS,
 Spectral Chop, Add Reverb, Vinyl, Lo-Fi and Synth are in the small
@@ -106,8 +109,8 @@ it resets to Off on every start. Details:
 
 ## Install
 
-1. Download **`minimod.zip`** from the
-   [latest release](https://github.com/ioma8/mpc-minimod/releases/latest).
+1. Download **`minimod.zip`** or **`minimod-dictation.zip`** (includes voice
+   project names) from the [latest release](https://github.com/ioma8/mpc-minimod/releases/latest).
 2. Unzip it and copy the `autorun` folder to the **top level** of the SD card —
    not inside another folder.
 3. Put the card in the MPC Sample and power it on.
@@ -118,12 +121,13 @@ To go back to stock, delete `autorun` from the card (or boot without the card).
 
 ```sh
 cd mod
-./build.sh          # builds, strips, checks and packs
+./build.sh standard  # smaller package without dictation
+./build.sh dictation # optional voice dictation package
 ./pack.sh           # compatibility alias; does the same
 ```
 
-That writes the same package as the release:
-`mod/build/minimod.zip`, plus `minimod.so` for the lab and `minimod.elf`/
+That writes the release packages `mod/build/minimod.zip` and
+`mod/build/minimod-dictation.zip`, plus `minimod.so` for the lab and `minimod.elf`/
 `minimod.map` for the emulator tests.
 
 The build is delegated to the SDK's `build-mod.sh`; minimod does not maintain a

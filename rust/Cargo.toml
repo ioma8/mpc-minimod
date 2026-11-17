@@ -11,8 +11,12 @@ repository = "https://github.com/jakubkolcar/sample-converter"
 
 [workspace.dependencies]
 minimod-dsp = { path = "crates/dsp" }
-mpc-sample-sdk = "0.7.3"
+mpc-sample-sdk = "0.7.4"
 libc = "0.2"
+whisper-rs = "0.16.0"
+
+[patch.crates-io]
+whisper-rs-sys = { path = "patches/whisper-rs-sys" }
 
 
 [workspace.lints.rust]

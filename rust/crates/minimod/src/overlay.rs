@@ -64,11 +64,26 @@ pub fn poll_offpage() {
 
 /// The page's paint: draw the mod's overlay on top of the app's.
 pub fn paint(graphics: Graphics, event: mpc_sample_sdk::PaintEvent) {
+    let handle = graphics.handle();
+    #[cfg(feature = "dictation")]
+    if crate::speech::is_project_save_screen(event.component) {
+        if let Some((title, recording)) = crate::speech::overlay_state() {
+            paint::colour(handle, 0xff15_151a);
+            paint::rect(handle, 8, 174, 304, 32);
+            paint::colour(handle, if recording { 0xffff_6b62 } else { 0xff5c_c8ff });
+            paint::rect(handle, 8, 174, 304, 2);
+            paint::colour(handle, 0xffff_ffff);
+            paint::text(handle, title, 16, 179, 288, 23, 19.0);
+        } else {
+            paint::colour(handle, 0xffb0_b0b0);
+            paint::text(handle, "Press SAMPLE RECORD to dictate", 8, 180, 304, 24, 14.0);
+        }
+        return;
+    }
     if !event.sample_page {
         return;
     }
     let component = event.component;
-    let handle = graphics.handle();
     crate::spectral::frame();
     let _ = crate::jobflow::finish(component);
     // An extraction can switch the page to chop mode; put it back now instead

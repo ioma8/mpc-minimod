@@ -31,6 +31,8 @@ pub(crate) mod routing;
 pub mod settings;
 pub mod spectral;
 pub mod spectral_machine;
+#[cfg(feature = "dictation")]
+pub(crate) mod speech;
 pub mod synth_lights;
 pub mod ui;
 

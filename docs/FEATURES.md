@@ -5,6 +5,24 @@ measured, and what is still open. Mechanisms are catalogued in
 [`MECHANISMS.md`](MECHANISMS.md); the road to each one is in
 [`HISTORY.md`](HISTORY.md).
 
+## Voice project names
+
+While the native **Create name** field is open, press `SAMPLE RECORD` to start
+dictation and press it again to finish. MiniMod swallows that key only while
+the name field is open, so it cannot start normal sample recording. No other
+key starts or stops dictation. A banner identifies recording and transcription,
+then clears on completion. MiniMod captures the firmware's active ALSA input
+stream through the SDK's successful `snd_pcm_readi` hook, with a 30-second
+recording limit. Whisper.cpp `tiny.en-q5_1` transcribes on a worker thread; the
+result is converted to an alphanumeric project name and inserted into the open
+native field. The normal save controls and project-writing path remain the
+firmware's.
+
+The model is downloaded and checksum-verified by `mod/build.sh`, then bundled
+in `mod/build/minimod.zip`; first-time builds need network access and about
+31 MB of extra download. Route the desired source to **AUDIO IN** in the MPC
+audio settings.
+
 | feature | trigger | state |
 |---|---|---|
 | 16-Levels pitch shift | `PLUS` / `MINUS` | verified on hardware |

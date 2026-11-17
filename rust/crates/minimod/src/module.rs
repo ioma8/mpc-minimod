@@ -53,6 +53,10 @@ impl Mod for Minimod {
     }
 
     fn on_button(&mut self, event: ButtonEvent) -> Flow {
+        #[cfg(feature = "dictation")]
+        if crate::speech::on_button(&event) {
+            return Flow::Consume;
+        }
         crate::recent::on_button(event);
         // Finish a job first: a completion that switched the page to chop mode
         // arms and applies its restore inside this callback.
@@ -111,6 +115,26 @@ impl Mod for Minimod {
         crate::ui::label(label)
     }
 
+    fn on_text_assignment(
+        &mut self,
+        dest: usize,
+        label: &core::ffi::CStr,
+    ) -> Option<&'static core::ffi::CStr> {
+        #[cfg(feature = "dictation")]
+        crate::speech::observe_assignment(dest, label);
+        #[cfg(not(feature = "dictation"))]
+        let _ = dest;
+        crate::ui::label(label)
+    }
+
+    fn on_repaint(&mut self, _component: usize) {
+        #[cfg(feature = "dictation")]
+        {
+            crate::speech::observe_repaint(_component);
+            crate::speech::on_repaint();
+        }
+    }
+
     fn on_paint(&mut self, graphics: &mut mpc_sample_sdk::draw::Graphics, event: PaintEvent) {
         crate::overlay::paint(*graphics, event);
         crate::menu::follow_preview();
@@ -128,10 +152,16 @@ impl Mod for Minimod {
     fn audio(&self) -> AudioHooks {
         AudioHooks {
             output: Some(crate::backend::audio::output),
-            input_interleaved: Some(crate::backend::audio::input_interleaved),
+            input_interleaved: Some(audio_input_interleaved),
             input_planar: Some(crate::backend::audio::input_planar),
         }
     }
+}
+
+fn audio_input_interleaved(samples: &[i32], channels: usize, rate: u32) {
+    crate::backend::audio::input_interleaved(samples, channels, rate);
+    #[cfg(feature = "dictation")]
+    crate::speech::input_interleaved(samples, channels, rate);
 }
 
 /// Handle physical pad events without the UI module lock.
