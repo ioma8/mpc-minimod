@@ -64,6 +64,7 @@ level of the SD card and power on; see [Install](#install).
 | --- | --- |
 | **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim; only on the trim screen | `SHIFT` + `B3` |
 | **Octave shift** of pads in 16 Levels mode — by half the grid | `PLUS` / `MINUS` keys (both = reset) |
+| **Microtonal 16 Levels** — halves the pad grid so each pad is half a semitone (the row spans 8 semitones); the other turn restores whole semitones, and a toast shows the mode | 16 Levels on: hold `16 LEVELS` and turn `DATA` |
 | **External MIDI chromatic playback** of the selected sample while in 16 Levels, in the sample's own key (C3 when it has no root note) | Enable **Pad MIDI In** in MIDI Config, then play a MIDI keyboard |
 | **HPSS** — splits the selected sample into harmonic and percussive copies on two empty pads; the source sample is left untouched | `SHIFT` + `DATA`, choose **HPSS**, `DATA` |
 | **Spectral Chop** — cuts the selected sample into musical regions — a new chord, a new phrase, a different drum — and chops that same pad at those boundaries (Manual slice markers, up to 16) | `SHIFT` + `DATA`, choose **Spectral Chop**, `DATA` |

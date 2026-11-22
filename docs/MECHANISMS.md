@@ -416,6 +416,7 @@ Address space is stated per row: `mod` offsets are what the shipped hooks use;
 | router | Ghidra `0x221aa30` → `0x2215070` decodes the event; `0x2214fc0` recomputes the slot byte at struct `+0x30` | [static] |
 | 16 Levels writer | Ghidra `0x21472f0`: type at `levels+0x88`; always writes exactly one parameter slot (or velocity) per level 0..15 | [static] |
 | pitch setter | mod `0x27e4400` (Ghidra `0x28e4400`): `props[index+2] = clamp(steps·(s0/(max-min)), 0, 255)`; `props[0] |= 1<<index`; index 0 range −120..120, 241 steps | [static] |
+| pitch slots | the setter writes **one** slot per call: slot 0 is the semitones and slot 1 the fine tune (the Tune page's K1 = semitones, K2 = fine, firmware 1.3.0.12). Both ranges are −120..120 with 241 steps (`0x27e3900` returns 241 for indices 0 and 1), but the steps are not the same size: slot 0 is one step per **semitone**, slot 1 one step per **tenth of a semitone** (±120 steps = ±12 semitones). Measured through the lab's PCM stream: five slot-1 steps raise the pitch exactly half a semitone | [static] + lab |
 | the app's own call | `w3 = level − originalPad` (signed semitones), `event+0x30` = selected pad | [hook] |
 | external-note source | keep the firmware's source for pass-through; rebuild the note for the selected pad and dispatch with `0x7ffffffa` | [rt] |
 

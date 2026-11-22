@@ -26,6 +26,8 @@ pub struct State {
     pub octave: i32,
     /// The synth preview shift, in eight-semitone steps.
     pub synth_octave: i32,
+    /// Whether the 16 Levels grid is halved (microtonal).
+    pub microtonal: bool,
 }
 
 impl State {
@@ -36,6 +38,7 @@ impl State {
             trim_step: 0,
             octave: 0,
             synth_octave: 0,
+            microtonal: false,
         }
     }
 }
@@ -132,6 +135,32 @@ pub(crate) fn apply_action(action: Action, event: ButtonEvent, last_pad: i32) ->
 #[must_use]
 pub fn octave() -> i32 {
     state().octave
+}
+
+/// Whether the 16 Levels grid plays half semitones.
+#[must_use]
+pub fn microtonal() -> bool {
+    state().microtonal
+}
+
+/// Turn the half-semitone grid on or off.
+///
+/// Returns the toast text when the mode actually changed, so a turn that holds
+/// the current mode does not repeat the message.
+#[must_use]
+pub fn set_microtonal(on: bool) -> Option<&'static str> {
+    let mut changed = false;
+    with_state_mut(|state| {
+        if state.microtonal != on {
+            state.microtonal = on;
+            changed = true;
+        }
+    });
+    changed.then_some(if on {
+        "Microtonal: half steps"
+    } else {
+        "Semitones"
+    })
 }
 
 /// Reset the synth preview shift when its page opens.

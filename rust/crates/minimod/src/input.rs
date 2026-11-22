@@ -20,11 +20,20 @@ static LAST_PAD: AtomicI32 = AtomicI32::new(-1);
 
 /// The UI-owned button and encoder history.
 #[derive(Clone, Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent physical key holds; a state machine would invent states the input does not have"
+)]
 pub(crate) struct State {
     data_target: usize,
     plus_held: bool,
     minus_held: bool,
     b3_down: bool,
+    levels_down: bool,
+    /// The 16 LEVELS press held back while 16 Levels is up, for a replay.
+    levels_press: Option<[u8; 16]>,
+    /// Whether a DATA turn used that hold as the microtonal gesture.
+    levels_gesture: bool,
     button_owners: [u8; 256],
 }
 
@@ -36,6 +45,9 @@ impl State {
             plus_held: false,
             minus_held: false,
             b3_down: false,
+            levels_down: false,
+            levels_press: None,
+            levels_gesture: false,
             button_owners: [0; 256],
         }
     }
@@ -87,6 +99,7 @@ struct Modes {
     chop_mode: bool,
     shift: bool,
     erase: bool,
+    levels: bool,
 }
 
 /// A button decision and the feature action, if the event triggers one.
@@ -128,6 +141,8 @@ pub(crate) struct SurfaceDecision {
 pub(crate) enum EncoderAction {
     MenuStep(i32),
     SynthKindStep(i32),
+    /// Turn the halved 16 Levels grid on (`1`) or off (`-1`).
+    Microtonal(i32),
 }
 
 /// An encoder flow decision and optional action for the menu.
@@ -154,6 +169,8 @@ pub(crate) struct CcDecision {
 /// Which pads the app can address.
 const PADS: usize = 128;
 const LOOPER_PADS: usize = crate::backend::looper::PADS;
+/// The 16 LEVELS key as a byte, for the replay.
+const LEVELS_KEY: u8 = buttons::KEY_LEVELS as u8;
 const PREVIEW_PADS: usize = crate::backend::bass::PADS;
 
 fn pad_index(pad: i32) -> Option<usize> {
@@ -167,7 +184,8 @@ pub(crate) fn button(state: &mut State, event: ButtonEvent) -> ButtonDecision {
     if event.surface != 0 {
         state.data_target = mpc_sample_sdk::event::data_target(event.surface);
     }
-    button_with_modes(state, event, modes(), crate::midi::levels_active() != 0)
+    let modes = modes();
+    button_with_modes(state, event, modes, modes.levels)
 }
 
 fn button_with_modes(
@@ -176,6 +194,9 @@ fn button_with_modes(
     modes: Modes,
     levels: bool,
 ) -> ButtonDecision {
+    if let Some(decision) = defer_levels_press(state, event, modes) {
+        return decision;
+    }
     let action = decide_button(state, event, modes, levels);
     let should_run = if action == ButtonAction::Autotrim {
         let first_press = event.pressed && !state.b3_down;
@@ -214,6 +235,60 @@ fn button_with_modes(
         action: should_run.then_some(action),
         levels,
     }
+}
+
+/// Hold back the 16 LEVELS press while 16 Levels is up.
+///
+/// 16 LEVELS is the app's own toggle, and the microtonal gesture needs it held,
+/// so the press is parked until the release decides: a DATA turn before the
+/// release makes it the gesture and the hold is swallowed; a plain tap is the
+/// app's toggle, replayed through the app's dispatcher so the page still closes.
+/// Returns `None` when the event is not a 16 Levels press to defer.
+fn defer_levels_press(
+    state: &mut State,
+    event: ButtonEvent,
+    modes: Modes,
+) -> Option<ButtonDecision> {
+    if event.code != buttons::KEY_LEVELS {
+        return None;
+    }
+    if event.pressed {
+        state.levels_down = true;
+        // Defer only where the app would toggle: 16 Levels is up, on the Sample
+        // page, unshifted and outside chop mode, with no modal owning the keys.
+        let toggles = modes.levels
+            && modes.page_visible
+            && !modes.chop_mode
+            && !event.shift
+            && !modes.menu
+            && !modes.spectral
+            && !modes.looper;
+        if !toggles {
+            return None;
+        }
+        state.levels_press = Some(event.bytes);
+        state.levels_gesture = false;
+        return Some(ButtonDecision {
+            flow: Flow::Consume,
+            action: None,
+            levels: modes.levels,
+        });
+    }
+    state.levels_down = false;
+    let press = state.levels_press.take()?;
+    let gesture = core::mem::take(&mut state.levels_gesture);
+    if !gesture {
+        // SAFETY: the press came from the page that is up now and the release
+        // runs on its UI thread; the live check rejects a stale context.
+        let _ = unsafe { mpc_sample_sdk::event::replay_button_live(&press, LEVELS_KEY) };
+    }
+    Some(ButtonDecision {
+        flow: Flow::Consume,
+        // The replay was the toggle; the mod's own MIDI mode follows it the way
+        // the app's forwarded press did.
+        action: (!gesture).then_some(ButtonAction::ToggleLevels),
+        levels: modes.levels,
+    })
 }
 
 fn decide_button(state: &State, event: ButtonEvent, modes: Modes, levels: bool) -> ButtonAction {
@@ -385,11 +460,31 @@ fn surface_with_modes(event: SurfaceEvent, modes: Modes) -> SurfaceDecision {
 
 /// Decide whether a DATA turn belongs to the menu.
 #[must_use]
-pub(crate) fn encoder(state: &State, event: EncoderEvent) -> EncoderDecision {
+pub(crate) fn encoder(state: &mut State, event: EncoderEvent) -> EncoderDecision {
     encoder_with_modes(state, event, modes())
 }
 
-fn encoder_with_modes(state: &State, event: EncoderEvent, modes: Modes) -> EncoderDecision {
+fn encoder_with_modes(state: &mut State, event: EncoderEvent, modes: Modes) -> EncoderDecision {
+    // The microtonal grid is armed from 16 Levels: holding that key, a DATA
+    // turn halves the level grid, and the opposite direction restores whole
+    // semitones.  Nothing else in 16 Levels uses DATA, so the turn is ours only
+    // while the key is physically down.
+    if event.surface == state.data_target
+        && event.delta != 0
+        && modes.levels
+        && state.levels_down
+        && modes.page_visible
+    {
+        state.levels_gesture = true;
+        return EncoderDecision {
+            flow: Flow::Consume,
+            action: Some(EncoderAction::Microtonal(if event.delta > 0 {
+                1
+            } else {
+                -1
+            })),
+        };
+    }
     if event.surface != state.data_target || (!modes.menu && !modes.spectral) {
         return EncoderDecision {
             flow: Flow::Forward,
@@ -471,6 +566,7 @@ fn modes() -> Modes {
         chop_mode,
         shift: mpc_sample_sdk::shift(),
         erase: mpc_sample_sdk::erase(),
+        levels: crate::midi::levels_active() != 0,
     }
 }
 
@@ -765,7 +861,7 @@ mod tests {
             ..modes()
         };
         assert_eq!(
-            encoder_with_modes(&state, event, menu),
+            encoder_with_modes(&mut state, event, menu),
             super::EncoderDecision {
                 flow: Flow::Consume,
                 action: Some(EncoderAction::MenuStep(-1)),
@@ -777,12 +873,12 @@ mod tests {
             ..modes()
         };
         assert_eq!(
-            encoder_with_modes(&state, event, synth).action,
+            encoder_with_modes(&mut state, event, synth).action,
             Some(EncoderAction::SynthKindStep(-1))
         );
         assert_eq!(
             encoder_with_modes(
-                &state,
+                &mut state,
                 EncoderEvent {
                     surface: 11,
                     delta: 1

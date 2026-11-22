@@ -78,6 +78,8 @@ def cases_for(lab_path, panel):
         ('midi_chromatic', 'populated', 'emulator_midi_chromatic.py', ['--lab', str(lab_path), '--panel',
                                                         panel]),
         ('pad_octave', 'populated', 'emulator_pad_octave.py', ['--lab', str(lab_path)]),
+        ('microtonal', 'populated', 'emulator_microtonal.py', ['--lab', str(lab_path)]),
+        ('microtonal_pitch', 'populated', 'emulator_microtonal_pitch.py', ['--lab', str(lab_path)]),
         ('looper', 'populated', 'emulator_looper.py', ['--lab', str(lab_path), '--panel',
                                          panel]),
         ('looper_lights', 'empty', 'emulator_looper_lights.py', ['--panel',

@@ -29,7 +29,7 @@ impl Mod for Minimod {
 
     fn on_encoder(&mut self, event: EncoderEvent) -> Flow {
         crate::ui::cancel_chop_restore();
-        let decision = crate::input::encoder(&self.input, event);
+        let decision = crate::input::encoder(&mut self.input, event);
         match decision.action {
             Some(crate::input::EncoderAction::MenuStep(direction)) => {
                 let step = if direction > 0 { 1 } else { 7 };
@@ -46,6 +46,12 @@ impl Mod for Minimod {
                 let knobs = crate::menu::bass_knobs();
                 crate::backend::bass::preview_set_params(knobs[0], knobs[1], knobs[2]);
                 crate::ui::minimod_repaint_screen();
+            }
+            Some(crate::input::EncoderAction::Microtonal(direction)) => {
+                if let Some(text) = crate::ui::set_microtonal(direction > 0) {
+                    crate::paint::show_toast(text);
+                    crate::ui::minimod_repaint_screen();
+                }
             }
             None => {}
         }
@@ -109,6 +115,10 @@ impl Mod for Minimod {
 
     fn on_pitch(&mut self, applied: i32) -> i32 {
         crate::levels::apply(applied)
+    }
+
+    fn on_pitch_fine(&mut self, applied: i32) -> i32 {
+        crate::levels::apply_fine(applied)
     }
 
     fn on_label(&mut self, label: &core::ffi::CStr) -> Option<&'static core::ffi::CStr> {

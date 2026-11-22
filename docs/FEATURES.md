@@ -81,6 +81,43 @@ is tracked from the panel toggle and cleared when the Sample page goes away.
 **Evidence.** Verified on hardware. The supported branch is the common 16-Levels
 path; a separate firmware branch in the renderer is not hooked.
 
+## Microtonal 16 Levels
+
+**Behavior.** With 16 LEVELS lit, hold `16 LEVELS` and turn `DATA` to halve the
+pad grid: each pad is half a semitone above the one before, so the row spans 8
+semitones instead of 16. Turning the other way restores whole semitones. The
+toast shows the new mode (`Microtonal: half steps` / `Semitones`) and nothing is
+shown when the turn does not change it. `PLUS`/`MINUS` keep their eight
+semitones, which is one full microtonal row, so a press lands on the next row.
+
+**Implementation.** The firmware's pitch parameter is `Octave`/`Semitones`/`Cents`
+and its setter writes exactly one property slot per call: slot 0 is the
+semitones (one step per semitone, ±120), slot 1 the fine tune (one step per
+**tenth of a semitone**, ±120 steps = ±12 semitones). A half step therefore has
+to be five fine steps, never a fraction of a semitone, which the semitone slot
+cannot carry. `levels::pitch` keeps everything in half steps and splits each pad
+into a semitone and a fine-tune value; the SDK writes the fine slot through
+`Mod::on_pitch_fine` only when it is non-zero, so whole-semitone mods never touch
+it and the stock behaviour is unchanged.
+
+16 LEVELS is the app's own toggle, so a press while the page is up would leave
+16 Levels before the turn arrives. The key is therefore held back: `input`
+parks the press, a DATA turn before the release makes it the gesture and the
+hold is swallowed, and a plain tap is replayed through the app's own dispatcher
+so the page still closes.
+
+**Evidence.** Host tests cover the arithmetic
+(`rust/crates/minimod/src/levels.rs`). `mod/tests/emulator_microtonal.py` drives
+the real panel and passes: the row goes `(-3, 0) (-2, 0) (-1, 0)` → `(-2, 5)
+(-1, 0) (-1, 5)` → back, and the full emulator suite is 19/19 with the hold-back
+in place, so leaving 16 Levels with a tap still works.
+The audible pitch was measured through the lab's PCM stream: the pad that
+writes only semitones rises **+1.00 semitone** (ratio 1.0595) and the pad that
+writes five fine steps rises **+1.50 semitones** (ratio 1.0904) — five steps is
+half a semitone to sub-bin precision. The same rig measured `PLUS` at 1.5890
+against the expected 1.5874, so the measurement is sound. Hardware is not yet
+recorded.
+
 ---
 
 ## AutoTrim

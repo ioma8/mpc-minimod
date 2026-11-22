@@ -82,6 +82,14 @@ assert mpc.u64(mpc.symbol_address('g_screen')) != 0
 print('PASS: Sample screen is available')
 ```
 
+## Cases that listen
+
+`microtonal_pitch` measures what the firmware actually plays, so it records the
+lab's PCM stream (S16LE stereo at 44.1 kHz) and compares the pitch of two pads.
+QEMU's audio chardev serves **one** client and the panel page at
+<http://127.0.0.1:8765> is the other one: close that page while this case runs,
+or it skips with a message saying exactly that. Every other case is unaffected.
+
 Run it by name with `uv run --script mod/tests/emulator_suite.py <name>`. The
 helper also provides `control(name, action, value)`, `state()`, `wait_for(...)`,
 `midi(hex_bytes)`, `screenshot()`, `ssh(command)`, `process()`,
