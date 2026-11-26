@@ -19,6 +19,7 @@ import struct
 import subprocess
 import time
 import urllib.request
+from firmware_layout import LAYOUTS, detect
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -114,24 +115,25 @@ def main():
             return data
         def qword(address):
             return struct.unpack('<Q', memory(address, 8))[0]
-        expected_screen = int(next(
-            x.split('-')[0] for x in maps if x.endswith('/MPC Sample')), 16) + 0x6e212a0
+        app_base = int(next(
+            x.split('-')[0] for x in maps if x.endswith('/MPC Sample')), 16)
         # A library mapping appears before the app has necessarily built its
         # Sample screen. Gate on the screen vtable instead of sleeping 5 s.
         ready_deadline = time.monotonic() + 30
         while time.monotonic() < ready_deadline:
             screen = qword(base + symbols['g_screen'])
-            if screen and qword(screen) == expected_screen:
+            if screen and qword(screen) in tuple(
+                    app_base + layout.sample_page_vtable for layout in LAYOUTS):
                 break
             time.sleep(.1)
         else:
             raise AssertionError('Sample screen did not become ready after app restart')
         def model():
             screen = qword(base + symbols['g_screen'])
-            assert qword(screen) == expected_screen, 'Wrong map or Sample screen unavailable'
-            binding = qword(screen + 0x178)
+            layout = detect(app_base, qword(screen))
+            binding = qword(screen + layout.page_binding)
             state = qword(binding + 0x60)
-            sample = qword(qword(state + 0x22e8) + 0x4a8)
+            sample = qword(qword(state + layout.state_layers) + 0x4a8)
             meta = qword(sample + 0x130)
             frames = struct.unpack('<I', memory(meta + 4, 4))[0]
             assert frames == 62259, 'Load GuitPh-Grove3 on A13 first'
@@ -144,7 +146,8 @@ def main():
                 blob = memory(pointer + 0x78, 0x60)
                 pairs.append((struct.unpack_from('<Q', blob)[0],
                               struct.unpack_from('<Q', blob, 0x58)[0]))
-            kind = struct.unpack('<i', memory(qword(screen + 0x168) + 0x9c, 4))[0]
+            kind = struct.unpack(
+                '<i', memory(qword(screen + layout.chop_binding) + 0x9c, 4))[0]
             return sample, kind, pairs
         tap('SAMPLE')
         time.sleep(.2)

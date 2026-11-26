@@ -15,6 +15,7 @@ use crate::backend::{bass, hpss};
 pub(crate) struct Job {
     pub(crate) source: Option<Selection>,
     pub(crate) screen: usize,
+    pub(crate) surface: usize,
     pub(crate) program: Option<usize>,
     pub(crate) destination: Option<i32>,
     pub(crate) frames: u32,
@@ -29,6 +30,7 @@ impl Job {
     pub(crate) fn selected(source: Selection, kind: i32) -> Self {
         Self {
             screen: source.screen(),
+            surface: 0,
             program: None,
             destination: None,
             frames: source.frames(),
@@ -45,6 +47,7 @@ impl Job {
         Self {
             source: None,
             screen,
+            surface: 0,
             program: None,
             destination: None,
             frames: 0,

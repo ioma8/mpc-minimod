@@ -48,22 +48,36 @@ const LABELS: [&str; 4] = [
 /// returns the selected pad even when the last pad press was another pad or
 /// happened before a project/screen change. The selected sample is the fallback
 /// when the page state is temporary.
-fn selected_pad(surface: usize, last_pad: i32) -> Option<i32> {
+fn selected_sample(surface: usize, last_pad: i32) -> Option<(i32, usize)> {
     let screen = paint::screen();
     // SAFETY: `screen` is the component the paint hook recorded on this UI
     // thread; `current` validates its Sample-page vtable.
     if let Some(current) = unsafe { selection::current(screen) } {
         if let Some(pad) = pads::pad_for_state(surface, current.state()) {
-            return Some(pad);
+            return Some((pad, current.sample()));
+        }
+        // The control hook may not have seen a knob event yet. The selected
+        // page state also belongs to its program's pad table, so resolve it
+        // there instead of making AutoTrim depend on a cached surface.
+        if let Some(program) = selection::program(current.state()) {
+            for pad in 0..128 {
+                if pads::pad_slot(program, pad) == Some(current.state()) {
+                    return Some((pad, current.sample()));
+                }
+            }
         }
         if let Some(pad) = pads::pad_for_sample(surface, current.sample()) {
-            return Some(pad);
+            return Some((pad, current.sample()));
         }
         // A selected sample that is not addressable as a pad has no safe trim
         // target; never fall back to a stale physical press.
         return None;
     }
-    (0..128).contains(&last_pad).then_some(last_pad)
+    if (0..128).contains(&last_pad) {
+        pads::sample_for_pad(surface, last_pad).map(|sample| (last_pad, sample))
+    } else {
+        None
+    }
 }
 
 /// Run one press of the trim cycle.
@@ -73,11 +87,11 @@ fn selected_pad(surface: usize, last_pad: i32) -> Option<i32> {
 /// trim command was submitted.
 #[must_use]
 pub fn run(context: Context) -> bool {
-    let Some(pad) = selected_pad(context.surface, context.last_pad) else {
+    if context.surface == 0 || crate::control::original().is_none() {
+        return failure("AutoTrim: control unavailable");
+    }
+    let Some((pad, sample)) = selected_sample(context.surface, context.last_pad) else {
         return failure("AutoTrim: select a pad");
-    };
-    let Some(sample) = pads::sample_for_pad(context.surface, pad) else {
-        return failure("AutoTrim: no sample on pad");
     };
     // the sample is the page's own object.
     let frames = sample::frames(sample);
@@ -134,7 +148,11 @@ pub fn pad_root(pad: i32) -> i32 {
     // only the UI thread writes the surface.
     let surface = crate::control::surface();
     if surface == 0 {
-        return sample::DEFAULT_ROOT;
+        // SAFETY: the recorded Sample page is live on the UI callback thread.
+        return unsafe { selection::current(paint::screen()) }
+            .map_or(sample::DEFAULT_ROOT, |selected| {
+                sample::root_note(selected.sample())
+            });
     }
     pads::sample_for_pad(surface, pad).map_or(sample::DEFAULT_ROOT, sample::root_note)
 }

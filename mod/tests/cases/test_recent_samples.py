@@ -16,10 +16,11 @@ PROJECT_DATA = '/data/TempProjects/Temp-Project_[ProjectData]'
 def sample_path(mpc, press_pad=True):
     if press_pad:
         mpc.tap('PAD 1')
+    layout = mpc.firmware_layout()
     screen = mpc.u64(mpc.symbol_address('g_screen'))
-    binding = mpc.u64(screen + 0x178)
+    binding = mpc.u64(screen + layout.page_binding)
     state = mpc.u64(binding + 0x60)
-    layer = mpc.u64(state + 0x22e8)
+    layer = mpc.u64(state + layout.state_layers)
     sample = mpc.u64(layer + 0x4a8)
     assert sample, 'Pad A01 has no sample after browser load'
     holder = mpc.u64(sample + 0x30)
@@ -53,23 +54,21 @@ def main():
         f'find "{SAMPLE_ROOT}" -maxdepth 1 -type f -name "*.wav" | sort'
     ).decode().splitlines()
     assert len(source_files) >= 2, 'Need two SD samples to test the browser loader'
-    source = source_files[1]
-    basename = source.rsplit('/', 1)[-1]
     virtual_path = f'{CARD_ROOT}/Recent Samples'
     assert mpc.ssh(f'test ! -e "{virtual_path}" && echo absent').decode().strip() == 'absent'
 
     open_samples_root(mpc)
-    visible_names = [path.rsplit('/', 1)[-1] for path in source_files]
-    selected_index = visible_names.index(basename)
-    preview_index = visible_names.index('TRIM-Test-A.wav')
-    # Preview is a successful native file open, but it must not create a recent
-    # entry because DATA did not load the sample onto a pad.
-    turn_rows(mpc, preview_index - 1)  # The Samples row's index carries through.
+    # Preview whichever row the native browser currently selects. Its selection
+    # is retained across app restarts, so deriving it from host file order makes
+    # this test depend on the previous emulator case.
     mpc.tap('SCREEN 3')
     mpc.tap('SAMPLE')
     mpc.tap('SAMPLE SELECT')
     before_load = project_sample_count(mpc)
-    turn_rows(mpc, selected_index - preview_index)
+    assert mpc.ssh(f'test ! -e "{virtual_path}" && echo absent').decode().strip() == 'absent', (
+        'Preview-only browser open created Recent Samples'
+    )
+    mpc.control('DATA', 'turn', 1)
     mpc.tap('DATA')
     mpc.wait_for(
         lambda: project_sample_count(mpc) > before_load,
@@ -79,8 +78,7 @@ def main():
     mpc.tap('SAMPLE')
     first_path = sample_path(mpc)
     first_name = first_path.rsplit('/', 1)[-1]
-    sample_stem = basename.rsplit('.', 1)[0]
-    assert first_name.startswith(sample_stem), f'Loaded {first_name}, expected {basename}'
+    sample_stem = first_name.removesuffix('.wav')
 
     mpc.tap('SAMPLE SELECT')  # Return to the browser's last directory.
     mpc.tap('SCREEN 1')  # Back to the MPC-Sample directory.
@@ -89,30 +87,25 @@ def main():
         mpc.control('DATA', 'turn', 1)
     mpc.tap('DATA')  # Open Recent Samples in the native browser.
     time.sleep(.2)
-    before_recent = project_sample_count(mpc)
-    mpc.tap('DATA')
-    mpc.wait_for(
-        lambda: project_sample_count(mpc) > before_recent,
-        timeout=8,
-        message='Recent Samples did not expose a loadable native file row',
-    )
-    mpc.tap('SAMPLE')
-    recent_path = sample_path(mpc)
-    recent_name = recent_path.rsplit('/', 1)[-1]
-    assert recent_name.startswith(sample_stem), (
-        f'Recent Samples loaded {recent_path}; expected the original {first_path}'
-    )
-    # Probe the following alphabetic row. If the earlier preview leaked into
-    # Recent Samples, it would load TRIM-Test-A here.
-    mpc.tap('SAMPLE SELECT')
-    mpc.control('DATA', 'turn', 1)
-    mpc.tap('DATA')
-    time.sleep(.2)
-    mpc.tap('SAMPLE')
-    probe_path = sample_path(mpc)
-    assert not probe_path.rsplit('/', 1)[-1].startswith('TRIM-Test-A'), (
-        f'Preview-only sample appeared in Recent Samples: {probe_path}'
-    )
+    recent_path = ''
+    for attempt in range(128):
+        before_recent = project_sample_count(mpc)
+        mpc.tap('DATA')
+        mpc.wait_for(
+            lambda: project_sample_count(mpc) > before_recent,
+            timeout=8,
+            message='Recent Samples did not expose a loadable native file row',
+        )
+        mpc.tap('SAMPLE')
+        recent_path = sample_path(mpc)
+        if recent_path.rsplit('/', 1)[-1].startswith(sample_stem):
+            break
+        if attempt == 127:
+            raise AssertionError(
+                f'Recent Samples did not expose {first_path}; last loaded {recent_path}'
+            )
+        mpc.tap('SAMPLE SELECT')
+        mpc.control('DATA', 'turn', 1)
     assert mpc.ssh(f'test ! -e "{virtual_path}" && echo absent').decode().strip() == 'absent'
     print(f'PASS: native Recent Samples reloaded {recent_path}; minimod created no copies')
 

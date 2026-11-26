@@ -10,10 +10,11 @@ PROJECT = 'populated'
 def main():
     mpc = Emulator()
     mpc.tap('PAD 1')
+    layout = mpc.firmware_layout()
     screen = mpc.u64(mpc.symbol_address('g_screen'))
-    binding = mpc.u64(screen + 0x178)
+    binding = mpc.u64(screen + layout.page_binding)
     state = mpc.u64(binding + 0x60)
-    layers = mpc.u64(state + 0x22e8)
+    layers = mpc.u64(state + layout.state_layers)
     sample = mpc.u64(layers + 0x4a8)
     assert sample, 'Pad A01 has no sample'
     metadata = mpc.u64(sample + 0x130)

@@ -275,9 +275,10 @@ fn extract_take(job: &Job) -> Result<(), Report> {
     };
     if action == Action::Bass {
         let destination = extracted.pad;
-        // SAFETY: the surface was recorded by the control hook and `destination`
-        // is the pad this job just assigned on that surface.
-        if !unsafe { pads::set_layer_active(crate::control::surface(), destination, true) } {
+        // SAFETY: the program is still the live page's program on the UI thread.
+        if !job.program.is_some_and(|program| unsafe {
+            pads::set_program_layer_active(program, destination, true)
+        }) {
             return Err(Report {
                 raw: false,
                 status: "saved; pad not enabled",
@@ -369,13 +370,21 @@ fn finalize(job: &Job, screen: usize) -> Report {
     } else {
         let room = if action == Action::Bass {
             let program = selection::page_state(screen).and_then(selection::program);
-            let surface = crate::control::surface();
-            if program != job.program
-                || surface == 0
-                || job
-                    .destination
-                    .is_none_or(|pad| pads::pad_is_empty(surface, pad) != Some(true))
-            {
+            let surface = if job.surface != 0 {
+                job.surface
+            } else {
+                crate::control::surface()
+            };
+            let surface_empty = job
+                .destination
+                .and_then(|pad| pads::pad_is_empty(surface, pad));
+            let destination_is_free = surface_empty.unwrap_or_else(|| {
+                program.is_some_and(|program| {
+                    // SAFETY: the program is the live page's program on the UI thread.
+                    (unsafe { pads::first_free_pad(program) }) == job.destination
+                })
+            });
+            if program != job.program || !destination_is_free {
                 Err(cancelled(action))
             } else {
                 Ok(())
@@ -458,24 +467,32 @@ fn fail(action: Action, report: Report) {
     crate::ui::minimod_repaint_screen();
 }
 
-/// The pad a synth take may be written to: the last pad the user pressed when
-/// it is empty, otherwise the first empty pad.  A synth copy must not overwrite
-/// an existing sample, but it should land on the selected pad when that pad is
-/// empty.
-fn free_destination(surface: usize, last: i32) -> Option<usize> {
-    if surface == 0 {
-        return None;
+/// The last pad the user pressed is preferred when it is empty; otherwise use
+/// the first empty pad available on the live surface or program.
+fn free_destination(surface: usize, program: usize, last: i32) -> Option<usize> {
+    if surface != 0 {
+        let empty = |pad: usize| {
+            i32::try_from(pad).is_ok_and(|pad| pads::pad_is_empty(surface, pad) == Some(true))
+        };
+        if let Some(pad) = (0..128)
+            .find(|pad| i32::try_from(*pad).is_ok_and(|pad| pad == last) && empty(*pad))
+            .or_else(|| (0..128).find(|pad| empty(*pad)))
+        {
+            return Some(pad);
+        }
     }
-    let empty = |pad: usize| {
-        i32::try_from(pad).is_ok_and(|pad| pads::pad_is_empty(surface, pad) == Some(true))
-    };
-    (0..128)
-        .find(|pad| i32::try_from(*pad).is_ok_and(|p| p == last) && empty(*pad))
-        .or_else(|| (0..128).find(|pad| empty(*pad)))
+    // SAFETY: the program is the live Sample page's program on the UI thread.
+    unsafe { pads::first_free_pad(program) }.and_then(|pad| usize::try_from(pad).ok())
 }
 
 /// Start `action` on the selected sample.
-pub fn start(action: Action, screen: usize, menu: &mut crate::menu::State, last_pad: i32) -> bool {
+pub fn start(
+    action: Action,
+    screen: usize,
+    menu: &mut crate::menu::State,
+    last_pad: i32,
+    event_surface: usize,
+) -> bool {
     if task_slot().is_some() {
         return false;
     }
@@ -483,9 +500,23 @@ pub fn start(action: Action, screen: usize, menu: &mut crate::menu::State, last_
     // this UI callback.
     let current = unsafe { selection::current(screen) };
     let source = if action == Action::Bass {
-        // Choose the destination before seeding: the seed is written into the
-        // selected pad's layer, which would otherwise look occupied.
-        let Some(destination) = free_destination(crate::control::surface(), last_pad) else {
+        let Some(program) = selection::page_state(screen).and_then(selection::program) else {
+            fail(
+                action,
+                Report {
+                    raw: false,
+                    status: "no sample to seed Extract",
+                    toast: "Synth: no source sample",
+                },
+            );
+            return false;
+        };
+        let surface = if event_surface != 0 {
+            event_surface
+        } else {
+            crate::control::surface()
+        };
+        let Some(destination) = free_destination(surface, program, last_pad) else {
             fail(
                 action,
                 Report {
@@ -498,18 +529,8 @@ pub fn start(action: Action, screen: usize, menu: &mut crate::menu::State, last_
         };
         // The generated take only needs page identity and output geometry.
         // The SDK borrows the native seed for the Extract call itself.
-        let Some(program) = selection::page_state(screen).and_then(selection::program) else {
-            fail(
-                action,
-                Report {
-                    raw: false,
-                    status: "no sample to seed Extract",
-                    toast: "Synth: no source sample",
-                },
-            );
-            return false;
-        };
         let mut job = Job::generated(screen, action.code());
+        job.surface = surface;
         job.program = Some(program);
         job.destination = i32::try_from(destination).ok();
         job
@@ -666,12 +687,12 @@ pub fn finish(screen: usize) -> bool {
 
 /// Start a transform job bound to no effect.
 fn start_split(menu: &mut crate::menu::State, last_pad: i32) {
-    start(Action::Split, paint::screen(), menu, last_pad);
+    start(Action::Split, paint::screen(), menu, last_pad, 0);
 }
 
 /// Start a transform job for one effect.
 fn start_effect(action: Action, menu: &mut crate::menu::State, last_pad: i32) {
-    start(action, paint::screen(), menu, last_pad);
+    start(action, paint::screen(), menu, last_pad, 0);
 }
 
 /// Start a spectral chop.
@@ -690,8 +711,8 @@ fn start_bass_page(menu: &mut crate::menu::State) {
 }
 
 /// Start the bass synth.
-fn start_bass(menu: &mut crate::menu::State, last_pad: i32) {
-    start(Action::Bass, paint::screen(), menu, last_pad);
+fn start_bass(menu: &mut crate::menu::State, last_pad: i32, surface: usize) {
+    start(Action::Bass, paint::screen(), menu, last_pad, surface);
 }
 
 /// Open the looper, re-reading the device's rings if it opened.
@@ -711,7 +732,7 @@ fn start_looper() -> i32 {
 }
 
 /// Run the selected menu row.
-pub fn menu_activate(event: &[u8; 16], last_pad: i32) {
+pub fn menu_activate(event: &[u8; 16], last_pad: i32, surface: usize) {
     let hooks = crate::menu::Hooks {
         repaint: Some(crate::ui::minimod_repaint_screen),
         start_split: Some(start_split),
@@ -721,7 +742,9 @@ pub fn menu_activate(event: &[u8; 16], last_pad: i32) {
         start_bass_page: Some(start_bass_page),
         start_looper: Some(start_looper),
     };
-    crate::menu::with_state_mut(|state| crate::menu::activate(state, event, hooks, last_pad));
+    crate::menu::with_state_mut(|state| {
+        crate::menu::activate(state, event, hooks, last_pad, surface);
+    });
 }
 
 #[cfg(test)]

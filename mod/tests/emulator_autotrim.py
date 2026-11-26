@@ -30,6 +30,7 @@ import subprocess
 import time
 import urllib.request
 from pathlib import Path
+from firmware_layout import detect
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -95,6 +96,8 @@ def main():
     press('SAMPLE')
     time.sleep(.25)
     press('SCREEN 1')
+    press('SCREEN 1')
+    press('SCREEN 1')
     time.sleep(.2)
     if leds().get('75', 0) == 2:
         press('CHOP')
@@ -103,16 +106,20 @@ def main():
     time.sleep(.2)
 
     screen = qword(libbase + symbols['g_screen'])
-    assert qword(screen) == stock + 0x6e212a0, 'SampleModeScreen not found'
-    state = qword(qword(screen + 0x178) + 0x60)
-    layer = qword(state + 0x22e8)
+    layout = detect(stock, qword(screen))
+    state = qword(qword(screen + layout.page_binding) + 0x60)
+    layer = qword(state + layout.state_layers)
     sample = qword(layer + 0x4a8)
     assert sample, f'Pad {args.pad} has no sample'
     frames = u32(qword(sample + 0x130) + 4)
     assert frames > 1, f'Pad {args.pad} sample has no audio'
+    control('K1', 'set', 0)
+    control('K1', 'set', 64)
 
     def bounds():
-        return u32(layer + 0x7b8), u32(layer + 0x810), u32(layer + 0x868)
+        start, end, mirror = ((0x918, 0x970, 0x9c8) if layout.version == '1.4.0.8'
+                              else (0x7b8, 0x810, 0x868))
+        return u32(layer + start), u32(layer + end), u32(layer + mirror)
 
     def press_trim():
         # The cycle lives only while SHIFT stays held: releasing it resets the

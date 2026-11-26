@@ -4,8 +4,7 @@
 [mpc-sample-sdk](https://github.com/ioma8/mpc-sample-sdk).**
 
 I was annoyed by the complete reworks by other custom firmwares. I want the
-original MPC Sample experience, with just small fixes that enhance it for better flow. Thus I made this minimal MINIMOD for the **Akai MPC Sample** (firmware
-**1.3.0.12 only**). It adds only a few features which help me enjoy it more. Can be easily reverted by removing from SD card.
+original MPC Sample experience, with just small fixes that enhance it for better flow. Thus I made this minimal MINIMOD for the **Akai MPC Sample** on firmware **1.3.0.12** and **1.4.0.8**. It adds only a few features which help me enjoy it more. Can be easily reverted by removing from SD card.
 
 ▶ **[Watch the intro](https://youtu.be/bnnkfryecPY)**
 
@@ -142,6 +141,22 @@ That writes the release packages `mod/build/minimod.zip` and
 The build is delegated to the SDK's `build-mod.sh`; minimod does not maintain a
 second copy of the cross-compile, strip, glibc or autorun logic.
 
+### Firmware profile
+
+Builds target firmware 1.4.0.8 by default. Set `MINIMOD_FIRMWARE=1.3` to build
+for 1.3.0.12; set it to `1.4` to select 1.4 explicitly. The build script selects
+the matching SDK feature and autorun firmware hash together:
+
+```sh
+MINIMOD_FIRMWARE=1.3 ./mod/build.sh standard
+MINIMOD_FIRMWARE=1.4 ./mod/build.sh standard
+```
+
+The equivalent direct Cargo builds use `cargo build -p minimod
+--no-default-features --features fw-1-3` or `cargo build -p minimod
+--no-default-features --features fw-1-4`. Do not enable both firmware features
+in one build. The emulator suite in this repository targets the 1.4.0.8 lab image.
+
 The preload library is Rust: [`mpc-sample-sdk`](https://github.com/ioma8/mpc-sample-sdk) is the universal SDK
 (firmware image, hooks, input/audio/MIDI, drawing, typed platform objects),
 `rust/crates/minimod` is the feature code built on that SDK, and
@@ -183,6 +198,7 @@ new automatically discovered scenario.
 - [`docs/EMULATOR.md`](docs/EMULATOR.md) — the virtual MPC Sample
 - [`docs/DEVICE-NOTES.md`](docs/DEVICE-NOTES.md) — hardware, Bluetooth, WiFi, the hidden touch Preferences UI
 - [`docs/HISTORY.md`](docs/HISTORY.md) — investigations, reversals and open work
+- [`docs/FIRMWARE-1.4.md`](docs/FIRMWARE-1.4.md) — what firmware 1.4.0 changes against the 1.3.0.12 this mod targets
 - [`docs/ADDIN-ECOSYSTEM.md`](docs/ADDIN-ECOSYSTEM.md) — the 2026 addin projects, their loading rules and what we can reuse
 - [`docs/LIVE-LOOPER.md`](docs/LIVE-LOOPER.md) — the Live Looper: state machine, latency, sync
 - [`docs/RUST-PORT.md`](docs/RUST-PORT.md) — the Rust rewrite: layout, lint policy, what is ported and how it is proven

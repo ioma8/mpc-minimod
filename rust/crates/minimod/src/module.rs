@@ -146,6 +146,8 @@ impl Mod for Minimod {
     }
 
     fn on_paint(&mut self, graphics: &mut mpc_sample_sdk::draw::Graphics, event: PaintEvent) {
+        #[cfg(any(feature = "dictation", feature = "dictation-rknn"))]
+        crate::speech::observe_paint(event.component);
         crate::overlay::paint(*graphics, event);
         crate::menu::follow_preview();
     }

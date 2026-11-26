@@ -77,7 +77,9 @@ pub(crate) fn apply_action(action: Action, event: ButtonEvent, last_pad: i32) ->
         match action {
             Action::MenuOpen => crate::menu::open_menu(),
             Action::MenuClose => crate::menu::close_menu(),
-            Action::MenuActivate => crate::jobflow::menu_activate(&event.bytes, last_pad),
+            Action::MenuActivate => {
+                crate::jobflow::menu_activate(&event.bytes, last_pad, event.surface);
+            }
             Action::Shift(on) => {
                 if !on {
                     state.trim_step = 0;

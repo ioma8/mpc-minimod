@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from firmware_layout import detect
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,12 +70,12 @@ def main():
     app_base = int(next(x for x in maps if x.endswith('/MPC Sample')).split('-')[0], 16)
     mod_base = int(next(x for x in maps if x.endswith('/minimod.so')).split('-')[0], 16)
     screen = qword(mod_base + symbol('g_screen'))
-    assert qword(screen) == app_base + 0x6e212a0, 'Sample Mode must be visible'
+    layout = detect(app_base, qword(screen))
     tap('PAD 1')
     time.sleep(.3)
-    binding = qword(screen + 0x178)
+    binding = qword(screen + layout.page_binding)
     state = qword(binding + 0x60)
-    source_layer = qword(state + 0x22e8)
+    source_layer = qword(state + layout.state_layers)
     sample = qword(source_layer + 0x4a8)
     source_layer_holder = qword(source_layer + 0x4b0)
     meta = qword(sample + 0x130)
@@ -159,12 +160,12 @@ def main():
     # The preview itself has no exported counter in the current build; the
     # observable contract is that the pad keys are consumed and the app never
     # switches the selected sample underneath the page.
-    sample_before = qword(qword(qword(screen + 0x178) + 0x60) + 0x22e8)
+    sample_before = qword(qword(qword(screen + layout.page_binding) + 0x60) + layout.state_layers)
     tap('PAD 5')
     tap('PAD 9')
     tap('PAD 1')  # C2 is the last preview note, and therefore the rendered note
     time.sleep(1)
-    assert qword(qword(qword(screen + 0x178) + 0x60) + 0x22e8) == sample_before, \
+    assert qword(qword(qword(screen + layout.page_binding) + 0x60) + layout.state_layers) == sample_before, \
         'a pad press on the Bass page switched the selected sample'
     time.sleep(.2)
     tap('DATA')
@@ -211,7 +212,8 @@ def main():
         if strength > peak:
             pitch, peak = float(hz), strength
     assert abs(pitch - 65.406) < 5, f'Expected C2 fundamental, measured {pitch:.2f} Hz'
-    sample_after = qword(qword(qword(screen + 0x178) + 0x60) + 0x22e8 + 0x4a8)
+    sample_after = qword(qword(qword(screen + layout.page_binding) + 0x60)
+                         + layout.state_layers + 0x4a8)
     assert sample_after != sample_before, \
         'Selected pad did not receive the rendered sample'
     assert qword(source_layer + 0x4a8) == sample, 'source sample pointer was not restored'

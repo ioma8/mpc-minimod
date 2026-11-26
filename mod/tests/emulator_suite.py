@@ -31,7 +31,7 @@ PROJECT = '/data/TempProjects/Temp-Project.xpj'
 PROJECT_DATA = '/data/TempProjects/Temp-Project_[ProjectData]'
 DROPIN = '/run/systemd/system/ac50.service.d/mpclab-preload.conf'
 PRELOAD_BINARY = '/run/mpclab-preload/minimod.so'
-SCREEN_OFFSET = 0x6e212a0
+SCREEN_OFFSETS = (0x6e212a0, 0x76f6170)  # MPC Sample 1.3.0.12 and 1.4.0.8
 
 
 def symbols(path):
@@ -84,7 +84,7 @@ def cases_for(lab_path, panel):
                                          panel]),
         ('looper_lights', 'empty', 'emulator_looper_lights.py', ['--panel',
                                                        panel]),
-        ('synth_lights', 'populated', 'emulator_synth_lights.py', ['--panel',
+        ('synth_lights', 'empty', 'emulator_synth_lights.py', ['--panel',
                                                      panel]),
         ('synth_shift', 'populated', 'emulator_synth_shift.py', ['--lab', str(lab_path), '--panel',
                                                    panel]),
@@ -241,7 +241,7 @@ def main():
                 if screen:
                     vtable = int.from_bytes(ssh(
                         f'dd if=/proc/{pid}/mem bs=1 skip={screen} count=8 2>/dev/null'), 'little')
-                    if vtable == app_base + SCREEN_OFFSET:
+                    if vtable in (app_base + offset for offset in SCREEN_OFFSETS):
                         return
             except (subprocess.CalledProcessError, StopIteration, ValueError, TimeoutError):
                 pass

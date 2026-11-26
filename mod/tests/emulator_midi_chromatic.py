@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from firmware_layout import detect
 import struct
 
 
@@ -88,8 +89,7 @@ def main():
         return int.from_bytes(read(mod_base + symbols[name], size), 'little', signed=signed)
 
     screen = integer('g_screen', 8)
-    assert screen and int.from_bytes(read(screen, 8), 'little') == app_base + 0x6e212a0, \
-        'Open Sample Mode before running this check'
+    layout = detect(app_base, int.from_bytes(read(screen, 8), 'little'))
 
     # The MIDI config is per boot. Keep the selected pad and make 16 Levels
     # active if the user has not already done so.
@@ -148,13 +148,9 @@ def main():
     def qword(address):
         return int.from_bytes(read(address, 8), 'little')
 
-    surface = qword(mod_base + symbols['g_surface'])
-    assert surface, 'The surface pointer is not set'
-    array = qword(surface + 0x2808)
-    state = qword(array)
-    assert state, 'Pad 1 has no sample'
-    layers = qword(state + 0x22e8)
-    sample = qword(layers + 0x4a8)
+    sample_state = qword(qword(screen + layout.page_binding) + 0x60)
+    state_layers = qword(sample_state + layout.state_layers)
+    sample = qword(state_layers + 0x4a8)
     assert sample, 'Pad 1 has no sample'
     root = int.from_bytes(read(qword(sample + 0x130) + 0x3e4, 4), 'little', signed=True)
     assert 0 <= root <= 127, root

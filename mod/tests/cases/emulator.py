@@ -6,6 +6,8 @@ import subprocess
 import sys
 import time
 import urllib.request
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from firmware_layout import detect
 
 
 class Emulator:
@@ -79,6 +81,14 @@ class Emulator:
         maps = self.ssh(f'cat /proc/{pid}/maps').decode().splitlines()
         mapping = next(line for line in maps if line.endswith('/minimod.so'))
         return int(mapping.split('-')[0], 16) + offset
+
+    def firmware_layout(self):
+        screen = self.u64(self.symbol_address('g_screen'))
+        pid = self.process()
+        maps = self.ssh(f'cat /proc/{pid}/maps').decode().splitlines()
+        app_base = int(next(line.split('-')[0] for line in maps
+                            if line.endswith('/MPC Sample')), 16)
+        return detect(app_base, self.u64(screen))
 
     def read(self, address, size):
         pid = self.process()

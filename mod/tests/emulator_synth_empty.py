@@ -17,6 +17,7 @@ import time
 import urllib.request
 
 import panel_screen
+from firmware_layout import detect
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -76,14 +77,18 @@ def main():
         assert len(data) == 8 * len(addresses), 'firmware exited or memory read failed'
         return struct.unpack('<' + 'Q' * len(addresses), data)
 
-    surface = qword(base + symbols['g_surface'])
-    first, end = qword(surface + 0x2808), qword(surface + 0x2810)
+    screen = qword(base + symbols['g_screen'])
+    app_base = int(next(line for line in maps if line.endswith('/MPC Sample')).split('-')[0], 16)
+    layout = detect(app_base, qword(screen))
+    page_state = qword(qword(screen + layout.page_binding) + 0x60)
+    program = qword(page_state + layout.state_program)
+    first, end = qword(program + layout.surface_pads), qword(program + layout.surface_pads_end)
     assert first and end - first >= 128 * 8, 'pad table unavailable'
 
     def populated():
         states = struct.unpack('<128Q', read(first, 128 * 8))
         active = [(pad, state) for pad, state in enumerate(states) if state]
-        layers = qwords([state + 0x22e8 for _, state in active])
+        layers = qwords([state + layout.state_layers for _, state in active])
         samples = qwords([layer + 0x4a8 for layer in layers if layer])
         sample_index = iter(samples)
         return [pad for (pad, _), layer in zip(active, layers)
@@ -110,9 +115,9 @@ def main():
     time.sleep(.2)  # Let the menu close and the Sample page repaint.
     panel_screen.assert_no_modal(args.panel, 'Synth')
     screen = qword(base + symbols['g_screen'])
-    state = qword(qword(screen + 0x178) + 0x60)
+    state = qword(qword(screen + layout.page_binding) + 0x60)
     destination_state = qword(first + (args.pad - 1) * 8)
-    layer = qword(destination_state + 0x22e8)
+    layer = qword(destination_state + layout.state_layers)
     assert layer, 'destination pad has no layer'
     active = read(layer + 0xb18, 1)[0]
     assert active == 1, f'destination layer is inactive: {active}'
@@ -139,7 +144,8 @@ def main():
         powers.append((previous**2 + previous2**2 - coefficient * previous * previous2, hz))
     pitch = max(powers)[1]
     assert abs(pitch - 65.406) < 5, f'expected C2, measured {pitch} Hz'
-    assert populated() == [args.pad - 1], 'another pad was populated'
+    actual_pads = populated()
+    assert actual_pads == [args.pad - 1], f'populated pads: {actual_pads}'
     assert int(ssh('pidof "MPC Sample"')) == pid, 'firmware restarted'
     assert ssh('systemctl show ac50 -p NRestarts') == restarts, 'firmware restarted'
     print(f'PASS: pad {args.pad}, active layer, {frames} stereo frames at {rate} Hz, '

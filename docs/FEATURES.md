@@ -8,9 +8,14 @@ measured, and what is still open. Mechanisms are catalogued in
 ## Voice project names
 
 While the native **Create name** field is open, press `SAMPLE RECORD` to start
-dictation and press it again to finish. MiniMod swallows that key only while
-the name field is open, so it cannot start normal sample recording. No other
-key starts or stops dictation. A banner identifies recording and transcription,
+dictation and press it again to finish. MiniMod takes that key only while the save
+screen is on top: it arms on the screen's own paint, which happens when the dialog
+is shown and never at startup, and disarms through the dialog's own Cancel or
+Do it! buttons. Disarming cannot use paint or repaint of the Sample page, because
+the app keeps drawing the page behind the dialog. The earlier design also armed on the `Create name` label, but that
+label is assigned while the dialog is *built* at startup, so from boot the mod
+believed the dialog was open and swallowed `SAMPLE RECORD` everywhere — the app's
+own recording stopped working. No other key starts or stops dictation. A banner identifies recording and transcription,
 then clears on completion. MiniMod captures the firmware's active ALSA input
 stream through the SDK's successful `snd_pcm_readi` hook, with a 30-second
 recording limit. Moonshine Tiny English transcribes on a persistent worker; the

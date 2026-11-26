@@ -25,6 +25,8 @@ The converter (`mpc2stems`) is a separate product with its own docs in
 * **The Live Looper** — [`LIVE-LOOPER.md`](LIVE-LOOPER.md).
 * **Interop with other mods/addins** — [`ADDIN-ECOSYSTEM.md`](ADDIN-ECOSYSTEM.md)
   (how other addins load, the shared installer rules, and what we can reuse).
+* **A newer firmware than 1.3.0.12** — [`FIRMWARE-1.4.md`](FIRMWARE-1.4.md) (what
+  1.4.0 changes, and which of it is only compiled-in).
 
 ## Ownership — one home per topic
 
@@ -41,6 +43,7 @@ The converter (`mpc2stems`) is a separate product with its own docs in
 | [`RUST-PORT.md`](RUST-PORT.md) | the Rust rewrite: layout, lint policy, module map, every round and dead end, how each part is proven | firmware mechanisms |
 | [`LIVE-LOOPER.md`](LIVE-LOOPER.md) | the Live Looper feature: state machine, latency, sync, validation | other features |
 | [`HISTORY.md`](HISTORY.md) | chronology, superseded approaches, disproved leads, open investigations, the code review | current contracts (those live in MECHANISMS/FEATURES) |
+| [`FIRMWARE-1.4.md`](FIRMWARE-1.4.md) | what firmware 1.4.0 changes against the 1.3.0.12 target: scripting, remote screen, MPE, entitlements, platform, content, and what stays unproven | 1.3.0.12 addresses (those live in MECHANISMS) |
 | [`re/`](re/README.md) | raw evidence: Ghidra output, decompiled fragments, screenshots | prose claims |
 | [`tasks/`](tasks/README.md) | backlog of unstarted feature ideas | current behavior |
 

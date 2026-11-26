@@ -14,6 +14,9 @@ readme = "../../README.md"
 crate-type = ["cdylib", "staticlib"]
 
 [features]
+default = ["fw-1-4"]
+fw-1-3 = ["mpc-sample-sdk/fw-1-3"]
+fw-1-4 = ["mpc-sample-sdk/fw-1-4"]
 dictation = []
 dictation-rknn = []
 

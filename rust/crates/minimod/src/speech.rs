@@ -71,10 +71,35 @@ impl Drop for MoonshineWorker {
 pub(crate) fn observe_assignment(_dest: usize, text: &CStr) {
     match text.to_bytes() {
         b"Create name" => {
+            // Only forget the editor. `SAVE_SCREEN` is armed by the screen's own
+            // paint: this label is also assigned while the dialog is merely being
+            // built at startup, and arming there swallowed SAMPLE RECORD for the
+            // whole session.
             EDITOR.store(0, Ordering::Release);
-            SAVE_SCREEN.store(true, Ordering::Release);
         }
         _ => {}
+    }
+}
+
+/// Whether dictation owns this SAMPLE RECORD press.
+///
+/// `save_screen` must describe the dialog *now*, not once, because the app only
+/// reports the dialog closing through its own buttons; a latched `SAVE_SCREEN`
+/// swallowed the plain key and left the app's recording dead for the session.
+fn intercepts(event: &ButtonEvent, save_screen: bool, session: bool) -> bool {
+    event.pressed && event.code == button::SAMPLE_RECORD && (save_screen || session)
+}
+
+/// Arm dictation when the save screen is painted.
+///
+/// The app paints a screen when it is shown and does not paint the save screen at
+/// startup, so this is the reliable "the dialog is open" signal; the repaint hook
+/// misses it and the `Create name` label is assigned while the dialog is merely
+/// built at boot. Disarming stays with the dialog's own buttons, because the
+/// Sample page also paints behind the dialog.
+pub(crate) fn observe_paint(component: usize) {
+    if is_project_save_screen(component) {
+        SAVE_SCREEN.store(true, Ordering::Release);
     }
 }
 
@@ -85,9 +110,11 @@ pub(crate) fn on_button(event: &ButtonEvent) -> bool {
             && SAMPLE_RECORD_KEY_OWNED.swap(false, Ordering::AcqRel);
     }
 
-    if event.code == button::SAMPLE_RECORD
-        && (SAVE_SCREEN.load(Ordering::Acquire) || SESSION.load(Ordering::Acquire))
-    {
+    if intercepts(
+        event,
+        SAVE_SCREEN.load(Ordering::Acquire),
+        SESSION.load(Ordering::Acquire),
+    ) {
         SAMPLE_RECORD_KEY_OWNED.store(true, Ordering::Release);
         if SESSION.load(Ordering::Acquire) {
             STOP_REQUESTED.store(true, Ordering::Release);
@@ -145,9 +172,10 @@ pub(crate) fn observe_repaint(component: usize) {
     if !is_project_save_screen(component) {
         return;
     }
-    // The dialog may already exist before the mod is loaded, and its static
-    // "Create name" label is not necessarily assigned again. Detect the live
-    // native screen itself so the shortcuts work whenever the field is open.
+    // The screen paints itself when it is shown and never at startup, so this is
+    // the only place that arms dictation. The `Create name` label is not usable
+    // here: it is assigned while the dialog is built at startup, which armed the
+    // shortcut for the whole session and swallowed the app's SAMPLE RECORD.
     SAVE_SCREEN.store(true, Ordering::Release);
     let base = mpc_sample_sdk::image::base();
     let Some(editor) = component
@@ -249,6 +277,14 @@ fn run(generation: usize) {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     if GENERATION.load(Ordering::Acquire) != generation || !SAVE_SCREEN.load(Ordering::Acquire) {
+        // The dialog went away mid-session. Drop this session instead of returning
+        // with `SESSION` still set, which would keep the dictation gesture armed
+        // for the rest of the run.
+        if GENERATION.load(Ordering::Acquire) == generation {
+            CAPTURE_ENABLED.store(false, Ordering::Release);
+            SESSION.store(false, Ordering::Release);
+            crate::ui::request_repaint();
+        }
         return;
     }
     match result {
@@ -656,5 +692,46 @@ fn close_screen() {
     if !old.is_null() {
         // SAFETY: PENDING owned this CString and no native assignment received it.
         unsafe { drop(CString::from_raw(old)) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{button, intercepts};
+    use crate::buttons::PRESSED;
+    use mpc_sample_sdk::ButtonEvent;
+
+    fn sample_record(pressed: bool) -> ButtonEvent {
+        ButtonEvent {
+            event: 0,
+            bytes: [0; 16],
+            code: button::SAMPLE_RECORD,
+            value: if pressed { PRESSED } else { 0 },
+            pressed,
+            shift: false,
+            erase: false,
+            surface: 1,
+        }
+    }
+
+    #[test]
+    fn dictation_takes_the_plain_key_only_while_the_dialog_is_open() {
+        assert!(intercepts(&sample_record(true), true, false));
+    }
+
+    #[test]
+    fn a_button_press_outside_the_dialog_belongs_to_the_app() {
+        // The regression: a stale latch swallowed the plain key everywhere.
+        assert!(!intercepts(&sample_record(true), false, false));
+    }
+
+    #[test]
+    fn an_open_session_takes_the_key_to_stop() {
+        assert!(intercepts(&sample_record(true), false, true));
+    }
+
+    #[test]
+    fn releases_are_never_intercepted_here() {
+        assert!(!intercepts(&sample_record(false), true, true));
     }
 }

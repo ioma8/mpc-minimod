@@ -17,12 +17,22 @@ fi
 
 variant=${1:-standard}
 case "$variant" in standard|dictation|dictation-rknn) ;; *) echo "usage: ./build.sh [standard|dictation|dictation-rknn]" >&2; exit 2 ;; esac
+firmware=${MINIMOD_FIRMWARE:-1.4}
+case "$firmware" in
+    1.3)
+        firmware_feature=fw-1-3
+        firmware_hash=44507c7a7d3029c411b2e3780ea286ca3e08b7e3ffd7b5047d52f73bf5299d1f
+        ;;
+    1.4)
+        firmware_feature=fw-1-4
+        firmware_hash=2b1ce171e951c90bf08cf375d7db9065f1782745b07a436bb2d22fdaabba0af0
+        ;;
+    *) echo "MINIMOD_FIRMWARE must be 1.3 or 1.4" >&2; exit 2 ;;
+esac
 mkdir -p build
 case "$variant" in
     dictation|dictation-rknn)
-        if [ ! -f build/minimod.zip ]; then
-            "$0" standard
-        fi
+        "$0" standard
         if [ -f build/minimod.zip ]; then cp build/minimod.zip build/minimod-standard.zip; fi
         ;;
 esac
@@ -32,12 +42,11 @@ fi
 if [ "$variant" = dictation ]; then
     ./moonshine/build.sh
 fi
+features=$firmware_feature
 if [ "$variant" = dictation-rknn ]; then
-set -- --features dictation-rknn
+    features=$features,dictation-rknn
 elif [ "$variant" = dictation ]; then
-set -- --features dictation
-else
-set --
+    features=$features,dictation
 fi
 "$sdk_dir/build-mod.sh" \
     --manifest-path "$rust_dir/Cargo.toml" \
@@ -51,9 +60,11 @@ fi
     --require-symbol g_click \
     --require-symbol g_buf_out \
     --pack \
-    --firmware-sha256 44507c7a7d3029c411b2e3780ea286ca3e08b7e3ffd7b5047d52f73bf5299d1f \
+    --no-default-features \
+    --features "$features" \
+    --firmware-sha256 "$firmware_hash" \
     --display-name minimod \
-    --env MINIMOD_DEBUG=0 "$@"
+    --env MINIMOD_DEBUG=0
 
 if [ "$variant" = dictation ]; then
 bundle="build/moonshine-bundle/autorun/moonshine"

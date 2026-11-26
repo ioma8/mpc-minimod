@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from firmware_layout import detect
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -97,12 +98,12 @@ def main():
         return int.from_bytes(memory(address, 8), 'little')
 
     screen = qword(mod_base + symbol('g_screen'))
-    assert qword(screen) == app_base + 0x6e212a0, 'Sample page must be visible'
+    layout = detect(app_base, qword(screen))
     tap('PAD 1')          # the action runs on the selected pad; select before modelling
     time.sleep(.15)
-    binding = qword(screen + 0x178)
+    binding = qword(screen + layout.page_binding)
     state = qword(binding + 0x60)
-    sample = qword(qword(state + 0x22e8) + 0x4a8)
+    sample = qword(qword(state + layout.state_layers) + 0x4a8)
     meta = qword(sample + 0x130)
     source_frames = int.from_bytes(memory(meta + 4, 4), 'little')
     source_channels = int.from_bytes(memory(meta, 2), 'little')

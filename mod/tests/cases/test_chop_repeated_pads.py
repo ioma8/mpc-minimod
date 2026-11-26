@@ -51,19 +51,27 @@ def main():
         mpc.control('DATA', 'turn', 1)
         mpc.tap('DATA')
         mpc.control('DATA', 'turn', -1)  # The folder selection carries into the list.
-        mpc.tap('DATA')  # The generated 000- file is the first sample.
-        time.sleep(2)
-        mpc.tap('SAMPLE')
-        time.sleep(1)
-        screen = mpc.u64(mpc.symbol_address('g_screen'))
-        binding = mpc.u64(screen + 0x178)
-        state = mpc.u64(binding + 0x60)
-        layer = mpc.u64(state + 0x22e8)
-        sample = mpc.u64(layer + 0x4a8)
-        holder = mpc.u64(sample + 0x30)
-        path = mpc.u64(holder + 0x120)
-        loaded = mpc.read(path, 512).split(b'\0', 1)[0].decode()
-        assert name.removesuffix('.wav') in loaded, f'Wrong test sample loaded: {loaded}'
+        loaded = ''
+        for attempt in range(128):
+            mpc.tap('DATA')
+            time.sleep(.5)
+            mpc.tap('SAMPLE')
+            time.sleep(.2)
+            layout = mpc.firmware_layout()
+            screen = mpc.u64(mpc.symbol_address('g_screen'))
+            binding = mpc.u64(screen + layout.page_binding)
+            state = mpc.u64(binding + 0x60)
+            layer = mpc.u64(state + layout.state_layers)
+            sample = mpc.u64(layer + 0x4a8)
+            holder = mpc.u64(sample + 0x30)
+            path = mpc.u64(holder + 0x120)
+            loaded = mpc.read(path, 512).split(b'\0', 1)[0].decode()
+            if name.removesuffix('.wav') in loaded:
+                break
+            if attempt == 127:
+                raise AssertionError(f'Generated test sample was not selectable; last loaded: {loaded}')
+            mpc.tap('SAMPLE SELECT')
+            mpc.control('DATA', 'turn', 1)
         mpc.tap('CHOP')
         time.sleep(1)
         mpc.control('K3', 'set', 32)  # Regions 4

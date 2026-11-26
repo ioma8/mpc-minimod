@@ -53,7 +53,7 @@ pub struct Hooks {
     /// Start the spectral chop, with the event that asked for it.
     pub start_spectral: Option<fn(&mut State, &[u8; 16], i32)>,
     /// Start the bass synth with its source backup.
-    pub start_bass: Option<fn(&mut State, i32)>,
+    pub start_bass: Option<fn(&mut State, i32, usize)>,
     /// Show the bass control page.
     pub start_bass_page: Option<fn(&mut State)>,
     /// Open the live looper.
@@ -75,13 +75,13 @@ pub fn close(state: &mut State, hooks: Hooks) -> bool {
 }
 
 /// Run the selected row.
-pub fn activate(state: &mut State, event: &[u8; 16], hooks: Hooks, last_pad: i32) {
+pub fn activate(state: &mut State, event: &[u8; 16], hooks: Hooks, last_pad: i32, surface: usize) {
     if state.busy != 0 {
         return;
     }
     if state.bass_edit != 0 {
         if let Some(start) = hooks.start_bass {
-            start(state, last_pad);
+            start(state, last_pad, surface);
         }
         return;
     }

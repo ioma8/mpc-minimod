@@ -11,10 +11,8 @@ repository = "https://github.com/jakubkolcar/sample-converter"
 
 [workspace.dependencies]
 minimod-dsp = { path = "crates/dsp" }
-# The fine-tune pitch slot needs SDK 0.8.  Use the published crate once
-# `cargo publish` has put 0.8.0 on crates.io; until then this pins the tag, so a
-# fresh clone builds without a sibling checkout.
-mpc-sample-sdk = { git = "https://github.com/ioma8/mpc-sample-sdk", tag = "v0.8.0" }
+# Pin the 1.4-capable SDK and select the firmware table used by this converter.
+mpc-sample-sdk = { git = "https://github.com/ioma8/mpc-sample-sdk", rev = "dc35650", default-features = false }
 libc = "0.2"
 
 
