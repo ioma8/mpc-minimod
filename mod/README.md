@@ -11,12 +11,12 @@ A minimal mod for the Akai MPC Sample (firmware 1.3.0.12), delivered as an SD
 `autorun` package. Nothing on disk is modified: the library is copied to `/run`
 (tmpfs) and preloaded into the stock app, so a reboot returns to stock.
 
-**Current status:** the Live Looper is emulator-verified (audio, state machine, sync quantization, close); pitch shift and full-keyboard chromatic external MIDI are verified on hardware. AutoTrim's native command and UI updates are verified in the emulator. SAMPLE OPTIONS, HPSS, Spectral Chop, Reverb, Vinyl, Lo-Fi, and Bass Synth are emulator-verified. Bass Synth saves a DaisySP physical-model C2 pluck and auditions a chromatic C2–D#3 range from pads 1–16 while its parameter page is open. It does not instantiate the firmware's FMBass class because that class requires an H3 host context. Details: [`docs/FEATURES.md`](../docs/FEATURES.md#bass-synth). Add Reverb appends a rendered tail through the native Extract writer; see [`docs/FEATURES.md`](../docs/FEATURES.md#add-reverb-vinyl-and-lo-fi). Per-feature behavior and validation: [`docs/FEATURES.md`](../docs/FEATURES.md); firmware mechanisms: [`docs/MECHANISMS.md`](../docs/MECHANISMS.md).
+**Current status:** the Live Looper is emulator-verified (audio, state machine, sync quantization, close); pitch shift and full-keyboard chromatic external MIDI are verified on hardware. AutoTrim's trim cycle and UI updates are verified in the emulator. SAMPLE OPTIONS, HPSS, Spectral Chop, Reverb, Vinyl, Lo-Fi, and Bass Synth are emulator-verified. Bass Synth saves a DaisySP physical-model C2 pluck and auditions a chromatic C2–D#3 range from pads 1–16 while its parameter page is open. It does not instantiate the firmware's FMBass class because that class requires an H3 host context. Details: [`docs/FEATURES.md`](../docs/FEATURES.md#bass-synth). Add Reverb appends a rendered tail through the native Extract writer; see [`docs/FEATURES.md`](../docs/FEATURES.md#add-reverb-vinyl-and-lo-fi). Per-feature behavior and validation: [`docs/FEATURES.md`](../docs/FEATURES.md); firmware mechanisms: [`docs/MECHANISMS.md`](../docs/MECHANISMS.md).
 
 | # | feature | control | state |
 | --- | --- | --- | --- |
 | 1 | pitch shift in 16 Levels, ±8 semitones (half the pad grid) | `PLUS` / `MINUS` | verified on device |
-| 2 | AutoTrim of the selected pad's sample | `SHIFT` + `B3` | native command path and marker refresh verified in emulator |
+| 2 | AutoTrim of the selected pad's sample | `SHIFT` + `STOP` | trim cycle and marker refresh verified in emulator |
 | 3 | AutoTrim soft-key caption | `SHIFT` held on the Sample page | verified; hidden in Chop mode |
 | 4 | SAMPLE OPTIONS → HPSS split onto two pads | `SHIFT` + `DATA`, then `DATA` | emulator-verified; see [HPSS](../docs/FEATURES.md#hpss) |
 | 5 | SAMPLE OPTIONS → Spectral Chop slices the selected pad at detected onsets | `SHIFT` + `DATA`, choose Spectral Chop, `DATA` | emulator-verified by `mod/tests/emulator_spectral.py`; see [Spectral Chop](../docs/FEATURES.md#spectral-chop) |
@@ -50,13 +50,14 @@ released   : Trim        Tune        Filter
   not also run. The shift is applied in
   `0x27e4400(ctx, ?, ?, semitoneOffset)` — the function the 16-Levels renderer
   calls with `(pad & 0xf) - originalPad`.
-* **AutoTrim** — `SHIFT` + **B3**. The app's native control dispatcher updates
-  Start, End, the model, and waveform markers. While SHIFT stays held, presses
+* **AutoTrim** — `SHIFT` + **STOP**. When the app has sent a native control
+  event, AutoTrim uses its control dispatcher; otherwise it updates the
+  selected layer's trim fields through the SDK. While SHIFT stays held, presses
   use 3%, 6%, 9%, then clear trim; release SHIFT to reset the cycle. The default
   threshold is 3% of peak (about −30.46 dB), with a 90-count floor.
   `MINIMOD_TRIM_DB` overrides the relative threshold for the first step. PCM
   16/24/32-bit and float32 WAV files are supported. AutoTrim is suppressed in
-  Chop mode, where SHIFT+B3 is the stock Split command.
+  Chop mode, where the stock trim shortcut is not intercepted.
 * **SAMPLE OPTIONS** — `SHIFT` + `DATA` opens the menu on the Sample
   page. Turn `DATA` to choose **HPSS**, **Spectral Chop**, **Add Reverb**, **Vinyl**, **Lo-Fi**, **Bass Synth** or **Close**, press
   `DATA` to confirm, or press `SHIFT` + `DATA` to close. The wheel uses the

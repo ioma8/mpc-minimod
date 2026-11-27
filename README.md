@@ -61,7 +61,7 @@ level of the SD card and power on; see [Install](#install).
 
 | what | how |
 | --- | --- |
-| **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim; only on the trim screen | `SHIFT` + `B3` |
+| **AutoTrim** — trims the selected sample to its silent edges; each further press tightens it (3 %, 6 %, 9 %), the fourth removes the trim; only on the trim screen | `SHIFT` + `STOP` |
 | **Octave shift** of pads in 16 Levels mode — by half the grid | `PLUS` / `MINUS` keys (both = reset) |
 | **Microtonal 16 Levels** — halves the pad grid so each pad is half a semitone (the row spans 8 semitones); the other turn restores whole semitones, and a toast shows the mode | 16 Levels on: hold `16 LEVELS` and turn `DATA` |
 | **External MIDI chromatic playback** of the selected sample while in 16 Levels, in the sample's own key (C3 when it has no root note) | Enable **Pad MIDI In** in MIDI Config, then play a MIDI keyboard |

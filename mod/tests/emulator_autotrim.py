@@ -3,10 +3,9 @@
 # ///
 """Check AutoTrim against the live model in the running MPC emulator.
 
-AutoTrim is SHIFT+B3 on the Sample page. The mod calls the app's own control
-dispatcher with frame positions; the command writes the pad's zone and the
-renderer. This test reads those bounds straight out of the app's memory, so it
-needs no logging build and no fixed fixture beyond a pad that has a sample.
+AutoTrim is SHIFT+STOP on the Sample page. This test reads trim bounds straight
+out of the app's memory, so it needs no logging build or fixed fixture beyond a
+pad that has a sample.
 
 Model path (firmware 1.3.0.12):
 
@@ -19,7 +18,7 @@ Model path (firmware 1.3.0.12):
     layer + 0x810     trim end frame        (u32)
     layer + 0x868     trim start mirror     (u32)
 
-SHIFT+B3 cycles 3 %, 6 %, 9 % of peak and then clears the trim; each press must
+SHIFT+STOP cycles 3 %, 6 %, 9 % of peak and then clears the trim; each press must
 tighten the bounds, and the fourth must restore the whole sample.
 """
 import argparse
@@ -113,9 +112,6 @@ def main():
     assert sample, f'Pad {args.pad} has no sample'
     frames = u32(qword(sample + 0x130) + 4)
     assert frames > 1, f'Pad {args.pad} sample has no audio'
-    control('K1', 'set', 0)
-    control('K1', 'set', 64)
-
     def bounds():
         start, end, mirror = ((0x918, 0x970, 0x9c8) if layout.version == '1.4.0.8'
                               else (0x7b8, 0x810, 0x868))
@@ -123,8 +119,8 @@ def main():
 
     def press_trim():
         # The cycle lives only while SHIFT stays held: releasing it resets the
-        # step counter, so a whole cycle is one hold and N B3 presses.
-        press('SCREEN 3')
+        # step counter, so a whole cycle is one hold and N STOP presses.
+        press('STOP')
         # Give the firmware time to finish its audio scan and update the model.
         time.sleep(.3)
 
@@ -164,18 +160,18 @@ def main():
     print(f'PASS clear: {start}..{end}')
 
     assert int(ssh('pidof "MPC Sample"').split()[0]) == pid, 'App restarted'
-    # On another Sample screen the shortcut must not be armed, so B3 reaches
+    # On another Sample screen the shortcut must not be armed, so STOP reaches
     # the app instead of consuming and trimming.
     press('SCREEN 2')
     time.sleep(.2)
     before = bounds()
     control('SHIFT', 'press', 127)
     time.sleep(.05)
-    press_trim()
+    press('STOP')
     control('SHIFT', 'release')
     time.sleep(.15)
     after = bounds()
-    assert after == before, f'B3 trimmed off the trim screen: {before} -> {after}'
+    assert after == before, f'STOP trimmed off the trim screen: {before} -> {after}'
 
     print('PASS: cycle, tightening, clear, start mirror, no restart')
 

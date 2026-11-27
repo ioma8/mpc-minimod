@@ -327,11 +327,14 @@ pub fn request_repaint() {
 ///
 /// The looper needs a steady 60 ms cadence for its pulse bar; everything else
 /// (a finished render, a spectral step) only needs one frame, requested with
-/// [`request_repaint`].  This runs on the SDK's pump thread, so it only reads
-/// atomics.
+/// [`request_repaint`]. Toasts keep the pump active until their final clearing
+/// frame has been drawn.
 #[must_use]
 pub fn pump_component() -> usize {
     if looper::looper_is_open() != 0 {
+        return current_component();
+    }
+    if mpc_sample_sdk::draw::toast_repaint_due(crate::clock::now_ms()) {
         return current_component();
     }
     // Jobs and Spectral advance from paint callbacks. Retry while either is

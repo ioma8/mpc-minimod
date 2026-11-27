@@ -28,7 +28,7 @@ pub(crate) struct State {
     data_target: usize,
     plus_held: bool,
     minus_held: bool,
-    b3_down: bool,
+    stop_down: bool,
     levels_down: bool,
     /// The 16 LEVELS press held back while 16 Levels is up, for a replay.
     levels_press: Option<[u8; 16]>,
@@ -44,7 +44,7 @@ impl State {
             data_target: 0,
             plus_held: false,
             minus_held: false,
-            b3_down: false,
+            stop_down: false,
             levels_down: false,
             levels_press: None,
             levels_gesture: false,
@@ -199,14 +199,14 @@ fn button_with_modes(
     }
     let action = decide_button(state, event, modes, levels);
     let should_run = if action == ButtonAction::Autotrim {
-        let first_press = event.pressed && !state.b3_down;
-        if event.code == buttons::KEY_B3 {
-            state.b3_down = event.pressed;
+        let first_press = event.pressed && !state.stop_down;
+        if event.code == buttons::KEY_STOP {
+            state.stop_down = event.pressed;
         }
         first_press
     } else {
-        if event.code == buttons::KEY_B3 {
-            state.b3_down = event.pressed;
+        if event.code == buttons::KEY_STOP {
+            state.stop_down = event.pressed;
         }
         true
     };
@@ -311,7 +311,11 @@ fn decide_button(state: &State, event: ButtonEvent, modes: Modes, levels: bool) 
         },
         page_visible: modes.page_visible,
         trim_screen: modes.trim_screen,
-        chop_mode: modes.chop_mode && matches!(event.code, buttons::KEY_B3 | buttons::KEY_LEVELS),
+        chop_mode: modes.chop_mode
+            && matches!(
+                event.code,
+                buttons::KEY_B3 | buttons::KEY_STOP | buttons::KEY_LEVELS
+            ),
     };
     buttons::dispatch(context)
 }
@@ -577,8 +581,7 @@ fn track_screen_button(event: ButtonEvent) {
     if event.code == buttons::KEY_SCREEN1 {
         crate::ui::set_trim_screen(true);
     } else if event.code == buttons::KEY_B3 && !event.shift {
-        // A plain B3 opens the Filter page; SHIFT+B3 is AutoTrim and does not
-        // leave the trim page.
+        // A plain B3 opens the Filter page.
         crate::ui::set_trim_screen(false);
     } else if buttons::leaves_trim_screen(event.code) {
         crate::ui::set_trim_screen(false);
@@ -628,15 +631,15 @@ mod tests {
     }
 
     #[test]
-    fn the_trim_page_survives_sample_and_shift_b3() {
+    fn the_trim_page_survives_sample_and_shift_stop() {
         // The app opens on the trim page; SAMPLE only brings the page forward.
         super::track_screen_button(event_button(buttons::KEY_SCREEN1, PRESSED, false));
         assert!(crate::ui::trim_screen());
         // SAMPLE (0x06) keeps the selected knob page.
         super::track_screen_button(event_button(0x06, PRESSED, false));
         assert!(crate::ui::trim_screen(), "SAMPLE keeps the knob page");
-        // SHIFT+B3 is AutoTrim: it must not look like the Filter page key.
-        super::track_screen_button(event_button(buttons::KEY_B3, PRESSED, true));
+        // SHIFT+STOP is AutoTrim and does not leave the trim page.
+        super::track_screen_button(event_button(buttons::KEY_STOP, PRESSED, true));
         assert!(crate::ui::trim_screen());
         // A plain B3 opens the Filter page.
         super::track_screen_button(event_button(buttons::KEY_B3, PRESSED, false));
@@ -669,18 +672,18 @@ mod tests {
         );
 
         let mut state = State::new();
-        let b3_down = event_button(buttons::KEY_B3, PRESSED, true);
+        let stop_down = event_button(buttons::KEY_STOP, PRESSED, true);
         let trim = Modes {
             trim_screen: true,
             ..modes()
         };
         assert_eq!(
-            button_with_modes(&mut state, b3_down, trim, false).flow,
+            button_with_modes(&mut state, stop_down, trim, false).flow,
             Flow::Consume
         );
-        let b3_up = event_button(buttons::KEY_B3, 0, false);
+        let stop_up = event_button(buttons::KEY_STOP, 0, false);
         assert_eq!(
-            button_with_modes(&mut state, b3_up, modes(), false).flow,
+            button_with_modes(&mut state, stop_up, modes(), false).flow,
             Flow::Consume
         );
 
@@ -809,7 +812,7 @@ mod tests {
             trim_screen: true,
             ..modes()
         };
-        let press = event_button(buttons::KEY_B3, PRESSED, true);
+        let press = event_button(buttons::KEY_STOP, PRESSED, true);
         assert_eq!(
             button_with_modes(&mut state, press, trim, false).action,
             Some(ButtonAction::Autotrim)
@@ -818,7 +821,7 @@ mod tests {
             button_with_modes(&mut state, press, trim, false).action,
             None
         );
-        let release = event_button(buttons::KEY_B3, 0, true);
+        let release = event_button(buttons::KEY_STOP, 0, true);
         assert_eq!(
             button_with_modes(&mut state, release, trim, false).action,
             None

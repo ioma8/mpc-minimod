@@ -87,7 +87,7 @@ fn selected_sample(surface: usize, last_pad: i32) -> Option<(i32, usize)> {
 /// trim command was submitted.
 #[must_use]
 pub fn run(context: Context) -> bool {
-    if context.surface == 0 || crate::control::original().is_none() {
+    if crate::control::original().is_none() {
         return failure("AutoTrim: control unavailable");
     }
     let Some((pad, sample)) = selected_sample(context.surface, context.last_pad) else {
@@ -116,16 +116,31 @@ pub fn run(context: Context) -> bool {
     // than 2^24 frames (about 6.3 minutes at 44.1 kHz) rounds the trim to the
     // nearest frame.  That precision is the SDK's control API, not a choice
     // here; the bound is exact for every shorter sample.
-    // SAFETY: the control context and surface came from the app's control hook
-    // in this UI callback; the pad and values are the trim fields the page owns.
-    unsafe {
-        crate::control::set_trim(
-            context.control,
-            context.surface,
-            pad,
-            first,
-            last.saturating_add(1),
-        );
+    if context.surface != 0 {
+        // SAFETY: the control context and surface came from the app's control
+        // hook; these are the selected page's trim values.
+        unsafe {
+            crate::control::set_trim(
+                context.control,
+                context.surface,
+                pad,
+                first,
+                last.saturating_add(1),
+            );
+        }
+    } else {
+        // SAFETY: the paint hook records the live Sample page on this UI thread.
+        let Some(selected) = (unsafe { selection::current(paint::screen()) }) else {
+            return failure("AutoTrim: select a pad");
+        };
+        if selected.sample() != sample
+            // SAFETY: current() validated the selected page and this callback
+            // runs on the UI thread.
+            || !unsafe { selected.set_trim_bounds(first, last) }
+        {
+            return failure("AutoTrim: control unavailable");
+        }
+        crate::ui::minimod_repaint_screen();
     }
     true
 }

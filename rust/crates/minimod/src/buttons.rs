@@ -7,7 +7,7 @@
 
 pub(crate) use mpc_sample_sdk::event::button::{
     B3 as KEY_B3, DATA as KEY_DATA, ERASE as KEY_ERASE, LEVELS as KEY_LEVELS, MINUS as KEY_MINUS,
-    PLUS as KEY_PLUS, PRESSED, SHIFT as KEY_SHIFT,
+    PLUS as KEY_PLUS, PRESSED, SHIFT as KEY_SHIFT, STOP as KEY_STOP,
 };
 
 /// The first soft key (the trim screen).
@@ -19,13 +19,12 @@ pub(crate) const KEY_SCREEN4: u32 = 0x0f;
 
 /// Whether a key leaves the trim screen, so the trim flag must be cleared.
 ///
-/// The first soft key is the trim screen. The third soft key is [`KEY_B3`],
-/// which the trim screen uses for the cycle; it is not a navigation key.
+/// The first soft key is the trim screen. B3 is the Filter tab; SHIFT+STOP
+/// runs `AutoTrim`.
 #[must_use]
 pub(crate) const fn leaves_trim_screen(code: u32) -> bool {
     // SAMPLE only brings the Sample page forward; it keeps the selected knob
-    // page. B3 (the Filter tab) is handled by the caller because SHIFT+B3 is
-    // AutoTrim and stays on the trim page.
+    // page. B3 is the Filter tab; AutoTrim uses STOP.
     matches!(code, KEY_SCREEN2 | KEY_SCREEN4)
 }
 
@@ -179,7 +178,7 @@ pub(crate) fn dispatch(context: Context) -> Action {
     // The release matters too: it is what lets the next press count again.
     // AutoTrim edits the pad the user pressed last, so it is only armed on the
     // Sample page where that pad is the one being looked at.
-    if context.code == KEY_B3
+    if context.code == KEY_STOP
         && context.held.shift
         && context.page_visible
         && context.trim_screen
@@ -244,7 +243,7 @@ const fn encoder(context: Context, press: bool) -> Action {
 mod tests {
     use super::{
         Action, Context, Held, KEY_B3, KEY_DATA, KEY_LEVELS, KEY_MINUS, KEY_PLUS, KEY_SCREEN2,
-        KEY_SHIFT, Modals, OctaveKeys, PRESSED, Screens, dispatch, leaves_trim_screen,
+        KEY_SHIFT, KEY_STOP, Modals, OctaveKeys, PRESSED, Screens, dispatch, leaves_trim_screen,
     };
 
     /// The app's SAMPLE button; the mod no longer branches on it.
@@ -290,7 +289,7 @@ mod tests {
     #[test]
     fn sample_is_not_a_page_departure_and_b3_is_special() {
         assert!(!leaves_trim_screen(KEY_SAMPLE));
-        // SHIFT+B3 is AutoTrim, so the caller decides whether B3 leaves.
+        // SHIFT+STOP is AutoTrim; B3 stays a navigation key.
         assert!(!leaves_trim_screen(KEY_B3));
         assert!(leaves_trim_screen(KEY_SCREEN2));
     }
@@ -459,9 +458,9 @@ mod tests {
     }
 
     #[test]
-    fn both_edges_of_shift_b3_reach_the_trim_cycle() {
+    fn both_edges_of_shift_stop_reach_the_trim_cycle() {
         let mut context = Context {
-            code: KEY_B3,
+            code: KEY_STOP,
             down: PRESSED,
             held: Held { shift: true },
             octave: OctaveKeys::default(),
@@ -481,6 +480,9 @@ mod tests {
         assert_eq!(dispatch(context), Action::Forward);
         context.page_visible = true;
         context.trim_screen = false;
+        assert_eq!(dispatch(context), Action::Forward);
+        context.trim_screen = true;
+        context.code = KEY_B3;
         assert_eq!(dispatch(context), Action::Forward);
     }
 

@@ -34,7 +34,7 @@ in the MPC audio settings. Verified on the physical MPC Sample.
 | feature | trigger | state |
 |---|---|---|
 | 16-Levels pitch shift | `PLUS` / `MINUS` | verified on hardware |
-| AutoTrim | `SHIFT` + `B3` | verified in the emulator (model read-back) |
+| AutoTrim | `SHIFT` + `STOP` | verified in the emulator (model read-back) |
 | External MIDI chromatic | MIDI keyboard, Pad MIDI In on, 16 Levels | verified on hardware |
 | SAMPLE OPTIONS menu | `SHIFT` + `DATA` | verified in the emulator |
 | HPSS | menu → HPSS | emulator-verified |
@@ -127,7 +127,7 @@ recorded.
 
 ## AutoTrim
 
-**Behavior.** On the trim screen, `SHIFT`+`B3` trims the selected pad's sample
+**Behavior.** On the trim screen, `SHIFT`+`STOP` trims the selected pad's sample
 to its silent edges. The shortcut is not armed on the other Sample screens; there
 `B3` reaches the app unchanged.
 While `SHIFT` stays held the presses cycle **3 % → 6 % → 9 % of the file peak →
@@ -135,8 +135,7 @@ clear**; releasing `SHIFT` resets the cycle. The threshold has a 90-count
 absolute floor; `MINIMOD_TRIM_DB` overrides the relative part for the first
 step (default 3 % ≈ −30.46 dB). Each step shows a one-second toast
 (`Trim 3% of peak`, …). AutoTrim is disabled in Chop mode and outside the trim
-screen so `SHIFT`+`B3` keeps
-its stock Split meaning, and the soft-key caption is hidden there too.
+screen, and the soft-key caption is hidden in Chop mode.
 
 **Implementation.** The trim target is the page's native selected instrument
 state, matched to the surface pad table; the last physical pad press is only a
@@ -145,11 +144,11 @@ repeats while held) the mod
 resolves the pad's sample, reads its audio — the app's in-memory float32 buffer
 first, so it also works before a sample is saved, with the WAV as the fallback
 for streamed samples — computes the first/last frames above the threshold, and
-calls the app's native control handler (`0x1968020`) with the live dispatcher
-context and the pad index. Order matters: Start is opened to
-zero, End is set to `last + 1`, then Start is set to `first` — that lets the
-bounds expand when clearing an existing trim. The command updates the model and
-renderer; the mod writes no property, no layer field and no marker.
+uses the app's native control handler (`0x1968020`) when a live dispatcher
+context is available. Before the first knob event, the SDK updates the current
+page's validated trim fields and requests a repaint. The native path opens Start
+to zero, sets End to `last + 1`, then sets Start to `first`, allowing bounds to
+expand when clearing an existing trim.
 
 Sample resolution: pad index (last note-on, default A01) → surface pad vector
 `+0x2808/+0x2810` → pad state `+0x22e8` → layer `+0x4a8` → Sample. The WAV path
@@ -278,7 +277,7 @@ normalisation. `h + p` reconstructs the input.
 Python reconstruction error −138.4 … −141.0 dB. Both outputs are playable and
 persist across an `ac50` restart; the user-content source hash is unchanged
 (`2028b908…`); the app's project working copy may be re-dithered (±2 LSB).
-Ordinary `SHIFT+B1` Extract and `SHIFT+B3` AutoTrim still behave. The
+Ordinary `SHIFT+B1` Extract and `SHIFT+STOP` AutoTrim still behave. The
 full-sample override was proven with a live chop/trim range of `0..5083` while
 HPSS wrote all 63,906 frames.
 
