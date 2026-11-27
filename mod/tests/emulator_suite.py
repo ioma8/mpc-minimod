@@ -61,6 +61,8 @@ def cases_for(lab_path, panel):
     cases = [
         ('menu', 'populated', 'emulator_menu.py', ['--panel', panel]),
         ('autotrim', 'populated', 'emulator_autotrim.py', ['--lab', str(lab_path), '--pad', '2']),
+        ('autotrim_mismatched_cache', 'populated', 'emulator_autotrim.py',
+         ['--lab', str(lab_path), '--pad', '2', '--mismatched-cache']),
         ('spectral', 'populated', 'emulator_spectral.py', ['--lab', str(lab_path), '--ready']),
         ('hpss', 'populated', 'emulator_hpss.py', ['--lab', str(lab_path), '--panel',
                                      panel]),

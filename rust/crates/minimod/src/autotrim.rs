@@ -90,7 +90,21 @@ pub fn run(context: Context) -> bool {
     if crate::control::original().is_none() {
         return failure("AutoTrim: control unavailable");
     }
-    let Some((pad, sample)) = selected_sample(context.surface, context.last_pad) else {
+    #[cfg(feature = "fw-1-4")]
+    let (control, surface) = {
+        // SAFETY: the paint hook records the live Sample page on this UI thread.
+        let Some(selected) = (unsafe { selection::current(paint::screen()) }) else {
+            return failure("AutoTrim: select a pad");
+        };
+        // SAFETY: this is the current selection on its UI thread.
+        let Some(objects) = (unsafe { selected.trim_control() }) else {
+            return failure("AutoTrim: control unavailable");
+        };
+        objects
+    };
+    #[cfg(feature = "fw-1-3")]
+    let (control, surface) = (context.control, context.surface);
+    let Some((pad, sample)) = selected_sample(surface, context.last_pad) else {
         return failure("AutoTrim: select a pad");
     };
     // the sample is the page's own object.
@@ -116,9 +130,8 @@ pub fn run(context: Context) -> bool {
     // than 2^24 frames (about 6.3 minutes at 44.1 kHz) rounds the trim to the
     // nearest frame.  That precision is the SDK's control API, not a choice
     // here; the bound is exact for every shorter sample.
-    let (control, surface) = if context.surface != 0 {
-        (context.control, context.surface)
-    } else {
+    #[cfg(feature = "fw-1-3")]
+    if surface == 0 {
         // SAFETY: the paint hook records the live Sample page on this UI thread.
         let Some(selected) = (unsafe { selection::current(paint::screen()) }) else {
             return failure("AutoTrim: select a pad");
@@ -126,24 +139,13 @@ pub fn run(context: Context) -> bool {
         if selected.sample() != sample {
             return failure("AutoTrim: select a pad");
         }
-        #[cfg(feature = "fw-1-4")]
-        {
-            // SAFETY: this is the current selection on its UI thread.
-            let Some(objects) = (unsafe { selected.trim_control() }) else {
-                return failure("AutoTrim: control unavailable");
-            };
-            objects
+        // SAFETY: this is the current selection on its UI thread.
+        if !unsafe { selected.set_trim_bounds(first, last) } {
+            return failure("AutoTrim: control unavailable");
         }
-        #[cfg(feature = "fw-1-3")]
-        {
-            // SAFETY: this is the current selection on its UI thread.
-            if !unsafe { selected.set_trim_bounds(first, last) } {
-                return failure("AutoTrim: control unavailable");
-            }
-            crate::ui::minimod_repaint_screen();
-            return true;
-        }
-    };
+        crate::ui::minimod_repaint_screen();
+        return true;
+    }
     // SAFETY: the objects came from the app's control hook or the validated
     // current page; these are the selected pad's trim values.
     unsafe {

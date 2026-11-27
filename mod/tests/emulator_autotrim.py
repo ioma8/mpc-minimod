@@ -28,6 +28,7 @@ import importlib.util
 import json
 import struct
 import subprocess
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -41,6 +42,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--lab', type=Path, required=True)
     parser.add_argument('--pad', type=int, default=1, help='pad number 1..16')
+    parser.add_argument('--mismatched-cache', action='store_true',
+                        help='replace the cached surface with a different live object')
     parser.add_argument('--library', type=Path, default=ROOT / 'build/minimod.so')
     parser.add_argument('--mapfile', type=Path, default=ROOT / 'build/minimod.map')
     args = parser.parse_args()
@@ -115,8 +118,28 @@ def main():
     assert sample, f'Pad {args.pad} has no sample'
     frames = u32(qword(sample + 0x130) + 4)
     assert frames > 1, f'Pad {args.pad} sample has no audio'
-    assert qword(libbase + symbols['g_surface']) == 0, \
-        'Test must start before any native knob captured the control surface'
+    if args.mismatched_cache:
+        # Capture a real control context, then replace its surface with another
+        # live object. AutoTrim must resolve the current page instead of using
+        # the unrelated cache; the isolated fixture is restarted afterwards.
+        control('K1', 'set', 0)
+        control('K1', 'set', 64)
+        assert qword(libbase + symbols['g_surface']) != 0, 'No native surface captured'
+        # BusyBox dd cannot seek to these 64-bit addresses. A tiny static
+        # helper uses pwrite on exactly the one exported diagnostic word.
+        with tempfile.TemporaryDirectory() as temp:
+            helper = Path(temp) / 'write-u64'
+            subprocess.run(['zig', 'cc', '-target', 'aarch64-linux-musl', '-static', '-O2',
+                            str(ROOT / 'tests/lab_write_u64.c'), '-o', str(helper)], check=True)
+            subprocess.run(['ssh', *lab.ssh_base(), 'root@' + lab.HOST,
+                            'cat > /run/minimod-test-write-u64 && chmod 700 /run/minimod-test-write-u64'],
+                           input=helper.read_bytes(), check=True, timeout=20)
+        ssh(f'/run/minimod-test-write-u64 /proc/{pid}/mem '
+            f'{libbase + symbols["g_surface"]} {screen}')
+        assert qword(libbase + symbols['g_surface']) == screen
+    else:
+        assert qword(libbase + symbols['g_surface']) == 0, \
+            'Test must start before any native knob captured the control surface'
     def bounds():
         start, end, mirror = ((0x918, 0x970, 0x9c8) if layout.version == '1.4.0.8'
                               else (0x7b8, 0x810, 0x868))
