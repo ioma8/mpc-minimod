@@ -116,31 +116,38 @@ pub fn run(context: Context) -> bool {
     // than 2^24 frames (about 6.3 minutes at 44.1 kHz) rounds the trim to the
     // nearest frame.  That precision is the SDK's control API, not a choice
     // here; the bound is exact for every shorter sample.
-    if context.surface != 0 {
-        // SAFETY: the control context and surface came from the app's control
-        // hook; these are the selected page's trim values.
-        unsafe {
-            crate::control::set_trim(
-                context.control,
-                context.surface,
-                pad,
-                first,
-                last.saturating_add(1),
-            );
-        }
+    let (control, surface) = if context.surface != 0 {
+        (context.control, context.surface)
     } else {
         // SAFETY: the paint hook records the live Sample page on this UI thread.
         let Some(selected) = (unsafe { selection::current(paint::screen()) }) else {
             return failure("AutoTrim: select a pad");
         };
-        if selected.sample() != sample
-            // SAFETY: current() validated the selected page and this callback
-            // runs on the UI thread.
-            || !unsafe { selected.set_trim_bounds(first, last) }
-        {
-            return failure("AutoTrim: control unavailable");
+        if selected.sample() != sample {
+            return failure("AutoTrim: select a pad");
         }
-        crate::ui::minimod_repaint_screen();
+        #[cfg(feature = "fw-1-4")]
+        {
+            // SAFETY: this is the current selection on its UI thread.
+            let Some(objects) = (unsafe { selected.trim_control() }) else {
+                return failure("AutoTrim: control unavailable");
+            };
+            objects
+        }
+        #[cfg(feature = "fw-1-3")]
+        {
+            // SAFETY: this is the current selection on its UI thread.
+            if !unsafe { selected.set_trim_bounds(first, last) } {
+                return failure("AutoTrim: control unavailable");
+            }
+            crate::ui::minimod_repaint_screen();
+            return true;
+        }
+    };
+    // SAFETY: the objects came from the app's control hook or the validated
+    // current page; these are the selected pad's trim values.
+    unsafe {
+        crate::control::set_trim(control, surface, pad, first, last.saturating_add(1));
     }
     true
 }

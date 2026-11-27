@@ -145,8 +145,8 @@ resolves the pad's sample, reads its audio — the app's in-memory float32 buffe
 first, so it also works before a sample is saved, with the WAV as the fallback
 for streamed samples — computes the first/last frames above the threshold, and
 uses the app's native control handler (`0x1968020`) when a live dispatcher
-context is available. Before the first knob event, the SDK updates the current
-page's validated trim fields and requests a repaint. The native path opens Start
+context is available. Before the first knob event on firmware 1.4, the SDK resolves the live
+control context and program from the Sample page and calls the same handler. The native path opens Start
 to zero, sets End to `last + 1`, then sets Start to `first`, allowing bounds to
 expand when clearing an existing trim.
 

@@ -60,7 +60,7 @@ def case_settings(path):
 def cases_for(lab_path, panel):
     cases = [
         ('menu', 'populated', 'emulator_menu.py', ['--panel', panel]),
-        ('autotrim', 'populated', 'emulator_autotrim.py', ['--lab', str(lab_path), '--pad', '1']),
+        ('autotrim', 'populated', 'emulator_autotrim.py', ['--lab', str(lab_path), '--pad', '2']),
         ('spectral', 'populated', 'emulator_spectral.py', ['--lab', str(lab_path), '--ready']),
         ('hpss', 'populated', 'emulator_hpss.py', ['--lab', str(lab_path), '--panel',
                                      panel]),

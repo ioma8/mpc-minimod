@@ -12,7 +12,7 @@ repository = "https://github.com/jakubkolcar/sample-converter"
 [workspace.dependencies]
 minimod-dsp = { path = "crates/dsp" }
 # Pin the 1.4-capable SDK and select the firmware table used by this converter.
-mpc-sample-sdk = { git = "https://github.com/ioma8/mpc-sample-sdk", rev = "2add3cf", default-features = false }
+mpc-sample-sdk = { git = "https://github.com/ioma8/mpc-sample-sdk", rev = "f44a28b", default-features = false }
 libc = "0.2"
 
 

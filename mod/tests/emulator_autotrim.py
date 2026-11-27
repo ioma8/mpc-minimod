@@ -1,5 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
+# dependencies = ["pillow"]
 # ///
 """Check AutoTrim against the live model in the running MPC emulator.
 
@@ -22,6 +23,7 @@ SHIFT+STOP cycles 3 %, 6 %, 9 % of peak and then clears the trim; each press mus
 tighten the bounds, and the fourth must restore the whole sample.
 """
 import argparse
+import io
 import importlib.util
 import json
 import struct
@@ -29,6 +31,7 @@ import subprocess
 import time
 import urllib.request
 from pathlib import Path
+from PIL import Image
 from firmware_layout import detect
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,9 +48,9 @@ def main():
     symbols = {}
     for line in args.mapfile.read_text().splitlines():
         fields = line.split()
-        if fields and fields[-1] == 'g_screen':
-            symbols['g_screen'] = int(fields[0], 16)
-    assert 'g_screen' in symbols, 'g_screen missing from the linker map'
+        if fields and fields[-1] in ('g_screen', 'g_surface'):
+            symbols[fields[-1]] = int(fields[0], 16)
+    assert {'g_screen', 'g_surface'} <= symbols.keys(), 'SDK globals missing from linker map'
 
     spec = importlib.util.spec_from_file_location('lab', args.lab / 'lab.py')
     lab = importlib.util.module_from_spec(spec)
@@ -112,10 +115,21 @@ def main():
     assert sample, f'Pad {args.pad} has no sample'
     frames = u32(qword(sample + 0x130) + 4)
     assert frames > 1, f'Pad {args.pad} sample has no audio'
+    assert qword(libbase + symbols['g_surface']) == 0, \
+        'Test must start before any native knob captured the control surface'
     def bounds():
         start, end, mirror = ((0x918, 0x970, 0x9c8) if layout.version == '1.4.0.8'
                               else (0x7b8, 0x810, 0x868))
         return u32(layer + start), u32(layer + end), u32(layer + mirror)
+
+    def end_marker(end):
+        with urllib.request.urlopen(panel + '/screen.png', timeout=5) as response:
+            image = Image.open(io.BytesIO(response.read())).convert('RGB')
+        # The Trim waveform spans x=14..305. Its end handle is white at
+        # y=193, independent of the waveform's yellow audio pixels.
+        x = 14 + round(291 * end / (frames - 1))
+        return any(image.getpixel((column, 193)) == (255, 255, 255)
+                   for column in range(max(14, x - 3), min(308, x + 4)))
 
     def press_trim():
         # The cycle lives only while SHIFT stays held: releasing it resets the
@@ -146,6 +160,7 @@ def main():
         assert 0 <= start < end <= frames - 1, f'Step {step}: bad bounds {start}..{end}'
         assert mirror == start, f'Step {step}: start mirror {mirror} != {start}'
         assert end < frames - 1 or start > 0, f'Step {step}: {percent}% trimmed nothing'
+        assert end_marker(end), f'Step {step}: waveform end marker did not follow {end}'
         if previous is not None:
             assert end <= previous[1] and start >= previous[0], \
                 f'Step {step} did not tighten: {start}..{end} vs {previous}'

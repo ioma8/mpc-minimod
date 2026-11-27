@@ -51,8 +51,8 @@ released   : Trim        Tune        Filter
   `0x27e4400(ctx, ?, ?, semitoneOffset)` — the function the 16-Levels renderer
   calls with `(pad & 0xf) - originalPad`.
 * **AutoTrim** — `SHIFT` + **STOP**. When the app has sent a native control
-  event, AutoTrim uses its control dispatcher; otherwise it updates the
-  selected layer's trim fields through the SDK. While SHIFT stays held, presses
+  event, AutoTrim uses its control dispatcher; otherwise on firmware 1.4 it resolves the live page control context and
+  calls the same dispatcher. While SHIFT stays held, presses
   use 3%, 6%, 9%, then clear trim; release SHIFT to reset the cycle. The default
   threshold is 3% of peak (about −30.46 dB), with a 90-count floor.
   `MINIMOD_TRIM_DB` overrides the relative threshold for the first step. PCM
